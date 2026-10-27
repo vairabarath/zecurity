@@ -135,7 +135,7 @@ There were 0 `compile acl` errors in the controller log.
   - A first version also allowed a `disconnected` target. The automated security review of `3e6e5b4a` flagged that the old shield drops its rule at once while the new host stays unfirewalled until the target reconnects. Reverted in `599a7804`.
 - **Admin dialog:** Save on a protected resource with a rule change first shows a confirmation, with **Back** and **Unprotect & re-protect** buttons. It names the shield, says which shield takes over on a host move, and adds the offline notice when the shield isn't `ACTIVE`.
 
-**Open (security review of `3e6e5b4a`, finding 1, not fixed):**
+**Security review of `3e6e5b4a`, finding 1 — FIXED by the follow-up below (`9a535189`):**
 - Acks carry only a resource id and status. For a moment after an edit, a periodic `protected` ack the shield sent for the **old** rule can turn `protecting` into `protected` before the new rule is applied.
 - Routing and enforcement are the same either way, and the next ack corrects the status.
 - The fix is a rule generation and the sending shield's id on `ResourceAck`, stamped by the connector and checked in `RecordAck`. That's a proto change, so it waits for the user's decision.
@@ -156,3 +156,33 @@ There were 0 `compile acl` errors in the controller log.
 | 07:19:18 | shield s1 stopped (Ctrl-C) | marked `disconnected` at 07:21:45 (120 s threshold) |
 | 07:22:05.717 | UI: port 8003 → 8000, Save → confirmation with the offline notice → confirm | `protecting`/`apply` port 8000; LAN :8003 000 (old rule kept), :8000 200 (as warned) |
 | 07:26:03.146 | s1 restarted | connector replayed the snapshot: port 8000 rule at .150, generation 7; resource `protected`; LAN :8000 000, :8003 200 |
+
+## Follow-up — acks name their shield and rule (user-approved, `9a535189`)
+
+**Proto** (additive): `shield.v1.ResourceAck` gains `shield_id` (6), `host` (7), `protocol` (8), `port_from` (9) and `port_to` (10).
+
+- **Shield:** every ack is built by one constructor (`make_ack` / `health_ack` in `resources.rs`) that echoes the rule it is about.
+- **Connector** (`agent_server.rs`): `stamp_shield_id` overwrites `shield_id` with the stream's verified mTLS identity, so a shield can't ack for another.
+- **Controller** (`RecordAck(ctx, db, tenant, Ack)`) is strict:
+  - only the resource's current shield may ack it, including the tombstone reap;
+  - a `protected`/`failed` verdict counts only if host, protocol, `port_from` and `port_to` equal the current rule;
+  - an ignored ack from the wrong shield, or for a stale rule, is logged (`resource ack ignored: …`).
+- **Controller, `handleShieldStatus`:** a shield LAN-IP change re-synced `resources.host` but never pushed that shield its rules. The comment claimed the snapshot fingerprint would pick it up, but nothing triggered a push. It now pushes the snapshot. This is required now, because acks for the old host are ignored.
+- **Known limit (ABA):** after 8000 → 8003 → 8000 in quick succession, an in-flight ack for the first 8000 matches the current rule again. Only a per-edit generation would tell them apart. The window is momentary and the next health ack is correct.
+
+**Tests and mutants:**
+- **Shield:** `acks_echo_their_rule`. **Connector:** `ack_is_stamped_with_the_verified_shield_id`.
+- **Controller:** a wrong-shield ack is ignored for every status and for the reap; a stale rule is ignored (port, host, protocol, `port_to`); the current rule is accepted.
+- **Mutants:** shield check, whole rule check, host, protocol, `port_to` and the reap shield check were all killed by the logic, with no SQL errors. Applying the rule check to `unprotected` acks too is an equivalent mutant: a remove instruction always carries the current rule.
+- **Suites:** controller 1435 pass, connector 269, shield 59.
+
+**Live (2026-10-27, all components new):**
+- Controller `1b71e604`, connector `6d135575`, shields `85745516` on manoj (s1) and nika (s2).
+- **Upgrade window:** an ack from the old shield binary, which echoes no rule, was ignored as stale (logged). This is the intended strict behaviour.
+
+| Time (UTC) | Action | Result |
+|---|---|---|
+| 09:01:34.051 | port 8000 → 8003 | `protecting` → `protected` (verified 09:01:34) on s1 |
+| 09:01:44.619 | host .53 → .44, port 8000 | `protected` on s2 (09:01:44); then at 09:01:48 s1's next periodic `protected` ack was **ignored: wrong shield** |
+| 09:01:52.297 | host .44 → .53 | `protected` on s1 (09:01:52); at 09:01:59 s2's late ack was **ignored: wrong shield** |
+| 09:02:53 | final state, resource in no group | LAN: .53:8000 000 (protected), .53:8003 200, .44:8000 200 |

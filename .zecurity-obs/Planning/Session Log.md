@@ -3182,3 +3182,12 @@ serves on `127.0.0.1:9102`.
 - F54 (new): resource list queries never returned groups; now one batched query.
 - Live: the dialog names `cl-group`; Edit instead opens Edit without deleting; a real delete removes the resource and its rule; the Groups column is filled.
 - Tests: controller 1435 pass; admin 114 pass; ESLint clean.
+
+
+## 2026-10-27 — Fix 18 follow-up: acks name their shield and rule (user-approved)
+- Commit `9a535189` on the #146 branch (local).
+- Proto: `ResourceAck` gains fields 6–10 (additive).
+- The shield echoes the rule in every ack; the connector stamps the verified shield id; the controller's `RecordAck` is strict (current shield only; protected/failed only for the current rule), and ignored acks are logged.
+- A shield LAN-IP change now pushes the shield its snapshot.
+- Tests: controller 1435, connector 269, shield 59; mutants killed (one equivalent).
+- Live with all-new binaries: port edit and two host moves reached `protected`; the old shield's late acks were ignored as "wrong shield"; LAN firewall state correct.
