@@ -3,7 +3,7 @@ type: fix
 sprint: 20
 fix: 3
 title: Auth integration test always skips (Valkey URL) and then fails (stale migrations)
-status: planned
+status: fixed
 source_rows: [R2]
 source_findings: [36]
 severity: medium
@@ -20,7 +20,7 @@ tags:
 
 > Source: live acceptance row **R2** (FAIL), Finding 36.
 > `Acceptance-Test-Plan.md:17`: *"A skipped DB test is a failed acceptance case."*
-> Status: **verified, not fixed.** No code changed.
+> Status: **FIXED** in `411e216` (Sprint 21 K6); the test runs and passes on `fixed-pendings` (2026-10-17). Status line updated 2026-10-27.
 
 ## Failure (as observed)
 
