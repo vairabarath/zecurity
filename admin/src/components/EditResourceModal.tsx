@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
   UpdateResourceDocument,
@@ -44,8 +44,14 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
     skip: !open,
   })
 
-  useEffect(() => {
-    if (resource) {
+  // Load the form when the dialog opens (or shows another resource), not on
+  // every new `resource` object: the detail page polls every 3–10 s, and
+  // reloading on each poll threw away whatever the admin had typed.
+  const formFor = open && resource ? resource.id : null
+  const [loadedFor, setLoadedFor] = useState<string | null>(null)
+  if (formFor !== loadedFor) {
+    setLoadedFor(formFor)
+    if (resource && formFor) {
       setName(resource.name)
       setDescription(resource.description ?? '')
       setHost(resource.host)
@@ -55,7 +61,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
       setRemoteNetworkId(resource.remoteNetwork?.id ?? '')
       setError(null)
     }
-  }, [resource])
+  }
 
   const [updateResource, { loading }] = useMutation(UpdateResourceDocument, {
     onCompleted: (data) => {
