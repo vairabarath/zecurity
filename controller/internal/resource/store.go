@@ -523,7 +523,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 			tenantID, newNetworkID, newHost,
 		).Scan(&newShieldID, &newConnectorID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("update resource: %w on %s in its remote network; a protected resource's host must be a shield's LAN IP — unprotect it first, or install a shield there", ErrNoMatchingShield, newHost)
+			return nil, fmt.Errorf("update resource: no active shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or install a shield there): %w", newHost, ErrNoMatchingShield)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("update resource: match shield: %w", err)
