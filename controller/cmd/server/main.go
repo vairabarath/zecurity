@@ -1120,6 +1120,18 @@ func (s connectorWorkspaceStore) GetConnectorStanding(ctx context.Context, trust
 	return connector.LoadConnectorStanding(ctx, s.pool, trustDomain, connectorID)
 }
 
+func (s connectorWorkspaceStore) GetRelayStatus(ctx context.Context, relayID string) (string, error) {
+	var relayStatus string
+	err := s.pool.QueryRow(ctx, `SELECT status FROM relays WHERE id = $1`, relayID).Scan(&relayStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get relay status: %w", err)
+	}
+	return relayStatus, nil
+}
+
 func (s connectorWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
 	var certPEM string
 	err := s.pool.QueryRow(ctx,
