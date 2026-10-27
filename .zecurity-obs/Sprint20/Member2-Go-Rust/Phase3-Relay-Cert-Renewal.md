@@ -243,4 +243,10 @@ Atomic write (`cert_manager::write_atomic`): temp file (`create_new`) → `fsync
 
 **Suggested fix (from the run sheet):** treat revoked / `PermissionDenied` as terminal (exit, or a long backoff) and log it clearly. Low severity.
 
+**Fix applied (2026-10-27, Sprint 20 Fix 17, `d89c0310`):** not a plain `PermissionDenied` check, because a superseded renewal revokes a serial while the relay stays active.
+- The controller interceptor (`controller/internal/connector/spiffe.go`) adds the trailer `zecurity-relay-state: revoked` only when `relays.status` is `revoked` or `deleted`.
+- `relay/src/heartbeat.rs` ends the heartbeat loop on `PermissionDenied` with that marker and keeps the 5 s retry for everything else (incl. `Unavailable`).
+- The process does not exit.
+- Details: [[Sprint20/Fixes/Fix17-Revoked-Relay-Stops-Heartbeat]].
+
 **Also:** AT-F.8 was accepted at `RELAY_CERT_TTL=1h` (F1–F4 PASS), because of KI-1. KI-1 itself is fixed in Sprint 21 K1 (`7fb0fb7`); the 15m live check is Sprint 21 AT-K.1.
