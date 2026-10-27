@@ -423,19 +423,21 @@ type UpdateResult struct {
 	ShieldPushes []ShieldPush
 }
 
-// ErrResourceBusy: a shield-relevant edit while the resource is mid-protect,
-// mid-unprotect or being deleted.
-var ErrResourceBusy = errors.New("resource is mid-operation (protecting or deleting); wait for it to finish")
+// ErrResourceBusy: a shield-relevant edit while the resource is being
+// unprotected (protecting/remove) or deleted.
+var ErrResourceBusy = errors.New("resource is being unprotected or deleted; wait for it to finish")
 
 // Update modifies editable fields on a resource. Only non-nil fields are applied.
 //
-// Sprint 20 Fix 18 (F24): a shield-enforced resource (protected or failed)
-//   - re-pushes its shield when host, protocol, ports or network actually change
+// Sprint 20 Fix 18 (F24): a shield-enforced resource (protected, failed, or
+// protecting/apply)
+//   - goes back to protecting/apply and re-pushes its shield when host,
+//     protocol, ports or network actually change
 //     (values compared, as the admin UI sends every field), so the shield
 //     firewalls the new port at once (before, it kept the old one and the new
 //     port stayed open on the LAN);
-//   - moves to the active shield on the new host when host or remote network
-//     change (a shield protects only its own LAN IP), as protecting/apply, or is
+//   - moves to the enrolled (active or disconnected) shield on the new host when
+//     host or remote network change (a shield protects only its own LAN IP), or is
 //     refused with ErrNoMatchingShield if there is none. The old shield only gets
 //     a snapshot without the resource, never a remove instruction, so it sends no
 //     'unprotected' ack that could undo the move.
@@ -450,30 +452,33 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	defer tx.Rollback(ctx)
 
 	var (
-		status, host, networkID, protocol string
-		portFrom, portTo                  int
+		status, action, host, networkID, protocol string
+		portFrom, portTo                          int
 		shieldID, connectorID             *string
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT r.status, r.host, r.remote_network_id::text, r.protocol, r.port_from, r.port_to,
+		`SELECT r.status, r.pending_action, r.host, r.remote_network_id::text, r.protocol, r.port_from, r.port_to,
 		        r.shield_id::text, s.connector_id::text
 		   FROM resources r
 		   LEFT JOIN shields s ON s.id = r.shield_id
 		  WHERE r.id = $1 AND r.tenant_id = $2
 		    FOR UPDATE OF r`,
 		id, tenantID,
-	).Scan(&status, &host, &networkID, &protocol, &portFrom, &portTo, &shieldID, &connectorID)
+	).Scan(&status, &action, &host, &networkID, &protocol, &portFrom, &portTo, &shieldID, &connectorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("resource not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update resource: %w", err)
 	}
-	enforced := status == "protected" || status == "failed"
+	// Enforced: the shield holds (or is applying) the resource's rule. An edit
+	// while a protect is still in flight (e.g. its shield is offline) is allowed
+	// and simply replaces the pending rule.
+	enforced := status == "protected" || status == "failed" || (status == "protecting" && action == "apply")
 	// Compare values, not presence: the admin UI sends every field on each save.
 	shieldChanged := changedStr(input.Host, host, true) || changedStr(input.RemoteNetworkID, networkID, false) ||
 		changedStr(input.Protocol, protocol, false) || changedInt(input.PortFrom, portFrom) || changedInt(input.PortTo, portTo)
-	if shieldChanged && (status == "protecting" || status == "deleting") {
+	if shieldChanged && ((status == "protecting" && action == "remove") || status == "deleting") {
 		return nil, fmt.Errorf("update resource: %w", ErrResourceBusy)
 	}
 
@@ -517,26 +522,33 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 			`SELECT s.id::text, s.connector_id::text
 			   FROM shields s
 			  WHERE s.tenant_id = $1 AND s.remote_network_id::text = $2
-			    AND s.lan_ip = $3 AND s.status = 'active'
-			  ORDER BY s.created_at
+			    AND s.lan_ip = $3 AND s.status IN ('active', 'disconnected')
+			  ORDER BY s.status = 'active' DESC, s.created_at
 			  LIMIT 1`,
 			tenantID, newNetworkID, newHost,
 		).Scan(&newShieldID, &newConnectorID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("update resource: no active shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or install a shield there): %w", newHost, ErrNoMatchingShield)
+			return nil, fmt.Errorf("update resource: no enrolled shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or install a shield there): %w", newHost, ErrNoMatchingShield)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("update resource: match shield: %w", err)
 		}
 		if shieldID == nil || *shieldID != newShieldID {
 			add("shield_id", newShieldID)
-			sets = append(sets, "status = 'protecting'", "pending_action = 'apply'", "error_message = NULL")
 			result.Moved = true
 			result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: newConnectorID, ShieldID: newShieldID})
 		}
 	}
-	if enforced && shieldChanged && shieldID != nil && connectorID != nil {
-		result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: *connectorID, ShieldID: *shieldID})
+	if enforced && shieldChanged {
+		// Re-protect with the new settings: the shield swaps the old rule for the
+		// new one in one nftables transaction (no unprotected gap) and acks, which
+		// turns protecting back into protected (or failed). An offline shield gets
+		// the rule from the connector's cached snapshot when it reconnects; until
+		// then the resource shows protecting.
+		sets = append(sets, "status = 'protecting'", "pending_action = 'apply'", "error_message = NULL")
+		if shieldID != nil && connectorID != nil {
+			result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: *connectorID, ShieldID: *shieldID})
+		}
 	}
 
 	query := fmt.Sprintf(

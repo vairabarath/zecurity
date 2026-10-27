@@ -44,6 +44,8 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 	s1 := shield("s1", "10.0.0.1", "active")
 	s2 := shield("s2", "10.0.0.2", "active")
 	shield("s3-revoked", "10.0.0.3", "revoked")
+	s4 := shield("s4-offline", "10.0.0.4", "disconnected")
+	shield("s5-pending", "10.0.0.5", "pending")
 
 	port := 9400
 	mk := func(status, action, host string, shieldID any) string {
@@ -106,7 +108,7 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		}
 	})
 
-	t.Run("protected: port edit re-pushes its shield with the new port", func(t *testing.T) {
+	t.Run("protected: port edit re-protects on its shield with the new port", func(t *testing.T) {
 		id := mk("protected", "apply", "10.0.0.1", s1)
 		res, err := Update(ctx, db, tenantID, id, UpdateInput{PortFrom: num(9555), PortTo: num(9555)})
 		if err != nil {
@@ -115,8 +117,14 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		if res.Moved || !eq(pushes(res), []string{s1}) {
 			t.Fatalf("moved=%v pushes=%v, want [s1]", res.Moved, pushes(res))
 		}
-		if st := stateOf(id); st.status != "protected" || st.shield != s1 {
-			t.Fatalf("state = %+v", st)
+		if st := stateOf(id); st.status != "protecting" || st.action != "apply" || st.shield != s1 {
+			t.Fatalf("state = %+v, want protecting/apply on s1 until the shield acks", st)
+		}
+		if _, err := RecordAck(ctx, db, tenantID, id, "protected", "", time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+		if st := stateOf(id); st.status != "protected" {
+			t.Fatalf("after the shield's ack: %+v, want protected", st)
 		}
 		if in, p, _ := desired(s1, id); !in || p != 9555 {
 			t.Fatalf("s1 desired: in=%v port=%d, want 9555", in, p)
@@ -132,6 +140,9 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		if !eq(pushes(res), []string{s1}) {
 			t.Fatalf("pushes=%v, want [s1]", pushes(res))
 		}
+		if st := stateOf(id); st.status != "protecting" {
+			t.Fatalf("state = %+v, want protecting (re-verified by the shield)", st)
+		}
 	})
 
 	t.Run("protected: name or description edit needs no push", func(t *testing.T) {
@@ -142,6 +153,9 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		}
 		if res.Moved || len(res.ShieldPushes) != 0 {
 			t.Fatalf("moved=%v pushes=%v, want none", res.Moved, res.ShieldPushes)
+		}
+		if st := stateOf(id); st.status != "protected" {
+			t.Fatalf("state = %+v, want protected (no shield change)", st)
 		}
 	})
 
@@ -175,8 +189,25 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		}
 	})
 
-	t.Run("protected: host with no active shield is refused, nothing changes", func(t *testing.T) {
-		for _, h := range []string{"10.0.0.9", "10.0.0.3"} { // none; revoked shield
+	t.Run("protected: host edit to an offline shield is accepted, applied on reconnect", func(t *testing.T) {
+		id := mk("protected", "apply", "10.0.0.1", s1)
+		res, err := Update(ctx, db, tenantID, id, UpdateInput{Host: str("10.0.0.4")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Moved || !eq(pushes(res), []string{s4, s1}) {
+			t.Fatalf("moved=%v pushes=%v, want moved, [s4 s1]", res.Moved, pushes(res))
+		}
+		if st := stateOf(id); st.status != "protecting" || st.shield != s4 {
+			t.Fatalf("state = %+v, want protecting on s4", st)
+		}
+		if in, _, _ := desired(s4, id); !in {
+			t.Fatal("offline shield's desired set (replayed on reconnect) lacks the resource")
+		}
+	})
+
+	t.Run("protected: host with no enrolled shield is refused, nothing changes", func(t *testing.T) {
+		for _, h := range []string{"10.0.0.9", "10.0.0.3", "10.0.0.5"} { // none; revoked; pending
 			id := mk("protected", "apply", "10.0.0.1", s1)
 			_, err := Update(ctx, db, tenantID, id, UpdateInput{Host: str(h), Name: str("x")})
 			if !errors.Is(err, ErrNoMatchingShield) {
@@ -213,8 +244,22 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		}
 	})
 
-	t.Run("mid-operation: shield-relevant edit refused, name allowed", func(t *testing.T) {
-		for _, c := range []struct{ status, action string }{{"protecting", "apply"}, {"protecting", "remove"}, {"deleting", "remove"}} {
+	t.Run("protect in flight (e.g. shield offline): a further edit is allowed", func(t *testing.T) {
+		id := mk("protecting", "apply", "10.0.0.1", s1)
+		res, err := Update(ctx, db, tenantID, id, UpdateInput{PortFrom: num(9777), PortTo: num(9777)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !eq(pushes(res), []string{s1}) {
+			t.Fatalf("pushes=%v, want [s1]", pushes(res))
+		}
+		if in, p, _ := desired(s1, id); !in || p != 9777 {
+			t.Fatalf("s1 desired: in=%v port=%d, want 9777", in, p)
+		}
+	})
+
+	t.Run("unprotect or delete in flight: shield-relevant edit refused, name allowed", func(t *testing.T) {
+		for _, c := range []struct{ status, action string }{{"protecting", "remove"}, {"deleting", "remove"}} {
 			id := mk(c.status, c.action, "10.0.0.1", s1)
 			if _, err := Update(ctx, db, tenantID, id, UpdateInput{PortFrom: num(1)}); !errors.Is(err, ErrResourceBusy) {
 				t.Fatalf("%s/%s port edit: err = %v, want ErrResourceBusy", c.status, c.action, err)
