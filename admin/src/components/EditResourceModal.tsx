@@ -294,8 +294,8 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                   </p>
                   {shieldOffline && (
                     <p className="font-medium text-amber-600 dark:text-amber-400">
-                      {shieldName} is offline. The change is saved now and applied when the shield reconnects;
-                      until then the shield keeps the old rule.
+                      {shieldName} is offline. The change is saved now and applied when the shield reconnects.
+                      Until then the old rule stays in place and the new settings are NOT protected by the shield.
                     </p>
                   )}
                 </div>

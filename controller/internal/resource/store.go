@@ -436,8 +436,8 @@ var ErrResourceBusy = errors.New("resource is being unprotected or deleted; wait
 //     (values compared, as the admin UI sends every field), so the shield
 //     firewalls the new port at once (before, it kept the old one and the new
 //     port stayed open on the LAN);
-//   - moves to the enrolled (active or disconnected) shield on the new host when
-//     host or remote network change (a shield protects only its own LAN IP), or is
+//   - moves to the active shield on the new host when host or remote network
+//     change (a shield protects only its own LAN IP), or is
 //     refused with ErrNoMatchingShield if there is none. The old shield only gets
 //     a snapshot without the resource, never a remove instruction, so it sends no
 //     'unprotected' ack that could undo the move.
@@ -454,7 +454,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	var (
 		status, action, host, networkID, protocol string
 		portFrom, portTo                          int
-		shieldID, connectorID             *string
+		shieldID, connectorID                     *string
 	)
 	err = tx.QueryRow(ctx,
 		`SELECT r.status, r.pending_action, r.host, r.remote_network_id::text, r.protocol, r.port_from, r.port_to,
@@ -522,13 +522,13 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 			`SELECT s.id::text, s.connector_id::text
 			   FROM shields s
 			  WHERE s.tenant_id = $1 AND s.remote_network_id::text = $2
-			    AND s.lan_ip = $3 AND s.status IN ('active', 'disconnected')
-			  ORDER BY s.status = 'active' DESC, s.created_at
+			    AND s.lan_ip = $3 AND s.status = 'active'
+			  ORDER BY s.created_at
 			  LIMIT 1`,
 			tenantID, newNetworkID, newHost,
 		).Scan(&newShieldID, &newConnectorID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("update resource: no enrolled shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or install a shield there): %w", newHost, ErrNoMatchingShield)
+			return nil, fmt.Errorf("update resource: no active (online) shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or bring that shield online): %w", newHost, ErrNoMatchingShield)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("update resource: match shield: %w", err)
@@ -544,7 +544,9 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 		// new one in one nftables transaction (no unprotected gap) and acks, which
 		// turns protecting back into protected (or failed). An offline shield gets
 		// the rule from the connector's cached snapshot when it reconnects; until
-		// then the resource shows protecting.
+		// then the resource shows protecting and the NEW port is not firewalled
+		// (the old rule stays). A move needs an active target shield, so a host
+		// change never leaves the new host unprotected.
 		sets = append(sets, "status = 'protecting'", "pending_action = 'apply'", "error_message = NULL")
 		if shieldID != nil && connectorID != nil {
 			result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: *connectorID, ShieldID: *shieldID})

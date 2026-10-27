@@ -44,7 +44,7 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 	s1 := shield("s1", "10.0.0.1", "active")
 	s2 := shield("s2", "10.0.0.2", "active")
 	shield("s3-revoked", "10.0.0.3", "revoked")
-	s4 := shield("s4-offline", "10.0.0.4", "disconnected")
+	shield("s4-offline", "10.0.0.4", "disconnected")
 	shield("s5-pending", "10.0.0.5", "pending")
 
 	port := 9400
@@ -189,25 +189,10 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		}
 	})
 
-	t.Run("protected: host edit to an offline shield is accepted, applied on reconnect", func(t *testing.T) {
-		id := mk("protected", "apply", "10.0.0.1", s1)
-		res, err := Update(ctx, db, tenantID, id, UpdateInput{Host: str("10.0.0.4")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !res.Moved || !eq(pushes(res), []string{s4, s1}) {
-			t.Fatalf("moved=%v pushes=%v, want moved, [s4 s1]", res.Moved, pushes(res))
-		}
-		if st := stateOf(id); st.status != "protecting" || st.shield != s4 {
-			t.Fatalf("state = %+v, want protecting on s4", st)
-		}
-		if in, _, _ := desired(s4, id); !in {
-			t.Fatal("offline shield's desired set (replayed on reconnect) lacks the resource")
-		}
-	})
-
-	t.Run("protected: host with no enrolled shield is refused, nothing changes", func(t *testing.T) {
-		for _, h := range []string{"10.0.0.9", "10.0.0.3", "10.0.0.5"} { // none; revoked; pending
+	t.Run("protected: host with no active shield is refused, nothing changes", func(t *testing.T) {
+		// none; revoked; pending; offline (a move to an offline shield would leave
+		// the new host unprotected until it reconnects)
+		for _, h := range []string{"10.0.0.9", "10.0.0.3", "10.0.0.5", "10.0.0.4"} {
 			id := mk("protected", "apply", "10.0.0.1", s1)
 			_, err := Update(ctx, db, tenantID, id, UpdateInput{Host: str(h), Name: str("x")})
 			if !errors.Is(err, ErrNoMatchingShield) {
