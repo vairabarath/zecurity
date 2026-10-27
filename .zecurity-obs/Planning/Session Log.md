@@ -3144,3 +3144,23 @@ serves on `127.0.0.1:9102`.
 - Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
 - Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
 - Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
+
+
+## 2026-10-27 — path.md status pass, F20 closed, Sprint 20 Fix 17 (F32): FIXED in code
+- `path.md` statuses refreshed against the code (branch `sprint20/docs-pathmd-status`, local): F33/F28/F35/F36/F7 closed, F15 fixed in code, cert-audit findings merged (#137). F20 was already fixed by bug 3 (`86a436de`); added the "shield deleted without a revoke" test case (mutation-checked).
+- F32 on `sprint20/fix17-revoked-relay-heartbeat` (local, `d89c0310`):
+  - the interceptor adds `zecurity-relay-state: revoked` only when the relay row is revoked/deleted;
+  - the relay ends its heartbeat on that marker and keeps retrying on anything else.
+- Tests: relay 118, controller 1418 pass, 0 fail; 5/5 mutants killed. Live check pending (needs a super-admin with TOTP to revoke a lab relay).
+- Still open: F24, F25, F30 (runbook), F43, F4/F5 controller half.
+
+
+## 2026-10-27 — docs PR: runbook corrections, gqlgen command
+- Branch `sprint20/docs-runbook-corrections` (on top of #144).
+- `docs/sprint20-live-acceptance-runbook.md` §11: `kill -STOP` instead of `pkill -9` (F30, closed).
+- `docs/certificate-audit-live-runbook.md`:
+  - the six Fix 14 corrections (grpcurl import path, unexpired-only CRL, token messages, LAN relay flag, stage G order + `logout` stops the daemon, `buf generate` exclude);
+  - Sprint 22 provider TOTP login;
+  - Fix 16 / F19 guards on connector revoke and delete.
+- gqlgen command corrected in CLAUDE.md, agent.md, studyplan.md and CodeStudy 01; verified it regenerates with no diff.
+- Live F32 + F20 PASS recorded in #144. PRs #143 and #144 opened.

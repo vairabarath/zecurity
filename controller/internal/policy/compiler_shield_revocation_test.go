@@ -101,6 +101,22 @@ func TestCompileACLSnapshot_RevokedShieldMakesItsResourcesUnreachable(t *testing
 			mustExec(t, ctx, pool, `INSERT INTO shield_revocations (shield_id, tenant_id) VALUES ($1, $2)`, f.shieldID, f.wsID)
 			mustExec(t, ctx, pool, `DELETE FROM shields WHERE id = $1`, f.shieldID)
 		}},
+		// Finding 20: a shield deleted without a revoke leaves its resource
+		// 'protected' with shield_id NULL (ON DELETE SET NULL). It must not
+		// fail the whole compile.
+		{"shield row deleted without a revoke", func(t *testing.T, f fixture) {
+			mustExec(t, ctx, pool, `DELETE FROM shields WHERE id = $1`, f.shieldID)
+			var status string
+			var shieldNull bool
+			if err := pool.QueryRow(ctx,
+				`SELECT status, shield_id IS NULL FROM resources WHERE id = $1`, f.protectedID,
+			).Scan(&status, &shieldNull); err != nil {
+				t.Fatalf("read orphaned resource: %v", err)
+			}
+			if status != "protected" || !shieldNull {
+				t.Fatalf("fixture: want an orphaned protected resource, got status %q shield_id NULL=%v", status, shieldNull)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := setup(t, fmt.Sprintf("revoked-%d", i))
