@@ -251,6 +251,9 @@ func (r *queryResolver) Resources(ctx context.Context, remoteNetworkID string) (
 	for i, row := range rows {
 		result[i] = toResourceGQL(row)
 	}
+	if err := r.attachResourceGroups(ctx, tc.TenantID, result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -266,6 +269,9 @@ func (r *queryResolver) AllResources(ctx context.Context) ([]*graph.Resource, er
 	result := make([]*graph.Resource, len(rows))
 	for i, row := range rows {
 		result[i] = toResourceGQL(row)
+	}
+	if err := r.attachResourceGroups(ctx, tc.TenantID, result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

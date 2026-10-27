@@ -322,3 +322,54 @@ func TestUpdateResource_ProtectedHostEditMovesShield(t *testing.T) {
 		t.Fatalf("after move: shield=%s status=%s host=%s, want shield-2/protecting/%s", shieldID, status, got.Host, otherLAN)
 	}
 }
+
+// Sprint 20 F25: allResources/resources report the groups with an enabled
+// access rule (they always returned none, so the UI's Groups column and the
+// delete dialog couldn't say who loses access).
+func TestResourceQueries_ReturnGroups(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	withGroups := f.seedResource(t, "10.0.0.81", "unprotected")
+	noGroups := f.seedResource(t, "10.0.0.82", "unprotected")
+	group := func(name string, enabled bool) {
+		t.Helper()
+		var gid string
+		if err := f.pool.QueryRow(f.ctx,
+			`INSERT INTO groups (workspace_id, name) VALUES ($1, $2) RETURNING id`, f.tenantID, name,
+		).Scan(&gid); err != nil {
+			t.Fatalf("insert group: %v", err)
+		}
+		if _, err := f.pool.Exec(f.ctx,
+			`INSERT INTO access_rules (workspace_id, resource_id, group_id, enabled) VALUES ($1, $2, $3, $4)`,
+			f.tenantID, withGroups, gid, enabled,
+		); err != nil {
+			t.Fatalf("insert access rule: %v", err)
+		}
+	}
+	group("beta", true)
+	group("alpha", true)
+	group("disabled-rule", false)
+
+	qr := &queryResolver{f.mr.Resolver}
+	all, err := qr.AllResources(f.ctx)
+	if err != nil {
+		t.Fatalf("AllResources: %v", err)
+	}
+	inNet, err := qr.Resources(f.ctx, f.networkID)
+	if err != nil {
+		t.Fatalf("Resources: %v", err)
+	}
+	for name, list := range map[string][]*graph.Resource{"allResources": all, "resources": inNet} {
+		got := map[string][]string{}
+		for _, r := range list {
+			for _, g := range r.Groups {
+				got[r.ID] = append(got[r.ID], g.Name)
+			}
+		}
+		if fmt.Sprint(got[withGroups]) != "[alpha beta]" {
+			t.Errorf("%s: groups = %v, want [alpha beta] (enabled rules only, by name)", name, got[withGroups])
+		}
+		if len(got[noGroups]) != 0 {
+			t.Errorf("%s: resource without rules has groups %v", name, got[noGroups])
+		}
+	}
+}

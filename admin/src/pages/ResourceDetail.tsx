@@ -12,6 +12,7 @@ import {
 import { protectTargetShield, hostShield, type ShieldLike } from '@/lib/protectShield'
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { StatusPill, relativeTime } from '@/lib/console'
 import { cn } from '@/lib/utils'
 import {
@@ -75,6 +76,7 @@ export default function ResourceDetail() {
   const { resourceId } = useParams<{ resourceId: string }>()
   const navigate = useNavigate()
   const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
 
   const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
@@ -142,9 +144,11 @@ export default function ResourceDetail() {
     void unprotectResource({ variables: { id: resourceId } })
   }
 
+  // Sprint 20 F25: deleting a resource also deletes its group access rules, so
+  // the dialog names the groups that lose access and offers Edit instead.
   function handleDelete() {
     if (!resourceId) return
-    if (!window.confirm('Delete this resource? This cannot be undone.')) return
+    setDeleteOpen(false)
     void deleteResource({ variables: { id: resourceId } })
   }
 
@@ -272,7 +276,7 @@ export default function ResourceDetail() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={handleDelete}
+            onClick={() => setDeleteOpen(true)}
             disabled={deleting || transitional}
             className="gap-2 text-destructive/80 hover:bg-destructive/5 hover:text-destructive"
           >
@@ -627,6 +631,53 @@ export default function ResourceDetail() {
           </div>
         </div>
       </div>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete resource “{resource.name}”?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            {resource.groups.length > 0 ? (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="font-semibold">
+                  {resource.groups.length === 1 ? '1 group loses' : `${resource.groups.length} groups lose`} access:
+                </p>
+                <p className="mt-1">{resource.groups.map((g) => g.name).join(', ')}</p>
+                <p className="mt-2">
+                  Deleting removes these access rules too. Creating the resource again does not bring them back.
+                </p>
+              </div>
+            ) : (
+              <p>No group has access to this resource.</p>
+            )}
+            <p className="text-muted-foreground">
+              To change its host, port or protocol, edit it instead — its group access is kept.
+            </p>
+            <p className="text-muted-foreground">This cannot be undone.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteOpen(false)
+                setEditOpen(true)
+              }}
+              className="gap-2"
+            >
+              <Pencil className="h-4 w-4" />
+              Edit instead
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting} className="gap-2">
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <EditResourceModal
         resource={resource}
