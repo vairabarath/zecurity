@@ -158,10 +158,17 @@ func (e *Evaluator) evaluateDevice(
 		return nil, false, fmt.Errorf("load profiles for evaluation: %w", err)
 	}
 
-	observationByCheck := make(map[string]Observation, len(observations))
+	approved, err := e.store.DeviceApproved(ctx, workspaceID, deviceID)
+	if err != nil {
+		return nil, false, fmt.Errorf("load device approval for evaluation: %w", err)
+	}
+
+	observationByCheck := make(map[string]Observation, len(observations)+1)
 	for _, observation := range observations {
 		observationByCheck[observation.CheckID] = observation
 	}
+	// Server-side check (ADR-030): always set here, never taken from a report.
+	observationByCheck[CheckDeviceApproved] = approvalObservation(report.ID, approved)
 
 	results := make([]ProfileResult, 0, len(profiles))
 	policyChanged := false
@@ -339,4 +346,17 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func approvalObservation(reportID uuid.UUID, approved bool) Observation {
+	status, detail := ObservationStatusFail, "device not approved by an admin"
+	if approved {
+		status, detail = ObservationStatusPass, "approved by an admin"
+	}
+	return Observation{
+		ReportID: reportID,
+		CheckID:  CheckDeviceApproved,
+		Status:   status,
+		Detail:   &detail,
+	}
 }
