@@ -244,7 +244,33 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | # | Item | Source | Status |
 |---|------|--------|--------|
 | FU-1 | **Create audit atomicity (D-14).** `POST /provider/relays` writes its `relay.create` audit best-effort, outside any transaction, after the relay row, the Valkey JTI and the JTI attach. A failed audit write is only logged, and a server error part-way through can leave a pending relay without a usable token. Revoke and delete are transactionally audited (Phase A). Fix: relay row + audit in one transaction, then token, Valkey JTI and attach, with clean-up on failure. | Phase A decision, 2026-10-26 | Open — separate change; Create must not be described as transactionally audited until then |
+| FU-2 | **Workspace consistency in the schema (B-1 defense in depth).** `access_rules` has single-column foreign keys, so the database accepts a rule whose workspace, resource and group belong to different workspaces; `group_members` has no workspace column at all. Add `UNIQUE (id, tenant_id)` on `resources`, `UNIQUE (id, workspace_id)` on `groups` and composite foreign keys from `access_rules`; decide how to constrain `group_members` (column + composite FK, or trigger). Needs a migration number (043 is reserved for Phase D). | B-1 fix, 2026-10-27 | Open — the application and compiler now enforce it |
 
 ## Post-Sprint Fixes
 
-*(None yet.)*
+### Fix: B-1 cross-tenant access rules, groups and memberships (security, High)
+**Issue:** an admin of one workspace could read and change another workspace's policy data by sending its IDs (reproduced on a throwaway database with two fabricated workspaces):
+- `group(id)` returned any workspace's group, its members' emails and its resources' hosts/ports;
+- `assignResourceToGroup` accepted a foreign resource or group, wrote a row mixing workspaces, and its response listed the foreign resource and the foreign workspace's groups (names and IDs); its `ON CONFLICT` touched the foreign workspace's own row;
+- `unassignResourceFromGroup` deleted the foreign workspace's rule. That workspace's users lost access once its snapshot was next rebuilt, and only the *caller's* workspace was notified;
+- `addGroupMember` accepted a foreign user and returned their email;
+- a mixed row pulled the foreign resource and the foreign remote network's connectors (LAN addresses) into the caller's compiled snapshot.
+
+No cross-tenant network access: the foreign connector enforces its own workspace's snapshot (exact SPIFFE match). Attacker needs: any workspace admin role (self-serve sign-up creates one) and one foreign resource ID (every end-user device of that workspace receives resource IDs in its ACL snapshot); the assign response then disclosed the group IDs needed for unassign.
+
+**Root Cause:** the resolvers checked the role (`@hasRole(ADMIN)`) but not ownership of the IDs; the store mutations and the read helpers (`GetGroup`, `ListGroupMembers`, `ListResourcesForGroup`, `ListGroupsForResource`, `loadResourceByID`, `loadUser`; `loadResourceWithGroups` ignored its tenant argument) looked rows up by ID alone; the compiler joined resources, shields and connectors without a workspace check; the schema can't express workspace consistency (FU-2).
+
+**Fix Applied:**
+- `internal/policy/store.go`:
+  - `AssignResourceToGroup` inserts only when both the resource and the group belong to the workspace; `ON CONFLICT … DO UPDATE … WHERE access_rules.workspace_id = EXCLUDED.workspace_id`;
+  - `UnassignResourceFromGroup` adds `AND workspace_id = $3`;
+  - `AddGroupMember` inserts only when the group and the user belong to the workspace (an existing member still succeeds);
+  - the list helpers take the workspace and join resources/groups/users on it;
+  - `GetGroup` and the mutations answer a malformed ID with `ErrNotFound` instead of a cast error;
+  - compiler: `ListEnabledRulesWithResources` requires the resource, group, remote network and shield to belong to the rule's workspace (a foreign shield reads as missing, so the entry fails closed); `GetConnectorsForRemoteNetworks` takes the workspace and filters on it.
+- `graph/resolvers/policy.resolvers.go`, `policy_helpers.go`: workspace passed everywhere; a foreign ID answers exactly like a missing one, with a user-safe message (`group not found`, `resource or group not found`, `rule not found`, `group or user not found`); other errors stay masked by the fail-closed `ErrorPresenter`.
+- Mutations notify only the caller's workspace, which is now the only one they can change.
+
+**Tests:** `graph/resolvers/policy_tenant_isolation_test.go` (7 tests: foreign group query, foreign/missing/malformed IDs on assign with no row written and no version bump, `ON CONFLICT` guard (mutation-checked), unassign, foreign user, planted foreign rows hidden from reads, same-workspace behaviour) and `internal/policy/compiler_tenant_isolation_test.go` (planted rows and a foreign shield never cross tenants; connector lookup scoped). All failed before the fix. Full controller suite: 1420 pass / 0 fail / 2 skip (unconditional stubs), every DB-backed test ran.
+
+**Not done here:** schema constraints (FU-2); lab database check for existing mixed rows (queries in the Session Log entry, for M1).

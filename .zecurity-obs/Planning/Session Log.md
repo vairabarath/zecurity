@@ -3144,3 +3144,15 @@ serves on `127.0.0.1:9102`.
 - Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
 - Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
 - Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
+
+
+## 2026-10-27 — Security fix B-1: cross-tenant access rules, groups and memberships
+- Branch `security/b1-cross-tenant-isolation` (worktree `../zecurity-b1`, base `fcb7e4eb` = `fixed-pendings`); not committed. Phase E work untouched on its own branch.
+- Confirmed on a throwaway DB with two fabricated workspaces: foreign group read (member emails, resource hosts), foreign rule delete (delayed denial of access), foreign rule/membership writes, foreign connector LAN addresses in the caller's snapshot. No cross-tenant network access (enforcement at the foreign connector holds).
+- Fix: workspace-scoped store mutations and reads, compiler joins require one workspace, foreign = missing with user-safe messages. No migration (schema constraints tracked as FU-2 in Sprint22/path.md).
+- Tests: 8 new DB-backed tests, all failing before the fix; controller 1420 pass / 0 fail / 2 skip (unconditional stubs).
+- Lab DB not checked (no access from this machine). Read-only queries for M1 — each should return 0:
+  - `SELECT count(*) FROM access_rules ar JOIN resources r ON r.id = ar.resource_id WHERE r.tenant_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM access_rules ar JOIN groups g ON g.id = ar.group_id WHERE g.workspace_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM group_members gm JOIN groups g ON g.id = gm.group_id JOIN users u ON u.id = gm.user_id WHERE u.tenant_id <> g.workspace_id;`
+
