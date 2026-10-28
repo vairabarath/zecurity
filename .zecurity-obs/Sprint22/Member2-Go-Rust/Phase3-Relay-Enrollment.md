@@ -6,7 +6,7 @@ sprint: 22
 phase: 3
 execution: E
 title: Relay Enrolment from the Console
-status: planned
+status: implemented   # 2026-10-27 on sprint22/phase-e-relay-enrollment, not committed; live AT-E1…E3 PASS on an isolated local stack, lab run (AT-E4/E5) open
 depends_on: [2]   # A merged
 schema_change: false
 tags:
@@ -81,6 +81,45 @@ From the Relays page, a super-admin or relay-ops operator adds a relay and gets,
 
 Go gate and console gate from [[Sprint22/path]].
 
+## Implementation record (2026-10-27)
+
+**Controller:**
+- `internal/pki/fingerprint.go` (new): `IntermediateFingerprint(ctx, q)` reads the row `/ca.crt` serves and returns the SHA-256 of its DER; `FingerprintPEM`. The shield token (`loadCAFingerprint`) and the connector token handler now use it, so the SQL lives in one place.
+- `internal/relay/admin_handler.go`:
+  - `AdminHandler` gains `CAFingerprint`, `ControllerGRPCAddr`, `ControllerHTTPAddr`;
+  - Create reads the fingerprint **before** the first write, so a failure leaves no relay row, token or audit row (500 `server_error`);
+  - the 201 body adds `ca_fingerprint`, `controller_grpc_addr`, `controller_http_addr` (always present; empty string when the setting is unset);
+  - `ValidateInstallAddr`: host:port, no scheme or path.
+- `cmd/server/main.go`: wires the fingerprint and the optional `PROVIDER_RELAY_CONTROLLER_ADDR` / `PROVIDER_RELAY_CONTROLLER_HTTP_ADDR` (`optionalInstallAddr`: a malformed value stops startup). `.env.example` documents both.
+
+**Console:**
+- `src/api/relays.ts` `createRelay`; `CreateRelayResponse` and the create error codes in `types.ts`; `src/lib/relay-errors.ts`.
+- `src/lib/relay-install.ts`: SAN checks mirroring `validateDNSSANs` / `validateIPSANs` (incl. Go's canonical IPv6 form and duplicates); `buildInstallCommands` (POSIX single-quoted values, placeholders when an address is unset).
+- `src/components/AddRelayDialog.tsx`, `src/components/ProvisioningTokenDialog.tsx`; Relays page: **Add relay** (super-admin, relay-ops), "Waiting for enrolment" under pending rows; Relay detail: pending notice with the D-20 hint.
+- `api-surface.test.ts` pins `POST /provider/relays`; the clipboard static guard allows exactly the two one-time secret dialogs.
+- Login page copy no longer says "Read-only fleet view".
+
+**Deviations from the plan above (deliberate):**
+- DNS names and IP addresses are plain text fields (comma- or space-separated) with per-entry validation, not chip inputs: same rules, less UI.
+- The dialog shows two commands: the systemd installer (`scripts/relay-local-install.sh`, the main path) and running `zecurity-relay` directly. Both carry every variable.
+- `RELAY_DNS_SANS` / `RELAY_IP_SANS` are filled with the full allowlists (the controller signs the stored allowlists anyway).
+- Server errors show in the dialog's error banner (with the server's `detail` for SAN codes), not under a field: the server names the bad value but not the field position.
+
+**Tests (written first, confirmed failing first):**
+- Go: `internal/pki/fingerprint_test.go`; `TestValidateInstallAddr`; DB-backed `TestAdminDB_CreateReturnsInstallParameters` (fingerprint = SHA-256 of the stored Intermediate DER, addresses echoed), `…UnconfiguredAddressesAreEmptyStrings`, `…CreateWithoutIntermediateLeavesNoState`; `TestAdminDB_CreateByRelayOps` now seeds an Intermediate.
+- Console: `relay-install.test.ts` (25), Relays (+14, and the read-only test now expects exactly one mutating control: both roles, validation, duplicates, server codes, placeholders, copy-on-click only, outside-click keeps / Escape discards, token gone from DOM/storage/URL after close, reload on close, empty form on reopen, pending hint), RelayDetail (+2).
+
+**Gates (2026-10-27):** `go test ./...` 1420 pass / 0 fail / 2 skip (the two unconditional `t.Skip` stubs, `TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed` and `TestEnroll_CSRSignatureInvalid`; every DB- and Valkey-backed test ran). Console: 436 tests pass, lint clean, build OK.
+
+**Live (2026-10-27): AT-E1 … AT-E3 PASS** on an isolated local stack; see [[Sprint22/Acceptance-Test-Plan]] → "Live run — Phase E".
+
 ## Post-Phase Fixes
 
-*(None yet.)*
+### Fix: Add relay reopened with the previous relay's values
+**Issue:** after a successful create, opening **Add relay** again showed the last name and SANs (found in the live run).
+
+**Root Cause:** `AddRelayDialog` keeps its own form state and only reset it on Cancel.
+
+**Fix Applied (`src/pages/Relays.tsx`):** the page bumps a `key` on every opening, so the dialog remounts with an empty form. Test: "after a successful create, Add relay opens with an empty form".
+
+*Note:* `AddOperatorDialog` (`OperatorDialogs.tsx`) resets the same way (Cancel only), so it likely has the same behaviour after a successful add. Not changed here (outside Phase E).

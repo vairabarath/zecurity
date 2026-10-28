@@ -4,10 +4,12 @@ import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as authApi from './auth'
 import * as operatorsApi from './operators'
 import * as readsApi from './reads'
+import * as relaysApi from './relays'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
-// auth calls (incl. the Sprint 22 TOTP steps) and the operator mutations
-// (C-b, plus reset-totp). Phase P adds GETs
+// auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
+// (C-b, plus reset-totp) and the relay mutations (Sprint 22 D-30: Phase E
+// adds create). Phase P adds GETs
 // only. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
@@ -19,6 +21,7 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/totp/enroll',
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
+  'POST /provider/relays',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -37,7 +40,12 @@ const ALLOWED_READS = [
   'GET /provider/users',
 ]
 
-const API_MODULES: Record<string, Record<string, unknown>> = { auth: authApi, operators: operatorsApi, reads: readsApi }
+const API_MODULES: Record<string, Record<string, unknown>> = {
+  auth: authApi,
+  operators: operatorsApi,
+  reads: readsApi,
+  relays: relaysApi,
+}
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
 // wrappers ignore the non-object argument).
@@ -68,6 +76,7 @@ describe('API surface', () => {
       'POST /provider/auth/totp/enroll/confirm': ok,
       [`POST /provider/users/${ID}/reset-totp`]: { status: 204 },
       'GET /provider/relays': page,
+      'POST /provider/relays': { status: 201, body: { relay_id: ID, provisioning_token: 't' } },
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
       'GET /provider/tenants': page,
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },

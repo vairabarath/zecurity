@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -23,7 +25,7 @@ const ProvisioningTokenTTL = 24 * time.Hour
 
 // Relay admin API (Sprint 22 Phase A; Decision Record D-17, D-31, D-14):
 //
-//	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist} → 201 {relay_id, provisioning_token, expires_at}
+//	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist} → 201 {relay_id, provisioning_token, expires_at, ca_fingerprint, controller_grpc_addr, controller_http_addr}
 //	POST   /provider/relays/{id}/revoke   super-admin             {reason, confirm_name} → 204
 //	DELETE /provider/relays/{id}          super-admin             {reason, confirm_name} → 204
 //
@@ -53,6 +55,14 @@ type AdminHandler struct {
 	JWTSecret     string
 	Authz         *provider.Authz
 	ProviderStore *provider.Store
+	// CAFingerprint returns the pinned Intermediate CA fingerprint
+	// (RELAY_CA_FINGERPRINT) for the install command (Phase E, D-30).
+	CAFingerprint func(ctx context.Context) (string, error)
+	// ControllerGRPCAddr and ControllerHTTPAddr are the addresses a relay host
+	// uses to reach the controller (CONTROLLER_ADDR, CONTROLLER_HTTP_ADDR).
+	// Optional: when empty the console shows placeholders.
+	ControllerGRPCAddr string
+	ControllerHTTPAddr string
 	// OnRelayRevoked, if set, runs post-commit after a relay is revoked or deleted:
 	// it rebuilds+broadcasts the relay list and invalidates the transport snapshot
 	// for affected workspaces so connectors AND clients converge. Wired in main.go.
@@ -69,12 +79,37 @@ type createRelayResponse struct {
 	RelayID           string    `json:"relay_id"`
 	ProvisioningToken string    `json:"provisioning_token"`
 	ExpiresAt         time.Time `json:"expires_at"`
+	// Install parameters (Phase E). None of them is secret.
+	CAFingerprint      string `json:"ca_fingerprint"`
+	ControllerGRPCAddr string `json:"controller_grpc_addr"`
+	ControllerHTTPAddr string `json:"controller_http_addr"`
 }
 
 // destructiveRequest is the D-17 body of revoke and delete.
 type destructiveRequest struct {
 	Reason      string `json:"reason"`
 	ConfirmName string `json:"confirm_name"`
+}
+
+// ValidateInstallAddr checks a controller address for the relay install
+// command (PROVIDER_RELAY_CONTROLLER_ADDR / _HTTP_ADDR): host:port with no
+// scheme or path, since the relay adds the scheme itself. Empty is allowed
+// (not configured; the console shows a placeholder).
+func ValidateInstallAddr(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%q is not host:port: %w", addr, err)
+	}
+	if host == "" || strings.ContainsAny(host, " /") {
+		return fmt.Errorf("%q has an invalid host", addr)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%q has an invalid port", addr)
+	}
+	return nil
 }
 
 // validRelayName: trimmed, 1–128 runes, no control characters.
@@ -138,6 +173,19 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	// Read the fingerprint before the first write: if it fails, nothing exists.
+	if h.CAFingerprint == nil {
+		log.Printf("relay admin: create without CA fingerprint source (wiring bug)")
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	caFingerprint, err := h.CAFingerprint(ctx)
+	if err != nil {
+		log.Printf("relay admin: read intermediate CA fingerprint: %v", err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+
 	relayID, err := h.Store.CreateRelay(ctx, name, dnsAllowlist, ipAllowlist)
 	if err != nil {
 		log.Printf("relay admin: create relay: %v", err)
@@ -182,9 +230,12 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 		log.Printf("provider audit (relay.create) failed for relay %s: %v", relayID, err)
 	}
 	provider.WriteJSON(w, http.StatusCreated, createRelayResponse{
-		RelayID:           relayID,
-		ProvisioningToken: tokenString,
-		ExpiresAt:         time.Now().Add(ProvisioningTokenTTL),
+		RelayID:            relayID,
+		ProvisioningToken:  tokenString,
+		ExpiresAt:          time.Now().Add(ProvisioningTokenTTL),
+		CAFingerprint:      caFingerprint,
+		ControllerGRPCAddr: h.ControllerGRPCAddr,
+		ControllerHTTPAddr: h.ControllerHTTPAddr,
 	})
 }
 

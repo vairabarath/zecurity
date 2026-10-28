@@ -2,7 +2,16 @@ package relay
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +25,7 @@ import (
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 
+	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
 
@@ -81,6 +91,11 @@ func newAdminEnv(t *testing.T, withValkey bool) *adminEnv {
 		JWTSecret:     "phase-a-test-relay-provisioning-secret-0123456789",
 		Authz:         provider.NewAuthz(),
 		ProviderStore: provider.NewStore(pool),
+		CAFingerprint: func(ctx context.Context) (string, error) {
+			return pki.IntermediateFingerprint(ctx, pool)
+		},
+		ControllerGRPCAddr: "controller.provider.test:9090",
+		ControllerHTTPAddr: "controller.provider.test:8080",
 		OnRelayRevoked: func(_ context.Context, relayID string) {
 			e.mu.Lock()
 			e.fanout = append(e.fanout, relayID)
@@ -474,6 +489,7 @@ func TestAdminDB_CreateValidationLeavesNoState(t *testing.T) {
 
 func TestAdminDB_CreateByRelayOps(t *testing.T) {
 	e := newAdminEnv(t, true)
+	e.seedIntermediate(t)
 	ctx := context.Background()
 	r := e.do(t, provider.RoleRelayOps, http.MethodPost, "/provider/relays", map[string]any{
 		"name": " relay-new ", "dns_allowlist": []string{"relay-new.example.com"}, "ip_allowlist": []string{"203.0.113.5"},
@@ -506,5 +522,96 @@ func TestAdminDB_CreateByRelayOps(t *testing.T) {
 		if strings.Contains(string(raw), out.ProvisioningToken) {
 			t.Fatal("provisioning token found in the audit row")
 		}
+	}
+}
+
+// --- Phase E: the Create response carries what the install command needs ---
+
+// seedIntermediate stores a self-signed certificate as the Intermediate CA row
+// and returns its PEM.
+func (e *adminEnv) seedIntermediate(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(7),
+		Subject:      pkix.Name{CommonName: "phase-e intermediate"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	if _, err := e.pool.Exec(context.Background(),
+		`INSERT INTO ca_intermediate (encrypted_key, nonce, certificate_pem, not_before, not_after)
+		 VALUES ('x', 'x', $1, now() - interval '1 hour', now() + interval '1 hour')`, certPEM); err != nil {
+		t.Fatal(err)
+	}
+	return certPEM
+}
+
+func TestAdminDB_CreateReturnsInstallParameters(t *testing.T) {
+	e := newAdminEnv(t, true)
+	certPEM := e.seedIntermediate(t)
+	block, _ := pem.Decode([]byte(certPEM))
+	sum := sha256.Sum256(block.Bytes)
+
+	r := e.do(t, provider.RoleSuperAdmin, http.MethodPost, "/provider/relays", map[string]any{"name": "relay-e"}, nil)
+	if r.code != http.StatusCreated {
+		t.Fatalf("create: %d %s, want 201", r.code, r.body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(r.body), &out); err != nil {
+		t.Fatal(err)
+	}
+	var jti string
+	_ = e.pool.QueryRow(context.Background(), `SELECT COALESCE(enrollment_token_jti, '') FROM relays WHERE id = $1`, out["relay_id"]).Scan(&jti)
+	t.Cleanup(func() { _ = e.rdb.Del(context.Background(), provisioningJTIPrefix+jti).Err() })
+
+	if out["ca_fingerprint"] != hex.EncodeToString(sum[:]) {
+		t.Errorf("ca_fingerprint %v, want %s", out["ca_fingerprint"], hex.EncodeToString(sum[:]))
+	}
+	if out["controller_grpc_addr"] != "controller.provider.test:9090" || out["controller_http_addr"] != "controller.provider.test:8080" {
+		t.Errorf("controller addresses %v / %v", out["controller_grpc_addr"], out["controller_http_addr"])
+	}
+}
+
+func TestAdminDB_CreateUnconfiguredAddressesAreEmptyStrings(t *testing.T) {
+	e := newAdminEnv(t, true)
+	e.seedIntermediate(t)
+	e.handler.ControllerGRPCAddr, e.handler.ControllerHTTPAddr = "", ""
+
+	r := e.do(t, provider.RoleRelayOps, http.MethodPost, "/provider/relays", map[string]any{"name": "relay-e2"}, nil)
+	if r.code != http.StatusCreated {
+		t.Fatalf("create: %d %s, want 201", r.code, r.body)
+	}
+	var out map[string]any
+	_ = json.Unmarshal([]byte(r.body), &out)
+	var jti string
+	_ = e.pool.QueryRow(context.Background(), `SELECT COALESCE(enrollment_token_jti, '') FROM relays WHERE id = $1`, out["relay_id"]).Scan(&jti)
+	t.Cleanup(func() { _ = e.rdb.Del(context.Background(), provisioningJTIPrefix+jti).Err() })
+	// Present and empty: the console shows placeholders for the operator to fill in.
+	for _, k := range []string{"controller_grpc_addr", "controller_http_addr"} {
+		if v, ok := out[k]; !ok || v != "" {
+			t.Errorf("%s = %v (present %v), want empty string", k, v, ok)
+		}
+	}
+}
+
+func TestAdminDB_CreateWithoutIntermediateLeavesNoState(t *testing.T) {
+	e := newAdminEnv(t, true) // no ca_intermediate row
+	r := e.do(t, provider.RoleSuperAdmin, http.MethodPost, "/provider/relays", map[string]any{"name": "relay-e3"}, nil)
+	if r.code != http.StatusInternalServerError || strings.TrimSpace(r.body) != `{"error":"server_error"}` {
+		t.Fatalf("create without CA: %d %q, want 500 server_error", r.code, r.body)
+	}
+	var relays, audits int
+	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM relays`).Scan(&relays)
+	_ = e.pool.QueryRow(context.Background(), `SELECT count(*) FROM provider_audit_logs`).Scan(&audits)
+	if relays != 0 || audits != 0 {
+		t.Fatalf("failed create left %d relays / %d audit rows", relays, audits)
 	}
 }

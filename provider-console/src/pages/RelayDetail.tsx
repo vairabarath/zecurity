@@ -167,6 +167,15 @@ function RelayView({ relay: r, back, onRefresh }: { relay: RelayDetailDTO; back:
         </div>
       </header>
 
+      {r.status === 'pending' && (
+        <Alert>
+          <AlertDescription>
+            Waiting for enrolment: the relay becomes active when it provisions with its one-time token (valid for 24
+            hours). If the token has expired, delete this relay and add a new one.
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="flex flex-wrap gap-4">
         <Card className="flex-[2_1_520px] px-5 py-5">
           <h2 className="sr-only">Overview</h2>

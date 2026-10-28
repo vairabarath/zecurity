@@ -1,9 +1,9 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
-import type { Page, RelaySummary } from '@/api/types'
-import { mockFetch, relayOpsMe, superAdminMe, type RecordedCall } from '@/test/fetch'
-import { renderApp, signedInAs } from '@/test/render'
+import { describe, expect, it, vi } from 'vitest'
+import type { CreateRelayResponse, Page, RelaySummary } from '@/api/types'
+import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
+import { renderApp, sessionStorageDump, signedInAs } from '@/test/render'
 
 const iso = (ms: number) => new Date(Date.now() + ms).toISOString()
 const MIN = 60_000
@@ -171,7 +171,7 @@ describe('Relays list', () => {
     expect(await screen.findByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
   })
 
-  it('is read-only: GETs only, and no mutating controls', async () => {
+  it('the only mutating control is Add relay; no revoke, delete or edit', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ 'GET /provider/relays': { status: 200, body: { items: [A], next_cursor: 'c' } } })
     renderApp('/relays')
@@ -183,8 +183,178 @@ describe('Relays list', () => {
       .getAllByRole('button')
       .filter((b) => !chips.includes(b))
       .map((b) => b.textContent?.trim())
-    expect(buttons.sort()).toEqual(['Next', 'Previous', 'Refresh'].sort())
-    expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
+    expect(buttons.sort()).toEqual(['Add relay', 'Next', 'Previous', 'Refresh'].sort())
+    expect(within(main).queryByText(/\b(revoke|delete|edit|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
+  })
+})
+
+// ── Sprint 22 Phase E: relay enrolment (D-30, D-20) ─────────────────────────
+
+const TOKEN = 'fake-provisioning-token-for-tests-0001'
+const FP = 'ab'.repeat(32)
+const CREATED: CreateRelayResponse = {
+  relay_id: '33333333-3333-3333-3333-333333333333',
+  provisioning_token: TOKEN,
+  expires_at: '2026-10-28T12:00:00Z',
+  ca_fingerprint: FP,
+  controller_grpc_addr: 'controller.example.com:9090',
+  controller_http_addr: 'controller.example.com:8080',
+}
+
+function enrolSetup(me = superAdminMe, create: FakeResponse = { status: 201, body: CREATED }) {
+  signedInAs(me)
+  const { calls } = mockFetch({
+    'GET /provider/relays': { status: 200, body: { items: [A, B], next_cursor: null } },
+    'POST /provider/relays': create,
+  })
+  renderApp('/relays')
+  return { user: userEvent.setup(), calls }
+}
+
+async function openAdd(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'Add relay' }))
+  return screen.findByRole('dialog', { name: 'Add relay' })
+}
+
+const posts = (calls: RecordedCall[]) => calls.filter((c) => c.method === 'POST')
+
+describe('Relays: add relay', () => {
+  it.each([
+    ['super-admin', superAdminMe],
+    ['relay-ops', relayOpsMe],
+  ])('%s can add a relay and gets the token and install commands once', async (_, me) => {
+    const { user, calls } = enrolSetup(me)
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), ' relay-new ')
+    await user.type(within(dialog).getByLabelText('DNS names'), 'relay-new.example.com, relay-new.internal')
+    await user.type(within(dialog).getByLabelText('IP addresses'), '203.0.113.9')
+    await user.click(within(dialog).getByRole('button', { name: 'Create relay' }))
+
+    const tok = await screen.findByRole('dialog', { name: 'Install relay-new' })
+    expect(posts(calls)).toEqual([
+      expect.objectContaining({
+        path: '/provider/relays',
+        body: { name: 'relay-new', dns_allowlist: ['relay-new.example.com', 'relay-new.internal'], ip_allowlist: ['203.0.113.9'] },
+      }),
+    ])
+    expect(within(tok).getByLabelText('Provisioning token')).toHaveTextContent(TOKEN)
+    const installer = within(tok).getByLabelText('Install command')
+    expect(installer).toHaveTextContent(`RELAY_ID='${CREATED.relay_id}'`)
+    expect(installer).toHaveTextContent(`RELAY_CA_FINGERPRINT='${FP}'`)
+    expect(installer).toHaveTextContent(`RELAY_PROVISIONING_TOKEN='${TOKEN}'`)
+    expect(installer).toHaveTextContent(`CONTROLLER_ADDR='controller.example.com:9090'`)
+    expect(installer).toHaveTextContent(`RELAY_DNS_SANS='relay-new.example.com,relay-new.internal'`)
+    expect(installer).toHaveTextContent(`RELAY_IP_SANS='203.0.113.9'`)
+    expect(within(tok).getByLabelText('Direct command')).toHaveTextContent(`RELAY_PROVISIONING_TOKEN='${TOKEN}'`)
+    expect(within(tok).getByText(/single use/i)).toBeInTheDocument()
+    expect(within(tok).getByText(/24 hours/)).toBeInTheDocument()
+    expect(within(tok).queryByText(/placeholder/i)).not.toBeInTheDocument()
+
+    await user.click(within(tok).getByRole('button', { name: 'I’ve saved it, close' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain(TOKEN)
+    expect(sessionStorageDump()).not.toContain(TOKEN)
+    expect(localStorage.length).toBe(0)
+    expect(window.location.href).not.toContain(TOKEN)
+    await waitFor(() => expect(relayCalls(calls).filter((c) => c.method === 'GET')).toHaveLength(2)) // reload on close
+  })
+
+  it('unconfigured controller addresses show placeholders and say so', async () => {
+    const { user } = enrolSetup(superAdminMe, {
+      status: 201,
+      body: { ...CREATED, controller_grpc_addr: '', controller_http_addr: '' },
+    })
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.click(within(dialog).getByRole('button', { name: 'Create relay' }))
+    const tok = await screen.findByRole('dialog', { name: 'Install relay-new' })
+    expect(within(tok).getByLabelText('Install command')).toHaveTextContent(`CONTROLLER_ADDR='<controller-host>:9090'`)
+    expect(within(tok).getByText(/placeholder/i)).toBeInTheDocument()
+  })
+
+  it.each([
+    ['DNS names', 'Relay.Example.com', /lowercase/i],
+    ['DNS names', '*.example.com', /wildcard/i],
+    ['IP addresses', '10.0.0.01', /canonical/i],
+  ])('an invalid %s entry (%s) is caught before any request', async (field, value, message) => {
+    const { user, calls } = enrolSetup()
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.type(within(dialog).getByLabelText(field), value)
+    expect(within(dialog).getByText(message)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Create relay' })).toBeDisabled()
+    expect(posts(calls)).toHaveLength(0)
+  })
+
+  it('duplicate entries are caught before any request', async () => {
+    const { user, calls } = enrolSetup()
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.type(within(dialog).getByLabelText('DNS names'), 'a.example.com a.example.com')
+    expect(within(dialog).getByText(/listed twice/i)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Create relay' })).toBeDisabled()
+    expect(posts(calls)).toHaveLength(0)
+  })
+
+  it('a blank name keeps Create disabled', async () => {
+    const { user } = enrolSetup()
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), '   ')
+    expect(within(dialog).getByRole('button', { name: 'Create relay' })).toBeDisabled()
+  })
+
+  it.each([
+    ['invalid_dns_san', 'invalid DNS SAN "x"', /DNS name was rejected: invalid DNS SAN "x"/],
+    ['invalid_name', undefined, /1 to 128 characters/],
+    ['forbidden', undefined, /role can’t do this/],
+  ])('server %s is shown and the dialog stays open, without reloading', async (code, detail, message) => {
+    const { user, calls } = enrolSetup(superAdminMe, { status: code === 'forbidden' ? 403 : 400, body: { error: code, detail } })
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.click(within(dialog).getByRole('button', { name: 'Create relay' }))
+    expect(await within(dialog).findByText(message)).toBeInTheDocument()
+    expect(relayCalls(calls).filter((c) => c.method === 'GET')).toHaveLength(1)
+  })
+
+  it('copies only on click; clicking outside keeps the token, Escape discards it', async () => {
+    const { user } = enrolSetup()
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+    const dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.click(within(dialog).getByRole('button', { name: 'Create relay' }))
+    const tok = await screen.findByRole('dialog', { name: 'Install relay-new' })
+    expect(writeText).not.toHaveBeenCalled()
+    await user.click(within(tok).getByRole('button', { name: 'Copy install command' }))
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining(`RELAY_PROVISIONING_TOKEN='${TOKEN}'`))
+    await user.click(within(tok).getByRole('button', { name: 'Copy token' }))
+    expect(writeText).toHaveBeenLastCalledWith(TOKEN)
+
+    fireEvent.pointerDown(document.body)
+    expect(screen.getByRole('dialog', { name: 'Install relay-new' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain(TOKEN)
+  })
+
+  it('after a successful create, Add relay opens with an empty form', async () => {
+    const { user } = enrolSetup()
+    let dialog = await openAdd(user)
+    await user.type(within(dialog).getByLabelText('Name'), 'relay-new')
+    await user.type(within(dialog).getByLabelText('DNS names'), 'relay-new.example.com')
+    await user.click(within(dialog).getByRole('button', { name: 'Create relay' }))
+    const tok = await screen.findByRole('dialog', { name: 'Install relay-new' })
+    await user.click(within(tok).getByRole('button', { name: 'I’ve saved it, close' }))
+    dialog = await openAdd(user)
+    expect(within(dialog).getByLabelText('Name')).toHaveValue('')
+    expect(within(dialog).getByLabelText('DNS names')).toHaveValue('')
+    expect(within(dialog).getByLabelText('IP addresses')).toHaveValue('')
+  })
+
+  it('a pending relay says it is waiting for enrolment', async () => {
+    enrolSetup()
+    const row = await screen.findByRole('row', { name: 'relay-b' })
+    expect(within(row).getByText('Waiting for enrolment')).toBeInTheDocument()
+    expect(within(screen.getByRole('row', { name: 'relay-a' })).queryByText('Waiting for enrolment')).not.toBeInTheDocument()
   })
 })
