@@ -291,7 +291,13 @@ Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
 - [x] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Live PASS: E1–E4; 6 rotations, 10-min cadence, 0 failures.)*
 - [x] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Live PASS: F1–F7. The concurrent-revoke race is covered by `store_renew_integration_test.go`.)*
 - [x] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Live PASS: G1–G3, G5–G8. The shield-renewal part rests on evidence from before 17:16, while the shield TTL was 24h. Established tunnels during a swap are AT-G.6, which FAILED; see Phase G.)*
-- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **2026-10-27: everything passes except G4 / AT-G.1** (a duplicate ReEnroll within 60 s is ignored), which is unit-tested and was never run live.
+- [x] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **2026-10-28: G4 / AT-G.1 PASS live (Sathiya), the last open scenario.**
+  - **Setup:** controller `fix/m1-tgate-fu4` (`0fb2d743`, sha `b2167ee2`) with `CONNECTOR_CERT_TTL=15m` and `CONNECTOR_RENEWAL_WINDOW=20m`, so every new certificate starts inside the window and the controller re-asks on each new Control stream. Connector `g4-conn` on inkyank .75 (binary `6d135575`).
+  - **07:34:31.797Z:** ReEnroll; renewed `64422773…` at .884; switched to the new stream at .930; the duplicate ReEnroll on it at .935 was **ignored** (`certificate renewed moments ago — ignoring duplicate ReEnroll`).
+  - **07:44:34.793Z:** the next ReEnroll, **10 min 3 s later** (the resend interval), renewed `c1090257…`; the duplicate at .918 was ignored again.
+  - **DB:** 3 certificates (enrollment + 2 renewals), `cert_serial` = `c1090257…`, status `active`. No double renewal.
+  - Connector revoked and lab cleaned afterwards.
+  - *Earlier (2026-10-27):* everything passed except G4 / AT-G.1 (a duplicate ReEnroll within 60 s is ignored), which was unit-tested and never run live.
   - R2 re-run on `65447e4e` (`fixed-pendings` + #146/#147) with the CI env: `go build` and `go vet` OK; `go test ./...` **1435 PASS, 0 FAIL, 2 SKIP**. The skips are by design: `TestEnroll_CSRSignatureInvalid` and a SCIM test covered by `mapping_probe_test.go`. The 30 skips that hid Finding 35 are gone.
   - The box can be ticked once G4 runs live, or is accepted on its unit test.
   - *Earlier:* **Not met (2026-10-20):** R2 regression gate FAIL (Finding 35: 4 `graph/resolvers` tests, still failing on `fixed-pendings`, waiting on Fix02); G4 / AT-G.1 not exercised live (unit-tested). G9 / AT-G.6 was accepted on 2026-10-20 on the `a25bb33` re-test (see Phase G).

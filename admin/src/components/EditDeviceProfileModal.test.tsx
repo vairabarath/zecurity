@@ -19,6 +19,13 @@ const CHECKS = [
     platform: "linux",
     allowUnsupportedMeaningful: true,
   },
+  {
+    __typename: "PostureCheckDescriptor" as const,
+    id: "zecurity.device.approved",
+    label: "Approved by an admin",
+    platform: "any",
+    allowUnsupportedMeaningful: false,
+  },
 ];
 
 const PROFILE = {
@@ -62,6 +69,35 @@ describe("EditDeviceProfileModal", () => {
 
     expect(firewallToggle).toHaveAttribute("aria-checked", "true");
     expect(luksToggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("pre-checks Approved by an admin when the profile requires it", async () => {
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetSupportedPostureChecksDocument },
+            result: { data: { supportedPostureChecks: CHECKS } },
+          },
+        ]}
+      >
+        <EditDeviceProfileModal
+          open
+          profile={{
+            ...PROFILE,
+            requirements: [{ checkId: "zecurity.device.approved" }],
+          }}
+          onOpenChange={vi.fn()}
+        />
+      </MockedProvider>,
+    );
+
+    expect(
+      await screen.findByRole("switch", { name: "Approved by an admin" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(
+      screen.getByRole("switch", { name: "Firewall active" }),
+    ).toHaveAttribute("aria-checked", "false");
   });
 
   it("renders nothing when closed", () => {

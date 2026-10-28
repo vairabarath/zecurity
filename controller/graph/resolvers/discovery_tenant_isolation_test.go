@@ -109,23 +109,45 @@ func TestDiscoveryIsolation_PromoteGivesNoForeignSignal(t *testing.T) {
 	}
 }
 
-// Documents current behaviour, not a goal: promotion never sets a remote
-// network, so even on the caller's own shield it can't create a resource. It
-// now fails with the user-safe "remote network not found" (before the
-// resource-network check it failed with a masked Postgres cast error). Repairing
-// the feature is separate work; this pins that the failure writes nothing.
-func TestDiscoveryIsolation_PromoteOwnShieldCurrentlyCannotCreate(t *testing.T) {
+// FU-4: promoting a service on the caller's own shield creates a resource in
+// that shield's network (before, it never set a network and always failed).
+func TestDiscoveryIsolation_PromoteOwnShieldCreatesResource(t *testing.T) {
 	f := newIsoFixture(t)
 	shieldA := f.seedShield(t, f.a, "a")
 	before := f.resourceCount(t)
-	_, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "tcp", 5432)
-	if err == nil {
-		t.Fatal("promotion unexpectedly succeeded; update this test and the follow-up note")
+	vA, vB := f.notifier.Version(f.a.id), f.notifier.Version(f.b.id)
+
+	res, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "tcp", 5432)
+	if err != nil {
+		t.Fatalf("own shield promotion: %v", err)
 	}
-	if msg := presented(f.a.ctx, err); msg != "remote network not found" {
-		t.Errorf("own shield promotion: client sees %q", msg)
+	if res.Host != "10.90.0.1" || res.PortFrom != 5432 || res.PortTo != 5432 || res.Protocol != "tcp" {
+		t.Errorf("promoted resource = %+v", res)
 	}
-	if after := f.resourceCount(t); after != before {
-		t.Errorf("failed promotion changed the resource count: %d -> %d", before, after)
+	var rn, tenant string
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT remote_network_id::text, tenant_id::text FROM resources WHERE id = $1`, res.ID,
+	).Scan(&rn, &tenant); err != nil {
+		t.Fatal(err)
+	}
+	if rn != f.a.rn || tenant != f.a.id {
+		t.Errorf("resource network/workspace = %s/%s, want %s/%s", rn, tenant, f.a.rn, f.a.id)
+	}
+	if after := f.resourceCount(t); after != before+1 {
+		t.Errorf("resource count %d -> %d, want +1", before, after)
+	}
+	if f.notifier.Version(f.a.id) == vA {
+		t.Error("promotion did not notify A's policy")
+	}
+	if f.notifier.Version(f.b.id) != vB {
+		t.Error("promotion bumped another workspace's policy version")
+	}
+
+	// An undiscovered port on the same shield still creates nothing.
+	if _, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "udp", 9); err == nil {
+		t.Error("undiscovered service was promoted")
+	}
+	if after := f.resourceCount(t); after != before+1 {
+		t.Errorf("rejected promotion changed the resource count to %d", after)
 	}
 }

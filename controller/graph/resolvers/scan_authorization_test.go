@@ -1,9 +1,12 @@
 package resolvers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +69,25 @@ func clientMessage(ctx context.Context, err error) string {
 	return ErrorPresenter(ctx, err).Message
 }
 
+// request records requestID as sent to w's connector, as triggerScan does.
+func (f *scanFixture) request(t *testing.T, w scanWS, requestID string) {
+	t.Helper()
+	ok, err := discovery.RecordScanRequest(context.Background(), f.pool, w.id, w.conn, requestID)
+	if err != nil || !ok {
+		t.Fatalf("record scan request %s: %v %v", requestID, ok, err)
+	}
+}
+
+func (f *scanFixture) storedRows(t *testing.T, requestID string) int {
+	t.Helper()
+	var n int
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM connector_scan_results WHERE request_id = $1`, requestID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func (f *scanFixture) report(t *testing.T, connID, requestID, ip string) {
 	t.Helper()
 	if err := discovery.UpsertScanResults(context.Background(), f.pool, connID, []discovery.ScanResult{
@@ -90,6 +112,9 @@ func (f *scanFixture) results(t *testing.T, w scanWS, requestID string) []string
 
 func TestScanIsolation_TriggerScanSameAnswerForEveryUnavailableConnector(t *testing.T) {
 	f := newScanFixture(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	var want string
 	for _, c := range []struct{ name, id string }{
 		{"foreign connector", f.b.conn},
@@ -110,16 +135,28 @@ func TestScanIsolation_TriggerScanSameAnswerForEveryUnavailableConnector(t *test
 			t.Errorf("%s: client sees %q, want %q for every case", c.name, msg, "connector not found or not connected")
 		}
 	}
+	// Operators still see which connector each refusal named (FU-3).
+	for _, id := range []string{f.b.conn, "not-a-uuid"} {
+		if !strings.Contains(logs.String(), fmt.Sprintf("connector=%q reason=not_in_workspace", id)) {
+			t.Errorf("refusal for %q not logged with its connector: %q", id, logs.String())
+		}
+	}
+	// No refused or unsent request stays bound to a connector (FU-5).
+	var left int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM scan_requests`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d scan requests left after refused dispatches", left)
+	}
 }
 
 func TestScanIsolation_ResultsScopedToWorkspace(t *testing.T) {
 	f := newScanFixture(t)
+	f.request(t, f.a, "req-a")
+	f.request(t, f.b, "req-b")
 	f.report(t, f.a.conn, "req-a", "10.1.0.1")
 	f.report(t, f.b.conn, "req-b", "10.2.0.1")
-	// One request ID reported by both workspaces' connectors (a request ID is
-	// not a secret; a connector can report any ID it likes).
-	f.report(t, f.a.conn, "req-shared", "10.1.0.9")
-	f.report(t, f.b.conn, "req-shared", "10.2.0.9")
 
 	// Positive controls: each workspace reads its own results.
 	if got := f.results(t, f.a, "req-a"); len(got) != 1 || got[0] != "10.1.0.1" {
@@ -127,16 +164,6 @@ func TestScanIsolation_ResultsScopedToWorkspace(t *testing.T) {
 	}
 	if got := f.results(t, f.b, "req-b"); len(got) != 1 || got[0] != "10.2.0.1" {
 		t.Errorf("B reads req-b = %v, want [10.2.0.1]", got)
-	}
-	// A can't read B's request, and sees only its own rows of a shared ID.
-	if got := f.results(t, f.a, "req-b"); len(got) != 0 {
-		t.Errorf("A reads B's request: %v", got)
-	}
-	if got := f.results(t, f.a, "req-shared"); len(got) != 1 || got[0] != "10.1.0.9" {
-		t.Errorf("A reads req-shared = %v, want only its own row", got)
-	}
-	if got := f.results(t, f.b, "req-shared"); len(got) != 1 || got[0] != "10.2.0.9" {
-		t.Errorf("B reads req-shared = %v, want only its own row", got)
 	}
 	// Foreign, missing and malformed request IDs all answer an empty list.
 	for _, id := range []string{"req-b", "req-missing", "not a request id"} {
@@ -146,24 +173,93 @@ func TestScanIsolation_ResultsScopedToWorkspace(t *testing.T) {
 	}
 }
 
-func TestScanIsolation_LateReportCannotTakeOverResult(t *testing.T) {
-	f := newScanFixture(t)
-	f.report(t, f.a.conn, "req-a", "10.1.0.1")
-	// B's connector reports the same (request, ip, port, protocol) later.
-	f.report(t, f.b.conn, "req-a", "10.1.0.1")
+// FU-5 (FU-3 residual): a request is bound to the connector it was sent to.
+// A report for it from any other connector, another workspace's or another of
+// the same workspace's, before or after the owner's, is dropped: it can neither
+// hide the owner's row nor add rows to the request.
+func TestScanIsolation_UnsolicitedReportIsDropped(t *testing.T) {
+	for _, foreignFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("foreign report first=%v", foreignFirst), func(t *testing.T) {
+			f := newScanFixture(t)
+			var peer string
+			if err := f.pool.QueryRow(context.Background(),
+				`INSERT INTO connectors (tenant_id, remote_network_id, name, status)
+				 SELECT tenant_id, remote_network_id, 'peer', 'active' FROM connectors WHERE id = $1
+				 RETURNING id`, f.a.conn).Scan(&peer); err != nil {
+				t.Fatal(err)
+			}
+			f.request(t, f.a, "req-a")
+			foreign := func() {
+				f.report(t, f.b.conn, "req-a", "10.1.0.1")
+				f.report(t, peer, "req-a", "10.1.0.2")
+			}
+			if foreignFirst {
+				foreign()
+			}
+			f.report(t, f.a.conn, "req-a", "10.1.0.1")
+			if !foreignFirst {
+				foreign()
+			}
+			// The same connector reporting again is still a no-op.
+			f.report(t, f.a.conn, "req-a", "10.1.0.1")
 
-	var owner string
-	if err := f.pool.QueryRow(context.Background(),
-		`SELECT connector_id::text FROM connector_scan_results WHERE request_id = 'req-a' AND ip = '10.1.0.1'`).Scan(&owner); err != nil {
+			if n := f.storedRows(t, "req-a"); n != 1 {
+				t.Errorf("stored %d rows for req-a, want only the bound connector's 1", n)
+			}
+			res, err := f.qr.GetScanResults(f.a.ctx, "req-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(res) != 1 || res[0].ReachableFrom != f.a.conn || res[0].IP != "10.1.0.1" {
+				t.Errorf("A reads %+v, want exactly its connector's row", res)
+			}
+			if got := f.results(t, f.b, "req-a"); len(got) != 0 {
+				t.Errorf("B reads A's request: %v", got)
+			}
+		})
+	}
+}
+
+// RecordScanRequest binds only a connector of the caller's workspace, and a
+// purge removes old requests with their results.
+func TestScanIsolation_RecordAndPurgeRequests(t *testing.T) {
+	f := newScanFixture(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		name, conn string
+		want       bool
+	}{
+		{"own connector", f.a.conn, true},
+		{"foreign connector", f.b.conn, false},
+		{"missing connector", "00000000-0000-4000-8000-0000000000ff", false},
+		{"malformed id", "not-a-uuid", false},
+	} {
+		ok, err := discovery.RecordScanRequest(ctx, f.pool, f.a.id, c.conn, "req-"+c.name)
+		if err != nil || ok != c.want {
+			t.Errorf("%s: recorded=%v err=%v, want %v", c.name, ok, err, c.want)
+		}
+	}
+	f.report(t, f.a.conn, "req-own connector", "10.1.0.1")
+	if err := discovery.PurgeScanResults(ctx, f.pool, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if owner != f.a.conn {
-		t.Errorf("result row now owned by connector %s, want A's %s", owner, f.a.conn)
+	var requests int
+	_ = f.pool.QueryRow(ctx, `SELECT count(*) FROM scan_requests`).Scan(&requests)
+	if requests != 0 || f.storedRows(t, "req-own connector") != 0 {
+		t.Errorf("after purge: %d requests, %d results", requests, f.storedRows(t, "req-own connector"))
 	}
-	if got := f.results(t, f.a, "req-a"); len(got) != 1 {
-		t.Errorf("A lost its result: %v", got)
+
+	// A deleted connector takes its requests and their results with it.
+	f.request(t, f.b, "req-b")
+	f.report(t, f.b.conn, "req-b", "10.2.0.1")
+	if f.storedRows(t, "req-b") != 1 {
+		t.Fatal("fixture: B's result not stored")
 	}
-	if got := f.results(t, f.b, "req-a"); len(got) != 0 {
-		t.Errorf("B reads A's result through its late report: %v", got)
+	if _, err := f.pool.Exec(ctx, `DELETE FROM connectors WHERE id = $1`, f.b.conn); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.pool.QueryRow(ctx, `SELECT count(*) FROM scan_requests`).Scan(&requests)
+	if requests != 0 || f.storedRows(t, "req-b") != 0 {
+		t.Errorf("after deleting the connector: %d requests, %d results", requests, f.storedRows(t, "req-b"))
 	}
 }

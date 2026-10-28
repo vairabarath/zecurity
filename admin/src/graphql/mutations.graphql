@@ -207,6 +207,22 @@ mutation RevokeDevice($deviceId: ID!) {
   revokeDevice(deviceId: $deviceId)
 }
 
+mutation ApproveDevice($deviceId: ID!) {
+  approveDevice(deviceId: $deviceId) {
+    id
+    approvedAt
+    approvedByEmail
+  }
+}
+
+mutation UnapproveDevice($deviceId: ID!) {
+  unapproveDevice(deviceId: $deviceId) {
+    id
+    approvedAt
+    approvedByEmail
+  }
+}
+
 mutation CreateDeviceProfile($name: String!, $manualTrust: Boolean) {
   createDeviceProfile(name: $name, manualTrust: $manualTrust) {
     id

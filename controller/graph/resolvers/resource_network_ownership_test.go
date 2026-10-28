@@ -132,7 +132,9 @@ func TestResourceNetwork_SameWorkspaceStillWorks(t *testing.T) {
 
 func TestResourceNetwork_ReadsHideForeignNetworkName(t *testing.T) {
 	f := newIsoFixture(t)
-	// A legacy row the old code could write: A's resource on B's network.
+	// A legacy row the old code could write: A's resource on B's network. The
+	// schema refuses it (FU-2), so drop that check here.
+	allowCrossWorkspaceRows(t, f.pool)
 	if _, err := f.pool.Exec(context.Background(), `UPDATE resources SET remote_network_id = $1 WHERE id = $2`, f.b.rn, f.a.res); err != nil {
 		t.Fatal(err)
 	}

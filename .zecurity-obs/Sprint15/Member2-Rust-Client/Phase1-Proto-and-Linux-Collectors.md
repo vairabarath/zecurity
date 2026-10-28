@@ -141,4 +141,48 @@ cd client && cargo build
 - [x] **Build gate:** `cd client && cargo build`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: the firewall check passed on any `policy drop`, not only the inbound chain (2026-10-28, `c7d812cb`)
+**File:** `client/src/posture.rs` `collect_firewall` (+ tests in `client/src/posture_tests.rs`).
+
+**Issue:**
+- The nftables branch matched the text `policy drop` / `policy reject` anywhere in `nft list ruleset`.
+- A drop policy on a **forward** or **output** chain (Docker's `FORWARD`, or any tool's) therefore reported `linux.firewall.active` = PASS while inbound was wide open.
+- **Found live 2026-10-28:**
+  1. This PC had only `table inet fwprobe { chain forwardonly { type filter hook forward priority 0; policy drop; } }`.
+  2. It reported PASS (`nft default-deny active`) and satisfied an ENFORCE profile requiring the check.
+  3. It reached the bound resource, while nika connected to a fresh listener on it (`INBOUND 200`).
+
+**Root cause:** a text search with no notion of which hook or family a chain belongs to.
+
+**Fix applied:**
+- The nftables branch reads `nft -j list ruleset` and passes only for an **input-hook base chain of family `inet` or `ip`** whose policy is `drop` or `reject`.
+- This also covers iptables-nft's own `ip filter INPUT`.
+- Forward/output-only drops and IPv6-only input drops fail; non-JSON output is an Error.
+- The iptables (`Chain INPUT (policy DROP)`) and ufw branches are unchanged.
+
+```rust
+// BEFORE: try_backend(runner, "nft", &["list", "ruleset"], &["policy drop", "policy reject"], …)
+// AFTER:  nft_input_default_deny(runner): nft -j list ruleset → a chain with
+//         hook == "input" && family ∈ {inet, ip} && policy ∈ {drop, reject}
+```
+
+**Tests:**
+- forward/output-only drop fails; ip6-only input drop fails;
+- inet/ip input drop or reject passes, also beside permissive chains;
+- non-JSON output is an Error.
+- 4 mutants killed (hook, family, policy, reject). Client 286 pass.
+
+**Live, fixed client `b1afd95a`:**
+
+| State | Result |
+|---|---|
+| no firewall | FAIL `nftables present but no default-deny input chain` |
+| forward-only drop | **FAIL** (the old client: PASS) |
+| inet input chain, policy drop | PASS `nft input chain inet fwtest/input policy drop` |
+
+The enforcement path was verified the same day with the old client:
+- ENFORCE denied a failing device;
+- a passing report restored access;
+- the connector refused a stale-ACL client;
+- AUDIT allowed access while recording the reason.

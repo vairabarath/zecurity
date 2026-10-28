@@ -58,6 +58,11 @@ func TestReportDevicePostureIntegration(t *testing.T) {
 	userA := insertClientPostureUser(t, ctx, pool, workspaceA, "a")
 	deviceA := insertClientPostureDevice(t, ctx, pool, workspaceA, userA, "a")
 	deviceA2 := insertClientPostureDevice(t, ctx, pool, workspaceA, userA, "a2")
+	// A device in B owned by A's user. The schema refuses it (FU-5), so drop
+	// that check here: the handler must refuse it on its own.
+	if _, err := pool.Exec(ctx, `ALTER TABLE client_devices DROP CONSTRAINT client_devices_user_same_workspace_fkey`); err != nil {
+		t.Fatalf("drop consistency constraint: %v", err)
+	}
 	deviceCrossWorkspace := insertClientPostureDevice(t, ctx, pool, workspaceB, userA, "cross")
 	deviceRevoked := insertClientPostureDevice(t, ctx, pool, workspaceA, userA, "revoked")
 	if _, err := pool.Exec(ctx, `UPDATE client_devices SET revoked_at = NOW() WHERE id = $1`, deviceRevoked); err != nil {

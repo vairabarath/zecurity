@@ -59,9 +59,8 @@ type RelayRow struct {
 	LastHeartbeatAt    *time.Time
 }
 
-// CreateRelay inserts a new relay row with status='pending'.
-// The enrollment_token_jti is attached separately via AttachJTI once the
-// caller has issued the JWT (the JWT's sub claim is the just-minted relay id).
+// CreateRelay inserts a new relay row with status='pending' and no token.
+// The admin API uses CreateRelayAudited; this is for fixtures and tooling.
 func (s *Store) CreateRelay(ctx context.Context, name string, dnsAllowlist, ipAllowlist []string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx,
@@ -76,19 +75,51 @@ func (s *Store) CreateRelay(ctx context.Context, name string, dnsAllowlist, ipAl
 	return id, nil
 }
 
-// AttachJTI records the issued provisioning-token jti on the relay row.
-func (s *Store) AttachJTI(ctx context.Context, id, jti string) error {
-	tag, err := s.pool.Exec(ctx,
+// CreateRelayAudited creates a pending relay with its provisioning token and
+// audit row in one transaction (D-14, Sprint 22 FU-1): insert the row, call
+// issue with the new id (it mints the token and returns its jti), attach the
+// jti, run audit in the same transaction, commit. Any failure rolls back the
+// row, the jti and the audit together; side effects issue made outside the
+// database are the caller's to undo.
+func (s *Store) CreateRelayAudited(
+	ctx context.Context,
+	name string,
+	dnsAllowlist, ipAllowlist []string,
+	issue func(ctx context.Context, relayID string) (jti string, err error),
+	audit func(ctx context.Context, tx pgx.Tx, relayID string) error,
+) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin create relay: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var id string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO relays (name, dns_allowlist, ip_allowlist)
+		 VALUES ($1, $2, $3)
+		 RETURNING id`,
+		name, dnsAllowlist, ipAllowlist,
+	).Scan(&id); err != nil {
+		return "", fmt.Errorf("insert relay: %w", err)
+	}
+	jti, err := issue(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("issue provisioning token: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE relays SET enrollment_token_jti = $2, updated_at = NOW() WHERE id = $1`,
 		id, jti,
-	)
-	if err != nil {
-		return fmt.Errorf("attach jti: %w", err)
+	); err != nil {
+		return "", fmt.Errorf("attach jti: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrRelayNotFound
+	if err := audit(ctx, tx, id); err != nil {
+		return "", fmt.Errorf("audit relay create: %w", err)
 	}
-	return nil
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit create relay: %w", err)
+	}
+	return id, nil
 }
 
 // LoadRelayByID returns the relay row or ErrRelayNotFound.

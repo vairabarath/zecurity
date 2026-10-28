@@ -254,6 +254,21 @@ func newScimEnableHarness(t *testing.T) *scimEnableHarness {
 	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
 		t.Fatalf("create test database: %v", err)
 	}
+	// Drop through the admin connection: Postgres refuses to drop the database
+	// a session is connected to, so dropping it over h.pool (as teardown used
+	// to) failed silently and leaked one database per test. Registered here so
+	// a failed setup doesn't leak either; it runs after teardown closed h.pool.
+	t.Cleanup(func() {
+		admin, err := pgxpool.New(context.Background(), adminDSN)
+		if err != nil {
+			t.Logf("drop test database %s: %v", dbName, err)
+			return
+		}
+		defer admin.Close()
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName+" WITH (FORCE)"); err != nil {
+			t.Logf("drop test database %s: %v", dbName, err)
+		}
+	})
 	h := &scimEnableHarness{t: t, adminDSN: adminDSN, dbName: dbName}
 
 	parsed, err := url.Parse(adminDSN)
@@ -302,9 +317,9 @@ func newScimEnableHarness(t *testing.T) *scimEnableHarness {
 	return h
 }
 
+// teardown closes the harness; the database is dropped by the t.Cleanup
+// registered in newScimEnableHarness.
 func (h *scimEnableHarness) teardown() {
-	ctx := context.Background()
-	_, _ = h.pool.Exec(ctx, "DROP DATABASE IF EXISTS "+h.dbName)
 	h.pool.Close()
 	if h.srv != nil {
 		h.srv.Close()

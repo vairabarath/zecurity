@@ -26,6 +26,11 @@ const (
 	CheckSecureBoot = "linux.secure_boot.enabled"
 )
 
+// CheckDeviceApproved is a server-side check (ADR-030): PASS when an admin
+// approved the device. The controller computes it from client_devices; a
+// client can never report it (ValidateReport drops it like any unknown check).
+const CheckDeviceApproved = "zecurity.device.approved"
+
 var (
 	ErrInvalidReport       = errors.New("invalid posture report")
 	ErrNoRecognizedChecks  = errors.New("posture report contains no valid recognized checks")
@@ -76,6 +81,17 @@ var supportedCheckDescriptors = []CheckDescriptor{
 	},
 }
 
+// serverCheckDescriptors are checks a profile may require but only the
+// controller observes (ADR-030).
+var serverCheckDescriptors = []CheckDescriptor{
+	{
+		ID:       CheckDeviceApproved,
+		Label:    "Approved by an admin",
+		Platform: "any",
+	},
+}
+
+// recognizedChecks are the checks a client may report.
 var recognizedChecks = func() map[string]struct{} {
 	checks := make(map[string]struct{}, len(supportedCheckDescriptors))
 	for _, descriptor := range supportedCheckDescriptors {
@@ -217,9 +233,23 @@ func ValidateReport(now time.Time, input ReportInput) (Report, error) {
 	}, nil
 }
 
+// IsRecognizedCheck reports whether a profile may require checkID: a client
+// check or a server-side check.
 func IsRecognizedCheck(checkID string) bool {
-	_, ok := recognizedChecks[checkID]
-	return ok
+	if _, ok := recognizedChecks[checkID]; ok {
+		return true
+	}
+	return IsServerCheck(checkID)
+}
+
+// IsServerCheck reports whether checkID is computed by the controller.
+func IsServerCheck(checkID string) bool {
+	for _, d := range serverCheckDescriptors {
+		if d.ID == checkID {
+			return true
+		}
+	}
+	return false
 }
 
 func SupportedChecks() []string {
@@ -231,7 +261,7 @@ func SupportedChecks() []string {
 }
 
 func SupportedCheckDescriptors() []CheckDescriptor {
-	descriptors := make([]CheckDescriptor, len(supportedCheckDescriptors))
-	copy(descriptors, supportedCheckDescriptors)
-	return descriptors
+	descriptors := make([]CheckDescriptor, 0, len(supportedCheckDescriptors)+len(serverCheckDescriptors))
+	descriptors = append(descriptors, supportedCheckDescriptors...)
+	return append(descriptors, serverCheckDescriptors...)
 }

@@ -17,6 +17,10 @@ type ClientDevice {
   lastSeenAt:   String
   createdAt:    String!
   revokedAt:    String
+  # ADR-030: set once an admin approves the device as a company device. A
+  # profile requiring zecurity.device.approved admits only approved devices.
+  approvedAt:      String
+  approvedByEmail: String
 }
 
 extend type Query {
@@ -37,4 +41,10 @@ extend type Mutation {
   # Admin only — revokes a client device cert. Connector picks up revocation
   # on its next 5-min CRL refresh cycle.
   revokeDevice(deviceId: ID!): Boolean! @hasRole(roles: [ADMIN])
+
+  # Admin only (ADR-030) — marks a device as approved by an admin, or removes
+  # the approval. Audited; access is re-evaluated at once. A revoked device
+  # can't be approved. Both are no-ops when the device is already in that state.
+  approveDevice(deviceId: ID!): ClientDevice! @hasRole(roles: [ADMIN])
+  unapproveDevice(deviceId: ID!): ClientDevice! @hasRole(roles: [ADMIN])
 }
