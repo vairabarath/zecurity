@@ -211,7 +211,7 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 
 ### Phase V — M1: Acceptance
 
-- [ ] **V1** Run AT-T on the lab after T merges.
+- [x] **V1** Run AT-T on the lab after T merges. *(2026-10-27, Sathiya: **PASS**, 40/40 API checks plus the console QR/verify pages. Run on an isolated local stack (throwaway DB, own Valkey, controller :18080) rather than the lab fleet: AT-T needs only the controller and the console. See Acceptance-Test-Plan → Live run — Phase T.)*
 - [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E and AT-X pending.)*
 - [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges.
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
@@ -288,6 +288,8 @@ No cross-tenant network access: the foreign connector enforces its own workspace
 - Compiler: already covered by the B-1 filter (`rn.tenant_id = ar.workspace_id`); pinned by a test.
 
 **Tests:** `graph/resolvers/resource_network_ownership_test.go` (create and update with foreign/missing/malformed network rejected with no row change and no version bump; same-workspace create/move/description-only update; legacy row hides the foreign name and can be repaired; direct store calls under a concurrent burst) and `internal/policy/compiler_resource_network_test.go` (legacy resource on a foreign network never brings that network or its connectors into the snapshot; fails on the pre-B-1 base). Full controller suite: 1426 pass / 0 fail / 2 skip (unconditional stubs).
+
+**After merging #146 (Fix 18):** `resource.Update` became one transaction (row lock, shield re-binding); the network-ownership check now runs inside that transaction before the write (`SELECT EXISTS … remote_networks WHERE id = … AND tenant_id = …`; a network never changes tenant). #146's new `ListGroupsByResource` got the B-1 joins (resource and group must belong to the rule's workspace).
 
 **Depends on:** the B-1 fix (this branch is stacked on its uncommitted changes; the compiler guarantee comes from B-1).
 

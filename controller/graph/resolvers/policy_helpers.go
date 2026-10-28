@@ -150,6 +150,24 @@ func (r *Resolver) loadGroup(ctx context.Context, tenantID, groupID string) (*gr
 	return groupRowToGQL(row, members, resources), nil
 }
 
+// attachResourceGroups fills Groups on resource list results with one query
+// (Sprint 20 F25). Before, resources/allResources always returned no groups.
+func (r *Resolver) attachResourceGroups(ctx context.Context, tenantID string, list []*graph.Resource) error {
+	byResource, err := r.PolicyStore.ListGroupsByResource(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("resource groups: %w", err)
+	}
+	for _, res := range list {
+		rows := byResource[res.ID]
+		groups := make([]*graph.Group, 0, len(rows))
+		for _, g := range rows {
+			groups = append(groups, groupRowToGQL(g, nil, nil))
+		}
+		res.Groups = groups
+	}
+	return nil
+}
+
 // loadResourceWithGroups fetches one of tenantID's resources and populates its
 // Groups field with that workspace's groups only (B-1).
 func (r *Resolver) loadResourceWithGroups(ctx context.Context, tenantID, resourceID string) (*graph.Resource, error) {

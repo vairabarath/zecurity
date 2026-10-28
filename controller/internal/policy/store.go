@@ -340,6 +340,39 @@ func (s *Store) SetRuleEnabled(ctx context.Context, id string, enabled bool) err
 	return nil
 }
 
+// ListGroupsByResource returns, for every resource in the workspace, the groups
+// with an enabled access rule for it, in one query (Sprint 20 F25: resource
+// lists showed no groups, so the delete dialog couldn't say who loses access).
+func (s *Store) ListGroupsByResource(ctx context.Context, workspaceID string) (map[string][]*GroupRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ar.resource_id, g.id, g.workspace_id, g.name, g.description, g.created_at, g.updated_at,
+		        g.origin, g.external_id, g.connection_id
+		   FROM access_rules ar
+		   -- B-1: the rule's resource and group must belong to its workspace.
+		   JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+		   JOIN groups g ON g.id = ar.group_id AND g.workspace_id = ar.workspace_id
+		  WHERE ar.workspace_id = $1 AND ar.enabled = TRUE
+		  ORDER BY g.name`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list groups by resource: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string][]*GroupRow)
+	for rows.Next() {
+		var resourceID string
+		row := &GroupRow{}
+		if err := rows.Scan(&resourceID, &row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt,
+			&row.UpdatedAt, &row.Origin, &row.ExternalID, &row.ConnectionID); err != nil {
+			return nil, fmt.Errorf("scan resource group: %w", err)
+		}
+		out[resourceID] = append(out[resourceID], row)
+	}
+	return out, rows.Err()
+}
+
 // ListGroupsForResource returns the groups with an enabled rule for a
 // workspace resource. Only rules whose workspace, resource and group all
 // match workspaceID count (B-1).

@@ -261,3 +261,115 @@ func TestUnprotectResource_DoesNotInvalidate(t *testing.T) {
 		t.Fatalf("push hook fired %d times on unprotect, want 0", got)
 	}
 }
+
+// Sprint 20 Fix 18 (F24): a host edit is compiler-visible, so it invalidates
+// exactly once (Fix 02's one-notify rule).
+func TestUpdateResource_HostEditInvalidatesOnce(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	id := f.seedResource(t, "10.0.0.93", "unprotected")
+
+	host := "10.0.0.94"
+	got, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &host})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if got.Host != host {
+		t.Fatalf("host = %q, want %q", got.Host, host)
+	}
+	if n := f.fires.Load(); n != 1 {
+		t.Fatalf("push hook fired %d times, want 1", n)
+	}
+}
+
+// Sprint 20 Fix 18 (F24): a protected resource's host edit moves it to the
+// active shield on the new host (protecting/apply) with one notify; a host
+// without a shield is refused and changes nothing.
+func TestUpdateResource_ProtectedHostEditMovesShield(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	const otherLAN = "10.0.0.97"
+	var shield2 string
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, lan_ip)
+		 SELECT tenant_id, remote_network_id, connector_id, 'shield-2', 'active', $2 FROM shields WHERE id = $1
+		 RETURNING id`,
+		f.shieldID, otherLAN,
+	).Scan(&shield2); err != nil {
+		t.Fatalf("insert second shield: %v", err)
+	}
+	id := f.seedResource(t, aclFixtureShieldLAN, "protected")
+
+	nowhere := "10.0.0.98"
+	if _, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &nowhere}); err == nil {
+		t.Fatal("host without a shield accepted")
+	}
+	if n := f.fires.Load(); n != 0 {
+		t.Fatalf("refused edit fired the push hook %d times", n)
+	}
+
+	host := otherLAN
+	got, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &host})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if n := f.fires.Load(); n != 1 {
+		t.Fatalf("push hook fired %d times, want 1", n)
+	}
+	var shieldID, status string
+	if err := f.pool.QueryRow(f.ctx, `SELECT shield_id::text, status FROM resources WHERE id = $1`, id).Scan(&shieldID, &status); err != nil {
+		t.Fatal(err)
+	}
+	if shieldID != shield2 || status != "protecting" || got.Host != otherLAN {
+		t.Fatalf("after move: shield=%s status=%s host=%s, want shield-2/protecting/%s", shieldID, status, got.Host, otherLAN)
+	}
+}
+
+// Sprint 20 F25: allResources/resources report the groups with an enabled
+// access rule (they always returned none, so the UI's Groups column and the
+// delete dialog couldn't say who loses access).
+func TestResourceQueries_ReturnGroups(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	withGroups := f.seedResource(t, "10.0.0.81", "unprotected")
+	noGroups := f.seedResource(t, "10.0.0.82", "unprotected")
+	group := func(name string, enabled bool) {
+		t.Helper()
+		var gid string
+		if err := f.pool.QueryRow(f.ctx,
+			`INSERT INTO groups (workspace_id, name) VALUES ($1, $2) RETURNING id`, f.tenantID, name,
+		).Scan(&gid); err != nil {
+			t.Fatalf("insert group: %v", err)
+		}
+		if _, err := f.pool.Exec(f.ctx,
+			`INSERT INTO access_rules (workspace_id, resource_id, group_id, enabled) VALUES ($1, $2, $3, $4)`,
+			f.tenantID, withGroups, gid, enabled,
+		); err != nil {
+			t.Fatalf("insert access rule: %v", err)
+		}
+	}
+	group("beta", true)
+	group("alpha", true)
+	group("disabled-rule", false)
+
+	qr := &queryResolver{f.mr.Resolver}
+	all, err := qr.AllResources(f.ctx)
+	if err != nil {
+		t.Fatalf("AllResources: %v", err)
+	}
+	inNet, err := qr.Resources(f.ctx, f.networkID)
+	if err != nil {
+		t.Fatalf("Resources: %v", err)
+	}
+	for name, list := range map[string][]*graph.Resource{"allResources": all, "resources": inNet} {
+		got := map[string][]string{}
+		for _, r := range list {
+			for _, g := range r.Groups {
+				got[r.ID] = append(got[r.ID], g.Name)
+			}
+		}
+		if fmt.Sprint(got[withGroups]) != "[alpha beta]" {
+			t.Errorf("%s: groups = %v, want [alpha beta] (enabled rules only, by name)", name, got[withGroups])
+		}
+		if len(got[noGroups]) != 0 {
+			t.Errorf("%s: resource without rules has groups %v", name, got[noGroups])
+		}
+	}
+}

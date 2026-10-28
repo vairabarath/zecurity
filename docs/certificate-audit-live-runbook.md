@@ -79,7 +79,7 @@ The commands use `localhost`, as if everything runs on the controller's machine.
 ### 2.4 Build
 
 ```bash
-buf generate
+buf generate                                # add --exclude-path .worktrees (and any other checkout under the repo) or it fails on duplicate files
 (cd controller && go build ./...)
 cargo build --manifest-path connector/Cargo.toml
 cargo build --manifest-path relay/Cargo.toml
@@ -140,10 +140,24 @@ The first login after a reset returns `password_change_required: true` and a pas
 ```bash
 curl -s -X POST http://localhost:8080/provider/auth/password -H "Authorization: Bearer $(jq -r .token "$RUN/plogin.json")" \
   -H 'Content-Type: application/json' -d '{"current_password":"<bootstrap password>","new_password":"<new password>"}' | jq .
-# then log in again with the new password and keep the token:
-export PTOKEN=$(curl -s -X POST http://localhost:8080/provider/auth/login -H 'Content-Type: application/json' \
-  -d '{"email":"<bootstrap email>","password":"<new password>"}' | jq -r .token)
 ```
+
+Since Sprint 22 (Phase T) a super-admin must use TOTP. The password change (and every later login) returns an MFA-stage token with `"mfa": "enroll"` (first time) or `"mfa": "verify"`; only the token from the TOTP step can call `/provider/relays`.
+
+```bash
+MFA_TOKEN=$(curl -s -X POST http://localhost:8080/provider/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"<bootstrap email>","password":"<new password>"}' | tee "$RUN/plogin.json" | jq -r .token)
+jq -r .mfa "$RUN/plogin.json"     # enroll | verify
+# mfa = enroll: get a secret, add it to an authenticator app (TOTP, SHA1, 6 digits, 30 s), then confirm with a code
+curl -s -X POST http://localhost:8080/provider/auth/totp/enroll -H "Authorization: Bearer $MFA_TOKEN" | jq -r .otpauth_uri
+export PTOKEN=$(curl -s -X POST http://localhost:8080/provider/auth/totp/enroll/confirm -H "Authorization: Bearer $MFA_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"code":"<6-digit code>"}' | jq -r .token)
+# mfa = verify (already enrolled):
+export PTOKEN=$(curl -s -X POST http://localhost:8080/provider/auth/totp/verify -H "Authorization: Bearer $MFA_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"code":"<6-digit code>"}' | jq -r .token)
+```
+
+Lost the password or the TOTP device? On the controller host: `zecurity-controller provider recover-admin --email <email>` prints a one-time temporary password, clears TOTP and ends sessions.
 
 ### 3.3 Workspace ID
 
@@ -220,7 +234,9 @@ csr_b64() { openssl req -new -key "$1" -subj "/CN=renew-test" -addext "subjectAl
 
 # grpcurl as the connector (mTLS with its own certificate); -insecure skips only the server-name check
 asconn() { grpcurl -insecure -cert "$RUN/connector/connector.crt" -key "$RUN/connector/connector.key" \
-             -import-path proto "$@"; }
+             -import-path . "$@"; }
+# Calls pass -proto proto/connector/v1/connector.proto (or proto/shield/v1/shield.proto): connector.proto
+# imports proto/client/v1/client.proto, so the import path must be the repo root.
 ```
 
 > `openssl crl` prints serials without leading zeros; the database stores `SerialNumber.Text(16)`, also without them, so they compare directly.
@@ -239,6 +255,8 @@ RELAY_ID=$(jq -r .relay_id "$RUN/relay.json") RELAY_PROVISIONING_TOKEN=$(jq -r .
 ```
 
 **Expect:** `Relay provisioned`, `Relay heartbeat acknowledged`.
+
+> **Relay on a LAN address** (connector on another machine): start the controller with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true` (honoured only with `ENV=development`), put the relay's LAN IP in `ip_allowlist` / `RELAY_IP_SANS`, and point the relay at the controller's LAN address (`CONTROLLER_ADDR=<lan-ip>:9090`, `CONTROLLER_HTTP_ADDR=<lan-ip>:8080`). Otherwise the relay is never published and connectors log `LabelledRelayList is empty`.
 
 ### 5.2 Connector (genuine enrollment)
 
@@ -350,7 +368,7 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$RUN/attack
 ### 8.1 Connector
 
 ```bash
-asconn -proto connector/v1/connector.proto \
+asconn -proto proto/connector/v1/connector.proto \
   -d "{\"public_key_der\":\"$(csr_b64 "$RUN/attacker.key" "spiffe://$TD/connector/$CONN")\"}" \
   localhost:9090 connector.v1.ConnectorService/RenewCert
 ```
@@ -360,7 +378,7 @@ asconn -proto connector/v1/connector.proto \
 ### 8.2 Shield (through the connector's identity, as the connector proxies it)
 
 ```bash
-asconn -proto shield/v1/shield.proto \
+asconn -proto proto/shield/v1/shield.proto \
   -d "{\"shield_id\":\"$SHIELD\",\"public_key_der\":\"$(csr_b64 "$RUN/attacker.key" "spiffe://$TD/shield/$SHIELD")\"}" \
   localhost:9090 shield.v1.ShieldService/RenewCert
 ```
@@ -403,7 +421,7 @@ Then restart the connector with `CONTROLLER_HTTP_ADDR=localhost:8080`. **Expect:
    CONTROLLER_ADDR=localhost:9090 CONTROLLER_HTTP_ADDR=localhost:8080 ENROLLMENT_TOKEN='<A>' \
      STATE_DIR="$RUN/tok/a" AUTO_UPDATE_ENABLED=false connector/target/debug/zecurity-connector 2>&1 | tee "$RUN/logs/tok-a.log"
    ```
-   **Expect:** refused — `enrollment token is not the connector's current token`; nothing written.
+   **Expect:** refused — `token expired or already used` (re-issuing B drops A's jti from Valkey, so A fails the single-use check before the current-token check); nothing written.
 4. Enroll with **B** (`STATE_DIR="$RUN/tok/b"`). **Expect:** enrolls; stop it with Ctrl-C afterwards (it would clash on :9091).
 5. Enroll with **B** again in a fresh directory (`STATE_DIR="$RUN/tok/b2"`). **Expect:** refused (`token expired or already used`).
 6. Optional: on a fresh connector `tok-conn-2`, start two enrollments with the **same** token at the same time (two terminals, two state directories). **Expect:** exactly one succeeds.
@@ -412,7 +430,7 @@ Delete `tok-conn` and `tok-conn-2` in the admin UI afterwards (revoke first if a
 
 ### 10.2 Shield
 
-Repeat steps 1–5 with a new shield `tok-shield` (sudo, separate state directories). **Expect:** same results, with `enrollment token is not the shield's current token` for A.
+Repeat steps 1–5 with a new shield `tok-shield` (sudo, separate state directories). **Expect:** same results, with `token expired or already used` for A.
 
 ---
 
@@ -426,10 +444,10 @@ There is no admin action to suspend a user yet. Use one of these:
   ```
   SQL alone does not notify the policy. Make any policy change for the workspace afterwards (e.g. add and remove a member from a group in the admin UI) so the connector gets a recompiled ACL.
 
-**Expect:**
-- **bug 5:** the client user's open sessions through the connector end, and new connections to resources are refused;
-- **bug 4:** `zecurity-client logout && zecurity-client login` does not give the user a new device certificate;
-- reactivate (`UPDATE users SET status = 'active' …` plus a policy change, or re-enable the IdP connection): access comes back without re-enrolling, because the device was suspended, not revoked.
+**Expect**, in this order:
+1. **bug 5:** the client user's open sessions through the connector end, and new connections to resources are refused.
+2. Reactivate (`UPDATE users SET status = 'active' …` plus a policy change, or re-enable the IdP connection). Access comes back without re-enrolling, because the device was suspended, not revoked. **Do this before step 3**: `logout` wipes the device's local state, so after it there is nothing left to come back.
+3. Suspend again, then check **bug 4:** `zecurity-client logout && zecurity-client login` does not give the user a new device certificate. `logout` also stops the daemon: run `sudo systemctl start zecurity-client` before `login`.
 
 Then **revoke** the client device in the admin UI and check:
 ```bash
@@ -461,26 +479,29 @@ Have the long-lived session to the shield-protected resource open (Stage A).
 ## 13. Stage I — bugs 7 and 9 (part 2): revoking and deleting a connector
 
 1. Note `connhist "$CONN"` (should now be 3 or more serials). Admin UI → revoke the connector.
+   - If it is the network's last connector and a non-revoked shield is still enrolled, the revoke is refused (`… they would be stranded`, Sprint 20 Fix 16, F46). Add another connector, revoke the shield first, or call `revokeConnector(id: …, alsoRevokeShields: true)` in GraphQL.
 2. **Bug 9 — every serial is on the CRL:**
    ```bash
    connhist "$CONN"      # all rows now have revoked_at
-   wscrl                 # must list c0, c1, c2 (and any later serials)
+   wscrl                 # must list every UNEXPIRED serial (the CRL omits expired ones: not_after > NOW())
    ```
+   With 15 min certificates, `c0`–`c2` have usually expired by this stage, so they are on no CRL. Check that every row in `connhist` has `revoked_at`, and that every row with `not_after` in the future is on `wscrl`.
 3. **Bug 7 — the revoked connector can't use connector RPCs** (it still has a valid certificate):
    ```bash
-   asconn -proto connector/v1/connector.proto \
+   asconn -proto proto/connector/v1/connector.proto \
      -d "{\"public_key_der\":\"$(openssl req -new -key "$RUN/connector/connector.key" -subj /CN=renew-test \
           -addext "subjectAltName=URI:spiffe://$TD/connector/$CONN" -outform DER | base64 -w0)\"}" \
      localhost:9090 connector.v1.ConnectorService/RenewCert
-   asconn -proto connector/v1/connector.proto -d '{}' localhost:9090 connector.v1.ConnectorService/Goodbye
+   asconn -proto proto/connector/v1/connector.proto -d '{}' localhost:9090 connector.v1.ConnectorService/Goodbye
    psql "$DB" -Atc "SELECT status, revoked_at IS NOT NULL FROM connectors WHERE id = '$CONN'"
    ```
    **Expect:** both calls fail with `PermissionDenied` (`connector revoked`); the row stays `revoked`. In `connector.log`, any shield renewal it tries to proxy fails (`shield cert renewal proxy failed`).
 4. **F34 (known open, record only):** do client sessions through this connector keep working? Write down what you see.
 5. **Bug 9 — deleting doesn't drop it from the CRL:** Admin UI → delete the connector, then:
+   - The delete is refused while a shield is still attached (`… shield(s) still attached`, F19). Let the shield fail over to another connector, or revoke it first.
    ```bash
    psql "$DB" -Atc "SELECT count(*) FROM connectors WHERE id = '$CONN'"   # 0
-   wscrl                                                                    # still lists c0, c1, c2
+   wscrl                                                                    # still lists the unexpired serials
    ```
 
 ---

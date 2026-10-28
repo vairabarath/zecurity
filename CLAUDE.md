@@ -9,7 +9,7 @@
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
 **Sprint 22 is the active sprint: Provider Dashboard Phase 3, "Super-Admin TOTP and Relay Management".** Make the provider console a safe place to manage the relay fleet. Order: **T → A → {E, X} → D** (V alongside):
-- **T — super-admin TOTP** (D-28, D-33; **merged in PR #138**): an operator requires TOTP if they are a super-admin or have TOTP enabled; `IssueSession` refuses a full session without `otp` for them and `RequireProvider` enforces it per request from the DB row; login and password change end in a confined MFA-stage token (`mfa: verify|enroll`); reset-totp (reason required); `zecurity-controller provider recover-admin` break-glass CLI; console `/mfa` page. **Live authenticator acceptance (AT-T) is pending (Sathiya).**
+- **T — super-admin TOTP** (D-28, D-33; **merged in PR #138**): an operator requires TOTP if they are a super-admin or have TOTP enabled; `IssueSession` refuses a full session without `otp` for them and `RequireProvider` enforces it per request from the DB row; login and password change end in a confined MFA-stage token (`mfa: verify|enroll`); reset-totp (reason required); `zecurity-controller provider recover-admin` break-glass CLI; console `/mfa` page. **Live acceptance (AT-T) PASS 2026-10-27 (Sathiya).**
 - **A — relay admin API hardening** (D-17, D-31): JSON error codes, mandatory reason + typed relay-name confirmation (server-checked) for revoke/delete, revoke/delete super-admin only;
 - **E — relay enrolment from the console** (D-30, D-20): one-time provisioning token plus a complete install command;
 - **X — relay revoke/delete in the console** (D-30, D-31, D-17), super-admin only;
@@ -112,7 +112,7 @@ cd connector && cargo build                                  # Rust connector
 cargo build --manifest-path shield/Cargo.toml               # Rust shield
 cd client && cargo build                                   # Rust client CLI
 buf generate                                                 # Proto → Go stubs (from repo root)
-cd controller && go generate ./graph/...                     # GraphQL codegen
+cd controller && go tool gqlgen generate --config graph/gqlgen.yml   # GraphQL codegen (go generate ./graph/... does nothing: no directive)
 cd admin && npm run codegen                                  # Frontend TS hooks
 cd provider-console && npm run build                         # Provider console (npm test, npm run lint too)
 cd controller && docker compose down -v && docker compose up -d   # Recreate local DB after any schema change

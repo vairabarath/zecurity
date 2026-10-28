@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::time::timeout;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::relay_pool::RelayPool;
 use crate::tunnel_pool::{AuthenticatedStream, PathProbe, TunnelOpenError, TunnelPool};
@@ -14,7 +14,10 @@ use crate::tunnel_pool::{AuthenticatedStream, PathProbe, TunnelOpenError, Tunnel
 pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DIRECT_RETRY_INITIAL_COOLDOWN: Duration = Duration::from_secs(30);
-pub const DIRECT_RETRY_MAX_COOLDOWN: Duration = Duration::from_secs(2 * 60 * 60);
+/// Sprint 20 F43: was 2 h. With a relay, an expired cooldown is re-checked by
+/// one background probe, never by a user flow, so a short cap only costs a
+/// QUIC dial per window and lets a recovered connector be used again soon.
+pub const DIRECT_RETRY_MAX_COOLDOWN: Duration = Duration::from_secs(2 * 60);
 
 #[async_trait]
 pub trait DirectOpener: Send + Sync + 'static {
@@ -35,6 +38,13 @@ pub trait DirectOpener: Send + Sync + 'static {
     /// Must never close the connection.
     async fn evict_if_silent(&self, _addr: SocketAddr, _probe: &PathProbe) -> bool {
         false
+    }
+
+    /// Sprint 20 F43: check that the direct path works again, without a user
+    /// flow. The default opens (and drops) a stream; the pool overrides it with
+    /// an authenticated connect that is pooled for the next flow.
+    async fn probe(&self, addr: SocketAddr) -> Result<(), TunnelOpenError> {
+        self.open(addr).await.map(|_| ())
     }
 }
 
@@ -61,6 +71,10 @@ impl DirectOpener for TunnelPool {
     async fn evict_if_silent(&self, addr: SocketAddr, probe: &PathProbe) -> bool {
         TunnelPool::evict_if_silent(self, addr, probe).await
     }
+
+    async fn probe(&self, addr: SocketAddr) -> Result<(), TunnelOpenError> {
+        self.get_or_connect(addr).await.map(|_| ())
+    }
 }
 
 #[async_trait]
@@ -78,12 +92,60 @@ pub struct RelayContext {
     pub connector_spiffe: String,
 }
 
+/// Direct-path health, shared with the background probe (Sprint 20 F43).
+struct DirectHealth {
+    failure_count: AtomicU32,
+    unhealthy_until: AtomicI64,
+    /// A background probe is in flight; at most one per transport.
+    probing: AtomicBool,
+}
+
+impl DirectHealth {
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    fn in_cooldown(&self) -> bool {
+        Self::now_unix() < self.unhealthy_until.load(Ordering::SeqCst)
+    }
+
+    fn mark_success(&self) {
+        self.failure_count.store(0, Ordering::SeqCst);
+        self.unhealthy_until.store(0, Ordering::SeqCst);
+    }
+
+    fn mark_failure(&self) {
+        let failures = self
+            .failure_count
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        let shift = failures.saturating_sub(1).min(16);
+        let cooldown_secs = DIRECT_RETRY_INITIAL_COOLDOWN
+            .as_secs()
+            .saturating_mul(1u64 << shift)
+            .min(DIRECT_RETRY_MAX_COOLDOWN.as_secs());
+        self.unhealthy_until
+            .store(Self::now_unix().saturating_add(cooldown_secs as i64), Ordering::SeqCst);
+    }
+}
+
+/// Clears `probing` when the probe task ends, however it ends.
+struct ProbeDone(Arc<DirectHealth>);
+
+impl Drop for ProbeDone {
+    fn drop(&mut self) {
+        self.0.probing.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct ClientTransport {
     direct: Arc<dyn DirectOpener>,
     direct_addr: SocketAddr,
     relay: Option<RelayContext>,
-    direct_failure_count: AtomicU32,
-    direct_unhealthy_until: AtomicI64,
+    health: Arc<DirectHealth>,
     /// Connector-revocation Phase C: the connector this transport reaches
     /// (empty when unknown). Lets a flow record which connector carries it.
     connector_id: String,
@@ -99,8 +161,11 @@ impl ClientTransport {
             direct,
             direct_addr,
             relay,
-            direct_failure_count: AtomicU32::new(0),
-            direct_unhealthy_until: AtomicI64::new(0),
+            health: Arc::new(DirectHealth {
+                failure_count: AtomicU32::new(0),
+                unhealthy_until: AtomicI64::new(0),
+                probing: AtomicBool::new(false),
+            }),
             connector_id: String::new(),
         }
     }
@@ -114,37 +179,49 @@ impl ClientTransport {
     pub fn connector_id(&self) -> &str {
         &self.connector_id
     }
-    fn now_unix() -> i64 {
-      std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .map(|d| d.as_secs() as i64)
-          .unwrap_or(0)
-  }
-
   fn direct_is_in_cooldown(&self) -> bool {
-      Self::now_unix() < self.direct_unhealthy_until.load(Ordering::Relaxed)
+      self.health.in_cooldown()
   }
 
   fn mark_direct_success(&self) {
-      self.direct_failure_count.store(0, Ordering::Relaxed);
-      self.direct_unhealthy_until.store(0, Ordering::Relaxed);
+      self.health.mark_success();
   }
 
   fn mark_direct_failure(&self) {
-      let failures = self
-          .direct_failure_count
-          .fetch_add(1, Ordering::Relaxed)
-          .saturating_add(1);
+      self.health.mark_failure();
+  }
 
-      let shift = failures.saturating_sub(1).min(16);
-      let multiplier = 1u64 << shift;
-      let cooldown_secs = DIRECT_RETRY_INITIAL_COOLDOWN
-          .as_secs()
-          .saturating_mul(multiplier)
-          .min(DIRECT_RETRY_MAX_COOLDOWN.as_secs());
-
-      let until = Self::now_unix().saturating_add(cooldown_secs as i64);
-      self.direct_unhealthy_until.store(until, Ordering::Relaxed);
+  /// Sprint 20 F43: the cooldown expired after a failure. Instead of making
+  /// user flows re-dial a possibly dead connector (each paying up to
+  /// `DIRECT_TIMEOUT`), one background probe re-checks the direct path while
+  /// flows keep using the relay. Success clears the cooldown; any failure,
+  /// including an identity failure, re-arms it with backoff.
+  fn spawn_direct_probe(&self) {
+      if self
+          .health
+          .probing
+          .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+          .is_err()
+      {
+          return;
+      }
+      let health = self.health.clone();
+      let direct = self.direct.clone();
+      let addr = self.direct_addr;
+      tokio::spawn(async move {
+          let _done = ProbeDone(health.clone());
+          match timeout(DIRECT_TIMEOUT, direct.probe(addr)).await {
+              Ok(Ok(())) => {
+                  health.mark_success();
+                  info!(direct_addr = %addr, "direct path healthy again (background probe)");
+              }
+              Ok(Err(TunnelOpenError::Authenticate(e))) => {
+                  health.mark_failure();
+                  warn!(direct_addr = %addr, error = %e, "direct path probe refused the connector's identity; staying on the relay");
+              }
+              Ok(Err(TunnelOpenError::Connect(_))) | Err(_) => health.mark_failure(),
+          }
+      });
   }
 
 
@@ -174,6 +251,11 @@ impl ClientTransport {
     ) -> Result<(AuthenticatedStream, Option<PathProbe>)> {
       let direct_err: anyhow::Error = if self.direct_is_in_cooldown() {
           anyhow!("direct path is in cooldown")
+      } else if self.relay.is_some() && self.health.failure_count.load(Ordering::SeqCst) > 0 {
+          // F43: cooldown expired after a failure — a background probe
+          // re-checks the direct path; this flow takes the relay.
+          self.spawn_direct_probe();
+          anyhow!("direct path is being re-checked")
       } else {
           let attempt = timeout(DIRECT_TIMEOUT, self.direct.open_probed(self.direct_addr)).await;
 
@@ -344,6 +426,122 @@ mod tests {
             connector_id: "conn-1".into(),
             connector_spiffe: "spiffe://td/connector/conn-1".into(),
         }
+    }
+
+    /// Sprint 20 F43: put the transport in the state "a failure happened and
+    /// its cooldown has just expired".
+    fn expire_cooldown_after_failure(t: &ClientTransport) {
+        t.health.failure_count.store(1, Ordering::SeqCst);
+        t.health.unhealthy_until.store(0, Ordering::SeqCst);
+    }
+
+    async fn wait_probe_done(t: &ClientTransport) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while t.health.probing.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "probe never finished");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// F43: while the cooldown is active, flows take the relay without dialing.
+    #[tokio::test]
+    async fn cooldown_flows_use_relay_without_dialing() {
+        let (direct, dcalls) = MockDirect::new(DirectBehavior::ConnectErr);
+        let (relay, rcalls) = MockRelay::new(true);
+        let t = ClientTransport::new(direct, loopback(), Some(relay_ctx(relay)));
+        t.open_authenticated_stream().await.unwrap();
+        assert_eq!(dcalls.load(Ordering::SeqCst), 1, "first flow dials and fails");
+        for _ in 0..3 {
+            t.open_authenticated_stream().await.unwrap();
+        }
+        assert_eq!(dcalls.load(Ordering::SeqCst), 1, "no dial while cooling down");
+        assert_eq!(rcalls.load(Ordering::SeqCst), 4);
+    }
+
+    /// F43: after the cooldown expires, flows don't pay a direct dial: they
+    /// take the relay at once and exactly one background probe dials.
+    #[tokio::test]
+    async fn expired_cooldown_probes_once_in_background() {
+        let (direct, dcalls) = MockDirect::new(DirectBehavior::Sleep(Duration::from_secs(10)));
+        let (relay, rcalls) = MockRelay::new(true);
+        let t = Arc::new(ClientTransport::new(direct, loopback(), Some(relay_ctx(relay))));
+        expire_cooldown_after_failure(&t);
+
+        let started = std::time::Instant::now();
+        let flows: Vec<_> = (0..5)
+            .map(|_| {
+                let t = t.clone();
+                tokio::spawn(async move { t.open_authenticated_stream().await.map(|_| ()) })
+            })
+            .collect();
+        for f in flows {
+            f.await.unwrap().unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_millis(500), "flows waited on the direct dial");
+        assert_eq!(rcalls.load(Ordering::SeqCst), 5);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(dcalls.load(Ordering::SeqCst), 1, "exactly one probe for all flows");
+
+        // The probe times out (dead connector): the cooldown is re-armed with backoff.
+        wait_probe_done(&t).await;
+        assert!(t.direct_is_in_cooldown());
+        assert_eq!(t.health.failure_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// F43: a successful probe clears the cooldown; the next flow goes direct.
+    #[tokio::test]
+    async fn successful_probe_restores_the_direct_path() {
+        let (direct, dcalls) = MockDirect::new(DirectBehavior::Ok);
+        let (relay, rcalls) = MockRelay::new(true);
+        let t = ClientTransport::new(direct, loopback(), Some(relay_ctx(relay)));
+        expire_cooldown_after_failure(&t);
+
+        t.open_authenticated_stream().await.unwrap();
+        assert_eq!(rcalls.load(Ordering::SeqCst), 1, "the flow during the probe takes the relay");
+        wait_probe_done(&t).await;
+        assert!(!t.direct_is_in_cooldown());
+        assert_eq!(t.health.failure_count.load(Ordering::SeqCst), 0);
+
+        t.open_authenticated_stream().await.unwrap();
+        assert_eq!(dcalls.load(Ordering::SeqCst), 2, "probe + the next flow dial direct");
+        assert_eq!(rcalls.load(Ordering::SeqCst), 1);
+    }
+
+    /// F43: a probe that meets an identity failure (e.g. a revoked connector)
+    /// never marks the direct path healthy.
+    #[tokio::test]
+    async fn probe_identity_failure_keeps_the_cooldown() {
+        let (direct, _) = MockDirect::new(DirectBehavior::AuthenticateErr);
+        let (relay, _) = MockRelay::new(true);
+        let t = ClientTransport::new(direct, loopback(), Some(relay_ctx(relay)));
+        expire_cooldown_after_failure(&t);
+        t.open_authenticated_stream().await.unwrap();
+        wait_probe_done(&t).await;
+        assert!(t.direct_is_in_cooldown());
+    }
+
+    /// F43: without a relay there is nothing to fall back to, so a flow after
+    /// an expired cooldown still dials direct itself (old behaviour).
+    #[tokio::test]
+    async fn without_relay_an_expired_cooldown_dials_in_the_flow() {
+        let (direct, dcalls) = MockDirect::new(DirectBehavior::Ok);
+        let t = ClientTransport::new(direct, loopback(), None);
+        expire_cooldown_after_failure(&t);
+        t.open_authenticated_stream().await.unwrap();
+        assert_eq!(dcalls.load(Ordering::SeqCst), 1);
+        assert!(!t.health.probing.load(Ordering::SeqCst), "no background probe");
+    }
+
+    /// F43: the backoff is capped at two minutes.
+    #[test]
+    fn cooldown_backoff_is_capped() {
+        let (direct, _) = MockDirect::new(DirectBehavior::Ok);
+        let t = ClientTransport::new(direct, loopback(), None);
+        for _ in 0..20 {
+            t.mark_direct_failure();
+        }
+        let left = t.health.unhealthy_until.load(Ordering::SeqCst) - DirectHealth::now_unix();
+        assert!((119..=120).contains(&left), "cooldown {left}s, want 120s");
     }
 
     fn find_typed(err: &anyhow::Error) -> Option<&TunnelOpenError> {

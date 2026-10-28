@@ -1111,12 +1111,18 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 		if lanIPChanged {
 			anyLanIPChanged = true
 			log.Printf("control stream: shield %s LAN IP changed to %q — re-synced resource hosts", s.ShieldId, s.LanIp)
+			// Sprint 20 Fix 18: the re-sync rewrote resources.host, so the shield
+			// must get the new host (its acks echo the rule it enforces, and an
+			// ack for the old host is ignored as stale).
+			if h.Registry != nil {
+				PushSnapshotForShield(ctx, h.Pool, h.Registry, client.connectorID, s.ShieldId)
+			}
 		}
 	}
 	// Either a connector move or a LAN-IP change alters the compiled ACL
 	// (connector move → routing; LAN-IP change → resource.host was re-synced), so
-	// bump the workspace ACL version once for the batch. The shield's own resource
-	// instructions pick up the new host via the snapshot fingerprint separately.
+	// bump the workspace ACL version once for the batch. The shield gets the new
+	// host from the snapshot pushed above.
 	if (anyConnectorChanged || anyLanIPChanged) && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
 			log.Printf("control stream: notify after shield status change tenant=%s: %v", client.tenantID, err)
@@ -1127,11 +1133,17 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
 	var anyChanged bool
 	for _, ack := range batch.Acks {
-		changed, err := resource.RecordAck(
-			ctx, h.Pool, tenantID,
-			ack.ResourceId, ack.Status, ack.Error,
-			ack.VerifiedAt,
-		)
+		changed, err := resource.RecordAck(ctx, h.Pool, tenantID, resource.Ack{
+			ResourceID: ack.ResourceId,
+			Status:     ack.Status,
+			Error:      ack.Error,
+			VerifiedAt: ack.VerifiedAt,
+			ShieldID:   ack.ShieldId,
+			Host:       ack.Host,
+			Protocol:   ack.Protocol,
+			PortFrom:   int(ack.PortFrom),
+			PortTo:     int(ack.PortTo),
+		})
 		if err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 			continue

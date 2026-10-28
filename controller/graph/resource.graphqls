@@ -29,6 +29,7 @@ input UpdateResourceInput {
   remoteNetworkId: String
   name:            String
   description:     String
+  host:            String        # protected: must be an active shield's lan_ip (the resource moves to that shield)
   protocol:        String
   portFrom:        Int
   portTo:          Int

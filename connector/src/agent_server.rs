@@ -1055,6 +1055,7 @@ impl ShieldService for ShieldRegistry {
                                         .await;
                                     }
                                     Some(Body::ResourceAck(ack)) => {
+                                        let ack = stamp_shield_id(ack, &shield_id);
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
                                     }
                                     Some(Body::DiscoveryReport(report)) => {
@@ -1220,9 +1221,34 @@ impl ShieldService for ShieldRegistry {
     }
 }
 
+/// Sprint 20 Fix 18: an ack names the shield it came from, taken from the
+/// stream's verified mTLS identity — whatever the shield put there is
+/// overwritten, so one shield can't ack for another. The controller ignores an
+/// ack from any shield but the resource's current one.
+fn stamp_shield_id(mut ack: ResourceAck, verified_shield_id: &str) -> ResourceAck {
+    ack.shield_id = verified_shield_id.to_string();
+    ack
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sprint 20 Fix 18: the forwarded ack carries the stream's verified shield
+    /// id, never the one the shield claimed.
+    #[test]
+    fn ack_is_stamped_with_the_verified_shield_id() {
+        let claimed = ResourceAck {
+            resource_id: "r1".into(),
+            status: "protected".into(),
+            shield_id: "someone-else".into(),
+            port_from: 8000,
+            ..Default::default()
+        };
+        let ack = stamp_shield_id(claimed, "verified-shield");
+        assert_eq!(ack.shield_id, "verified-shield");
+        assert_eq!((ack.resource_id.as_str(), ack.port_from), ("r1", 8000));
+    }
 
     fn test_registry() -> ShieldRegistry {
         // connect_lazy never dials until first use; push_instructions' offline path

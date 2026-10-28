@@ -62,6 +62,19 @@ func TestRecordAckReportsACLChanges(t *testing.T) {
 		return s
 	}
 
+	// ackFor builds the ack the resource's own shield would send for its
+	// current rule (Sprint 20 Fix 18).
+	ackFor := func(id, status string) Ack {
+		t.Helper()
+		a := Ack{ResourceID: id, Status: status, VerifiedAt: time.Now().Unix()}
+		if err := db.QueryRow(ctx,
+			`SELECT shield_id::text, host, protocol, port_from, port_to FROM resources WHERE id = $1`, id,
+		).Scan(&a.ShieldID, &a.Host, &a.Protocol, &a.PortFrom, &a.PortTo); err != nil {
+			t.Fatalf("read resource %s: %v", id, err)
+		}
+		return a
+	}
+
 	cases := []struct {
 		name               string
 		status, action     string
@@ -74,11 +87,15 @@ func TestRecordAckReportsACLChanges(t *testing.T) {
 		{"protect fails: same (shield) route", "protecting", "apply", "failed", false, "failed"},
 		{"protected re-verified as failed: same route", "protected", "apply", "failed", false, "failed"},
 		{"stale unprotected ack during an apply: guarded out", "protecting", "apply", "unprotected", false, "protecting"},
+		// Fix 18: 'unprotected' completes only an unprotect; a stray one (e.g. from
+		// the shield a resource was moved away from) is ignored.
+		{"stray unprotected ack on protected: guarded out", "protected", "apply", "unprotected", false, "protected"},
+		{"stray unprotected ack on failed: guarded out", "failed", "apply", "unprotected", false, "failed"},
 		{"tombstone reaped", "deleting", "remove", "unprotected", true, "(gone)"},
 	}
 	for _, c := range cases {
 		id := mk(c.status, c.action)
-		changed, err := RecordAck(ctx, db, tenantID, id, c.ack, "", time.Now().Unix())
+		changed, err := RecordAck(ctx, db, tenantID, ackFor(id, c.ack))
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -87,6 +104,65 @@ func TestRecordAckReportsACLChanges(t *testing.T) {
 		}
 		if got := statusOf(id); got != c.wantStatusAfterAck {
 			t.Errorf("%s: status = %s, want %s", c.name, got, c.wantStatusAfterAck)
+		}
+	}
+
+	// Fix 18: an ack from another shield is ignored, whatever its status.
+	var otherShield string
+	if err := db.QueryRow(ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status) VALUES ($1, $2, $3, 'sh2', 'active') RETURNING id`,
+		tenantID, networkID, connectorID,
+	).Scan(&otherShield); err != nil {
+		t.Fatalf("insert second shield: %v", err)
+	}
+	for _, c := range []struct{ status, action, ack string }{
+		{"protecting", "apply", "protected"},
+		{"protecting", "apply", "failed"},
+		{"protecting", "remove", "unprotected"},
+		{"deleting", "remove", "unprotected"},
+	} {
+		id := mk(c.status, c.action)
+		a := ackFor(id, c.ack)
+		a.ShieldID = otherShield
+		if changed, err := RecordAck(ctx, db, tenantID, a); err != nil || changed {
+			t.Errorf("%s/%s + %s from another shield: changed=%v err=%v", c.status, c.action, c.ack, changed, err)
+		}
+		if got := statusOf(id); got != c.status {
+			t.Errorf("%s/%s + %s from another shield: status = %s, want unchanged", c.status, c.action, c.ack, got)
+		}
+	}
+
+	// Fix 18: a protected/failed verdict for a rule that is no longer current is
+	// stale (e.g. sent for the old port right before an edit); the current one counts.
+	for _, verdict := range []string{"protected", "failed"} {
+		id := mk("protecting", "apply")
+		stale := ackFor(id, verdict)
+		stale.PortFrom, stale.PortTo = stale.PortFrom+1000, stale.PortTo+1000
+		if _, err := RecordAck(ctx, db, tenantID, stale); err != nil {
+			t.Fatal(err)
+		}
+		if got := statusOf(id); got != "protecting" {
+			t.Errorf("stale-rule %s ack: status = %s, want protecting", verdict, got)
+		}
+		for _, mutate := range []func(*Ack){
+			func(a *Ack) { a.Host = "10.9.9.9" },
+			func(a *Ack) { a.Protocol = "udp" },
+			func(a *Ack) { a.PortTo++ },
+		} {
+			a := ackFor(id, verdict)
+			mutate(&a)
+			if _, err := RecordAck(ctx, db, tenantID, a); err != nil {
+				t.Fatal(err)
+			}
+			if got := statusOf(id); got != "protecting" {
+				t.Errorf("stale-rule %s ack (%+v): status = %s, want protecting", verdict, a, got)
+			}
+		}
+		if _, err := RecordAck(ctx, db, tenantID, ackFor(id, verdict)); err != nil {
+			t.Fatal(err)
+		}
+		if got := statusOf(id); got != verdict {
+			t.Errorf("current-rule %s ack: status = %s, want %s", verdict, got, verdict)
 		}
 	}
 }

@@ -26,7 +26,11 @@ func TestRecordAck_ReapReturnsReaped(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM resources WHERE id = $1`, resID) })
 
-	reaped, err := RecordAck(ctx, db, tenantID, resID, "unprotected", "", 0)
+	// Fix 18: only the resource's own shield may reap it.
+	if reaped, err := RecordAck(ctx, db, tenantID, Ack{ResourceID: resID, Status: "unprotected", ShieldID: "00000000-0000-0000-0000-000000000001"}); err != nil || reaped {
+		t.Fatalf("ack from another shield: reaped=%v err=%v, want ignored", reaped, err)
+	}
+	reaped, err := RecordAck(ctx, db, tenantID, Ack{ResourceID: resID, Status: "unprotected", ShieldID: shieldID})
 	if err != nil {
 		t.Fatalf("RecordAck: %v", err)
 	}
@@ -34,7 +38,7 @@ func TestRecordAck_ReapReturnsReaped(t *testing.T) {
 		t.Fatal("expected reaped=true when an 'unprotected' ack reaps a tombstone")
 	}
 
-	reaped2, err := RecordAck(ctx, db, tenantID, resID, "unprotected", "", 0)
+	reaped2, err := RecordAck(ctx, db, tenantID, Ack{ResourceID: resID, Status: "unprotected", ShieldID: shieldID})
 	if err != nil {
 		t.Fatalf("RecordAck (second): %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"math/big"
 	"net/url"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -145,6 +147,12 @@ type mockWorkspaceStore struct {
 	standing       *ConnectorStanding
 	standingErr    error
 	standingCalls  int
+	relayStatus    string
+	relayStatusErr error
+}
+
+func (m *mockWorkspaceStore) GetRelayStatus(ctx context.Context, relayID string) (string, error) {
+	return m.relayStatus, m.relayStatusErr
 }
 
 func (m *mockWorkspaceStore) GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error) {
@@ -249,6 +257,67 @@ func TestUnarySPIFFEInterceptor_RelayRevoked(t *testing.T) {
 	_, err := interceptor(ctx, nil, info, handler)
 	if got, want := status.Code(err), codes.PermissionDenied; got != want {
 		t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+	}
+}
+
+// trailerStream records the trailer an interceptor sets via grpc.SetTrailer.
+type trailerStream struct {
+	grpc.ServerTransportStream
+	trailer metadata.MD
+}
+
+func (s *trailerStream) Method() string               { return "" }
+func (s *trailerStream) SetHeader(metadata.MD) error  { return nil }
+func (s *trailerStream) SendHeader(metadata.MD) error { return nil }
+func (s *trailerStream) SetTrailer(md metadata.MD) error {
+	s.trailer = metadata.Join(s.trailer, md)
+	return nil
+}
+
+// Sprint 20 F32: a refused relay carries the revoked marker only when the
+// relay row itself is terminal. A revoked serial of a live relay (superseded
+// renewal) and an unreadable status get none, so that relay keeps retrying.
+func TestUnarySPIFFEInterceptor_RelayRevoked_TerminalMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     string
+		statusErr  error
+		wantMarker bool
+	}{
+		{"relay revoked", "revoked", nil, true},
+		{"relay deleted", "deleted", nil, true},
+		{"relay active, serial superseded", "active", nil, false},
+		{"relay row missing", "", nil, false},
+		{"status unreadable", "", errors.New("db down"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, validator, store, info, handler := relayInterceptorFixture(t)
+			ms := store.(*mockWorkspaceStore)
+			ms.relayStatus, ms.relayStatusErr = tc.status, tc.statusErr
+
+			p, _ := peer.FromContext(ctx)
+			leaf := p.AuthInfo.(credentials.TLSInfo).State.PeerCertificates[0]
+			revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
+				return []string{leaf.SerialNumber.Text(16)}, nil
+			})
+			if err := revChecker.Refresh(context.Background()); err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+			stream := &trailerStream{}
+			ctx = grpc.NewContextWithServerTransportStream(ctx, stream)
+
+			_, err := UnarySPIFFEInterceptor(validator, store, revChecker)(ctx, nil, info, handler)
+			if got, want := status.Code(err), codes.PermissionDenied; got != want {
+				t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+			}
+			got := stream.trailer.Get(RelayStateMarkerKey)
+			if tc.wantMarker && (len(got) != 1 || got[0] != RelayStateRevoked) {
+				t.Fatalf("marker = %v, want [%q]", got, RelayStateRevoked)
+			}
+			if !tc.wantMarker && len(got) != 0 {
+				t.Fatalf("marker = %v, want none", got)
+			}
+		})
 	}
 }
 
