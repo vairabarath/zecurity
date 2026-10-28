@@ -3156,3 +3156,12 @@ serves on `127.0.0.1:9102`.
   - `SELECT count(*) FROM access_rules ar JOIN groups g ON g.id = ar.group_id WHERE g.workspace_id <> ar.workspace_id;`
   - `SELECT count(*) FROM group_members gm JOIN groups g ON g.id = gm.group_id JOIN users u ON u.id = gm.user_id WHERE u.tenant_id <> g.workspace_id;`
 
+
+## 2026-10-27 — Security fix: resource remote-network ownership (from the B-1 review)
+- Branch `security/resource-network-ownership` (worktree `../zecurity-rn`, base `fcb7e4eb` plus the uncommitted B-1 changes applied as a first layer); not committed.
+- Confirmed: create/update accepted another workspace's remote network and returned its name; pre-B-1, the snapshot routed the resource through the foreign network's connector.
+- Fix: the store's INSERT/UPDATE check the network's tenant in the same statement; read joins hide a foreign network's name; one "remote network not found" for foreign, missing and malformed IDs. No migration.
+- Tests: 6 new DB-backed tests (failing before the fix); controller 1426 pass / 0 fail / 2 skip.
+- Lab check for existing rows (read-only, for M1; should return 0): `SELECT count(*) FROM resources r JOIN remote_networks rn ON rn.id = r.remote_network_id WHERE rn.tenant_id <> r.tenant_id;`
+- Review follow-up: discovered-service lookup now workspace-scoped (`getDiscoveredServices` returned any workspace's services; `promoteDiscoveredService` probe closed); tests strengthened (read error fails, compiler positive control, no false concurrency claim). Controller 1429 pass / 0 fail / 2 skip. New open finding FU-3 (`triggerScan` / `getScanResults` not workspace-scoped, likely High) recorded in Sprint22/path.md; not fixed (needs approval).
+

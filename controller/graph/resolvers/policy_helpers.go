@@ -57,9 +57,9 @@ func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, tenantID, resourc
 	err := pool.QueryRow(ctx,
 		`SELECT r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
 		        r.status, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
-		        r.remote_network_id, rn.name
+		        r.remote_network_id, COALESCE(rn.name, '')
 		 FROM resources r
-		 JOIN remote_networks rn ON rn.id = r.remote_network_id
+		 LEFT JOIN remote_networks rn ON rn.id = r.remote_network_id AND rn.tenant_id = r.tenant_id
 		 WHERE r.id = $1 AND r.tenant_id = $2`,
 		resourceID, tenantID,
 	).Scan(

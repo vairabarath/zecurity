@@ -21,7 +21,9 @@ import (
 func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	// The store checks the shield belongs to this workspace first, so a
+	// foreign shield answers exactly like a missing one.
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, tc.TenantID, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: get services: %w", err)
 	}
@@ -89,7 +91,7 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 
 // GetDiscoveredServices is the resolver for the getDiscoveredServices field.
 func (r *queryResolver) GetDiscoveredServices(ctx context.Context, shieldID string) ([]*graph.DiscoveredService, error) {
-	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, tenant.MustGet(ctx).TenantID, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("getDiscoveredServices: %w", err)
 	}
