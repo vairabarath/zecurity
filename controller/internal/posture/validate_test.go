@@ -143,8 +143,8 @@ func TestValidateReportRejectsDuplicateCheckIDs(t *testing.T) {
 
 func TestSupportedCheckDescriptorsMatchValidationRegistry(t *testing.T) {
 	descriptors := SupportedCheckDescriptors()
-	if len(descriptors) != len(SupportedChecks()) {
-		t.Fatalf("descriptor count = %d, check count = %d", len(descriptors), len(SupportedChecks()))
+	if len(descriptors) != len(SupportedChecks())+len(serverCheckDescriptors) {
+		t.Fatalf("descriptor count = %d, check count = %d + %d server", len(descriptors), len(SupportedChecks()), len(serverCheckDescriptors))
 	}
 
 	for _, descriptor := range descriptors {
@@ -159,5 +159,31 @@ func TestSupportedCheckDescriptorsMatchValidationRegistry(t *testing.T) {
 	descriptors[0].Label = "mutated"
 	if SupportedCheckDescriptors()[0].Label == "mutated" {
 		t.Fatal("SupportedCheckDescriptors returned mutable registry storage")
+	}
+}
+
+// ADR-030: a client may not report the server-side approval check.
+func TestValidateReportDropsServerSideApprovalCheck(t *testing.T) {
+	now := time.Now().UTC()
+	in := validReportInput(now)
+	in.Checks = append(in.Checks, CheckInput{
+		CheckID: CheckDeviceApproved,
+		Status:  ObservationStatusPass,
+		Detail:  "approved by an admin",
+	})
+	got, err := ValidateReport(now, in)
+	if err != nil {
+		t.Fatalf("ValidateReport: %v", err)
+	}
+	for _, o := range got.Observations {
+		if o.CheckID == CheckDeviceApproved {
+			t.Fatalf("client-reported %s was kept: %#v", CheckDeviceApproved, o)
+		}
+	}
+	if !IsRecognizedCheck(CheckDeviceApproved) || !IsServerCheck(CheckDeviceApproved) {
+		t.Fatalf("%s must be requirable as a server check", CheckDeviceApproved)
+	}
+	if IsServerCheck(CheckFirewall) {
+		t.Fatalf("%s is a client check", CheckFirewall)
 	}
 }

@@ -13,16 +13,18 @@ import (
 )
 
 type ClientDevice struct {
-	ID           string  `json:"id"`
-	UserID       string  `json:"userId"`
-	Name         string  `json:"name"`
-	CommonName   string  `json:"commonName"`
-	Os           string  `json:"os"`
-	SpiffeID     *string `json:"spiffeId,omitempty"`
-	CertNotAfter *string `json:"certNotAfter,omitempty"`
-	LastSeenAt   *string `json:"lastSeenAt,omitempty"`
-	CreatedAt    string  `json:"createdAt"`
-	RevokedAt    *string `json:"revokedAt,omitempty"`
+	ID              string  `json:"id"`
+	UserID          string  `json:"userId"`
+	Name            string  `json:"name"`
+	CommonName      string  `json:"commonName"`
+	Os              string  `json:"os"`
+	SpiffeID        *string `json:"spiffeId,omitempty"`
+	CertNotAfter    *string `json:"certNotAfter,omitempty"`
+	LastSeenAt      *string `json:"lastSeenAt,omitempty"`
+	CreatedAt       string  `json:"createdAt"`
+	RevokedAt       *string `json:"revokedAt,omitempty"`
+	ApprovedAt      *string `json:"approvedAt,omitempty"`
+	ApprovedByEmail *string `json:"approvedByEmail,omitempty"`
 }
 
 type Connector struct {

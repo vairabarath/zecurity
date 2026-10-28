@@ -245,6 +245,10 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 - [x] Component tests for `Policies.tsx` and the rebuilt create modal.
 - [ ] Manual/E2E pass against a running backend (not done this session).
 - [x] **Build gate:** controller `go build`/`go test` + admin `codegen`/`build`, all green.
+- **Superseded (2026-10-28, ADR-030):** `manualTrust` was stored but never read by any
+  access decision. It is now deprecated. The profile panels offer the server-side
+  requirement "Approved by an admin" (`zecurity.device.approved`) instead, and admins
+  approve devices on the Devices page. See `Decisions/ADR-030-Admin-Device-Approval.md`.
 
 ### Phase F — M3: Active-Session Registry
 > See [[Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry]]. Depends on nothing — Day 1.
@@ -303,6 +307,11 @@ buf generate   # from repo root, after M2-A lands — regenerates Go stubs only;
 - [x] `cargo test` passes for both `client` and `connector`, not just `cargo build`.
 
 ## Post-Sprint Fixes
+
+### Fix: firewall posture check false PASS on non-inbound drop policies (2026-10-28, `c7d812cb`)
+- **Issue:** `linux.firewall.active` passed whenever `policy drop` appeared anywhere in the nftables ruleset, e.g. a Docker-style FORWARD chain, with inbound wide open. Reproduced live: the device satisfied an ENFORCE profile and accepted inbound connections.
+- **Fix:** the check now passes only for an IPv4 (`inet`/`ip`) input-hook chain with policy drop or reject, read from `nft -j`. Live re-check passed. Details: M2 Phase 1 → Post-Phase Fixes.
+- **Related, not fixed — a decision is needed:** `DeviceProfile.manualTrust` is stored and shown, but no access decision reads it.
 
 ### Fix: Posture migration renumbered to 030
 

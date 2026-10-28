@@ -338,6 +338,8 @@ query GetClientDevices {
     lastSeenAt
     createdAt
     revokedAt
+    approvedAt
+    approvedByEmail
   }
 }
 

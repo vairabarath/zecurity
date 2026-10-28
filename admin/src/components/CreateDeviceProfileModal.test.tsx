@@ -20,6 +20,13 @@ const CHECKS = [
     platform: "linux",
     allowUnsupportedMeaningful: true,
   },
+  {
+    __typename: "PostureCheckDescriptor" as const,
+    id: "zecurity.device.approved",
+    label: "Approved by an admin",
+    platform: "any",
+    allowUnsupportedMeaningful: false,
+  },
 ];
 
 function renderModal() {
@@ -82,14 +89,19 @@ describe("CreateDeviceProfileModal", () => {
     expect(screen.getByText("Firewall active")).toBeInTheDocument();
   });
 
-  it("renders Manual Trust as always-on and non-interactive", async () => {
+  it("offers Approved by an admin as an optional requirement, off by default", async () => {
     renderModal();
     await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
 
-    const manualTrust = await screen.findByRole("switch", {
-      name: "Manual Trust (always enabled)",
+    const approval = await screen.findByRole("switch", {
+      name: "Approved by an admin",
     });
-    expect(manualTrust).toHaveAttribute("aria-checked", "true");
-    expect(manualTrust).toBeDisabled();
+    expect(approval).toHaveAttribute("aria-checked", "false");
+    expect(approval).toBeEnabled();
+    await userEvent.click(approval);
+    expect(approval).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByText("Manual Trust")).not.toBeInTheDocument();
+    // Server checks are not listed again among the Linux posture checks.
+    expect(screen.getAllByText("Approved by an admin")).toHaveLength(1);
   });
 });

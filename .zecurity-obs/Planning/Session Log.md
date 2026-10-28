@@ -3247,6 +3247,34 @@ serves on `127.0.0.1:9102`.
 - Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
 - Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
 
+## 2026-10-28 — Device posture live test; firewall check false-pass fixed
+- Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
+  - ENFORCE denies a device whose firewall check fails;
+  - a PASS report restores access at the next sync;
+  - the connector refuses a client with a stale ACL;
+  - AUDIT allows access and records the reason.
+- Found: a forward-only `policy drop` made the firewall check PASS while inbound was open (proven from nika). Fixed in `client/src/posture.rs` (`c7d812cb`, branch `fix/posture-firewall-input-chain`, local): the check reads `nft -j` and requires an IPv4 input-hook drop/reject chain. Live re-check: forward-only now FAILs, a real input drop PASSes.
+- Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
+
+## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
+- Branch `feat/device-approval` (base `84a06023` = main); committed locally, not pushed. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
+- Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.
+- Controller:
+  - `client_devices.approved_at` / `approved_by`; `approveDevice` / `unapproveDevice` (admin, workspace-scoped, revoked refused, no-op when unchanged), audited as `device.approve` / `device.unapprove` in the same transaction; the device is re-evaluated at once.
+  - Server-side check `zecurity.device.approved`: a profile may require it; a client report of it is dropped, and the evaluator always sets it from `client_devices`.
+  - Evaluations of one device are serialized (process-local lock, D-02), so an in-flight evaluation can't store a stale PASS after an un-approve (from the automated security review).
+- Admin UI: Devices page Approval column + Approve / Remove approval; the profile panels replace the locked Manual Trust switch with "Approved by an admin" (BYOD when off).
+- Tests: controller 1460 pass / 0 fail / 2 skip (unconditional stubs), all DB variables set; 9 mutants killed (overlay, revoked, workspace scope, client self-report, re-evaluation, revoked approvable, resolver scope, no-op re-audit, evaluation lock). Admin 119 tests pass, build green, eslint clean on changed files.
+- **Live test PASS (2026-10-28):**
+  - Setup: controller `822a038b` (this branch; `044` applied by hand to the lab DB), connector on inkyank .75, client `c5e0c5eb` on .164. `appr-company` (:8811) was bound to an ENFORCE profile requiring `zecurity.device.approved`; `appr-byod` (:8812) had no profile. A local nft rule dropped untunnelled traffic to both ports.
+  - Unapproved: :8811 dropped, :8812 200.
+  - First approve (06:45:10): the device's last report was 90 min old (the lab controller had been down), so the immediate re-evaluation stayed FAIL ("posture report is stale"), which is fail-closed as designed. Access came with the next report: the connector got ACL v11 at 06:45:26, the client polled it at 06:46:26, and :8811 returned 200 76.6 s after the approve.
+  - With a fresh report:
+    - remove approval (06:46:49.715): connector ACL v12 in 46 ms; :8811 denied at once (`tunnel denied: access denied`, session ended);
+    - re-approve (06:46:51.934): ACL v13 in 56 ms; :8811 200 at once.
+  - :8812 (BYOD) returned 200 throughout. Audit: `device.approve`, `device.unapprove`, `device.approve`.
+  - Cleaned up: approval removed; profile, resources and connector deleted or revoked; web servers and nft table removed; controller stopped. The lab DB keeps the nullable `044` columns.
+
 ## 2026-10-28 — M1: Sprint 22 T-gate PASS, FU-4 fixed, SCIM test DB leak fixed
 - Branch `fix/m1-tgate-fu4` (base `fixed-pendings` `84a06023`); local fixed-pendings fast-forwarded (was 94 behind, 0 ahead).
 - **T-gate PASS** in a worktree at `84a06023` with a CI-style env (empty `ci_empty_admin`, throwaway Valkey `:6390/15`):
