@@ -216,16 +216,60 @@ pub(crate) async fn try_backend(
     }
 }
 
+/// nftables: default-deny means an IPv4 input-hook base chain (family `inet`
+/// or `ip`) whose policy is drop or reject. Read from the JSON ruleset, not
+/// the text: "policy drop" anywhere in the text also matched a forward or
+/// output chain (e.g. Docker's), passing a host whose inbound was wide open.
+/// With iptables-nft, iptables' own INPUT chain is part of this ruleset too.
+pub(crate) async fn nft_input_default_deny(runner: &dyn CommandRunner) -> Option<PostureCheck> {
+    let out = match runner.run("nft", &["-j", "list", "ruleset"]).await {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(error_check(CHECK_ID_FIREWALL, "nft failed to execute")),
+    };
+    if !out.status.success() {
+        return Some(error_check(CHECK_ID_FIREWALL, "nft exited with error"));
+    }
+    let Ok(ruleset) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Some(error_check(CHECK_ID_FIREWALL, "nft ruleset is not valid JSON"));
+    };
+    let deny = ruleset
+        .get("nftables")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("chain"))
+        .find(|chain| {
+            let field = |k: &str| chain.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            field("hook") == "input"
+                && matches!(field("family"), "inet" | "ip")
+                && matches!(field("policy"), "drop" | "reject")
+        });
+    Some(match deny {
+        Some(chain) => {
+            let field = |k: &str| chain.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+            check(
+                CHECK_ID_FIREWALL,
+                CheckStatus::Pass,
+                format!(
+                    "nft input chain {} {}/{} policy {}",
+                    field("family"),
+                    field("table"),
+                    field("name"),
+                    field("policy")
+                ),
+            )
+        }
+        None => check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Fail,
+            "nftables present but no default-deny input chain",
+        ),
+    })
+}
+
 pub(crate) async fn collect_firewall(runner: Arc<dyn CommandRunner>) -> PostureCheck {
-    let nft = try_backend(
-        runner.as_ref(),
-        "nft",
-        &["list", "ruleset"],
-        &["policy drop", "policy reject"],
-        "nftables present but not default-deny",
-    )
-    .await;
-    if let Some(c) = nft {
+    if let Some(c) = nft_input_default_deny(runner.as_ref()).await {
         return c;
     }
 
