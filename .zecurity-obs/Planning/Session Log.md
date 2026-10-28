@@ -3320,3 +3320,10 @@ serves on `127.0.0.1:9102`.
 - **Outbox flake:** not reproduced (55 runs). A transient reaped state was confirmed and made deterministic with a 5 s poll delay; test-only fix.
 - **Gate:** 10/10 FU-5 mutants; controller 1500 / 0 / 2; fresh-volume init of 48 files clean; controller starts.
 
+## 2026-10-28 — M1: FU-2 + FU-5 live check PASS (PR #153)
+- Dev DB reset; branch controller `2d7530a6`; connector on inkyank .75; client on .164 rebuilt for the new platform root (`dev-build.sh`; needs sudo to install).
+- **Scan:** request bound to the connector, results stored, foreign ID refused and logged with no request left.
+- **Policy:** group, member (trigger-filled workspace), resource and rule; tunnel access 200 with the connector's `access allowed`.
+- **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
+- **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
+

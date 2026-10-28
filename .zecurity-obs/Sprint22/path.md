@@ -472,6 +472,31 @@ Also, a scan result's key `(request_id, ip, port, protocol)` didn't include the 
   - fresh-volume init of all 48 SQL files: 0 errors, 28 `*_same_workspace_fkey`;
   - the controller starts.
 
+### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
+**Setup:**
+- Dev DB recreated from all 48 files (28 `*_same_workspace_fkey`, `scan_requests`).
+- Controller `2d7530a6` (sha `d7ea9ffc`) on :8080/:9090.
+- Workspace `xiyo` provisioned with `bootstrap.Service.Provision` from a throwaway program (deleted, never committed).
+- Connector `fu5-conn` on inkyank .75; client on .164, rebuilt with `client/scripts/dev-build.sh`, because the reset made a new platform root and the client refused the old pin (expected).
+
+**1. Scan:**
+- `triggerScan` recorded `scan_requests` bound to `fu5-conn`.
+- The connector's report was stored: 192.168.1.75:8811 open, `reachableFrom` = `fu5-conn`; 8812 (closed) absent.
+- A foreign connector ID got `connector not found or not connected`, was logged with `connector="…" reason=not_in_workspace`, and left no request behind.
+
+**2. Policy and access:**
+- `createGroup`, `addGroupMember` (the trigger filled `workspace_id`), `createResource` and `assignResourceToGroup` all went through the new keys.
+- The client listed `fu5-web`, and `curl 192.168.1.75:8811` returned 200 through the tunnel. The connector logged `access allowed` and `tunnel_opened ok` for device `550b6d45`.
+- The connector received ACL v5 and v6 within 1 s.
+
+**3. Device and posture:**
+- Device enrolment wrote `client_devices` (key to the user).
+- An audit profile (`linux.firewall.active`, `zecurity.device.approved`) bound to the resource was evaluated from the device's report: the report is linked and the workspace is correct.
+- `approveDevice` stored an approver from the same workspace, audited `device.approve`, and re-evaluated at once.
+- Result: not satisfied, `linux.firewall.active: FAIL: nftables present but no default-deny input chain` (this PC; matches #149). Access stayed 200 because the profile is in audit mode.
+
+**Cleanup:** connector revoked and stopped; the web server, token and state removed on inkyank; the token server and controller stopped. The dev DB keeps workspace `xiyo`.
+
 ### Observed: `TestProcessorRunReapsAbandonedIntegration` (outbox) flaky under full-suite load
 - 2026-10-28: it failed once in 3 full controller runs ("event was not reaped before timeout", 4 s deadline).
 - It passes alone (3/3, about 1.6 s) and in the other 2 full runs. It's unrelated to the changes above.
