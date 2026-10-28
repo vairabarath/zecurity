@@ -3274,3 +3274,24 @@ serves on `127.0.0.1:9102`.
     - re-approve (06:46:51.934): ACL v13 in 56 ms; :8811 200 at once.
   - :8812 (BYOD) returned 200 throughout. Audit: `device.approve`, `device.unapprove`, `device.approve`.
   - Cleaned up: approval removed; profile, resources and connector deleted or revoked; web servers and nft table removed; controller stopped. The lab DB keeps the nullable `044` columns.
+
+## 2026-10-28 — M1: Sprint 22 T-gate PASS, FU-4 fixed, SCIM test DB leak fixed
+- Branch `fix/m1-tgate-fu4` (base `fixed-pendings` `84a06023`); local fixed-pendings fast-forwarded (was 94 behind, 0 ahead).
+- **T-gate PASS** in a worktree at `84a06023` with a CI-style env (empty `ci_empty_admin`, throwaway Valkey `:6390/15`):
+  - Go: gate packages 338 pass, 0 skip; whole controller 1457 / 0 / 2 (unconditional stubs).
+  - Console: 395 pass, lint and build ok.
+  - Schema: scratch-volume init, 45 files, 0 errors; controller starts; TOTP columns present.
+  - Ticked in `Sprint22/path.md`.
+- **FU-4:** `promoteDiscoveredService` creates the resource in the shield's network and notifies the policy; 2 mutants killed.
+- **Test hygiene:** the SCIM harness leaked one dev-Postgres database per test (6 per run, 315 accumulated). The drop now goes through the admin DSN in `t.Cleanup`, and the leaked databases are removed.
+- Controller after both fixes: 1457 pass / 0 fail / 2 skip, no databases left behind.
+
+## 2026-10-28 — M1: Sprint 20 G4 live PASS, FU-1 fixed, TTL/window warning
+- **G4 / AT-G.1 PASS live**, the last open Sprint 20 scenario:
+  - Setup: `CONNECTOR_CERT_TTL=15m` and `CONNECTOR_RENEWAL_WINDOW=20m` force a duplicate ReEnroll right after each renewal.
+  - The connector ignored both duplicates (`renewed moments ago`) and renewed only on the 10-min resend (07:34:31 → 07:44:34). The DB had 3 certificates, with no double renewal.
+  - Sprint 20 "all scenarios pass" is ticked.
+- **FU-1:** relay create is now transactionally audited (row + JTI + audit in one transaction; Valkey JTI written inside and removed on failure). 2 new DB tests; 4 mutants killed.
+- **Startup warning** when `CONNECTOR_CERT_TTL` ≤ `CONNECTOR_RENEWAL_WINDOW`; behaviour unchanged.
+- **Controller suite** (isolated env): 1459 pass / 1 fail / 2 skip. The fail is the outbox reap test, flaky under load: it passes alone 3/3 and is unrelated. Recorded in Sprint22/path.md, not fixed.
+- **Cleanup:** connector revoked; lab, scratch Valkey and test DBs cleaned; no controller left running.

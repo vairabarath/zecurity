@@ -2,9 +2,11 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/apperr"
@@ -100,6 +102,25 @@ var ErrShieldNotFound = apperr.UserErrorf("shield not found")
 // shields (an empty list if it has none). The shield's ownership is checked in
 // the same query: a foreign, missing or malformed shield ID is
 // ErrShieldNotFound, never another workspace's services.
+// ShieldRemoteNetwork returns the remote network of one of the workspace's
+// shields; a foreign, missing or malformed shield is ErrShieldNotFound.
+func ShieldRemoteNetwork(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) (string, error) {
+	if _, err := uuid.Parse(shieldID); err != nil {
+		return "", ErrShieldNotFound
+	}
+	var rn string
+	err := db.QueryRow(ctx,
+		`SELECT remote_network_id::text FROM shields WHERE id=$1 AND tenant_id=$2`,
+		shieldID, tenantID).Scan(&rn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrShieldNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return rn, nil
+}
+
 func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) ([]DiscoveredService, error) {
 	if _, err := uuid.Parse(shieldID); err != nil {
 		return nil, ErrShieldNotFound

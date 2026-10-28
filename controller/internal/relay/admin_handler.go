@@ -186,48 +186,52 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	relayID, err := h.Store.CreateRelay(ctx, name, dnsAllowlist, ipAllowlist)
+	// D-14 (FU-1): the relay row, its token jti and the relay.create audit
+	// commit together. The Valkey jti is written inside the transaction, so a
+	// committed relay always has a usable token; if the transaction then fails,
+	// the jti is removed again. (A crash between the two leaves at worst a
+	// Valkey jti for a relay that doesn't exist: provisioning refuses it, and
+	// it expires with the token.)
+	var tokenString, jti string
+	relayID, err := h.Store.CreateRelayAudited(ctx, name, dnsAllowlist, ipAllowlist,
+		func(ctx context.Context, relayID string) (string, error) {
+			tok, j, err := IssueProvisioningToken(h.JWTSecret, relayID, ProvisioningTokenTTL)
+			if err != nil {
+				return "", err
+			}
+			if err := StoreProvisioningJTI(ctx, h.Redis, j, relayID, ProvisioningTokenTTL); err != nil {
+				return "", fmt.Errorf("persist provisioning jti: %w", err)
+			}
+			tokenString, jti = tok, j
+			return j, nil
+		},
+		func(ctx context.Context, tx pgx.Tx, relayID string) error {
+			return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+				ProviderUserID: &actor.UserID,
+				ProviderEmail:  actor.Email,
+				Action:         provider.ActionRelayCreate,
+				TargetType:     "relay",
+				TargetID:       relayID,
+				Details: map[string]any{
+					"name": name,
+					"ttl":  ProvisioningTokenTTL.String(),
+					"dns":  dnsAllowlist,
+					"ip":   ipAllowlist,
+				},
+				IPAddress: provider.ClientIP(r),
+			})
+		})
 	if err != nil {
+		if jti != "" {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+			if delErr := h.Redis.Del(cleanupCtx, provisioningJTIPrefix+jti).Err(); delErr != nil {
+				log.Printf("relay admin: remove provisioning jti after failed create: %v", delErr)
+			}
+			cancelCleanup()
+		}
 		log.Printf("relay admin: create relay: %v", err)
 		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
-	}
-	tokenString, jti, err := IssueProvisioningToken(h.JWTSecret, relayID, ProvisioningTokenTTL)
-	if err != nil {
-		log.Printf("relay admin: issue provisioning token for relay %s: %v", relayID, err)
-		provider.WriteError(w, http.StatusInternalServerError, "server_error")
-		return
-	}
-	if err := StoreProvisioningJTI(ctx, h.Redis, jti, relayID, ProvisioningTokenTTL); err != nil {
-		log.Printf("relay admin: persist provisioning jti for relay %s: %v", relayID, err)
-		provider.WriteError(w, http.StatusInternalServerError, "server_error")
-		return
-	}
-	if err := h.Store.AttachJTI(ctx, relayID, jti); err != nil {
-		log.Printf("relay admin: record provisioning jti for relay %s: %v", relayID, err)
-		provider.WriteError(w, http.StatusInternalServerError, "server_error")
-		return
-	}
-	// KNOWN GAP (D-14, tracked as a Sprint 22 follow-up): this audit is
-	// best-effort and outside any transaction — the relay row and token
-	// already exist, so a failed audit write is only logged. A server error
-	// part-way through the steps above can likewise leave a pending relay
-	// without a usable token. Revoke and delete ARE transactionally audited.
-	if err := h.ProviderStore.InsertAudit(ctx, provider.AuditEntry{
-		ProviderUserID: &actor.UserID,
-		ProviderEmail:  actor.Email,
-		Action:         provider.ActionRelayCreate,
-		TargetType:     "relay",
-		TargetID:       relayID,
-		Details: map[string]any{
-			"name": name,
-			"ttl":  ProvisioningTokenTTL.String(),
-			"dns":  dnsAllowlist,
-			"ip":   ipAllowlist,
-		},
-		IPAddress: provider.ClientIP(r),
-	}); err != nil {
-		log.Printf("provider audit (relay.create) failed for relay %s: %v", relayID, err)
 	}
 	provider.WriteJSON(w, http.StatusCreated, createRelayResponse{
 		RelayID:            relayID,
