@@ -78,6 +78,7 @@ mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {
     id
     name
     description
+    host
     protocol
     portFrom
     portTo

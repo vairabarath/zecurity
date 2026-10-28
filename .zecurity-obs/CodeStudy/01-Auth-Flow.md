@@ -85,7 +85,7 @@ You write two things:
 
 gqlgen writes everything in between: HTTP body parsing, GraphQL query parsing, argument unmarshaling, dispatch tables, response serialization, error handling.
 
-Generate command: `cd controller && go generate ./graph/...`.
+Generate command: `cd controller && go tool gqlgen generate --config graph/gqlgen.yml`.
 
 ---
 
@@ -295,7 +295,7 @@ type AuthInitPayload {
 
 This is the only place where the operation is declared. `provider: String!` means required. `workspaceName: String` (no `!`) means optional. `AuthInitPayload!` is the required return type.
 
-When you run `go generate ./graph/...`, gqlgen produces [controller/graph/generated.go](controller/graph/generated.go) (~10,000 lines, all auto-generated).
+When you run `go tool gqlgen generate --config graph/gqlgen.yml`, gqlgen produces [controller/graph/generated.go](controller/graph/generated.go) (~10,000 lines, all auto-generated).
 
 ### Step B — gqlgen Generates the `MutationResolver` Interface
 

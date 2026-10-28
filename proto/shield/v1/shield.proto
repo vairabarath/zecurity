@@ -56,6 +56,14 @@ message ResourceAck {
   string error = 3; // set only on failure
   int64 verified_at = 4; // unix timestamp of last port check
   bool port_reachable = 5;
+  // Sprint 20 Fix 18: what the ack is about, so the controller can ignore a
+  // stale one. shield_id is overwritten by the connector with the shield's
+  // verified (mTLS) identity; the rule fields echo what the shield enforces.
+  string shield_id = 6;
+  string host = 7;
+  string protocol = 8;
+  int32 port_from = 9;
+  int32 port_to = 10;
 }
 
 // Complete desired resource set for this shield (ADR-004 Phase 2).

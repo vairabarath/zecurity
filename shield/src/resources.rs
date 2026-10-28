@@ -30,6 +30,69 @@ pub struct ActiveResource {
     pub port_to: u16,
 }
 
+/// The rule an ack is about. Every ack echoes it (Sprint 20 Fix 18) so the
+/// controller can ignore one for a rule that is no longer current; the
+/// connector stamps the shield id.
+trait AckRule {
+    fn fields(&self) -> (&str, &str, &str, i32, i32);
+}
+
+impl AckRule for ActiveResource {
+    fn fields(&self) -> (&str, &str, &str, i32, i32) {
+        (
+            &self.resource_id,
+            &self.host,
+            &self.protocol,
+            self.port_from as i32,
+            self.port_to as i32,
+        )
+    }
+}
+
+impl AckRule for crate::proto::ResourceInstruction {
+    fn fields(&self) -> (&str, &str, &str, i32, i32) {
+        (
+            &self.resource_id,
+            &self.host,
+            &self.protocol,
+            self.port_from,
+            self.port_to,
+        )
+    }
+}
+
+fn make_ack(
+    rule: &impl AckRule,
+    status: &str,
+    error: impl Into<String>,
+    verified_at: i64,
+    port_reachable: bool,
+) -> ResourceAck {
+    let (resource_id, host, protocol, port_from, port_to) = rule.fields();
+    ResourceAck {
+        resource_id: resource_id.to_string(),
+        status: status.to_string(),
+        error: error.into(),
+        verified_at,
+        port_reachable,
+        shield_id: String::new(),
+        host: host.to_string(),
+        protocol: protocol.to_string(),
+        port_from,
+        port_to,
+    }
+}
+
+/// Health-check outcome for an enforced resource: protected when its port
+/// answers, failed otherwise.
+fn health_ack(rule: &impl AckRule, reachable: bool, verified_at: i64) -> ResourceAck {
+    if reachable {
+        make_ack(rule, "protected", "", verified_at, true)
+    } else {
+        make_ack(rule, "failed", "port not listening", verified_at, false)
+    }
+}
+
 pub struct SharedResourceState {
     pub active: Mutex<Vec<ActiveResource>>,
     pub acks: Mutex<Vec<ResourceAck>>,
@@ -223,24 +286,7 @@ pub async fn run_health_check_loop(interval_secs: u64, state: Arc<SharedResource
 
         let mut fresh_acks: Vec<ResourceAck> = resources
             .iter()
-            .map(|res| {
-                let reachable = check_port(&res.host, res.port_from);
-                ResourceAck {
-                    resource_id: res.resource_id.clone(),
-                    status: if reachable {
-                        "protected".to_string()
-                    } else {
-                        "failed".to_string()
-                    },
-                    error: if reachable {
-                        String::new()
-                    } else {
-                        "port not listening".to_string()
-                    },
-                    verified_at: now,
-                    port_reachable: reachable,
-                }
-            })
+            .map(|res| health_ack(res, check_port(&res.host, res.port_from), now))
             .collect();
 
         let mut acks = state.acks.lock().unwrap();
@@ -281,13 +327,13 @@ pub async fn handle_apply(
             host = %instruction.host,
             "resource host does not match this shield's LAN IP — rejecting"
         );
-        return ResourceAck {
-            resource_id: instruction.resource_id.clone(),
-            status: "failed".to_string(),
-            error: "resource host does not match this shield's IP".to_string(),
-            verified_at: now,
-            port_reachable: false,
-        };
+        return make_ack(
+            instruction,
+            "failed",
+            "resource host does not match this shield's IP",
+            now,
+            false,
+        );
     }
 
     {
@@ -322,21 +368,7 @@ pub async fn handle_apply(
                 port_reachable = reachable,
                 "resource applied — nftables chain rebuilt"
             );
-            ResourceAck {
-                resource_id: instruction.resource_id.clone(),
-                status: if reachable {
-                    "protected".to_string()
-                } else {
-                    "failed".to_string()
-                },
-                error: if reachable {
-                    String::new()
-                } else {
-                    "port not listening".to_string()
-                },
-                verified_at: now,
-                port_reachable: reachable,
-            }
+            health_ack(instruction, reachable, now)
         }
         Err(e) => {
             state
@@ -350,13 +382,7 @@ pub async fn handle_apply(
                 error = %e,
                 "nftables apply failed"
             );
-            ResourceAck {
-                resource_id: instruction.resource_id.clone(),
-                status: "failed".to_string(),
-                error: e.to_string(),
-                verified_at: now,
-                port_reachable: false,
-            }
+            make_ack(instruction, "failed", e.to_string(), now, false)
         }
     }
 }
@@ -385,13 +411,7 @@ pub async fn handle_remove(
         resource_id = %instruction.resource_id,
         "resource removed from nftables"
     );
-    ResourceAck {
-        resource_id: instruction.resource_id.clone(),
-        status: "unprotected".to_string(),
-        error: String::new(),
-        verified_at: now_unix(),
-        port_reachable: false,
-    }
+    make_ack(instruction, "unprotected", "", now_unix(), false)
 }
 
 /// Apply an authoritative desired-state snapshot (ADR-004 Phase 2):
@@ -428,13 +448,13 @@ pub async fn handle_snapshot(
                 host = %res.host,
                 "snapshot resource host does not match this shield's LAN IP — skipping"
             );
-            acks.push(ResourceAck {
-                resource_id: res.resource_id.clone(),
-                status: "failed".to_string(),
-                error: "resource host does not match this shield's IP".to_string(),
-                verified_at: now,
-                port_reachable: false,
-            });
+            acks.push(make_ack(
+                res,
+                "failed",
+                "resource host does not match this shield's IP",
+                now,
+                false,
+            ));
             continue;
         }
         new_active.push(ActiveResource {
@@ -458,30 +478,13 @@ pub async fn handle_snapshot(
                 "resource snapshot applied — chain rebuilt"
             );
             for r in &applied {
-                let reachable = check_port(&r.host, r.port_from);
-                acks.push(ResourceAck {
-                    resource_id: r.resource_id.clone(),
-                    status: if reachable { "protected" } else { "failed" }.to_string(),
-                    error: if reachable {
-                        String::new()
-                    } else {
-                        "port not listening".to_string()
-                    },
-                    verified_at: now,
-                    port_reachable: reachable,
-                });
+                acks.push(health_ack(r, check_port(&r.host, r.port_from), now));
             }
         }
         Err(e) => {
             error!(error = %e, "snapshot nftables apply failed");
             for r in &applied {
-                acks.push(ResourceAck {
-                    resource_id: r.resource_id.clone(),
-                    status: "failed".to_string(),
-                    error: e.to_string(),
-                    verified_at: now,
-                    port_reachable: false,
-                });
+                acks.push(make_ack(r, "failed", e.to_string(), now, false));
             }
         }
     }
@@ -617,6 +620,43 @@ fn port_drop_rule(protocol: &str, port_expr: Expression<'static>) -> Rule<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sprint 20 Fix 18: every ack echoes the rule it is about, so the
+    /// controller can ignore one for a rule that is no longer current.
+    #[test]
+    fn acks_echo_their_rule() {
+        let active = ActiveResource {
+            resource_id: "r1".into(),
+            host: "10.0.0.5".into(),
+            protocol: "tcp".into(),
+            port_from: 8000,
+            port_to: 8010,
+        };
+        let check = |a: &ResourceAck, status: &str| {
+            assert_eq!(a.resource_id, "r1");
+            assert_eq!(a.status, status);
+            assert_eq!((a.host.as_str(), a.protocol.as_str()), ("10.0.0.5", "tcp"));
+            assert_eq!((a.port_from, a.port_to), (8000, 8010));
+            assert!(a.shield_id.is_empty(), "the connector stamps shield_id");
+        };
+        check(&health_ack(&active, true, 1), "protected");
+        let failed = health_ack(&active, false, 1);
+        check(&failed, "failed");
+        assert_eq!(failed.error, "port not listening");
+
+        let instruction = crate::proto::ResourceInstruction {
+            resource_id: "r1".into(),
+            host: "10.0.0.5".into(),
+            protocol: "tcp".into(),
+            port_from: 8000,
+            port_to: 8010,
+            action: "remove".into(),
+        };
+        check(
+            &make_ack(&instruction, "unprotected", "", 1, false),
+            "unprotected",
+        );
+    }
     use nftables::schema::NfObject;
 
     fn res(id: &str, port: u16) -> ActiveResource {

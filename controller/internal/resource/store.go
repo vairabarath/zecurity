@@ -398,13 +398,90 @@ type UpdateInput struct {
 	RemoteNetworkID *string
 	Name            *string
 	Description     *string
+	Host            *string
 	Protocol        *string
 	PortFrom        *int
 	PortTo          *int
 }
 
+// ShieldPush names a shield whose desired-state snapshot must be re-pushed after
+// an update (connector.PushSnapshotForShield).
+type ShieldPush struct {
+	ConnectorID string
+	ShieldID    string
+}
+
+// UpdateResult is an applied update plus the shield work it requires.
+type UpdateResult struct {
+	Row *Row
+	// Moved: a protected resource's host or network now matches a different
+	// shield. It is bound to that shield as protecting/apply, so the caller also
+	// delivers the apply instruction (as ProtectResource does).
+	Moved bool
+	// ShieldPushes lists the shields whose snapshot changed, the new shield first
+	// so the new host is firewalled before the old shield drops its rule.
+	ShieldPushes []ShieldPush
+}
+
+// ErrResourceBusy: a shield-relevant edit while the resource is being
+// unprotected (protecting/remove) or deleted.
+var ErrResourceBusy = errors.New("resource is being unprotected or deleted; wait for it to finish")
+
 // Update modifies editable fields on a resource. Only non-nil fields are applied.
-func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*Row, error) {
+//
+// Sprint 20 Fix 18 (F24): a shield-enforced resource (protected, failed, or
+// protecting/apply)
+//   - goes back to protecting/apply and re-pushes its shield when host,
+//     protocol, ports or network actually change
+//     (values compared, as the admin UI sends every field), so the shield
+//     firewalls the new port at once (before, it kept the old one and the new
+//     port stayed open on the LAN);
+//   - moves to the active shield on the new host when host or remote network
+//     change (a shield protects only its own LAN IP), or is
+//     refused with ErrNoMatchingShield if there is none. The old shield only gets
+//     a snapshot without the resource, never a remove instruction, so it sends no
+//     'unprotected' ack that could undo the move.
+func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*UpdateResult, error) {
+	if input.Host != nil && strings.TrimSpace(*input.Host) == "" {
+		return nil, fmt.Errorf("update resource: host must not be empty")
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("update resource: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		status, action, host, networkID, protocol string
+		portFrom, portTo                          int
+		shieldID, connectorID                     *string
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT r.status, r.pending_action, r.host, r.remote_network_id::text, r.protocol, r.port_from, r.port_to,
+		        r.shield_id::text, s.connector_id::text
+		   FROM resources r
+		   LEFT JOIN shields s ON s.id = r.shield_id
+		  WHERE r.id = $1 AND r.tenant_id = $2
+		    FOR UPDATE OF r`,
+		id, tenantID,
+	).Scan(&status, &action, &host, &networkID, &protocol, &portFrom, &portTo, &shieldID, &connectorID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("resource not found")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update resource: %w", err)
+	}
+	// Enforced: the shield holds (or is applying) the resource's rule. An edit
+	// while a protect is still in flight (e.g. its shield is offline) is allowed
+	// and simply replaces the pending rule.
+	enforced := status == "protected" || status == "failed" || (status == "protecting" && action == "apply")
+	// Compare values, not presence: the admin UI sends every field on each save.
+	shieldChanged := changedStr(input.Host, host, true) || changedStr(input.RemoteNetworkID, networkID, false) ||
+		changedStr(input.Protocol, protocol, false) || changedInt(input.PortFrom, portFrom) || changedInt(input.PortTo, portTo)
+	if shieldChanged && ((status == "protecting" && action == "remove") || status == "deleting") {
+		return nil, fmt.Errorf("update resource: %w", ErrResourceBusy)
+	}
+
 	args := []any{id, tenantID}
 	sets := []string{"updated_at = NOW()"}
 
@@ -413,14 +490,20 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
 	}
 
+	newHost, newNetworkID := host, networkID
 	if input.RemoteNetworkID != nil {
 		add("remote_network_id", *input.RemoteNetworkID)
+		newNetworkID = *input.RemoteNetworkID
 	}
 	if input.Name != nil {
 		add("name", *input.Name)
 	}
 	if input.Description != nil {
 		add("description", *input.Description)
+	}
+	if input.Host != nil {
+		newHost = strings.TrimSpace(*input.Host)
+		add("host", newHost)
 	}
 	if input.Protocol != nil {
 		add("protocol", *input.Protocol)
@@ -432,29 +515,86 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 		add("port_to", *input.PortTo)
 	}
 
+	result := &UpdateResult{}
+	if enforced && (newHost != host || newNetworkID != networkID) {
+		var newShieldID, newConnectorID string
+		err := tx.QueryRow(ctx,
+			`SELECT s.id::text, s.connector_id::text
+			   FROM shields s
+			  WHERE s.tenant_id = $1 AND s.remote_network_id::text = $2
+			    AND s.lan_ip = $3 AND s.status = 'active'
+			  ORDER BY s.created_at
+			  LIMIT 1`,
+			tenantID, newNetworkID, newHost,
+		).Scan(&newShieldID, &newConnectorID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("update resource: no active (online) shield on %s in the resource's remote network; a protected resource's host must be a shield's LAN IP (unprotect it first, or bring that shield online): %w", newHost, ErrNoMatchingShield)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("update resource: match shield: %w", err)
+		}
+		if shieldID == nil || *shieldID != newShieldID {
+			add("shield_id", newShieldID)
+			result.Moved = true
+			result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: newConnectorID, ShieldID: newShieldID})
+		}
+	}
+	if enforced && shieldChanged {
+		// Re-protect with the new settings: the shield swaps the old rule for the
+		// new one in one nftables transaction (no unprotected gap) and acks, which
+		// turns protecting back into protected (or failed). An offline shield gets
+		// the rule from the connector's cached snapshot when it reconnects; until
+		// then the resource shows protecting and the NEW port is not firewalled
+		// (the old rule stays). A move needs an active target shield, so a host
+		// change never leaves the new host unprotected.
+		sets = append(sets, "status = 'protecting'", "pending_action = 'apply'", "error_message = NULL")
+		if shieldID != nil && connectorID != nil {
+			result.ShieldPushes = append(result.ShieldPushes, ShieldPush{ConnectorID: *connectorID, ShieldID: *shieldID})
+		}
+	}
+
 	query := fmt.Sprintf(
 		`UPDATE resources SET %s
-		  WHERE id = $1 AND tenant_id = $2
-		  RETURNING id`,
+		  WHERE id = $1 AND tenant_id = $2`,
 		joinSets(sets),
 	)
-
-	var discardedID string
-	err := db.QueryRow(ctx, query, args...).Scan(&discardedID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("resource not found")
-		}
+	if _, err := tx.Exec(ctx, query, args...); err != nil {
 		return nil, fmt.Errorf("update resource: %w", err)
 	}
-	return GetByID(ctx, db, tenantID, id)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("update resource: commit: %w", err)
+	}
+	row, err := GetByID(ctx, db, tenantID, id)
+	if err != nil {
+		return nil, err
+	}
+	result.Row = row
+	return result, nil
+}
+
+// changedStr reports whether an update field differs from the stored value
+// (Sprint 20 Fix 18): a nil field, or an equal value, is no change.
+func changedStr(in *string, cur string, trim bool) bool {
+	if in == nil {
+		return false
+	}
+	v := *in
+	if trim {
+		v = strings.TrimSpace(v)
+	}
+	return v != cur
+}
+
+func changedInt(in *int, cur int) bool {
+	return in != nil && *in != cur
 }
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
 // compiler actually reads (policy.ListEnabledRulesWithResources selects name,
 // host, port_from, protocol, shield, status and remote_network_id; the compiler
 // routes each resource through its remote network's connectors). Of those,
-// UpdateInput can change name, protocol, port_from and remote_network_id.
+// UpdateInput can change name, host (Fix 18), protocol, port_from and
+// remote_network_id.
 // description and port_to are invisible to the compiler, so changing only those
 // must not invalidate the per-workspace ACL snapshot. Callers use this to decide
 // whether to fire NotifyPolicyChange after an UpdateResource.
@@ -463,7 +603,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 // invisible); an unconditional notify in UpdateResource hid that until Fix 02
 // removed the duplicate.
 func ACLRelevantUpdate(input UpdateInput) bool {
-	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
+	return input.Name != nil || input.Host != nil || input.Protocol != nil || input.PortFrom != nil ||
 		input.RemoteNetworkID != nil
 }
 
@@ -727,13 +867,30 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 //
 // Updates within one route class (e.g. protecting → protected/failed) change no
 // compiler-visible data and return false.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (aclChanged bool, err error) {
-	if status == "unprotected" {
+// Ack is a shield's report about one resource (shield.v1.ResourceAck as
+// forwarded by the connector). ShieldID is the connector-stamped, verified
+// shield identity; Host/Protocol/PortFrom/PortTo echo the rule the shield
+// enforces (Sprint 20 Fix 18).
+type Ack struct {
+	ResourceID string
+	Status     string
+	Error      string
+	VerifiedAt int64
+	ShieldID   string
+	Host       string
+	Protocol   string
+	PortFrom   int
+	PortTo     int
+}
+
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) (aclChanged bool, err error) {
+	if ack.Status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
 			 WHERE id = $1 AND tenant_id = $2
-			   AND status = 'deleting'`,
-			resourceID, tenantID,
+			   AND status = 'deleting'
+			   AND shield_id::text = $3`,
+			ack.ResourceID, tenantID, ack.ShieldID,
 		)
 		if err != nil {
 			return false, fmt.Errorf("record ack (reap): %w", err)
@@ -754,17 +911,55 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		  WHERE r.id = prev.id
 			AND r.status != 'deleting'
 		    AND NOT (r.status = 'protecting' AND r.pending_action = 'remove' AND $2 != 'unprotected')
-		    AND NOT (r.status = 'protecting' AND r.pending_action = 'apply'  AND $2 = 'unprotected')
+		    -- Fix 18: 'unprotected' completes only an unprotect (protecting/remove).
+		    -- A stray one (e.g. a late ack from the shield a resource was moved
+		    -- away from) must not flip a protected resource to connector routing.
+		    AND ($2 != 'unprotected' OR (r.status = 'protecting' AND r.pending_action = 'remove'))
+		    -- Fix 18: only the resource's current shield may ack it, and a
+		    -- protected/failed verdict counts only for the current rule; an ack
+		    -- the shield sent for the old host/port right before an edit is stale.
+		    AND r.shield_id::text = $6
+		    AND ($2 NOT IN ('protected', 'failed')
+		         OR (r.host = $7 AND r.protocol = $8 AND r.port_from = $9 AND r.port_to = $10))
 		 RETURNING prev.status`,
-		resourceID, status, errMsg, verifiedAt, tenantID,
+		ack.ResourceID, ack.Status, ack.Error, ack.VerifiedAt, tenantID,
+		ack.ShieldID, ack.Host, ack.Protocol, ack.PortFrom, ack.PortTo,
 	).Scan(&oldStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
+		logIgnoredAck(ctx, db, tenantID, ack)
 		return false, nil // guarded out: nothing changed
 	}
 	if err != nil {
 		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return connectorRouted(oldStatus) != connectorRouted(status), nil
+	return connectorRouted(oldStatus) != connectorRouted(ack.Status), nil
+}
+
+// logIgnoredAck says why an ack changed nothing, when the reason is a wrong
+// shield or a stale rule (Fix 18), so a resource stuck in 'protecting' can be
+// diagnosed from the controller log. Status-guard cases stay silent: they are
+// routine (a periodic ack while an unprotect is in flight).
+func logIgnoredAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) {
+	var (
+		shieldID, host, protocol string
+		portFrom, portTo         int
+	)
+	if err := db.QueryRow(ctx,
+		`SELECT COALESCE(shield_id::text, ''), host, protocol, port_from, port_to
+		   FROM resources WHERE id = $1 AND tenant_id = $2`,
+		ack.ResourceID, tenantID,
+	).Scan(&shieldID, &host, &protocol, &portFrom, &portTo); err != nil {
+		return
+	}
+	switch {
+	case shieldID != ack.ShieldID:
+		log.Printf("resource ack ignored: resource=%s status=%s from shield %q, but the resource is bound to %q",
+			ack.ResourceID, ack.Status, ack.ShieldID, shieldID)
+	case (ack.Status == "protected" || ack.Status == "failed") &&
+		(host != ack.Host || protocol != ack.Protocol || portFrom != ack.PortFrom || portTo != ack.PortTo):
+		log.Printf("resource ack ignored: resource=%s status=%s is for rule %s %s/%d-%d, current rule is %s %s/%d-%d (stale)",
+			ack.ResourceID, ack.Status, ack.Host, ack.Protocol, ack.PortFrom, ack.PortTo, host, protocol, portFrom, portTo)
+	}
 }
 
 // connectorRouted mirrors policy.routeTypeForResource: pending and unprotected
