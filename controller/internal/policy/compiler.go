@@ -94,7 +94,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 	}
 
 	// Batch connector fetch — all active connectors for the referenced RNs.
-	connectorRows, err := store.GetConnectorsForRemoteNetworks(ctx, rnIDs)
+	connectorRows, err := store.GetConnectorsForRemoteNetworks(ctx, workspaceID, rnIDs)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: connector lookup: %w", err)
 	}

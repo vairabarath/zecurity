@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tokio::sync::watch;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::cert_manager::{CertManager, CertMaterial};
 use crate::config::RelayConfig;
@@ -16,6 +16,13 @@ use crate::state::RelayState;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Trailer key and value the controller attaches when this relay is revoked or
+/// deleted (Sprint 20 F32; controller `connector.RelayStateMarkerKey`). Only
+/// the marker is terminal: a refusal without it (a superseded serial, an
+/// unreadable status, `Unavailable`) keeps the retry loop.
+const RELAY_STATE_MARKER_KEY: &str = "zecurity-relay-state";
+const RELAY_STATE_REVOKED: &str = "revoked";
 
 /// Heartbeat inputs taken from RelayConfig.
 #[derive(Clone, Debug)]
@@ -133,6 +140,15 @@ pub async fn run_with<T: HeartbeatTransport>(
                 info!("Relay certificate renewed; reconnecting heartbeat with the new identity");
                 continue;
             }
+            Err(e) if is_terminal_refusal(&e) => {
+                // Revoked is terminal (Sprint 20 invariant): stop dialling
+                // instead of retrying every RECONNECT_DELAY forever (F32).
+                error!(
+                    error = %e,
+                    "controller reports this Relay revoked; heartbeat stopped. Replace the relay to bring it back"
+                );
+                return;
+            }
             Err(e) => warn!(error = %e, "Relay heartbeat connection ended"),
         }
         // Back off before reconnecting — but reconnect at once if a renewed
@@ -204,6 +220,20 @@ async fn run_connected<T: HeartbeatTransport>(
             }
         }
     }
+}
+
+/// True only for a PermissionDenied carrying the controller's revoked marker.
+fn is_terminal_refusal(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .any(|status| {
+            status.code() == tonic::Code::PermissionDenied
+                && status
+                    .metadata()
+                    .get(RELAY_STATE_MARKER_KEY)
+                    .and_then(|v| v.to_str().ok())
+                    == Some(RELAY_STATE_REVOKED)
+        })
 }
 
 fn controller_host(controller_addr: &str) -> Result<String> {
@@ -441,6 +471,116 @@ mod tests {
         assert_eq!(sent, want, "request carries the registered ids");
         assert!(state.is_revoked(&revoked));
         assert!(c2.close_reason().is_none(), "unlisted connector untouched");
+    }
+
+    /// Connects fine, then refuses every heartbeat with `refusal()`, wrapped
+    /// the way `GrpcHeartbeat::send` wraps it.
+    #[derive(Clone)]
+    struct RefusingTransport {
+        refusal: fn() -> tonic::Status,
+        connects: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HeartbeatTransport for RefusingTransport {
+        type Conn = ();
+
+        async fn connect(&self, _material: &CertMaterial) -> Result<()> {
+            self.connects
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _conn: &mut (),
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            Err((self.refusal)()).context("Relay Heartbeat RPC failed")
+        }
+    }
+
+    fn revoked_marker_status() -> tonic::Status {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert(RELAY_STATE_MARKER_KEY, RELAY_STATE_REVOKED.parse().unwrap());
+        tonic::Status::with_metadata(
+            tonic::Code::PermissionDenied,
+            "relay certificate revoked",
+            md,
+        )
+    }
+
+    /// Runs the heartbeat against `refusal` for 60 s of paused time and
+    /// returns (connect attempts, whether the loop ended).
+    async fn connects_in_a_minute(refusal: fn() -> tonic::Status) -> (usize, bool) {
+        let pki = TestPki::new();
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-hb-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let transport = RefusingTransport {
+            refusal,
+            connects: Arc::default(),
+        };
+        let settings = HeartbeatSettings {
+            listen_port: 9093,
+            max_connections: 16,
+            default_interval: Duration::from_secs(3600),
+        };
+        let task = tokio::spawn(run_with(
+            transport.clone(),
+            settings,
+            manager,
+            RelayState::new(),
+        ));
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let finished = task.is_finished();
+        task.abort();
+        (
+            transport.connects.load(std::sync::atomic::Ordering::SeqCst),
+            finished,
+        )
+    }
+
+    /// F32: the controller's revoked marker stops the heartbeat for good.
+    #[tokio::test(start_paused = true)]
+    async fn revoked_marker_stops_the_heartbeat() {
+        let (connects, finished) = connects_in_a_minute(revoked_marker_status).await;
+        assert_eq!(connects, 1, "a revoked relay must not redial");
+        assert!(finished, "the heartbeat loop must end");
+    }
+
+    /// F32 guard: refusals without the marker keep the 5 s retry — a revoked
+    /// serial of a live relay, and the fail-closed Unavailable.
+    #[tokio::test(start_paused = true)]
+    async fn refusals_without_the_marker_keep_retrying() {
+        for refusal in [
+            (|| tonic::Status::permission_denied("relay certificate revoked"))
+                as fn() -> tonic::Status,
+            || tonic::Status::unavailable("relay revocation state unavailable"),
+            || {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(RELAY_STATE_MARKER_KEY, "unknown".parse().unwrap());
+                tonic::Status::with_metadata(tonic::Code::PermissionDenied, "x", md)
+            },
+            || {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(RELAY_STATE_MARKER_KEY, RELAY_STATE_REVOKED.parse().unwrap());
+                tonic::Status::with_metadata(tonic::Code::Unavailable, "x", md)
+            },
+        ] {
+            let (connects, finished) = connects_in_a_minute(refusal).await;
+            assert!(connects >= 10, "only {connects} attempts in 60 s");
+            assert!(!finished, "the heartbeat loop must keep running");
+        }
     }
 
     async fn wait_for_connects(transport: &RecordingTransport, n: usize) -> Vec<String> {

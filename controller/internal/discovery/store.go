@@ -4,7 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
 
 type DiscoveredService struct {
@@ -88,27 +91,59 @@ func ReplaceDiscoveredServices(ctx context.Context, db *pgxpool.Pool, shieldID s
 	return tx.Commit(ctx)
 }
 
-func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]DiscoveredService, error) {
+// ErrShieldNotFound answers a shield that doesn't exist or belongs to another
+// workspace, with one user-safe message for both, so the response reveals
+// nothing about other workspaces' shields or what they discovered.
+var ErrShieldNotFound = apperr.UserErrorf("shield not found")
+
+// GetDiscoveredServices returns the services discovered on one of tenantID's
+// shields (an empty list if it has none). The shield's ownership is checked in
+// the same query: a foreign, missing or malformed shield ID is
+// ErrShieldNotFound, never another workspace's services.
+func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) ([]DiscoveredService, error) {
+	if _, err := uuid.Parse(shieldID); err != nil {
+		return nil, ErrShieldNotFound
+	}
 	rows, err := db.Query(ctx, `
-		SELECT shield_id, protocol, port, bound_ip, service_name, first_seen, last_seen
-		FROM shield_discovered_services
-		WHERE shield_id=$1
-		ORDER BY port ASC
-	`, shieldID)
+		SELECT s.id::text, d.protocol, d.port, d.bound_ip, d.service_name, d.first_seen, d.last_seen
+		FROM shields s
+		LEFT JOIN shield_discovered_services d ON d.shield_id = s.id
+		WHERE s.id=$1 AND s.tenant_id=$2
+		ORDER BY d.port ASC
+	`, shieldID, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []DiscoveredService
+	owned := false
+	result := []DiscoveredService{}
 	for rows.Next() {
-		var s DiscoveredService
-		if err := rows.Scan(&s.ShieldID, &s.Protocol, &s.Port, &s.BoundIP, &s.ServiceName, &s.FirstSeen, &s.LastSeen); err != nil {
+		owned = true
+		// The service columns are NULL on the shield's row when it has none.
+		var (
+			s                              DiscoveredService
+			protocol, boundIP, serviceName *string
+			port                           *int
+			firstSeen, lastSeen            *time.Time
+		)
+		if err := rows.Scan(&s.ShieldID, &protocol, &port, &boundIP, &serviceName, &firstSeen, &lastSeen); err != nil {
 			return nil, err
 		}
+		if protocol == nil {
+			continue
+		}
+		s.Protocol, s.Port, s.BoundIP, s.ServiceName = *protocol, *port, *boundIP, *serviceName
+		s.FirstSeen, s.LastSeen = *firstSeen, *lastSeen
 		result = append(result, s)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !owned {
+		return nil, ErrShieldNotFound
+	}
+	return result, nil
 }
 
 func DeleteDiscoveredService(ctx context.Context, db *pgxpool.Pool, shieldID, protocol string, port int) error {
@@ -142,13 +177,19 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 	return tx.Commit(ctx)
 }
 
-func GetScanResults(ctx context.Context, db *pgxpool.Pool, requestID string) ([]ScanResult, error) {
+// GetScanResults returns tenantID's results for a scan request: only rows
+// reported by tenantID's own connectors (FU-3). A result row's connector is the
+// authenticated stream that reported it, and a connector's workspace never
+// changes, so the join is the ownership check; the request ID is not.
+// Foreign and unknown request IDs both return an empty list.
+func GetScanResults(ctx context.Context, db *pgxpool.Pool, tenantID, requestID string) ([]ScanResult, error) {
 	rows, err := db.Query(ctx, `
-		SELECT request_id, connector_id, ip, port, protocol, service_name, first_seen
-		FROM connector_scan_results
-		WHERE request_id=$1
-		ORDER BY ip, port
-	`, requestID)
+		SELECT r.request_id, r.connector_id, r.ip, r.port, r.protocol, r.service_name, r.first_seen
+		FROM connector_scan_results r
+		JOIN connectors c ON c.id = r.connector_id AND c.tenant_id = $2
+		WHERE r.request_id=$1
+		ORDER BY r.ip, r.port
+	`, requestID, tenantID)
 	if err != nil {
 		return nil, err
 	}

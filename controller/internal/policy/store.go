@@ -13,6 +13,17 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// validUUIDs reports whether every id parses as a UUID. A malformed ID can't
+// name a row, so callers answer ErrNotFound instead of a Postgres cast error.
+func validUUIDs(ids ...string) bool {
+	for _, id := range ids {
+		if _, err := uuid.Parse(id); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // GroupRow is a group record with pre-loaded members and resources.
 type GroupRow struct {
 	ID          string
@@ -145,6 +156,9 @@ func (s *Store) DeleteGroup(ctx context.Context, id string) error {
 }
 
 func (s *Store) GetGroup(ctx context.Context, id string) (*GroupRow, error) {
+	if !validUUIDs(id) {
+		return nil, ErrNotFound
+	}
 	row := &GroupRow{}
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, workspace_id, name, description, created_at, updated_at,
@@ -188,14 +202,33 @@ func (s *Store) ListGroups(ctx context.Context, workspaceID string) ([]*GroupRow
 
 // ── Members ───────────────────────────────────────────────────────────────
 
-func (s *Store) AddGroupMember(ctx context.Context, groupID, userID string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)
-		 ON CONFLICT DO NOTHING`,
-		groupID, userID,
-	)
+// AddGroupMember adds userID to groupID. Both must belong to workspaceID
+// (B-1: client-supplied IDs are not proof of ownership); otherwise nothing is
+// written and ErrNotFound is returned. Adding an existing member succeeds.
+func (s *Store) AddGroupMember(ctx context.Context, workspaceID, groupID, userID string) error {
+	if !validUUIDs(workspaceID, groupID, userID) {
+		return ErrNotFound
+	}
+	var matched int
+	err := s.pool.QueryRow(ctx,
+		`WITH target AS (
+		     SELECT g.id AS group_id, u.id AS user_id
+		       FROM groups g
+		       JOIN users u ON u.tenant_id = g.workspace_id
+		      WHERE g.id = $1 AND u.id = $2 AND g.workspace_id = $3
+		 ), ins AS (
+		     INSERT INTO group_members (group_id, user_id)
+		     SELECT group_id, user_id FROM target
+		     ON CONFLICT DO NOTHING
+		 )
+		 SELECT count(*) FROM target`,
+		groupID, userID, workspaceID,
+	).Scan(&matched)
 	if err != nil {
 		return fmt.Errorf("add group member: %w", err)
+	}
+	if matched == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
@@ -214,11 +247,16 @@ func (s *Store) RemoveGroupMember(ctx context.Context, groupID, userID string) e
 	return nil
 }
 
-// ListGroupMembers returns user IDs that belong to a group.
-func (s *Store) ListGroupMembers(ctx context.Context, groupID string) ([]string, error) {
+// ListGroupMembers returns the IDs of a workspace group's members. Rows whose
+// group or user belongs to another workspace are ignored (B-1).
+func (s *Store) ListGroupMembers(ctx context.Context, workspaceID, groupID string) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT user_id FROM group_members WHERE group_id = $1`,
-		groupID,
+		`SELECT gm.user_id
+		   FROM group_members gm
+		   JOIN groups g ON g.id = gm.group_id
+		   JOIN users u ON u.id = gm.user_id AND u.tenant_id = g.workspace_id
+		  WHERE gm.group_id = $1 AND g.workspace_id = $2`,
+		groupID, workspaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list group members: %w", err)
@@ -238,25 +276,46 @@ func (s *Store) ListGroupMembers(ctx context.Context, groupID string) ([]string,
 
 // ── Access Rules ──────────────────────────────────────────────────────────
 
+// AssignResourceToGroup creates (or re-enables) the rule granting groupID
+// access to resourceID. The resource and the group must both belong to
+// workspaceID, and an existing rule is updated only if it belongs to
+// workspaceID too (B-1). Otherwise nothing is written and ErrNotFound is
+// returned, the same as for IDs that don't exist.
 func (s *Store) AssignResourceToGroup(ctx context.Context, workspaceID, resourceID, groupID string) (*AccessRuleRow, error) {
+	if !validUUIDs(workspaceID, resourceID, groupID) {
+		return nil, ErrNotFound
+	}
 	row := &AccessRuleRow{}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO access_rules (workspace_id, resource_id, group_id)
-		 VALUES ($1, $2, $3)
+		 SELECT $1, r.id, g.id
+		   FROM resources r, groups g
+		  WHERE r.id = $2 AND r.tenant_id = $1
+		    AND g.id = $3 AND g.workspace_id = $1
 		 ON CONFLICT (resource_id, group_id) DO UPDATE SET enabled = TRUE, updated_at = NOW()
+		  WHERE access_rules.workspace_id = EXCLUDED.workspace_id
 		 RETURNING id, workspace_id, resource_id, group_id, enabled, created_at, updated_at`,
 		workspaceID, resourceID, groupID,
 	).Scan(&row.ID, &row.WorkspaceID, &row.ResourceID, &row.GroupID, &row.Enabled, &row.CreatedAt, &row.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("assign resource to group: %w", err)
 	}
 	return row, nil
 }
 
-func (s *Store) UnassignResourceFromGroup(ctx context.Context, resourceID, groupID string) error {
+// UnassignResourceFromGroup deletes workspaceID's rule for (resourceID,
+// groupID). A rule owned by another workspace is never touched (B-1): it reads
+// as ErrNotFound, like a rule that doesn't exist.
+func (s *Store) UnassignResourceFromGroup(ctx context.Context, workspaceID, resourceID, groupID string) error {
+	if !validUUIDs(workspaceID, resourceID, groupID) {
+		return ErrNotFound
+	}
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM access_rules WHERE resource_id = $1 AND group_id = $2`,
-		resourceID, groupID,
+		`DELETE FROM access_rules WHERE resource_id = $1 AND group_id = $2 AND workspace_id = $3`,
+		resourceID, groupID, workspaceID,
 	)
 	if err != nil {
 		return fmt.Errorf("unassign resource from group: %w", err)
@@ -281,11 +340,50 @@ func (s *Store) SetRuleEnabled(ctx context.Context, id string, enabled bool) err
 	return nil
 }
 
-// ListGroupsForResource returns group IDs that have an enabled access rule for a resource.
-func (s *Store) ListGroupsForResource(ctx context.Context, resourceID string) ([]string, error) {
+// ListGroupsByResource returns, for every resource in the workspace, the groups
+// with an enabled access rule for it, in one query (Sprint 20 F25: resource
+// lists showed no groups, so the delete dialog couldn't say who loses access).
+func (s *Store) ListGroupsByResource(ctx context.Context, workspaceID string) (map[string][]*GroupRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT group_id FROM access_rules WHERE resource_id = $1 AND enabled = TRUE`,
-		resourceID,
+		`SELECT ar.resource_id, g.id, g.workspace_id, g.name, g.description, g.created_at, g.updated_at,
+		        g.origin, g.external_id, g.connection_id
+		   FROM access_rules ar
+		   -- B-1: the rule's resource and group must belong to its workspace.
+		   JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+		   JOIN groups g ON g.id = ar.group_id AND g.workspace_id = ar.workspace_id
+		  WHERE ar.workspace_id = $1 AND ar.enabled = TRUE
+		  ORDER BY g.name`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list groups by resource: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string][]*GroupRow)
+	for rows.Next() {
+		var resourceID string
+		row := &GroupRow{}
+		if err := rows.Scan(&resourceID, &row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt,
+			&row.UpdatedAt, &row.Origin, &row.ExternalID, &row.ConnectionID); err != nil {
+			return nil, fmt.Errorf("scan resource group: %w", err)
+		}
+		out[resourceID] = append(out[resourceID], row)
+	}
+	return out, rows.Err()
+}
+
+// ListGroupsForResource returns the groups with an enabled rule for a
+// workspace resource. Only rules whose workspace, resource and group all
+// match workspaceID count (B-1).
+func (s *Store) ListGroupsForResource(ctx context.Context, workspaceID, resourceID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ar.group_id
+		   FROM access_rules ar
+		   JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+		   JOIN groups g ON g.id = ar.group_id AND g.workspace_id = ar.workspace_id
+		  WHERE ar.resource_id = $1 AND ar.workspace_id = $2 AND ar.enabled = TRUE`,
+		resourceID, workspaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list groups for resource: %w", err)
@@ -303,11 +401,17 @@ func (s *Store) ListGroupsForResource(ctx context.Context, resourceID string) ([
 	return ids, rows.Err()
 }
 
-// ListResourcesForGroup returns resource IDs assigned to a group.
-func (s *Store) ListResourcesForGroup(ctx context.Context, groupID string) ([]string, error) {
+// ListResourcesForGroup returns the resources assigned to a workspace group.
+// Only rules whose workspace, resource and group all match workspaceID count
+// (B-1).
+func (s *Store) ListResourcesForGroup(ctx context.Context, workspaceID, groupID string) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT resource_id FROM access_rules WHERE group_id = $1 AND enabled = TRUE`,
-		groupID,
+		`SELECT ar.resource_id
+		   FROM access_rules ar
+		   JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+		   JOIN groups g ON g.id = ar.group_id AND g.workspace_id = ar.workspace_id
+		  WHERE ar.group_id = $1 AND ar.workspace_id = $2 AND ar.enabled = TRUE`,
+		groupID, workspaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list resources for group: %w", err)
@@ -359,9 +463,13 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 			            OR EXISTS (SELECT 1 FROM shield_revocations sr WHERE sr.shield_id = r.shield_id)
 			        ))
 			 FROM access_rules ar
-			 JOIN resources r ON r.id = ar.resource_id
-			 JOIN remote_networks rn ON rn.id = r.remote_network_id
-			 LEFT JOIN shields s ON s.id = r.shield_id
+			 -- B-1: every joined row must belong to the rule's workspace, so an
+			 -- inconsistent row can never pull another tenant into the snapshot.
+			 -- A shield from another workspace reads as missing (fails closed).
+			 JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+			 JOIN groups g ON g.id = ar.group_id AND g.workspace_id = ar.workspace_id
+			 JOIN remote_networks rn ON rn.id = r.remote_network_id AND rn.tenant_id = ar.workspace_id
+			 LEFT JOIN shields s ON s.id = r.shield_id AND s.tenant_id = ar.workspace_id
 			 WHERE ar.workspace_id = $1
 			   AND ar.enabled = TRUE
 			   AND r.status != 'deleting'`,
@@ -496,7 +604,8 @@ type RemoteNetworkConnectorsRow struct {
 // connectors from this result to preserve partial-availability semantics.
 // Each row includes per-connector relay coordinates from connector_relay_placement
 // (LEFT JOIN so connectors without a placement still appear as direct-only).
-func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetworkIDs []string) ([]*RemoteNetworkConnectorsRow, error) {
+// Only workspaceID's connectors are returned, whatever RN IDs are passed (B-1).
+func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, workspaceID string, remoteNetworkIDs []string) ([]*RemoteNetworkConnectorsRow, error) {
 	if len(remoteNetworkIDs) == 0 {
 		return nil, nil
 	}
@@ -516,9 +625,10 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 		   LEFT JOIN connector_relay_placement crp ON crp.connector_id = c.id
 		   LEFT JOIN relays r ON r.id = crp.relay_id AND r.status = 'active'
 		  WHERE c.remote_network_id = ANY($1::uuid[])
+		    AND c.tenant_id = $2
 		    AND c.status = 'active'
 		  ORDER BY c.remote_network_id, c.last_heartbeat_at DESC NULLS LAST`,
-		remoteNetworkIDs,
+		remoteNetworkIDs, workspaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get connectors for remote networks: %w", err)

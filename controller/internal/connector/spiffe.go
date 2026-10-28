@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"strings"
 
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -59,7 +61,21 @@ type WorkspaceStore interface {
 	// connector connectorID in trustDomain. Returns (nil, nil) if no such
 	// connector exists and (nil, err) if the state cannot be read.
 	GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error)
+
+	// GetRelayStatus loads relays.status for relayID. Returns ("", nil) if no
+	// such relay exists and ("", err) if the status cannot be read.
+	GetRelayStatus(ctx context.Context, relayID string) (string, error)
 }
+
+// RelayStateMarkerKey is the gRPC trailer key on a refused relay RPC that
+// carries the relay's authoritative state (Sprint 20 F32). It is attached only
+// when the relay row itself is terminal; a revoked serial alone (a superseded
+// renewal) gets no marker. gRPC metadata keys are lower-case ASCII.
+const RelayStateMarkerKey = "zecurity-relay-state"
+
+// RelayStateRevoked is the only marker value: the relay is revoked or
+// deleted, both terminal. The relay stops its heartbeat on it.
+const RelayStateRevoked = "revoked"
 
 // WorkspaceLookup is the minimal workspace info needed by the trust domain validator.
 // We define our own type instead of importing models.Workspace to avoid coupling.
@@ -227,6 +243,7 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 				return nil, status.Error(codes.Unavailable, "relay revocation state unavailable")
 			}
 			if revChecker.IsRevoked(leaf.SerialNumber.Text(16)) {
+				markTerminalRelay(ctx, store, entityID)
 				return nil, status.Error(codes.PermissionDenied, "relay certificate revoked")
 			}
 		}
@@ -238,6 +255,23 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		ctx = spiffe.WithIdentity(ctx, spiffeID, role, entityID, trustDomain)
 
 		return handler(ctx, req)
+	}
+}
+
+// markTerminalRelay attaches the revoked marker trailer when the relay row is
+// revoked or deleted (Sprint 20 F32). A failed lookup or a live relay gets no
+// marker: the call is still refused, but the relay keeps retrying.
+func markTerminalRelay(ctx context.Context, store WorkspaceStore, relayID string) {
+	relayStatus, err := store.GetRelayStatus(ctx, relayID)
+	if err != nil {
+		log.Printf("relay %s: revoked serial; relay status unavailable, no marker: %v", relayID, err)
+		return
+	}
+	if relayStatus != "revoked" && relayStatus != "deleted" {
+		return
+	}
+	if err := grpc.SetTrailer(ctx, metadata.Pairs(RelayStateMarkerKey, RelayStateRevoked)); err != nil {
+		log.Printf("relay %s: set revoked marker: %v", relayID, err)
 	}
 }
 

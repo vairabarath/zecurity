@@ -21,6 +21,8 @@ func TestACLRelevantUpdate(t *testing.T) {
 		{"port_to only", UpdateInput{PortTo: aclIntPtr(9000)}, false},
 		// The compiler routes through the resource's remote network (Fix 02).
 		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, true},
+		// Fix 18 (F24): the compiler reads host.
+		{"host only", UpdateInput{Host: aclStrPtr("10.0.0.2")}, true},
 		{"empty input", UpdateInput{}, false},
 		{"irrelevant + relevant", UpdateInput{Description: aclStrPtr("note"), Protocol: aclStrPtr("udp")}, true},
 		{"all irrelevant", UpdateInput{Description: aclStrPtr("n"), PortTo: aclIntPtr(1)}, false},

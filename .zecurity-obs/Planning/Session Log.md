@@ -3146,6 +3146,99 @@ serves on `127.0.0.1:9102`.
 - Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
 
 
+## 2026-10-27 — path.md status pass, F20 closed, Sprint 20 Fix 17 (F32): FIXED in code
+- `path.md` statuses refreshed against the code (branch `sprint20/docs-pathmd-status`, local): F33/F28/F35/F36/F7 closed, F15 fixed in code, cert-audit findings merged (#137). F20 was already fixed by bug 3 (`86a436de`); added the "shield deleted without a revoke" test case (mutation-checked).
+- F32 on `sprint20/fix17-revoked-relay-heartbeat` (local, `d89c0310`):
+  - the interceptor adds `zecurity-relay-state: revoked` only when the relay row is revoked/deleted;
+  - the relay ends its heartbeat on that marker and keeps retrying on anything else.
+- Tests: relay 118, controller 1418 pass, 0 fail; 5/5 mutants killed. Live check pending (needs a super-admin with TOTP to revoke a lab relay).
+- Still open: F24, F25, F30 (runbook), F43, F4/F5 controller half.
+
+
+## 2026-10-27 — docs PR: runbook corrections, gqlgen command
+- Branch `sprint20/docs-runbook-corrections` (on top of #144).
+- `docs/sprint20-live-acceptance-runbook.md` §11: `kill -STOP` instead of `pkill -9` (F30, closed).
+- `docs/certificate-audit-live-runbook.md`:
+  - the six Fix 14 corrections (grpcurl import path, unexpired-only CRL, token messages, LAN relay flag, stage G order + `logout` stops the daemon, `buf generate` exclude);
+  - Sprint 22 provider TOTP login;
+  - Fix 16 / F19 guards on connector revoke and delete.
+- gqlgen command corrected in CLAUDE.md, agent.md, studyplan.md and CodeStudy 01; verified it regenerates with no diff.
+- Live F32 + F20 PASS recorded in #144. PRs #143 and #144 opened.
+
+
+## 2026-10-27 — Sprint 20 Fix 18 (F24 + F52 + F53): FIXED, live PASS
+- Branch `sprint20/fix18-resource-host-edit` (local; merged #143–#145 in for path.md).
+- F24: `updateResource` takes host. A protected resource moves to the active shield on the new host, or is refused. Decision (user): protected too; admin UI Host field as an exception to the admin/ rule.
+- F52 (new): editing a protected resource's port never reached its shield; the new port stayed open on the LAN (reproduced live). Fixed: shield-relevant edits re-push the shield.
+- `RecordAck` takes `unprotected` only for an unprotect.
+- F53 (new): the Edit Resource dialog lost typed values on each poll; fixed.
+- Tests: controller 1426 pass; admin 114 pass; 17 mutants killed.
+- Live: port edit applied on the shield in 20 ms; API host move s1→s2 and UI move back s2→s1 with LAN firewall checks; no-shield host refused.
+
+
+## 2026-10-27 — Sprint 20 Fix 19 (F25 + F54): FIXED, live PASS
+- On the #146 branch (local commit `dfcaed60`).
+- F25: Delete opens a dialog that lists the groups losing access and offers Edit instead (user decision).
+- F54 (new): resource list queries never returned groups; now one batched query.
+- Live: the dialog names `cl-group`; Edit instead opens Edit without deleting; a real delete removes the resource and its rule; the Groups column is filled.
+- Tests: controller 1435 pass; admin 114 pass; ESLint clean.
+
+
+## 2026-10-27 — Fix 18 follow-up: acks name their shield and rule (user-approved)
+- Commit `9a535189` on the #146 branch (local).
+- Proto: `ResourceAck` gains fields 6–10 (additive).
+- The shield echoes the rule in every ack; the connector stamps the verified shield id; the controller's `RecordAck` is strict (current shield only; protected/failed only for the current rule), and ignored acks are logged.
+- A shield LAN-IP change now pushes the shield its snapshot.
+- Tests: controller 1435, connector 269, shield 59; mutants killed (one equivalent).
+- Live with all-new binaries: port edit and two host moves reached `protected`; the old shield's late acks were ignored as "wrong shield"; LAN firewall state correct.
+
+
+## 2026-10-27 — Sprint 20 Fix 20 (F43): FIXED, live old-vs-new PASS
+- Client commit `f8906bb0` on the #146 branch.
+- `relay_pool`: an aged relay connection is retired (closed when its last flow ends) instead of closed with its flows on it.
+- `transport`: after a cooldown expires, flows keep the relay and a single-flight background probe re-checks the direct path; max cooldown 2 h → 2 min.
+- Tests: 3 + 6 new; 11 mutants killed; client 282 pass.
+- Live, with the direct path blocked by nft and a new relay `f43-relay-local`:
+  - held flow at 75 s: old reset → new 200;
+  - the flow at cooldown expiry: 2.09 s → 0.07 s;
+  - 3 min with no stall over 1 s;
+  - unblocked → direct again in 99 s.
+- With this, every Sprint 20 finding is closed apart from the close-out paperwork (F4/F5 status, Phase G boxes).
+
+## 2026-10-27 — Sprint 22 AT-T live acceptance: PASS
+- Isolated stack: throwaway DB with 45 migrations, its own Valkey on :6390, controller on :18080; the provider code matches `fixed-pendings` `fcb7e4eb`.
+- Driver `~/.cache/zecurity-phaset/at_t.py` (local): 40/40 API checks, AT-T1…T12 and AT-CORE-1.
+- Console (Orca browser): forced change → QR + setup key → confirm → dashboard; sign out → verify page → wrong code alert → correct code → dashboard.
+- Note: on the 5-wrong-codes lockout, the 6th attempt gets 429.
+- Recorded in Acceptance-Test-Plan → "Live run — Phase T"; Sprint22 path.md V1 ticked. Branch `sprint22/at-t-live-run` (local).
+
+## 2026-10-27 — Security fix B-1: cross-tenant access rules, groups and memberships
+- Branch `security/b1-cross-tenant-isolation` (worktree `../zecurity-b1`, base `fcb7e4eb` = `fixed-pendings`); not committed. Phase E work untouched on its own branch.
+- Confirmed on a throwaway DB with two fabricated workspaces: foreign group read (member emails, resource hosts), foreign rule delete (delayed denial of access), foreign rule/membership writes, foreign connector LAN addresses in the caller's snapshot. No cross-tenant network access (enforcement at the foreign connector holds).
+- Fix: workspace-scoped store mutations and reads, compiler joins require one workspace, foreign = missing with user-safe messages. No migration (schema constraints tracked as FU-2 in Sprint22/path.md).
+- Tests: 8 new DB-backed tests, all failing before the fix; controller 1420 pass / 0 fail / 2 skip (unconditional stubs).
+- Lab DB not checked (no access from this machine). Read-only queries for M1 — each should return 0:
+  - `SELECT count(*) FROM access_rules ar JOIN resources r ON r.id = ar.resource_id WHERE r.tenant_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM access_rules ar JOIN groups g ON g.id = ar.group_id WHERE g.workspace_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM group_members gm JOIN groups g ON g.id = gm.group_id JOIN users u ON u.id = gm.user_id WHERE u.tenant_id <> g.workspace_id;`
+
+
+## 2026-10-27 — Security fix: resource remote-network ownership (from the B-1 review)
+- Branch `security/resource-network-ownership` (worktree `../zecurity-rn`, base `fcb7e4eb` plus the uncommitted B-1 changes applied as a first layer); not committed.
+- Confirmed: create/update accepted another workspace's remote network and returned its name; pre-B-1, the snapshot routed the resource through the foreign network's connector.
+- Fix: the store's INSERT/UPDATE check the network's tenant in the same statement; read joins hide a foreign network's name; one "remote network not found" for foreign, missing and malformed IDs. No migration.
+- Tests: 6 new DB-backed tests (failing before the fix); controller 1426 pass / 0 fail / 2 skip.
+- Lab check for existing rows (read-only, for M1; should return 0): `SELECT count(*) FROM resources r JOIN remote_networks rn ON rn.id = r.remote_network_id WHERE rn.tenant_id <> r.tenant_id;`
+- Review follow-up: discovered-service lookup now workspace-scoped (`getDiscoveredServices` returned any workspace's services; `promoteDiscoveredService` probe closed); tests strengthened (read error fails, compiler positive control, no false concurrency claim). Controller 1429 pass / 0 fail / 2 skip. New open finding FU-3 (`triggerScan` / `getScanResults` not workspace-scoped, likely High) recorded in Sprint22/path.md; not fixed (needs approval).
+
+## 2026-10-27 — Security fix FU-3: scan dispatch and scan results workspace-scoped
+- Branch `security/fu3-scan-authorization` (worktree `../zecurity-fu3`, base `fcb7e4eb`); not committed. Independent of the B-1 and resource-network branches.
+- Confirmed with fake streams and a throwaway DB: `triggerScan` reached another workspace's connector; `getScanResults` returned another workspace's results.
+- Fix: `PushScanCommand(workspaceID, …)` checks the live stream's authenticated tenant; `GetScanResults` joins the reporting connector's workspace; one user-safe error for any unavailable connector. No migration.
+- Tests: 4 new (1 registry, 3 DB-backed resolver), failing before the fix; controller 1416 pass / 0 fail / 2 skip.
+- Open: result key lacks the connector (theoretical squatting by a connector that knows a foreign request ID; needs a migration); no per-request connector binding within a workspace.
+- Review follow-up: refused scan dispatches are now logged server-side with the real reason (`not_connected` / `foreign_workspace`); client message unchanged. Controller 1417 pass / 0 fail / 2 skip.
+
 ## 2026-10-27 — Sprint 22 Phase E (relay enrolment from the console): implemented, live AT-E1…E3 PASS
 - Branch `sprint22/phase-e-relay-enrollment` (local, not committed).
 - Controller: shared `pki.IntermediateFingerprint` (shield + connector token now use it); `POST /provider/relays` adds `ca_fingerprint`, `controller_grpc_addr`, `controller_http_addr` (fingerprint read before any write); optional `PROVIDER_RELAY_CONTROLLER_ADDR` / `_HTTP_ADDR` (validated host:port, fail-fast).

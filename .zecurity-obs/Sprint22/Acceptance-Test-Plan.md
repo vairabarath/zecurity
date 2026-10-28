@@ -50,6 +50,35 @@ tags: [sprint22, tests, acceptance, provider-dashboard, totp, relay-management, 
 | AT-T11 | Super-admin changes password (forced and voluntary) | Response carries an `mfa` token, never a full one |
 | AT-T12 | Demoted super-admin (now relay-ops) with TOTP still enabled signs in | `mfa:"verify"`; a password-only token for them → 403 `mfa_required` |
 
+### Live run — Phase T (2026-10-27): PASS
+
+**Setup:**
+- Isolated local stack, not the shared lab: a throwaway database (`zecurity_live_phaset_*`, all 45 migrations), its own Valkey (`127.0.0.1:6390`, container `zecurity-phaset-valkey`), and a controller on ports 18080/19090 with fresh secrets and a create-only bootstrap super-admin.
+- The controller binary was built from the `sprint20/fix18-resource-host-edit` branch. Its provider, TOTP, middleware and console code is identical to `fixed-pendings` `fcb7e4eb` (empty diff).
+- The provider console dev server (`provider-console`, a temporary untracked Vite config proxying to :18080) was driven in Orca's browser.
+- TOTP codes were computed from the secret each enrolment returned, standing in for an authenticator app.
+- Tokens "minted before Phase T" (T10, T12) were signed with the stack's own provider key, with `amr: ["pwd"]` and no MFA stage, exactly as a pre-Phase-T controller issued them.
+- Run from Sathiya's session; the throwaway database, Valkey and processes were removed afterwards.
+
+**Results: 40/40 API checks passed, plus the console checks for T1.**
+
+| Case | Result | Evidence |
+|---|---|---|
+| AT-T1 | PASS (API and console) | bootstrap super-admin with no TOTP → `mfa:"enroll"`, `amr:["pwd"]`; the enroll token gets 403 on `/provider/me`, `/relays`, `/users`, `/audit` and on the verify route (`mfa_required`). Console: forced password change → **"Set up two-factor authentication" with the QR code and the setup key as text**; confirming a code → dashboard |
+| AT-T2 | PASS | enrol returns a secret and an `otpauth://totp/` URI; confirm → full token `amr:["pwd","otp"]`; `totp_enabled_at` set; `session_generation` 2 → 3; the pre-enrol token → 401; one `provider_user.totp_enroll` row; **none of the 8 secrets / otpauth URIs of the run appear in any audit row or in the controller log** |
+| AT-T3 | PASS (API and console) | next sign-in → `mfa:"verify"`; wrong code → 401 `invalid_code`; correct → full token. Console: verify page, a wrong code shows an alert, the correct one opens the dashboard |
+| AT-T4 | PASS | the same code on two verify tokens → first 200, second 401 `invalid_code` |
+| AT-T5 | PASS | wrong codes 1–5 → 401 `invalid_code`; **the 6th attempt** → 429 `too_many_attempts`; one `provider_auth.totp_rate_limit` row (the lockout starts once five codes have failed) |
+| AT-T6 | PASS | super-admin with TOTP, password reset by another super-admin → login gives a `pwc` token (no `mfa`), which gets 403 on the TOTP route; the password change → `mfa:"verify"` → verify 200 |
+| AT-T7 | PASS | reset with a reason → 204; the target's token → 401; its next login → `mfa:"enroll"`; one `provider_user.totp_reset` row with actor, target id, time and reason; own row → 409 `cannot_modify_self`; blank reason → 400 `reason_required`; relay-ops → 403 `forbidden`; no audit row for any refusal |
+| AT-T8 | PASS | `zecurity-controller provider recover-admin --email <super-admin>` → exit 0, one stdout line (the temporary password), TOTP cleared, the old token → 401, the next login needs a password change; one `provider_user.recover_admin` row; a relay-ops email and an unknown email → exit 1 with no stdout |
+| AT-T9 | PASS | relay-ops without TOTP: first change and later logins → full token `amr:["pwd"]`, no `mfa` stage; `GET /provider/relays` 200 |
+| AT-T10 / AT-CORE-1 | PASS | a super-admin token with `amr:["pwd"]` (as minted before Phase T) → 403 `mfa_required` on `GET /provider/me`, `/relays`, `/users` and `POST /provider/users` |
+| AT-T11 | PASS | forced change (no TOTP yet) → `mfa:"enroll"` token; forced change with TOTP → `mfa:"verify"`; voluntary change by a signed-in super-admin → `mfa:"verify"`; never a full token, `amr` never has `otp` |
+| AT-T12 | PASS | a super-admin demoted to relay-ops with TOTP still on → `mfa:"verify"` at sign-in; a password-only token for them → 403 `mfa_required` |
+
+**Setup note:** the console's `node_modules` predated #138 and lacked `qrcode.react`; `npm ci` (lockfile unchanged) fixed it.
+
 ## Phase A — Relay admin API hardening
 
 | ID | Scenario | Expected |

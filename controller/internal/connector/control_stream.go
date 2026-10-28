@@ -15,6 +15,7 @@ import (
 	// clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -438,14 +439,43 @@ func (r *ConnectorRegistry) PushResourceInstruction(
 	return nil
 }
 
-// PushScanCommand delivers a ScanCommand to a connected connector.
-// Returns an error if the connector is not currently connected.
-func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.ConnectorControlMessage) error {
+// ErrConnectorNotAvailable answers a scan aimed at a connector that is not
+// connected, doesn't exist or belongs to another workspace, with one user-safe
+// message for all of them (FU-3), so the answer reveals nothing about other
+// workspaces' connectors.
+var ErrConnectorNotAvailable = apperr.UserErrorf("connector not found or not connected")
+
+// PushScanCommand delivers a ScanCommand to workspaceID's connected
+// connector. The stream's tenant was set from the authenticated connector
+// record when it opened (Control), so a caller can only reach its own
+// workspace's connectors; anything else is ErrConnectorNotAvailable and nothing
+// is sent.
+//
+// A refusal is logged with its real reason, for operators only: the client
+// gets the same error either way. The connector ID comes from the client, so
+// it is quoted and truncated (no forged log lines). Scan targets aren't logged.
+func (r *ConnectorRegistry) PushScanCommand(workspaceID, connectorID string, msg *pb.ConnectorControlMessage) error {
 	c := r.get(connectorID)
-	if c == nil {
-		return fmt.Errorf("connector %s is not connected", connectorID)
+	switch {
+	case c == nil:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_connected",
+			workspaceID, truncateForLog(connectorID))
+		return ErrConnectorNotAvailable
+	case c.tenantID != workspaceID:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=foreign_workspace connector_workspace=%s",
+			workspaceID, truncateForLog(connectorID), c.tenantID)
+		return ErrConnectorNotAvailable
 	}
 	return c.send(msg)
+}
+
+// truncateForLog bounds a client-supplied value before it is logged.
+func truncateForLog(s string) string {
+	const max = 64
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
@@ -1081,12 +1111,18 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 		if lanIPChanged {
 			anyLanIPChanged = true
 			log.Printf("control stream: shield %s LAN IP changed to %q — re-synced resource hosts", s.ShieldId, s.LanIp)
+			// Sprint 20 Fix 18: the re-sync rewrote resources.host, so the shield
+			// must get the new host (its acks echo the rule it enforces, and an
+			// ack for the old host is ignored as stale).
+			if h.Registry != nil {
+				PushSnapshotForShield(ctx, h.Pool, h.Registry, client.connectorID, s.ShieldId)
+			}
 		}
 	}
 	// Either a connector move or a LAN-IP change alters the compiled ACL
 	// (connector move → routing; LAN-IP change → resource.host was re-synced), so
-	// bump the workspace ACL version once for the batch. The shield's own resource
-	// instructions pick up the new host via the snapshot fingerprint separately.
+	// bump the workspace ACL version once for the batch. The shield gets the new
+	// host from the snapshot pushed above.
 	if (anyConnectorChanged || anyLanIPChanged) && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
 			log.Printf("control stream: notify after shield status change tenant=%s: %v", client.tenantID, err)
@@ -1097,11 +1133,17 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
 	var anyChanged bool
 	for _, ack := range batch.Acks {
-		changed, err := resource.RecordAck(
-			ctx, h.Pool, tenantID,
-			ack.ResourceId, ack.Status, ack.Error,
-			ack.VerifiedAt,
-		)
+		changed, err := resource.RecordAck(ctx, h.Pool, tenantID, resource.Ack{
+			ResourceID: ack.ResourceId,
+			Status:     ack.Status,
+			Error:      ack.Error,
+			VerifiedAt: ack.VerifiedAt,
+			ShieldID:   ack.ShieldId,
+			Host:       ack.Host,
+			Protocol:   ack.Protocol,
+			PortFrom:   int(ack.PortFrom),
+			PortTo:     int(ack.PortTo),
+		})
 		if err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 			continue

@@ -146,6 +146,8 @@ When the channel is full (slow resource, slow device, or a burst of up to 64 × 
 
 ## Runbook corrections (`docs/certificate-audit-live-runbook.md`)
 
+**Applied 2026-10-27** (all six), together with the Sprint 22 provider TOTP login (§3.2) and the Fix 16 / F19 guards on connector revoke and delete (stage I).
+
 Found while running it; the run sheet's deviations list has the rest.
 1. **§4 `asconn`:** `connector/v1/connector.proto` imports `proto/client/v1/client.proto`, so use `-import-path . -proto proto/connector/v1/connector.proto` (and `proto/shield/v1/shield.proto`). As written, the connector call fails to parse.
 2. **§13 step 2 / I1:** the CRL lists only **unexpired** revoked serials (`AND not_after > NOW()`, `controller/internal/pki/workspace.go` ~600). With 15 min certs `c0`–`c2` have expired by stage I; expect every *unexpired* serial on the CRL, and every history row with `revoked_at`.
