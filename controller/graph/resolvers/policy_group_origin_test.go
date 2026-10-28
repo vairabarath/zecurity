@@ -298,7 +298,7 @@ func TestGroupOrigin_AssignAndUnassignResource_AllowsSCIMGroup(t *testing.T) {
 	}
 
 	// Verify group is associated with resource
-	assignedGroupIDs, err := f.mr.PolicyStore.ListGroupsForResource(f.ctx, resourceID)
+	assignedGroupIDs, err := f.mr.PolicyStore.ListGroupsForResource(f.ctx, f.tenantID, resourceID)
 	if err != nil {
 		t.Fatalf("ListGroupsForResource: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestGroupOrigin_AssignAndUnassignResource_AllowsSCIMGroup(t *testing.T) {
 	}
 
 	// Verify group is no longer associated
-	assignedGroupIDsAfter, err := f.mr.PolicyStore.ListGroupsForResource(f.ctx, resourceID)
+	assignedGroupIDsAfter, err := f.mr.PolicyStore.ListGroupsForResource(f.ctx, f.tenantID, resourceID)
 	if err != nil {
 		t.Fatalf("ListGroupsForResource after unassign: %v", err)
 	}

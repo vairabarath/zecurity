@@ -14,9 +14,16 @@ import (
 	"github.com/google/uuid"
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
 
 var ErrNoMatchingShield = errors.New("no active shield installed on resource host")
+
+// ErrRemoteNetworkNotFound answers a remote network that doesn't exist or
+// belongs to another workspace, with one user-safe message for both, so the
+// response reveals nothing about other workspaces' networks.
+var ErrRemoteNetworkNotFound = apperr.UserErrorf("remote network not found")
 
 // querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
 // single-source desired-state query can run either standalone or inside the
@@ -74,12 +81,15 @@ const resourceSelectCols = `
 	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
 	COALESCE(r.shield_id::text, ''), r.remote_network_id,
 	s.name, s.status, COALESCE(s.connector_id::text, ''),
-	rn.name`
+	COALESCE(rn.name, '')`
 
+// The network join requires the network to belong to the resource's own
+// workspace: a legacy row pointing at another workspace's network still lists
+// (so the admin can fix it) but never shows that network's name.
 const resourceJoins = `
 	FROM resources r
 	LEFT JOIN shields s ON s.id = r.shield_id
-	JOIN  remote_networks rn ON rn.id = r.remote_network_id`
+	LEFT JOIN remote_networks rn ON rn.id = r.remote_network_id AND rn.tenant_id = r.tenant_id`
 
 func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 	var row Row
@@ -119,8 +129,13 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 }
 
 // Create inserts an unprotected resource. A matching active Shield is retained
-// as a convenience for a later Protect operation, but is not required.
+// as a convenience for a later Protect operation, but is not required. The
+// remote network must belong to tenantID; the INSERT itself checks it, so
+// nothing is written otherwise (ErrRemoteNetworkNotFound).
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
+	if _, err := uuid.Parse(input.RemoteNetworkID); err != nil {
+		return nil, ErrRemoteNetworkNotFound
+	}
 	shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
 	if err != nil && !errors.Is(err, ErrNoMatchingShield) {
 		return nil, err
@@ -135,11 +150,17 @@ func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input Create
 		`INSERT INTO resources
 		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host,
 		     port_from, port_to, status, pending_action)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unprotected', 'remove')
+		 SELECT rn.tenant_id, rn.id, $3::uuid, $4::text, $5::text, $6::text, $7::text,
+		        $8::int, $9::int, 'unprotected', 'remove'
+		   FROM remote_networks rn
+		  WHERE rn.id = $2 AND rn.tenant_id = $1
 		 RETURNING id`,
 		tenantID, input.RemoteNetworkID, shieldArg,
 		input.Name, input.Description, input.Protocol, input.Host, input.PortFrom, input.PortTo,
 	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrRemoteNetworkNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
@@ -492,6 +513,23 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 
 	newHost, newNetworkID := host, networkID
 	if input.RemoteNetworkID != nil {
+		// A new remote network must belong to tenantID; a foreign or missing
+		// one changes nothing. Checked inside this transaction, and a network
+		// never moves to another tenant, so the answer can't go stale before
+		// the UPDATE below.
+		if _, err := uuid.Parse(*input.RemoteNetworkID); err != nil {
+			return nil, ErrRemoteNetworkNotFound
+		}
+		var owned bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM remote_networks WHERE id = $1 AND tenant_id = $2)`,
+			*input.RemoteNetworkID, tenantID,
+		).Scan(&owned); err != nil {
+			return nil, fmt.Errorf("update resource: check remote network: %w", err)
+		}
+		if !owned {
+			return nil, ErrRemoteNetworkNotFound
+		}
 		add("remote_network_id", *input.RemoteNetworkID)
 		newNetworkID = *input.RemoteNetworkID
 	}

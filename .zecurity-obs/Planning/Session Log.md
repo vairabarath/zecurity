@@ -3212,6 +3212,33 @@ serves on `127.0.0.1:9102`.
 - Note: on the 5-wrong-codes lockout, the 6th attempt gets 429.
 - Recorded in Acceptance-Test-Plan → "Live run — Phase T"; Sprint22 path.md V1 ticked. Branch `sprint22/at-t-live-run` (local).
 
+## 2026-10-27 — Security fix B-1: cross-tenant access rules, groups and memberships
+- Branch `security/b1-cross-tenant-isolation` (worktree `../zecurity-b1`, base `fcb7e4eb` = `fixed-pendings`); not committed. Phase E work untouched on its own branch.
+- Confirmed on a throwaway DB with two fabricated workspaces: foreign group read (member emails, resource hosts), foreign rule delete (delayed denial of access), foreign rule/membership writes, foreign connector LAN addresses in the caller's snapshot. No cross-tenant network access (enforcement at the foreign connector holds).
+- Fix: workspace-scoped store mutations and reads, compiler joins require one workspace, foreign = missing with user-safe messages. No migration (schema constraints tracked as FU-2 in Sprint22/path.md).
+- Tests: 8 new DB-backed tests, all failing before the fix; controller 1420 pass / 0 fail / 2 skip (unconditional stubs).
+- Lab DB not checked (no access from this machine). Read-only queries for M1 — each should return 0:
+  - `SELECT count(*) FROM access_rules ar JOIN resources r ON r.id = ar.resource_id WHERE r.tenant_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM access_rules ar JOIN groups g ON g.id = ar.group_id WHERE g.workspace_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM group_members gm JOIN groups g ON g.id = gm.group_id JOIN users u ON u.id = gm.user_id WHERE u.tenant_id <> g.workspace_id;`
+
+
+## 2026-10-27 — Security fix: resource remote-network ownership (from the B-1 review)
+- Branch `security/resource-network-ownership` (worktree `../zecurity-rn`, base `fcb7e4eb` plus the uncommitted B-1 changes applied as a first layer); not committed.
+- Confirmed: create/update accepted another workspace's remote network and returned its name; pre-B-1, the snapshot routed the resource through the foreign network's connector.
+- Fix: the store's INSERT/UPDATE check the network's tenant in the same statement; read joins hide a foreign network's name; one "remote network not found" for foreign, missing and malformed IDs. No migration.
+- Tests: 6 new DB-backed tests (failing before the fix); controller 1426 pass / 0 fail / 2 skip.
+- Lab check for existing rows (read-only, for M1; should return 0): `SELECT count(*) FROM resources r JOIN remote_networks rn ON rn.id = r.remote_network_id WHERE rn.tenant_id <> r.tenant_id;`
+- Review follow-up: discovered-service lookup now workspace-scoped (`getDiscoveredServices` returned any workspace's services; `promoteDiscoveredService` probe closed); tests strengthened (read error fails, compiler positive control, no false concurrency claim). Controller 1429 pass / 0 fail / 2 skip. New open finding FU-3 (`triggerScan` / `getScanResults` not workspace-scoped, likely High) recorded in Sprint22/path.md; not fixed (needs approval).
+
+## 2026-10-27 — Security fix FU-3: scan dispatch and scan results workspace-scoped
+- Branch `security/fu3-scan-authorization` (worktree `../zecurity-fu3`, base `fcb7e4eb`); not committed. Independent of the B-1 and resource-network branches.
+- Confirmed with fake streams and a throwaway DB: `triggerScan` reached another workspace's connector; `getScanResults` returned another workspace's results.
+- Fix: `PushScanCommand(workspaceID, …)` checks the live stream's authenticated tenant; `GetScanResults` joins the reporting connector's workspace; one user-safe error for any unavailable connector. No migration.
+- Tests: 4 new (1 registry, 3 DB-backed resolver), failing before the fix; controller 1416 pass / 0 fail / 2 skip.
+- Open: result key lacks the connector (theoretical squatting by a connector that knows a foreign request ID; needs a migration); no per-request connector binding within a workspace.
+- Review follow-up: refused scan dispatches are now logged server-side with the real reason (`not_connected` / `foreign_workspace`); client message unchanged. Controller 1417 pass / 0 fail / 2 skip.
+
 
 ## 2026-10-28 — Device posture live test; firewall check false-pass fixed
 - Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
