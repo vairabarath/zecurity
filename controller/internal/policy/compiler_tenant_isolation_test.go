@@ -122,6 +122,7 @@ func TestCompileACLSnapshot_TenantIsolation(t *testing.T) {
 
 	// A protected resource pointing at a foreign shield must not route to the
 	// foreign shield's connector: it fails closed (treated as unavailable).
+	// (allowCrossWorkspaceRows above already dropped the schema check.)
 	shieldB := mustInsertShield(t, ctx, pool, b.id, b.rn, b.conn)
 	mustProtectResource(t, ctx, pool, a.res, shieldB)
 	aEntries, _ = compile(a.id)

@@ -252,6 +252,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-2 | **Workspace consistency in the schema (B-1 defense in depth).** `access_rules` has single-column foreign keys, so the database accepts a rule whose workspace, resource and group belong to different workspaces; `group_members` has no workspace column at all. Add `UNIQUE (id, tenant_id)` on `resources` and `remote_networks`, `UNIQUE (id, workspace_id)` on `groups`, composite foreign keys from `access_rules` and `resources (remote_network_id, tenant_id)` (the resource-network fix showed the application can miss such a reference); and put the reporting connector into `connector_scan_results`' key (or record which connector each scan request was sent to), so a report can never suppress or stand in for another connector's result (FU-3 residual); decide how to constrain `group_members` (column + composite FK, or trigger). Needs a migration number (043 is reserved for Phase D). | B-1 fix, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `045_`, see Post-Sprint Fixes → FU-2) |
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
+| FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
 
 ## Post-Sprint Fixes
 
@@ -411,12 +412,73 @@ Also, a scan result's key `(request_id, ip, port, protocol)` didn't include the 
 
 **Lab check (M1, open item from B-1):** the dev database `ztna_platform` had no mixed rows before the reset: 51 resources, 51 rules and 1 membership checked across all four relationships.
 
-**Not changed:**
-- `connectors.remote_network_id` and `shields.remote_network_id` have the same single-column pattern. They weren't in FU-2's scope; this is a possible follow-up.
-- Two connectors **of one workspace** could each store a result for the same request, which would give two rows per ip/port. The admin `ScanModal` keys rows by `requestId-ip-port`, so that would only produce a React key warning. A request ID only goes to one connector, and the per-request connector binding within a workspace stays open, as in FU-3.
+**Left for FU-5 (fixed in `046_`, next entry):** the same single-column pattern on `connectors` / `shields` and elsewhere, and the per-request connector binding within a workspace.
+
+### Fix: FU-5 every workspace-scoped foreign key carries the workspace; scan requests bound to their connector `[schema: reset DB]`
+**Issue:**
+- **The audit:** after FU-2, a catalogue query listed every single-column foreign key from one `tenant_id`/`workspace_id` table to another. 28 remained.
+- **Scan requests:** they weren't bound to a connector, so another connector of the same workspace could add rows to a request.
+- **Scan results:** they had no key to their connector, so they outlived it until the 24 h purge.
+
+**Evidence first:** the dev DB had 0 mismatches on all 32 keys checked (FU-2's plus these 28). The only cross-workspace link was 1 `external_identities` row pointing at a platform connection.
+
+**Fix (`controller/migrations/046_workspace_consistency_all.sql`):**
+- **23 keys made composite** with the workspace:
+  - devices → users (owner and approver);
+  - posture reports and evaluations → devices, profiles and reports;
+  - profile bindings → resources and profiles;
+  - `resources.shield_id` → shields;
+  - shields → connectors and networks;
+  - connectors → networks;
+  - users, groups and external identities → SCIM sync instances;
+  - invitations, outbox events, workspace members and permissions → users.
+- **Generated from the catalogue**, and each key keeps its ON DELETE action. SET NULL keys use `ON DELETE SET NULL (col)`, so a delete clears only the reference, never the row's workspace.
+- **Targets:** `UNIQUE (id, workspace)` on `client_devices`, `connectors`, `device_posture_reports`, `device_profiles`, `scim_sync_instances` and `shields`.
+- **Excluded on purpose:** the 5 keys to `identity_connections`.
+  - A connection with `tenant_id NULL` is a shared platform connection (ADR-024) that every workspace's external identities use. A composite key can't express "NULL or the same workspace".
+  - A trigger could, but that would be a new ADR-024 rule, so it was not added.
+- **`scan_requests`** (request, connector, tenant, created_at) has a key to `connectors (id, tenant_id)` ON DELETE CASCADE. `connector_scan_results` gets a key `(request_id, connector_id)` → `scan_requests` ON DELETE CASCADE.
+
+**Code:**
+- **`TriggerScan`** records the request with `discovery.RecordScanRequest` before sending it. The insert is scoped to the workspace; a malformed ID is simply not found.
+  - A connector outside the workspace gets the same `connector not found or not connected` answer as before, and the refusal is logged.
+  - If the send fails, the request is deleted.
+- **`UpsertScanResults`** stores a row only if its request was sent to that connector (`INSERT … SELECT … WHERE EXISTS`). Anything else is dropped; the report handler only logs errors, so the stream isn't affected.
+- **`PurgeScanResults`** also deletes old requests.
+- **Side effect:** each request now has one connector, so the `ScanModal` duplicate-key case can't happen.
+- **#2 `resources.shield_id` was not a live bug:** no path takes a shield ID from the caller. `Create` uses the workspace-scoped `AutoMatchShield`, and `MarkProtecting` joins `s.tenant_id = r.tenant_id`. The key is defence in depth.
+
+**Tests:**
+- **`TestWorkspaceConsistency_EveryCrossTableKeyCarriesTheWorkspace`:** a catalogue check that also fails if a future migration adds such a key.
+- **`TestWorkspaceConsistency_DevicesShieldsAndProfiles`:**
+  - 12 refusals, each by its named constraint;
+  - SET NULL keeps the row's workspace (approver, report, shield);
+  - a deleted profile takes its bindings and evaluations with it.
+- **Scan:**
+  - `TestScanIsolation_UnsolicitedReportIsDropped`: another workspace's connector and a second connector of the same workspace, before and after the owner;
+  - `TestScanIsolation_RecordAndPurgeRequests`: own, foreign, missing and malformed connectors; purge; a connector delete cascades;
+  - the triggerScan refusal test also checks that no request is left behind.
+- **Planted-row tests:** two more get the drop-first treatment. `TestCompileACLSnapshot_TenantIsolation` (a resource on a foreign shield) goes through the extended `allowCrossWorkspaceRows`, and `TestReportDevicePostureIntegration` (a device in B owned by A's user) drops its one constraint inline.
+- **Mutants killed (10/10):**
+  - key reverted to single-column;
+  - SET NULL without the column list (×3);
+  - upsert without the request check;
+  - record ignoring the tenant;
+  - unsent request not deleted;
+  - purge keeping requests;
+  - results → requests key dropped (killed by the connector-delete test added for it).
+- **Gate:**
+  - controller 1500 pass / 0 fail / 2 skip (unconditional stubs);
+  - fresh-volume init of all 48 SQL files: 0 errors, 28 `*_same_workspace_fkey`;
+  - the controller starts.
 
 ### Observed: `TestProcessorRunReapsAbandonedIntegration` (outbox) flaky under full-suite load
 - 2026-10-28: it failed once in 3 full controller runs ("event was not reaped before timeout", 4 s deadline).
 - It passes alone (3/3, about 1.6 s) and in the other 2 full runs. It's unrelated to the changes above.
-- **Not fixed:** the cause isn't confirmed. It may be the 4 s deadline under load, or the reaped `failed` state being transient while the processor's claim loop runs.
+- **Investigated 2026-10-28, test-only fix:**
+  - Not reproduced in 55 runs: 30 alone, 25 under concurrent DB-heavy package runs.
+  - **A transient window is confirmed, though.** The reaper marks the event `failed`, retry 1, with the next attempt about 2 s later. The test's processor then re-claims it and, with no handler registered, makes it terminal (`failed`, retry 100).
+  - With a 5 s pause before the first poll, the old test fails deterministically with `retry_count = 100, want 1`.
+  - **Fix:** the test's outbox uses a 1 h retry base, so the reaped state stays put, and the deadline is 15 s (the loop ends as soon as the reaper has run). With the same 5 s pause the fixed test passes.
+  - The original "not reaped before timeout" (reaper later than 4 s under load) is covered by the longer deadline. That cause is unconfirmed.
 

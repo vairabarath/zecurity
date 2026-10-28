@@ -3312,3 +3312,11 @@ serves on `127.0.0.1:9102`.
 - Lab check from B-1: the dev DB had no mixed rows before the reset.
 - **Everyone recreates their local DB after this merges.**
 
+## 2026-10-28 — M1: FU-5 workspace keys everywhere (`046_`), scan requests bound to their connector, outbox flake
+- Same branch as FU-2 (`fix/fu2-schema-workspace-constraints`); one DB reset covers `045_` and `046_`.
+- **Catalogue audit:** 28 more single-column keys between workspace-scoped tables. The dev DB had 0 mismatches. 23 are now composite; the 5 to `identity_connections` are excluded (platform connections, ADR-024).
+- **Scan:** `scan_requests` binds each request to its connector; unsolicited reports are dropped; results go with their request and connector.
+- `resources.shield_id` was not a live bug (defence in depth only).
+- **Outbox flake:** not reproduced (55 runs). A transient reaped state was confirmed and made deterministic with a 5 s poll delay; test-only fix.
+- **Gate:** 10/10 FU-5 mutants; controller 1500 / 0 / 2; fresh-volume init of 48 files clean; controller starts.
+
