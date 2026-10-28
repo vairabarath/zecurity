@@ -1,10 +1,7 @@
 package connector
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/netutil"
+	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -68,21 +66,11 @@ func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb valkeycompat.Cmd
 			return
 		}
 
-		var certPEM string
-		err = pool.QueryRow(ctx,
-			`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
-		).Scan(&certPEM)
+		caFingerprint, err := pki.IntermediateFingerprint(ctx, pool)
 		if err != nil {
 			http.Error(w, "ca cert not found", http.StatusInternalServerError)
 			return
 		}
-		block, _ := pem.Decode([]byte(certPEM))
-		if block == nil {
-			http.Error(w, "invalid ca cert pem", http.StatusInternalServerError)
-			return
-		}
-		sum := sha256.Sum256(block.Bytes)
-		caFingerprint := hex.EncodeToString(sum[:])
 
 		tokenString, jti, err := GenerateEnrollmentToken(cfg, connectorID, tc.TenantID, workspaceSlug, caFingerprint)
 		if err != nil {

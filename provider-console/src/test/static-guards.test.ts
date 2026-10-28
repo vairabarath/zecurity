@@ -37,8 +37,11 @@ describe('source guards', () => {
     expect(filesMatching(/\bconsole\s*\./)).toEqual([])
   })
 
-  it('only the temporary-password dialog touches the clipboard', () => {
-    expect(filesMatching(/\bclipboard\b/)).toEqual(['/src/components/TemporaryPasswordDialog.tsx'])
+  it('only the one-time secret dialogs touch the clipboard', () => {
+    expect(filesMatching(/\bclipboard\b/).sort()).toEqual([
+      '/src/components/ProvisioningTokenDialog.tsx',
+      '/src/components/TemporaryPasswordDialog.tsx',
+    ])
   })
 
   it('never calls tenant endpoints (/graphql, tenant /auth/*)', () => {

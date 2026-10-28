@@ -170,4 +170,21 @@ describe('Relay detail', () => {
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
+
+  // Sprint 22 Phase E (D-20): a pending relay waits for its one-time token.
+  it('a pending relay says it is waiting for enrolment, with the expired-token hint', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail({ status: 'pending', certificates: [], cert_serial: null, cert_not_after: null }) } })
+    renderApp(`/relays/${ID}`)
+    expect(await screen.findByText(/Waiting for enrolment/)).toBeInTheDocument()
+    expect(screen.getByText(/If the token has expired, delete this relay and add a new one\./)).toBeInTheDocument()
+  })
+
+  it('an active relay shows no enrolment hint', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
+    renderApp(`/relays/${ID}`)
+    await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+    expect(screen.queryByText(/Waiting for enrolment/)).not.toBeInTheDocument()
+  })
 })

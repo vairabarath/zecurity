@@ -84,6 +84,10 @@ export const ErrorCode = {
   existsDisabled: 'exists_disabled',
   accountDisabled: 'account_disabled',
   serviceUnavailable: 'service_unavailable',
+  // relay create (Sprint 22 Phase A/E)
+  invalidName: 'invalid_name',
+  invalidDnsSan: 'invalid_dns_san',
+  invalidIpSan: 'invalid_ip_san',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -123,6 +127,21 @@ export interface ChangeRoleResponse {
 /** POST /provider/users/{id}/reset-password → 200. Shown once, like on create. */
 export interface ResetPasswordResponse {
   temporary_password: string
+}
+
+/**
+ * POST /provider/relays → 201 (Sprint 22 Phase E). `provisioning_token` is
+ * single-use, valid for 24 hours, shown once and then discarded; it must
+ * never reach storage, the URL or a log. The controller addresses are empty
+ * strings when the controller doesn't have them configured.
+ */
+export interface CreateRelayResponse {
+  relay_id: string
+  provisioning_token: string
+  expires_at: string
+  ca_fingerprint: string
+  controller_grpc_addr: string
+  controller_http_addr: string
 }
 
 // ── Phase R read APIs ────────────────────────────────────────────────────────
