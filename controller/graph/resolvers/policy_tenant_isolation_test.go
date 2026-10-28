@@ -197,7 +197,9 @@ func TestPolicyIsolation_ConflictCannotTouchForeignRow(t *testing.T) {
 
 	// A row owned by B on A's own (resource, group) pair (only possible from
 	// inconsistent data): A owns both IDs, so only the ON CONFLICT guard stops
-	// A from rewriting B's row.
+	// A from rewriting B's row. The schema refuses such a row (FU-2), so
+	// drop that check here.
+	allowCrossWorkspaceRows(t, f.pool)
 	if _, err := f.pool.Exec(context.Background(),
 		`INSERT INTO access_rules (workspace_id, resource_id, group_id, enabled) VALUES ($1, $2, $3, FALSE)`,
 		f.b.id, f.a.res, f.a.group); err != nil {
@@ -265,7 +267,9 @@ func TestPolicyIsolation_AddGroupMemberRejectsForeignUser(t *testing.T) {
 func TestPolicyIsolation_ReadsIgnorePlantedForeignRows(t *testing.T) {
 	f := newIsoFixture(t)
 	ctx := context.Background()
-	// Rows the old unscoped mutations could have written.
+	// Rows the old unscoped mutations could have written. The schema refuses
+	// them (FU-2), so drop that check here: the reads must ignore them anyway.
+	allowCrossWorkspaceRows(t, f.pool)
 	for _, q := range []struct {
 		sql  string
 		args []any

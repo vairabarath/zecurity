@@ -249,7 +249,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | # | Item | Source | Status |
 |---|------|--------|--------|
 | FU-1 | **Create audit atomicity (D-14).** `POST /provider/relays` writes its `relay.create` audit best-effort, outside any transaction, after the relay row, the Valkey JTI and the JTI attach. A failed audit write is only logged, and a server error part-way through can leave a pending relay without a usable token. Revoke and delete are transactionally audited (Phase A). Fix: relay row + audit in one transaction, then token, Valkey JTI and attach, with clean-up on failure. | Phase A decision, 2026-10-26 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-1) |
-| FU-2 | **Workspace consistency in the schema (B-1 defense in depth).** `access_rules` has single-column foreign keys, so the database accepts a rule whose workspace, resource and group belong to different workspaces; `group_members` has no workspace column at all. Add `UNIQUE (id, tenant_id)` on `resources` and `remote_networks`, `UNIQUE (id, workspace_id)` on `groups`, composite foreign keys from `access_rules` and `resources (remote_network_id, tenant_id)` (the resource-network fix showed the application can miss such a reference); and put the reporting connector into `connector_scan_results`' key (or record which connector each scan request was sent to), so a report can never suppress or stand in for another connector's result (FU-3 residual); decide how to constrain `group_members` (column + composite FK, or trigger). Needs a migration number (043 is reserved for Phase D). | B-1 fix, 2026-10-27 | Open — the application and compiler now enforce it |
+| FU-2 | **Workspace consistency in the schema (B-1 defense in depth).** `access_rules` has single-column foreign keys, so the database accepts a rule whose workspace, resource and group belong to different workspaces; `group_members` has no workspace column at all. Add `UNIQUE (id, tenant_id)` on `resources` and `remote_networks`, `UNIQUE (id, workspace_id)` on `groups`, composite foreign keys from `access_rules` and `resources (remote_network_id, tenant_id)` (the resource-network fix showed the application can miss such a reference); and put the reporting connector into `connector_scan_results`' key (or record which connector each scan request was sent to), so a report can never suppress or stand in for another connector's result (FU-3 residual); decide how to constrain `group_members` (column + composite FK, or trigger). Needs a migration number (043 is reserved for Phase D). | B-1 fix, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `045_`, see Post-Sprint Fixes → FU-2) |
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 
@@ -280,7 +280,7 @@ No cross-tenant network access: the foreign connector enforces its own workspace
 
 **Tests:** `graph/resolvers/policy_tenant_isolation_test.go` (7 tests: foreign group query, foreign/missing/malformed IDs on assign with no row written and no version bump, `ON CONFLICT` guard (mutation-checked), unassign, foreign user, planted foreign rows hidden from reads, same-workspace behaviour) and `internal/policy/compiler_tenant_isolation_test.go` (planted rows and a foreign shield never cross tenants; connector lookup scoped). All failed before the fix. Full controller suite: 1420 pass / 0 fail / 2 skip (unconditional stubs), every DB-backed test ran.
 
-**Not done here:** schema constraints (FU-2); lab database check for existing mixed rows (queries in the Session Log entry, for M1).
+**Not done here:** schema constraints (FU-2); lab database check for existing mixed rows (queries in the Session Log entry, for M1). *Both done 2026-10-28, see Post-Sprint Fixes → FU-2.*
 
 ### Fix: resources could reference another workspace's remote network (security, found in the B-1 review)
 **Issue:** `createResource` / `updateResource` stored any `remote_network_id` they were given. A workspace-A admin could put a resource on workspace B's network (B's network IDs reach every B device in its ACL snapshot). Reproduced on a throwaway database: both calls accepted B's network and the response showed **B's network name**. Before the B-1 compiler filter, A's snapshot also routed that resource through **B's network and B's connector** (its LAN address reached A's devices; B's connector would still deny A's devices, since it enforces B's snapshot). A missing network gave a generic INTERNAL error instead of a not-found.
@@ -373,6 +373,47 @@ Reproduced on a throwaway database and with fake connector streams: B's connecto
 **Fix:**
 - The controller logs a startup warning: `connectorRenewalWarning` in `cmd/server/renewal_config.go`, with a unit test.
 - Behaviour is unchanged. Clamping the window, as the shield does with `EffectiveRenewalWindow`, would be a design change and was not made.
+
+### Fix: FU-2 the schema refuses cross-workspace rows (B-1 defense in depth) `[schema: reset DB]`
+**Issue:** the B-1 and resource-network fixes enforce workspace consistency in the application and the ACL compiler only. The schema used single-column foreign keys, so it accepted:
+- a resource on another workspace's remote network;
+- an access rule whose resource or group belongs to another workspace;
+- a group member from another workspace (`group_members` had no workspace column).
+
+Also, a scan result's key `(request_id, ip, port, protocol)` didn't include the connector. A foreign connector that knew a request ID could report first and hide the owner's row (FU-3 residual).
+
+**Fix (`controller/migrations/045_workspace_consistency.sql`):**
+- Adds `UNIQUE (id, tenant_id)` on `remote_networks`, `resources` and `users`, and `UNIQUE (id, workspace_id)` on `groups`, as targets for the composite keys.
+- `resources (remote_network_id, tenant_id)` → `remote_networks`.
+- `access_rules (resource_id, workspace_id)` → `resources`, and `(group_id, workspace_id)` → `groups`.
+- `group_members` gets `workspace_id NOT NULL`, with keys to `groups (id, workspace_id)` and `users (id, tenant_id)`.
+  - A `BEFORE INSERT OR UPDATE` trigger always copies the workspace from the group, whatever the writer sent, so the key to `users` is the real check.
+  - The Go writers (`policy/store.go`, the two SCIM inserts) are unchanged. This was M1's choice of the options FU-2 left open; the alternatives were writers passing the column, or a check-only trigger.
+- Every replaced key keeps `ON DELETE CASCADE`.
+- `connector_scan_results` primary key is now `(request_id, connector_id, ip, port, protocol)`. `discovery.UpsertScanResults` `ON CONFLICT` follows.
+- The SCIM member lookups are already scoped to the workspace (`u.tenant_id`), so no current path starts failing.
+
+**Tests:**
+- New `internal/policy/workspace_consistency_test.go`:
+  - consistent rows are accepted, and the trigger fills the member's workspace;
+  - 7 cross-workspace writes fail with SQLSTATE 23503 on the named constraint: insert and update of a resource's network; a rule's foreign resource; a rule's foreign group; a foreign member; a writer that sends the user's workspace; moving a member into a foreign group;
+  - deletes still cascade.
+- The planted-row tests keep testing the application and compiler defence. Each drops the new constraints on its own throwaway database first (`allowCrossWorkspaceRows`):
+  - `TestCompileACLSnapshot_TenantIsolation` and `TestCompileACLSnapshot_ResourceOnForeignNetwork`;
+  - `TestPolicyIsolation_ConflictCannotTouchForeignRow` and `TestPolicyIsolation_ReadsIgnorePlantedForeignRows`;
+  - `TestResourceNetwork_ReadsHideForeignNetworkName`.
+- `TestScanIsolation_LateReportCannotTakeOverResult` became `TestScanIsolation_ForeignReportNeitherHidesNorTakesOverResult`. With the foreign report either before or after the owner's, there is one row per connector and each workspace reads only its own connector's row.
+- **Mutants killed (7/7):** each composite key reverted to single-column (4); the trigger trusting the writer's value; the trigger on INSERT only; the scan key without the connector.
+- **Gate:**
+  - full controller suite in a CI-style environment (empty admin DB, isolated Valkey): 1485 pass / 0 fail / 2 skip (unconditional stubs);
+  - fresh-volume init of all 47 SQL files: 0 errors;
+  - the controller starts on it.
+
+**Lab check (M1, open item from B-1):** the dev database `ztna_platform` had no mixed rows before the reset: 51 resources, 51 rules and 1 membership checked across all four relationships.
+
+**Not changed:**
+- `connectors.remote_network_id` and `shields.remote_network_id` have the same single-column pattern. They weren't in FU-2's scope; this is a possible follow-up.
+- Two connectors **of one workspace** could each store a result for the same request, which would give two rows per ip/port. The admin `ScanModal` keys rows by `requestId-ip-port`, so that would only produce a React key warning. A request ID only goes to one connector, and the per-request connector binding within a workspace stays open, as in FU-3.
 
 ### Observed: `TestProcessorRunReapsAbandonedIntegration` (outbox) flaky under full-suite load
 - 2026-10-28: it failed once in 3 full controller runs ("event was not reaped before timeout", 4 s deadline).

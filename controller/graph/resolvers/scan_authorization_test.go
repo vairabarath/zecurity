@@ -146,24 +146,41 @@ func TestScanIsolation_ResultsScopedToWorkspace(t *testing.T) {
 	}
 }
 
-func TestScanIsolation_LateReportCannotTakeOverResult(t *testing.T) {
-	f := newScanFixture(t)
-	f.report(t, f.a.conn, "req-a", "10.1.0.1")
-	// B's connector reports the same (request, ip, port, protocol) later.
-	f.report(t, f.b.conn, "req-a", "10.1.0.1")
+// FU-2 (FU-3 residual): a result's key includes the reporting connector, so
+// another workspace's connector reporting the same (request, ip, port,
+// protocol), before or after the owner, neither hides the owner's row nor
+// takes it over. Each workspace reads only its own connector's row.
+func TestScanIsolation_ForeignReportNeitherHidesNorTakesOverResult(t *testing.T) {
+	for _, foreignFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("foreign report first=%v", foreignFirst), func(t *testing.T) {
+			f := newScanFixture(t)
+			if foreignFirst {
+				f.report(t, f.b.conn, "req-a", "10.1.0.1")
+			}
+			f.report(t, f.a.conn, "req-a", "10.1.0.1")
+			if !foreignFirst {
+				f.report(t, f.b.conn, "req-a", "10.1.0.1")
+			}
+			// The same connector reporting again is still a no-op.
+			f.report(t, f.a.conn, "req-a", "10.1.0.1")
 
-	var owner string
-	if err := f.pool.QueryRow(context.Background(),
-		`SELECT connector_id::text FROM connector_scan_results WHERE request_id = 'req-a' AND ip = '10.1.0.1'`).Scan(&owner); err != nil {
-		t.Fatal(err)
-	}
-	if owner != f.a.conn {
-		t.Errorf("result row now owned by connector %s, want A's %s", owner, f.a.conn)
-	}
-	if got := f.results(t, f.a, "req-a"); len(got) != 1 {
-		t.Errorf("A lost its result: %v", got)
-	}
-	if got := f.results(t, f.b, "req-a"); len(got) != 0 {
-		t.Errorf("B reads A's result through its late report: %v", got)
+			var rows int
+			if err := f.pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM connector_scan_results WHERE request_id = 'req-a' AND ip = '10.1.0.1'`).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 2 {
+				t.Errorf("stored %d rows, want one per connector (2)", rows)
+			}
+			for _, w := range []scanWS{f.a, f.b} {
+				res, err := f.qr.GetScanResults(w.ctx, "req-a")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(res) != 1 || res[0].ReachableFrom != w.conn {
+					t.Errorf("workspace %s reads %+v, want exactly its own connector's row", w.id, res)
+				}
+			}
+		})
 	}
 }

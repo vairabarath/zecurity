@@ -188,7 +188,7 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 			INSERT INTO connector_scan_results
 				(request_id, connector_id, ip, port, protocol, service_name, first_seen)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (request_id, ip, port, protocol) DO NOTHING
+			ON CONFLICT (request_id, connector_id, ip, port, protocol) DO NOTHING
 		`, r.RequestID, connectorID, r.IP, r.Port, r.Protocol, r.ServiceName, now)
 		if err != nil {
 			return err

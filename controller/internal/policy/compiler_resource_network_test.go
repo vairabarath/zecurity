@@ -53,7 +53,9 @@ func TestCompileACLSnapshot_ResourceOnForeignNetwork(t *testing.T) {
 	mustAssignResourceToGroup(t, ctx, pool, wsA, valid, grp)
 	// Negative control: A's resource, but on B's network (planted the way the
 	// old code wrote it), granted to the same group. Device selection is the
-	// same for both, so only the network check can tell them apart.
+	// same for both, so only the network check can tell them apart. The
+	// schema refuses such a row (FU-2), so drop that check here.
+	allowCrossWorkspaceRows(t, ctx, pool)
 	legacy := mustInsertResource(t, ctx, pool, wsA, rnB, "legacy", "10.81.1.1", 22)
 	mustAssignResourceToGroup(t, ctx, pool, wsA, legacy, grp)
 

@@ -3295,3 +3295,20 @@ serves on `127.0.0.1:9102`.
 - **Startup warning** when `CONNECTOR_CERT_TTL` ≤ `CONNECTOR_RENEWAL_WINDOW`; behaviour unchanged.
 - **Controller suite** (isolated env): 1459 pass / 1 fail / 2 skip. The fail is the outbox reap test, flaky under load: it passes alone 3/3 and is unrelated. Recorded in Sprint22/path.md, not fixed.
 - **Cleanup:** connector revoked; lab, scratch Valkey and test DBs cleaned; no controller left running.
+
+## 2026-10-28 — M1: FU-2 schema workspace consistency (`045_`, `[schema: reset DB]`)
+- Branch `fix/fu2-schema-workspace-constraints` (base `fixed-pendings` `2a09dbbd`).
+- `045_workspace_consistency.sql`:
+  - composite foreign keys for resource → network and rule → resource/group;
+  - `group_members.workspace_id`, filled by a trigger from the group, with keys to groups and users;
+  - scan-result key includes the connector.
+- Go: only `discovery.UpsertScanResults` `ON CONFLICT`; the policy and SCIM writers are unchanged.
+- Tests:
+  - new schema test (7 refusals, cascades, trigger fill);
+  - 5 planted-row tests drop the constraints on their own DB first;
+  - the scan late-report test rewritten for one row per connector;
+  - 7/7 mutants killed.
+- Gate: controller 1485 / 0 / 2; fresh-volume init of 47 files with 0 errors; controller starts on it.
+- Lab check from B-1: the dev DB had no mixed rows before the reset.
+- **Everyone recreates their local DB after this merges.**
+

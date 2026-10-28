@@ -53,3 +53,20 @@ func newMigratedTestPool(t *testing.T, adminDSN, prefix string) *pgxpool.Pool {
 	}
 	return pool
 }
+
+// allowCrossWorkspaceRows drops the 045 workspace-consistency constraints
+// (Sprint 22 FU-2) on a throwaway database, so a test can plant the
+// inconsistent rows that the resolvers must still ignore on their own.
+func allowCrossWorkspaceRows(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, stmt := range []string{
+		`ALTER TABLE resources DROP CONSTRAINT resources_remote_network_same_workspace_fkey`,
+		`ALTER TABLE access_rules DROP CONSTRAINT access_rules_resource_same_workspace_fkey,
+		                          DROP CONSTRAINT access_rules_group_same_workspace_fkey`,
+		`ALTER TABLE group_members DROP CONSTRAINT group_members_user_same_workspace_fkey`,
+	} {
+		if _, err := pool.Exec(context.Background(), stmt); err != nil {
+			t.Fatalf("drop consistency constraint: %v", err)
+		}
+	}
+}
