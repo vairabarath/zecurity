@@ -3295,3 +3295,35 @@ serves on `127.0.0.1:9102`.
 - **Startup warning** when `CONNECTOR_CERT_TTL` ≤ `CONNECTOR_RENEWAL_WINDOW`; behaviour unchanged.
 - **Controller suite** (isolated env): 1459 pass / 1 fail / 2 skip. The fail is the outbox reap test, flaky under load: it passes alone 3/3 and is unrelated. Recorded in Sprint22/path.md, not fixed.
 - **Cleanup:** connector revoked; lab, scratch Valkey and test DBs cleaned; no controller left running.
+
+## 2026-10-28 — M1: FU-2 schema workspace consistency (`045_`, `[schema: reset DB]`)
+- Branch `fix/fu2-schema-workspace-constraints` (base `fixed-pendings` `2a09dbbd`).
+- `045_workspace_consistency.sql`:
+  - composite foreign keys for resource → network and rule → resource/group;
+  - `group_members.workspace_id`, filled by a trigger from the group, with keys to groups and users;
+  - scan-result key includes the connector.
+- Go: only `discovery.UpsertScanResults` `ON CONFLICT`; the policy and SCIM writers are unchanged.
+- Tests:
+  - new schema test (7 refusals, cascades, trigger fill);
+  - 5 planted-row tests drop the constraints on their own DB first;
+  - the scan late-report test rewritten for one row per connector;
+  - 7/7 mutants killed.
+- Gate: controller 1485 / 0 / 2; fresh-volume init of 47 files with 0 errors; controller starts on it.
+- Lab check from B-1: the dev DB had no mixed rows before the reset.
+- **Everyone recreates their local DB after this merges.**
+
+## 2026-10-28 — M1: FU-5 workspace keys everywhere (`046_`), scan requests bound to their connector, outbox flake
+- Same branch as FU-2 (`fix/fu2-schema-workspace-constraints`); one DB reset covers `045_` and `046_`.
+- **Catalogue audit:** 28 more single-column keys between workspace-scoped tables. The dev DB had 0 mismatches. 23 are now composite; the 5 to `identity_connections` are excluded (platform connections, ADR-024).
+- **Scan:** `scan_requests` binds each request to its connector; unsolicited reports are dropped; results go with their request and connector.
+- `resources.shield_id` was not a live bug (defence in depth only).
+- **Outbox flake:** not reproduced (55 runs). A transient reaped state was confirmed and made deterministic with a 5 s poll delay; test-only fix.
+- **Gate:** 10/10 FU-5 mutants; controller 1500 / 0 / 2; fresh-volume init of 48 files clean; controller starts.
+
+## 2026-10-28 — M1: FU-2 + FU-5 live check PASS (PR #153)
+- Dev DB reset; branch controller `2d7530a6`; connector on inkyank .75; client on .164 rebuilt for the new platform root (`dev-build.sh`; needs sudo to install).
+- **Scan:** request bound to the connector, results stored, foreign ID refused and logged with no request left.
+- **Policy:** group, member (trigger-filled workspace), resource and rule; tunnel access 200 with the connector's `access allowed`.
+- **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
+- **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
+

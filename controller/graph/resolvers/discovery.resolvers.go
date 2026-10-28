@@ -8,10 +8,12 @@ package resolvers
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/google/uuid"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -93,8 +95,28 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		},
 	}
 
+	// Bind the request to the connector before sending it, so only that
+	// connector's report is stored (FU-5). A connector outside the caller's
+	// workspace gets the same answer as an unconnected one (FU-3).
+	recorded, err := discovery.RecordScanRequest(ctx, r.Pool, tc.TenantID, connectorID, requestID)
+	if err != nil {
+		return "", fmt.Errorf("triggerScan: record request: %w", err)
+	}
+	if !recorded {
+		// Same form as PushScanCommand's refusals: the ID comes from the
+		// client, so it is quoted and truncated.
+		logID := connectorID
+		if len(logID) > 64 {
+			logID = logID[:64] + "…"
+		}
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_in_workspace", tc.TenantID, logID)
+		return "", fmt.Errorf("triggerScan: %w", connector.ErrConnectorNotAvailable)
+	}
 	// Only a connector of the caller's workspace can receive it (FU-3).
 	if err := r.ConnectorRegistry.PushScanCommand(tc.TenantID, connectorID, msg); err != nil {
+		if delErr := discovery.DeleteScanRequest(ctx, r.Pool, requestID); delErr != nil {
+			log.Printf("discovery: remove unsent scan request %s: %v", requestID, delErr)
+		}
 		return "", fmt.Errorf("triggerScan: %w", err)
 	}
 

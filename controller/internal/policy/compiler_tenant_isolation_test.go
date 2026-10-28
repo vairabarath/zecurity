@@ -59,7 +59,9 @@ func TestCompileACLSnapshot_TenantIsolation(t *testing.T) {
 	mustAssignResourceToGroup(t, ctx, pool, a.id, a.res, a.grp)
 	mustAssignResourceToGroup(t, ctx, pool, b.id, b.res, b.grp)
 	// Planted inconsistent rows owned by A: B's resource with A's group, and
-	// A's resource with B's group.
+	// A's resource with B's group. The schema refuses them (FU-2), so drop
+	// that check here: the compiler must ignore them on its own.
+	allowCrossWorkspaceRows(t, ctx, pool)
 	mustExec(t, ctx, pool, `INSERT INTO access_rules (workspace_id, resource_id, group_id) VALUES ($1, $2, $3)`, a.id, b.res, a.grp)
 	mustExec(t, ctx, pool, `INSERT INTO access_rules (workspace_id, resource_id, group_id) VALUES ($1, $2, $3)`, a.id, a.res, b.grp)
 
@@ -120,6 +122,7 @@ func TestCompileACLSnapshot_TenantIsolation(t *testing.T) {
 
 	// A protected resource pointing at a foreign shield must not route to the
 	// foreign shield's connector: it fails closed (treated as unavailable).
+	// (allowCrossWorkspaceRows above already dropped the schema check.)
 	shieldB := mustInsertShield(t, ctx, pool, b.id, b.rn, b.conn)
 	mustProtectResource(t, ctx, pool, a.res, shieldB)
 	aEntries, _ = compile(a.id)

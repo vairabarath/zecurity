@@ -1927,6 +1927,10 @@ func TestProcessorRunReapsAbandonedIntegration(t *testing.T) {
 	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
 
 	store := NewOutbox(pool)
+	// Keep the reaped state: with the default 1 s retry base the processor
+	// re-claims the event about 2 s after the reap and, with no handler, makes
+	// it terminal (retry_count 100), which the poll below could see instead.
+	store.retryPolicy.Base = time.Hour
 	registry := NewHandlerRegistry()
 
 	// No handler is needed. We directly create a processing event so
@@ -2000,7 +2004,9 @@ func TestProcessorRunReapsAbandonedIntegration(t *testing.T) {
 		done <- processor.Run(runCtx, 1)
 	}()
 
-	deadline := time.Now().Add(4 * time.Second)
+	// Generous for a loaded CI host: the loop ends as soon as the reaper
+	// (1 s interval) has run.
+	deadline := time.Now().Add(15 * time.Second)
 
 	for {
 		var status string

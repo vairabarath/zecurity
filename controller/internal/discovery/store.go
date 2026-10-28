@@ -175,6 +175,32 @@ func DeleteDiscoveredService(ctx context.Context, db *pgxpool.Pool, shieldID, pr
 	return err
 }
 
+// RecordScanRequest binds requestID to connectorID before the scan command is
+// sent (FU-5), so only that connector's report for it is stored. It records
+// nothing, and returns false, unless the connector belongs to tenantID; a
+// malformed connector ID is simply not found.
+func RecordScanRequest(ctx context.Context, db *pgxpool.Pool, tenantID, connectorID, requestID string) (bool, error) {
+	tag, err := db.Exec(ctx, `
+		INSERT INTO scan_requests (request_id, connector_id, tenant_id)
+		SELECT $3, c.id, c.tenant_id
+		FROM connectors c
+		WHERE c.id::text = $2 AND c.tenant_id = $1
+	`, tenantID, connectorID, requestID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// DeleteScanRequest removes a request whose scan command was never sent.
+func DeleteScanRequest(ctx context.Context, db *pgxpool.Pool, requestID string) error {
+	_, err := db.Exec(ctx, `DELETE FROM scan_requests WHERE request_id = $1`, requestID)
+	return err
+}
+
+// UpsertScanResults stores connectorID's results. A result for a request that
+// wasn't sent to connectorID is dropped (FU-5): a connector can't add rows to
+// another connector's request, in any workspace.
 func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string, results []ScanResult) error {
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -187,8 +213,9 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 		_, err := tx.Exec(ctx, `
 			INSERT INTO connector_scan_results
 				(request_id, connector_id, ip, port, protocol, service_name, first_seen)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (request_id, ip, port, protocol) DO NOTHING
+			SELECT $1::text, $2::uuid, $3::text, $4::int, $5::text, $6::text, $7::timestamptz
+			WHERE EXISTS (SELECT 1 FROM scan_requests WHERE request_id = $1::text AND connector_id = $2::uuid)
+			ON CONFLICT (request_id, connector_id, ip, port, protocol) DO NOTHING
 		`, r.RequestID, connectorID, r.IP, r.Port, r.Protocol, r.ServiceName, now)
 		if err != nil {
 			return err
@@ -228,7 +255,12 @@ func GetScanResults(ctx context.Context, db *pgxpool.Pool, tenantID, requestID s
 	return result, rows.Err()
 }
 
+// PurgeScanResults removes results and scan requests older than olderThan
+// (a request's results go with it).
 func PurgeScanResults(ctx context.Context, db *pgxpool.Pool, olderThan time.Time) error {
-	_, err := db.Exec(ctx, `DELETE FROM connector_scan_results WHERE first_seen < $1`, olderThan)
+	if _, err := db.Exec(ctx, `DELETE FROM connector_scan_results WHERE first_seen < $1`, olderThan); err != nil {
+		return err
+	}
+	_, err := db.Exec(ctx, `DELETE FROM scan_requests WHERE created_at < $1`, olderThan)
 	return err
 }
