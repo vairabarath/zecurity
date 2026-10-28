@@ -1,8 +1,9 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { RelayDetail } from '@/api/types'
-import { mockFetch, relayOpsMe, superAdminMe, type RecordedCall } from '@/test/fetch'
+import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
+import { RelayDangerZone } from '@/components/RelayDangerZone'
 import { renderApp, signedInAs } from '@/test/render'
 
 const ID = '11111111-1111-1111-1111-111111111111'
@@ -160,14 +161,27 @@ describe('Relay detail', () => {
     expect(await screen.findByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
   })
 
-  it('is read-only: only Refresh, no mutating controls, GETs only', async () => {
-    signedInAs(superAdminMe)
+  it('is read-only for relay-ops: only Refresh, no mutating controls, GETs only', async () => {
+    signedInAs(relayOpsMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
     expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh'])
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
+    expect(calls.every((c) => c.method === 'GET')).toBe(true)
+  })
+
+  // Sprint 22 Phase X (D-30, D-31): the only mutating controls on this page
+  // are a super-admin's Revoke and Delete; opening the page sends GETs only.
+  it('a super-admin sees exactly Refresh, Revoke relay and Delete relay; loading sends GETs only', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
+    renderApp(`/relays/${ID}`)
+    await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+    const main = screen.getByRole('main')
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Revoke relay', 'Delete relay'])
+    expect(within(main).queryByText(/\b(edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
 
@@ -186,5 +200,240 @@ describe('Relay detail', () => {
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     expect(screen.queryByText(/Waiting for enrolment/)).not.toBeInTheDocument()
+  })
+})
+
+// ── Sprint 22 Phase X: revoke and delete (D-17, D-20, D-30, D-31) ───────────
+
+const REASON = 'host compromised'
+
+type Route = FakeResponse | ((call: RecordedCall) => FakeResponse)
+
+/** GET answers each detail in turn (the last one repeats); writes per routes. */
+function relayRoutes(details: (RelayDetail | FakeResponse)[], writes: Record<string, Route> = {}) {
+  let n = 0
+  return {
+    [`GET /provider/relays/${ID}`]: () => {
+      const d = details[Math.min(n++, details.length - 1)]
+      return 'status' in d && typeof d.status === 'number' ? (d as FakeResponse) : { status: 200, body: d }
+    },
+    ...writes,
+  }
+}
+
+async function openAction(user: ReturnType<typeof userEvent.setup>, action: 'Revoke relay' | 'Delete relay') {
+  await user.click(await screen.findByRole('button', { name: action }))
+  return screen.findByRole('dialog', { name: action })
+}
+
+async function fillAndConfirm(
+  user: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  action: 'Revoke relay' | 'Delete relay',
+  name = 'relay-a',
+) {
+  await user.type(within(dialog).getByLabelText('Reason'), REASON)
+  await user.type(within(dialog).getByLabelText(/Type relay-a to confirm/), name)
+  await user.click(within(dialog).getByRole('button', { name: action }))
+}
+
+const writes = (calls: RecordedCall[]) => calls.filter((c) => c.method !== 'GET')
+const gets = (calls: RecordedCall[]) => relayCalls(calls).filter((c) => c.method === 'GET')
+
+describe('Relay detail: danger zone visibility', () => {
+  it.each([
+    ['active', ['Revoke relay', 'Delete relay']],
+    ['inactive', ['Revoke relay', 'Delete relay']],
+    ['pending', ['Revoke relay', 'Delete relay']],
+    ['revoked', ['Delete relay']],
+  ] as const)('super-admin, %s relay: %j', async (status, actions) => {
+    signedInAs(superAdminMe)
+    mockFetch(relayRoutes([detail({ status })]))
+    renderApp(`/relays/${ID}`)
+    const zone = await screen.findByRole('region', { name: 'Danger zone' })
+    expect(within(zone).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([...actions])
+  })
+
+  it('super-admin, deleted relay: no danger zone', async () => {
+    signedInAs(superAdminMe)
+    mockFetch(relayRoutes([detail({ status: 'deleted' })]))
+    renderApp(`/relays/${ID}`)
+    await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+    expect(screen.queryByRole('region', { name: 'Danger zone' })).not.toBeInTheDocument()
+  })
+
+  it('relay-ops: the page loads, with no danger zone', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([detail()]))
+    renderApp(`/relays/${ID}`)
+    await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+    expect(screen.queryByRole('region', { name: 'Danger zone' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Revoke relay|Delete relay/ })).not.toBeInTheDocument()
+  })
+
+  // Unknown roles can't open relay pages at all (route guard); the danger zone
+  // also checks the role itself, so it stays hidden even without the guard.
+  it.each([
+    ['an unknown role', 'auditor'],
+    ['an empty role', ''],
+    ['a near-miss role', 'Super-Admin'],
+  ])('%s: Forbidden page, and the danger zone itself refuses to render', async (_, role) => {
+    signedInAs({ ...superAdminMe, role })
+    mockFetch(relayRoutes([detail()]))
+    renderApp(`/relays/${ID}`)
+    expect(await screen.findByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Revoke relay|Delete relay/ })).not.toBeInTheDocument()
+
+    cleanup()
+    render(<RelayDangerZone relay={detail()} onDone={() => {}} />)
+    expect(screen.queryByRole('region', { name: 'Danger zone' })).not.toBeInTheDocument()
+  })
+
+  it('the danger zone component renders for a super-admin (positive control for the direct render)', () => {
+    signedInAs(superAdminMe)
+    render(<RelayDangerZone relay={detail()} onDone={() => {}} />)
+    expect(screen.getByRole('region', { name: 'Danger zone' })).toBeInTheDocument()
+  })
+})
+
+describe('Relay detail: revoke and delete requests', () => {
+  it('revoke: one POST to /revoke with the reason and name in the body, then a refresh shows it revoked', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(
+      relayRoutes([detail(), detail({ status: 'revoked' })], { [`POST /provider/relays/${ID}/revoke`]: { status: 204 } }),
+    )
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await fillAndConfirm(user, await openAction(user, 'Revoke relay'), 'Revoke relay')
+
+    expect(await screen.findByText(/relay-a is revoked/)).toBeInTheDocument()
+    expect(writes(calls)).toEqual([
+      expect.objectContaining({ method: 'POST', path: `/provider/relays/${ID}/revoke`, search: '', body: { reason: REASON, confirm_name: 'relay-a' } }),
+    ])
+    expect(gets(calls)).toHaveLength(2)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const zone = screen.getByRole('region', { name: 'Danger zone' })
+    expect(within(zone).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Delete relay'])
+  })
+
+  it('delete: one DELETE with the reason and name in the body, then a refresh shows it deleted', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(
+      relayRoutes([detail({ status: 'pending' }), detail({ status: 'deleted' })], { [`DELETE /provider/relays/${ID}`]: { status: 204 } }),
+    )
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await fillAndConfirm(user, await openAction(user, 'Delete relay'), 'Delete relay')
+
+    expect(await screen.findByText(/relay-a is deleted/)).toBeInTheDocument()
+    expect(writes(calls)).toEqual([
+      expect.objectContaining({ method: 'DELETE', path: `/provider/relays/${ID}`, search: '', body: { reason: REASON, confirm_name: 'relay-a' } }),
+    ])
+    expect(screen.queryByRole('region', { name: 'Danger zone' })).not.toBeInTheDocument()
+  })
+
+  it('a revoked relay can still be deleted', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(
+      relayRoutes([detail({ status: 'revoked' }), detail({ status: 'deleted' })], { [`DELETE /provider/relays/${ID}`]: { status: 204 } }),
+    )
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await fillAndConfirm(user, await openAction(user, 'Delete relay'), 'Delete relay')
+    expect(await screen.findByText(/relay-a is deleted/)).toBeInTheDocument()
+    expect(writes(calls).map((c) => c.method)).toEqual(['DELETE'])
+  })
+
+  it('a double click sends exactly one request', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(
+      relayRoutes([detail(), detail({ status: 'revoked' })], { [`POST /provider/relays/${ID}/revoke`]: { status: 204 } }),
+    )
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    const dialog = await openAction(user, 'Revoke relay')
+    await user.type(within(dialog).getByLabelText('Reason'), REASON)
+    await user.type(within(dialog).getByLabelText(/Type relay-a to confirm/), 'relay-a')
+    await user.dblClick(within(dialog).getByRole('button', { name: 'Revoke relay' }))
+    await screen.findByText(/relay-a is revoked/)
+    expect(writes(calls)).toHaveLength(1)
+  })
+
+  it('cancelling sends nothing', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(relayRoutes([detail()]))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    const dialog = await openAction(user, 'Delete relay')
+    await user.type(within(dialog).getByLabelText('Reason'), REASON)
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(writes(calls)).toHaveLength(0)
+  })
+})
+
+describe('Relay detail: revoke and delete errors', () => {
+  async function failWith(action: 'Revoke relay' | 'Delete relay', res: FakeResponse, after: (RelayDetail | FakeResponse)[] = []) {
+    signedInAs(superAdminMe)
+    const key = action === 'Revoke relay' ? `POST /provider/relays/${ID}/revoke` : `DELETE /provider/relays/${ID}`
+    const { calls } = mockFetch(relayRoutes([detail(), ...after], { [key]: res }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    const dialog = await openAction(user, action)
+    await fillAndConfirm(user, dialog, action)
+    return { calls, dialog }
+  }
+
+  it('confirmation_mismatch: shown on the name field, dialog stays open, no refresh', async () => {
+    const { calls, dialog } = await failWith('Revoke relay', { status: 400, body: { error: 'confirmation_mismatch' } })
+    const name = within(dialog).getByLabelText(/Type relay-a to confirm/)
+    await waitFor(() => expect(name).toHaveAttribute('aria-invalid', 'true'))
+    expect(name).toHaveAccessibleDescription(/doesn’t match the relay’s name/)
+    expect(gets(calls)).toHaveLength(1)
+  })
+
+  it.each([
+    ['reason_required', /Enter a reason/],
+    ['reason_too_long', /500 characters or fewer/],
+  ])('%s: shown on the reason field', async (code, message) => {
+    const { dialog } = await failWith('Delete relay', { status: 400, body: { error: code } })
+    const reason = within(dialog).getByLabelText('Reason')
+    await waitFor(() => expect(reason).toHaveAccessibleDescription(message))
+    expect(reason).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('forbidden: an error inside the dialog, no Forbidden page', async () => {
+    const { dialog } = await failWith('Revoke relay', { status: 403, body: { error: 'forbidden' } })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Only super-admins can revoke or delete relays/)
+    expect(screen.queryByRole('heading', { name: /don’t have access/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Revoke relay' })).toBeInTheDocument()
+  })
+
+  it('already_revoked: refreshes and explains', async () => {
+    const { calls } = await failWith('Revoke relay', { status: 409, body: { error: 'already_revoked' } }, [detail({ status: 'revoked' })])
+    expect(await screen.findByText(/already revoked/)).toBeInTheDocument()
+    expect(gets(calls)).toHaveLength(2)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByText(/relay-a is revoked\./)).not.toBeInTheDocument() // not reported as our success
+  })
+
+  it('already_deleted: refreshes and explains', async () => {
+    const { calls } = await failWith('Delete relay', { status: 409, body: { error: 'already_deleted' } }, [detail({ status: 'deleted' })])
+    expect(await screen.findByText(/already deleted/)).toBeInTheDocument()
+    expect(gets(calls)).toHaveLength(2)
+    expect(screen.queryByRole('region', { name: 'Danger zone' })).not.toBeInTheDocument()
+  })
+
+  it('not_found: refreshes; the page says the relay is gone', async () => {
+    const { calls } = await failWith('Delete relay', { status: 404, body: { error: 'not_found' } }, [{ status: 404, body: { error: 'not_found' } }])
+    expect(await screen.findByRole('heading', { name: 'Relay not found' })).toBeInTheDocument()
+    expect(gets(calls)).toHaveLength(2)
+  })
+
+  it('an unknown error: a generic message in the dialog, nothing reported as done', async () => {
+    const { dialog, calls } = await failWith('Revoke relay', { status: 500, body: { error: 'server_error' } })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/didn’t go through/)
+    expect(screen.queryByText(/relay-a is revoked/)).not.toBeInTheDocument()
+    expect(gets(calls)).toHaveLength(1)
   })
 })

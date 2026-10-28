@@ -20,3 +20,42 @@ export function relayErrorMessage(err: unknown): string {
       return 'The action failed. Try again.'
   }
 }
+
+export type RelayAction = 'revoke' | 'delete'
+
+/**
+ * What a failed revoke/delete means for the console (Phase X). `field` puts
+ * the message on that dialog field; `refresh` means the relay changed (or is
+ * gone) under us, so the dialog closes, the page reloads and `message` is
+ * shown as a notice; otherwise the message stays in the dialog.
+ */
+export interface RelayActionFailure {
+  message: string
+  field?: 'reason' | 'confirm'
+  refresh?: boolean
+}
+
+export function relayActionFailure(err: unknown, action: RelayAction, relayName: string): RelayActionFailure {
+  const verb = action === 'revoke' ? 'revoke' : 'delete'
+  if (!(err instanceof ApiError)) return { message: `The ${verb} didn’t go through. Try again.` }
+  switch (err.code) {
+    case ErrorCode.confirmationMismatch:
+      return { field: 'confirm', message: 'That doesn’t match the relay’s name exactly (case matters).' }
+    case ErrorCode.reasonRequired:
+      return { field: 'reason', message: 'Enter a reason. It is recorded in the provider audit log.' }
+    case ErrorCode.reasonTooLong:
+      return { field: 'reason', message: 'Keep the reason to 500 characters or fewer.' }
+    case ErrorCode.forbidden:
+      return { message: 'Only super-admins can revoke or delete relays.' }
+    case ErrorCode.alreadyRevoked:
+      return { refresh: true, message: `${relayName} was already revoked, possibly by another operator. The page is up to date.` }
+    case ErrorCode.alreadyDeleted:
+      return { refresh: true, message: `${relayName} was already deleted, possibly by another operator. The page is up to date.` }
+    case ErrorCode.notFound:
+      return { refresh: true, message: `${relayName} no longer exists.` }
+    case ErrorCode.networkError:
+      return { message: 'Can’t reach the controller. Check your connection; nothing was changed by this attempt.' }
+    default:
+      return { message: `The ${verb} didn’t go through. Try again.` }
+  }
+}

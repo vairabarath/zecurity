@@ -88,6 +88,10 @@ export const ErrorCode = {
   invalidName: 'invalid_name',
   invalidDnsSan: 'invalid_dns_san',
   invalidIpSan: 'invalid_ip_san',
+  // relay revoke/delete (Sprint 22 Phase A/X)
+  alreadyRevoked: 'already_revoked',
+  alreadyDeleted: 'already_deleted',
+  confirmationMismatch: 'confirmation_mismatch',
   // client-side only
   networkError: 'network_error',
 } as const

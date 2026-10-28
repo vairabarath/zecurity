@@ -3327,3 +3327,11 @@ serves on `127.0.0.1:9102`.
 - **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
 - **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
 
+## 2026-10-28 — Sprint 22 Phase X (relay revoke/delete in the console): implemented, live AT-X2…X5 PASS
+- Branch `sprint22/phase-x-relay-revoke-delete` (from `fixed-pendings` `a3ac8518`; merged with #149, #150, #152, #153 before the PR).
+- Console: shared `ConfirmDangerDialog` (reason counted like the server, exact name), relay detail "Danger zone" (super-admin only; Delete also on revoked and pending relays), `revokeRelay` / `deleteRelay` (body, never URL), error mapping, outcome notice that survives the reload.
+- Found and fixed: provider CORS didn't allow `DELETE`, so Delete would fail in production (console on its own origin). One-line controller change with a test.
+- Gates: console 469 pass, lint/build clean; middleware tests pass. Live (isolated stack, cross-origin): revoke → CRL + audit with reason; delete of a revoked and a pending relay.
+- AT-X4 also PASS live: a real connector on a revoked relay logged "Active relay absent from new list; migrating immediately" and registered with the other relay within ~150 ms; CRL and audit verified. Traffic continuity not exercised (no client tunnel).
+- Note: a Postgres crash during one full Go run (automatic recovery, ~2 min; 1234 databases on the dev server, mostly leaked `resolvers_updsc_*` test databases). The rerun passed in full. Cleanup of leaked test databases pending approval.
+
