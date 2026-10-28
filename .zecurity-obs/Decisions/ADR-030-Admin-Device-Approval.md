@@ -31,6 +31,7 @@ tags:
 1. **Approval is a per-device state, set once by an admin.**
    - `client_devices.approved_at` and `approved_by` (migration `044_device_approval.sql`; `043_` stays reserved for Sprint 22 Phase D).
    - A new or re-created device starts **unapproved**.
+     - Approval stays bound to one machine key. Every `EnrollDevice` inserts a new `client_devices` row. The key fingerprint is pinned once at enrollment. `RenewCert` refuses a different key (`fingerprint_mismatch`) and refuses legacy rows without a fingerprint. So no new key can inherit an existing approval.
    - Admins approve or un-approve with `approveDevice` / `unapproveDevice`. A revoked device can't be approved.
    - Both actions are audited in `audit_logs` (`device.approve` / `device.unapprove`) in the same transaction.
 2. **"Approved by an admin" is a posture check that a profile can require**, like the firewall check: `zecurity.device.approved`.
