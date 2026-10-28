@@ -3247,6 +3247,15 @@ serves on `127.0.0.1:9102`.
 - Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
 - Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
 
+## 2026-10-28 — Device posture live test; firewall check false-pass fixed
+- Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
+  - ENFORCE denies a device whose firewall check fails;
+  - a PASS report restores access at the next sync;
+  - the connector refuses a client with a stale ACL;
+  - AUDIT allows access and records the reason.
+- Found: a forward-only `policy drop` made the firewall check PASS while inbound was open (proven from nika). Fixed in `client/src/posture.rs` (`c7d812cb`, branch `fix/posture-firewall-input-chain`, local): the check reads `nft -j` and requires an IPv4 input-hook drop/reject chain. Live re-check: forward-only now FAILs, a real input drop PASSes.
+- Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
+
 ## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
 - Branch `feat/device-approval` (base `84a06023` = main); committed locally, not pushed. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
 - Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.

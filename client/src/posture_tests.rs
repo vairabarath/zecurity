@@ -176,8 +176,8 @@ impl CommandRunner for FakeCommandRunner {
 async fn firewall_pass_via_nft_default_deny() {
     let mut responses = HashMap::new();
     responses.insert(
-        FakeCommandRunner::key("nft", &["list", "ruleset"]),
-        make_output(0, "table inet filter {\n chain input {\n  policy drop\n }\n}"),
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
+        make_output(0, &nft_json(&[("inet", "filter", "input", "input", "drop")])),
     );
     let runner = Arc::new(FakeCommandRunner { responses });
 
@@ -189,13 +189,88 @@ async fn firewall_pass_via_nft_default_deny() {
 async fn firewall_fail_when_nft_present_but_permissive() {
     let mut responses = HashMap::new();
     responses.insert(
-        FakeCommandRunner::key("nft", &["list", "ruleset"]),
-        make_output(0, "table inet filter {\n chain input {\n  policy accept\n }\n}"),
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
+        make_output(0, &nft_json(&[("inet", "filter", "input", "input", "accept")])),
     );
     let runner = Arc::new(FakeCommandRunner { responses });
 
     let result = collect_firewall(runner).await;
     assert_eq!(result.status, CheckStatus::Fail as i32);
+}
+
+/// A `nft -j list ruleset` document with one base chain per
+/// (family, table, name, hook, policy).
+fn nft_json(chains: &[(&str, &str, &str, &str, &str)]) -> String {
+    let items: Vec<serde_json::Value> = chains
+        .iter()
+        .map(|(family, table, name, hook, policy)| {
+            serde_json::json!({"chain": {"family": family, "table": table, "name": name,
+                "type": "filter", "hook": hook, "prio": 0, "policy": policy}})
+        })
+        .collect();
+    serde_json::json!({"nftables": items}).to_string()
+}
+
+async fn firewall_status_for(chains: &[(&str, &str, &str, &str, &str)]) -> (i32, String) {
+    let mut responses = HashMap::new();
+    responses.insert(
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
+        make_output(0, &nft_json(chains)),
+    );
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses })).await;
+    (result.status, result.detail)
+}
+
+/// A drop policy on a forward or output chain (e.g. Docker's FORWARD) leaves
+/// inbound open: not a firewall. Found live: such a host reported PASS.
+#[tokio::test]
+async fn firewall_fail_when_only_forward_or_output_drop() {
+    for chains in [
+        vec![("inet", "fwprobe", "forwardonly", "forward", "drop")],
+        vec![("ip", "filter", "OUTPUT", "output", "drop")],
+        vec![
+            ("ip", "filter", "FORWARD", "forward", "drop"),
+            ("inet", "filter", "input", "input", "accept"),
+        ],
+    ] {
+        let (status, detail) = firewall_status_for(&chains).await;
+        assert_eq!(status, CheckStatus::Fail as i32, "{chains:?}: {detail}");
+    }
+}
+
+/// An IPv6-only input drop leaves IPv4 inbound open.
+#[tokio::test]
+async fn firewall_fail_when_only_ip6_input_drop() {
+    let (status, _) = firewall_status_for(&[("ip6", "filter", "INPUT", "input", "drop")]).await;
+    assert_eq!(status, CheckStatus::Fail as i32);
+}
+
+/// An IPv4 input chain with a drop or reject policy passes — also iptables-nft's
+/// own `ip filter INPUT`, and alongside other permissive chains.
+#[tokio::test]
+async fn firewall_pass_for_ipv4_input_drop_or_reject() {
+    for chains in [
+        vec![("ip", "filter", "INPUT", "input", "drop")],
+        vec![("inet", "fw", "in", "input", "reject")],
+        vec![
+            ("inet", "zecurity_client", "output", "output", "accept"),
+            ("inet", "fwtest", "input", "input", "drop"),
+        ],
+    ] {
+        let (status, detail) = firewall_status_for(&chains).await;
+        assert_eq!(status, CheckStatus::Pass as i32, "{chains:?}: {detail}");
+    }
+}
+
+#[tokio::test]
+async fn firewall_error_when_nft_output_is_not_json() {
+    let mut responses = HashMap::new();
+    responses.insert(
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
+        make_output(0, "table inet filter { chain input { policy drop } }"),
+    );
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses })).await;
+    assert_eq!(result.status, CheckStatus::Error as i32);
 }
 
 #[tokio::test]
@@ -225,7 +300,7 @@ async fn firewall_fail_when_no_backend_found() {
 async fn firewall_error_when_nft_execution_fails() {
     let mut responses = HashMap::new();
     responses.insert(
-        FakeCommandRunner::key("nft", &["list", "ruleset"]),
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
         make_output(1, ""),
     );
     let runner = Arc::new(FakeCommandRunner { responses });
