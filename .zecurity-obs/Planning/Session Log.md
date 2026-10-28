@@ -3165,3 +3165,10 @@ serves on `127.0.0.1:9102`.
 - Lab check for existing rows (read-only, for M1; should return 0): `SELECT count(*) FROM resources r JOIN remote_networks rn ON rn.id = r.remote_network_id WHERE rn.tenant_id <> r.tenant_id;`
 - Review follow-up: discovered-service lookup now workspace-scoped (`getDiscoveredServices` returned any workspace's services; `promoteDiscoveredService` probe closed); tests strengthened (read error fails, compiler positive control, no false concurrency claim). Controller 1429 pass / 0 fail / 2 skip. New open finding FU-3 (`triggerScan` / `getScanResults` not workspace-scoped, likely High) recorded in Sprint22/path.md; not fixed (needs approval).
 
+## 2026-10-27 — Security fix FU-3: scan dispatch and scan results workspace-scoped
+- Branch `security/fu3-scan-authorization` (worktree `../zecurity-fu3`, base `fcb7e4eb`); not committed. Independent of the B-1 and resource-network branches.
+- Confirmed with fake streams and a throwaway DB: `triggerScan` reached another workspace's connector; `getScanResults` returned another workspace's results.
+- Fix: `PushScanCommand(workspaceID, …)` checks the live stream's authenticated tenant; `GetScanResults` joins the reporting connector's workspace; one user-safe error for any unavailable connector. No migration.
+- Tests: 4 new (1 registry, 3 DB-backed resolver), failing before the fix; controller 1416 pass / 0 fail / 2 skip.
+- Open: result key lacks the connector (theoretical squatting by a connector that knows a foreign request ID; needs a migration); no per-request connector binding within a workspace.
+- Review follow-up: refused scan dispatches are now logged server-side with the real reason (`not_connected` / `foreign_workspace`); client message unchanged. Controller 1417 pass / 0 fail / 2 skip.

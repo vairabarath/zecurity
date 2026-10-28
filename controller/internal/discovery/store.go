@@ -177,13 +177,19 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 	return tx.Commit(ctx)
 }
 
-func GetScanResults(ctx context.Context, db *pgxpool.Pool, requestID string) ([]ScanResult, error) {
+// GetScanResults returns tenantID's results for a scan request: only rows
+// reported by tenantID's own connectors (FU-3). A result row's connector is the
+// authenticated stream that reported it, and a connector's workspace never
+// changes, so the join is the ownership check; the request ID is not.
+// Foreign and unknown request IDs both return an empty list.
+func GetScanResults(ctx context.Context, db *pgxpool.Pool, tenantID, requestID string) ([]ScanResult, error) {
 	rows, err := db.Query(ctx, `
-		SELECT request_id, connector_id, ip, port, protocol, service_name, first_seen
-		FROM connector_scan_results
-		WHERE request_id=$1
-		ORDER BY ip, port
-	`, requestID)
+		SELECT r.request_id, r.connector_id, r.ip, r.port, r.protocol, r.service_name, r.first_seen
+		FROM connector_scan_results r
+		JOIN connectors c ON c.id = r.connector_id AND c.tenant_id = $2
+		WHERE r.request_id=$1
+		ORDER BY r.ip, r.port
+	`, requestID, tenantID)
 	if err != nil {
 		return nil, err
 	}

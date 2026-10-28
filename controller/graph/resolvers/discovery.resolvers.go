@@ -56,6 +56,7 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 
 // TriggerScan is the resolver for the triggerScan field.
 func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error) {
+	tc := tenant.MustGet(ctx)
 	if len(targets) == 0 {
 		return "", fmt.Errorf("triggerScan: targets must not be empty")
 	}
@@ -82,8 +83,9 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		},
 	}
 
-	if err := r.ConnectorRegistry.PushScanCommand(connectorID, msg); err != nil {
-		return "", fmt.Errorf("triggerScan: connector %s not connected: %w", connectorID, err)
+	// Only a connector of the caller's workspace can receive it (FU-3).
+	if err := r.ConnectorRegistry.PushScanCommand(tc.TenantID, connectorID, msg); err != nil {
+		return "", fmt.Errorf("triggerScan: %w", err)
 	}
 
 	return requestID, nil
@@ -105,7 +107,7 @@ func (r *queryResolver) GetDiscoveredServices(ctx context.Context, shieldID stri
 
 // GetScanResults is the resolver for the getScanResults field.
 func (r *queryResolver) GetScanResults(ctx context.Context, requestID string) ([]*graph.ScanResult, error) {
-	results, err := discovery.GetScanResults(ctx, r.Pool, requestID)
+	results, err := discovery.GetScanResults(ctx, r.Pool, tenant.MustGet(ctx).TenantID, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("getScanResults: %w", err)
 	}

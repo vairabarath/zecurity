@@ -15,6 +15,7 @@ import (
 	// clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -438,14 +439,43 @@ func (r *ConnectorRegistry) PushResourceInstruction(
 	return nil
 }
 
-// PushScanCommand delivers a ScanCommand to a connected connector.
-// Returns an error if the connector is not currently connected.
-func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.ConnectorControlMessage) error {
+// ErrConnectorNotAvailable answers a scan aimed at a connector that is not
+// connected, doesn't exist or belongs to another workspace, with one user-safe
+// message for all of them (FU-3), so the answer reveals nothing about other
+// workspaces' connectors.
+var ErrConnectorNotAvailable = apperr.UserErrorf("connector not found or not connected")
+
+// PushScanCommand delivers a ScanCommand to workspaceID's connected
+// connector. The stream's tenant was set from the authenticated connector
+// record when it opened (Control), so a caller can only reach its own
+// workspace's connectors; anything else is ErrConnectorNotAvailable and nothing
+// is sent.
+//
+// A refusal is logged with its real reason, for operators only: the client
+// gets the same error either way. The connector ID comes from the client, so
+// it is quoted and truncated (no forged log lines). Scan targets aren't logged.
+func (r *ConnectorRegistry) PushScanCommand(workspaceID, connectorID string, msg *pb.ConnectorControlMessage) error {
 	c := r.get(connectorID)
-	if c == nil {
-		return fmt.Errorf("connector %s is not connected", connectorID)
+	switch {
+	case c == nil:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_connected",
+			workspaceID, truncateForLog(connectorID))
+		return ErrConnectorNotAvailable
+	case c.tenantID != workspaceID:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=foreign_workspace connector_workspace=%s",
+			workspaceID, truncateForLog(connectorID), c.tenantID)
+		return ErrConnectorNotAvailable
 	}
 	return c.send(msg)
+}
+
+// truncateForLog bounds a client-supplied value before it is logged.
+func truncateForLog(s string) string {
+	const max = 64
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
