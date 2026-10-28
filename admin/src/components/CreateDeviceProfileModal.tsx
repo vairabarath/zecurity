@@ -47,6 +47,10 @@ export function CreateDeviceProfileModal({
   const linuxChecks = (checksData?.supportedPostureChecks ?? []).filter(
     (check) => check.platform === 'linux',
   )
+  // Server-side checks (ADR-030), e.g. "Approved by an admin".
+  const serverChecks = (checksData?.supportedPostureChecks ?? []).filter(
+    (check) => check.platform === 'any',
+  )
 
   const [createDeviceProfile] = useMutation(CreateDeviceProfileDocument, {
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
@@ -217,13 +221,25 @@ export function CreateDeviceProfileModal({
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between rounded-2xl border border-border p-4">
-                    <div className="flex items-center gap-2 text-sm font-semibold">
-                      <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-                      Manual Trust
+                  {serverChecks.map((check) => (
+                    <div key={check.id} className="rounded-2xl border border-border p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-sm font-semibold">
+                          <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                          {check.label}
+                        </div>
+                        <Switch
+                          checked={checkedIds.has(check.id)}
+                          onCheckedChange={() => toggleCheck(check.id)}
+                          aria-label={check.label}
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Admits only devices an admin approved on the Devices page. Leave
+                        off to allow personal devices (BYOD).
+                      </p>
                     </div>
-                    <Switch checked disabled aria-label="Manual Trust (always enabled)" />
-                  </div>
+                  ))}
 
                   <button
                     type="button"
@@ -236,17 +252,6 @@ export function CreateDeviceProfileModal({
                     </span>
                     <span className="text-muted-foreground">&rarr;</span>
                   </button>
-
-                  <p className="text-xs text-muted-foreground">
-                    Trusted Profiles must have at least one verification requirement.{' '}
-                    <button
-                      type="button"
-                      onClick={comingSoon}
-                      className="underline-offset-2 hover:underline"
-                    >
-                      Manage verification methods
-                    </button>
-                  </p>
                 </div>
 
                 <div className="space-y-2">

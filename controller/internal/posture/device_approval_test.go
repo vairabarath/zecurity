@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +124,39 @@ func TestEvaluatorDeviceApproval(t *testing.T) {
 	exec(t, `UPDATE client_devices SET revoked_at = NULL, approved_at = NULL WHERE id = $1`)
 	if got := satisfied(t); got[company.ID].Satisfied {
 		t.Fatalf("un-approved device must fail the company profile: %#v", got[company.ID])
+	}
+
+	// Security review: an evaluation that read "approved" must not store its
+	// PASS after the un-approve's own re-evaluation stored FAIL.
+	exec(t, `UPDATE client_devices SET approved_at = NOW() WHERE id = $1`)
+	satisfied(t)
+	read, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	evaluator.afterApprovalRead = func() {
+		// Only the first (stale) evaluation pauses; sync.Once would block the
+		// second caller and hide the race.
+		if first.CompareAndSwap(false, true) {
+			close(read)
+			<-release
+		}
+	}
+	stale := make(chan error, 1)
+	go func() { _, err := evaluator.EvaluateDevice(ctx, ws, device); stale <- err }()
+	<-read // the in-flight evaluation saw "approved"
+	exec(t, `UPDATE client_devices SET approved_at = NULL WHERE id = $1`)
+	fresh := make(chan error, 1)
+	go func() { _, err := evaluator.EvaluateDevice(ctx, ws, device); fresh <- err }()
+	time.Sleep(200 * time.Millisecond) // without the lock, fresh finishes here
+	close(release)
+	if err := <-stale; err != nil {
+		t.Fatalf("stale evaluation: %v", err)
+	}
+	if err := <-fresh; err != nil {
+		t.Fatalf("fresh evaluation: %v", err)
+	}
+	evaluator.afterApprovalRead = nil
+	if ev, err := store.LatestEvaluation(ctx, ws, device, company.ID); err != nil || ev.Satisfied {
+		t.Fatalf("after un-approve racing an evaluation: satisfied=%v err=%v, want false", ev != nil && ev.Satisfied, err)
 	}
 
 	// Another workspace's lookup never sees this device's approval.

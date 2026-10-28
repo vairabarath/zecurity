@@ -245,6 +245,10 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 - [x] Component tests for `Policies.tsx` and the rebuilt create modal.
 - [ ] Manual/E2E pass against a running backend (not done this session).
 - [x] **Build gate:** controller `go build`/`go test` + admin `codegen`/`build`, all green.
+- **Superseded (2026-10-28, ADR-030):** `manualTrust` was stored but never read by any
+  access decision. It is now deprecated. The profile panels offer the server-side
+  requirement "Approved by an admin" (`zecurity.device.approved`) instead, and admins
+  approve devices on the Devices page. See `Decisions/ADR-030-Admin-Device-Approval.md`.
 
 ### Phase F — M3: Active-Session Registry
 > See [[Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry]]. Depends on nothing — Day 1.

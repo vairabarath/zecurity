@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,13 @@ type Evaluator struct {
 	store    *Store
 	notifier PolicyNotifier
 	now      func() time.Time
+
+	// deviceLocks serializes evaluations of one device (process-local, D-02),
+	// so an evaluation that read the device's approval can't store its result
+	// after a later evaluation that saw the approval change (ADR-030).
+	deviceLocks sync.Map // uuid.UUID -> *sync.Mutex
+	// afterApprovalRead is a test hook.
+	afterApprovalRead func()
 }
 
 func NewEvaluator(store *Store, notifier PolicyNotifier) *Evaluator {
@@ -143,6 +151,10 @@ func (e *Evaluator) evaluateDevice(
 	workspaceID uuid.UUID,
 	deviceID uuid.UUID,
 ) ([]ProfileResult, bool, error) {
+	lock, _ := e.deviceLocks.LoadOrStore(deviceID, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+
 	report, err := e.store.LatestReport(ctx, workspaceID, deviceID)
 	if err != nil {
 		return nil, false, fmt.Errorf("load latest report for evaluation: %w", err)
@@ -161,6 +173,9 @@ func (e *Evaluator) evaluateDevice(
 	approved, err := e.store.DeviceApproved(ctx, workspaceID, deviceID)
 	if err != nil {
 		return nil, false, fmt.Errorf("load device approval for evaluation: %w", err)
+	}
+	if e.afterApprovalRead != nil {
+		e.afterApprovalRead()
 	}
 
 	observationByCheck := make(map[string]Observation, len(observations)+1)

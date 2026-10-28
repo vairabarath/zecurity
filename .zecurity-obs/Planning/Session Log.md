@@ -3238,3 +3238,14 @@ serves on `127.0.0.1:9102`.
 - Tests: 4 new (1 registry, 3 DB-backed resolver), failing before the fix; controller 1416 pass / 0 fail / 2 skip.
 - Open: result key lacks the connector (theoretical squatting by a connector that knows a foreign request ID; needs a migration); no per-request connector binding within a workspace.
 - Review follow-up: refused scan dispatches are now logged server-side with the real reason (`not_connected` / `foreign_workspace`); client message unchanged. Controller 1417 pass / 0 fail / 2 skip.
+
+## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
+- Branch `feat/device-approval` (base `84a06023` = main); committed locally, not pushed. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
+- Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.
+- Controller:
+  - `client_devices.approved_at` / `approved_by`; `approveDevice` / `unapproveDevice` (admin, workspace-scoped, revoked refused, no-op when unchanged), audited as `device.approve` / `device.unapprove` in the same transaction; the device is re-evaluated at once.
+  - Server-side check `zecurity.device.approved`: a profile may require it; a client report of it is dropped, and the evaluator always sets it from `client_devices`.
+  - Evaluations of one device are serialized (process-local lock, D-02), so an in-flight evaluation can't store a stale PASS after an un-approve (from the automated security review).
+- Admin UI: Devices page Approval column + Approve / Remove approval; the profile panels replace the locked Manual Trust switch with "Approved by an admin" (BYOD when off).
+- Tests: controller 1460 pass / 0 fail / 2 skip (unconditional stubs), all DB variables set; 9 mutants killed (overlay, revoked, workspace scope, client self-report, re-evaluation, revoked approvable, resolver scope, no-op re-audit, evaluation lock). Admin 119 tests pass, build green, eslint clean on changed files.
+- Not done: live lab test (approve → access to a company-only resource; un-approve → denied; BYOD resource unaffected).
