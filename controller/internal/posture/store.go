@@ -261,6 +261,32 @@ func (s *Store) LatestReport(
 	return report, nil
 }
 
+// DeviceApproved reports whether an admin approved the device (ADR-030). A
+// revoked or missing device is never approved.
+func (s *Store) DeviceApproved(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	deviceID uuid.UUID,
+) (bool, error) {
+	var approved bool
+	err := s.pool.QueryRow(
+		ctx,
+		`SELECT approved_at IS NOT NULL AND revoked_at IS NULL
+		   FROM client_devices
+		  WHERE id = $1
+		    AND workspace_id = $2`,
+		deviceID,
+		workspaceID,
+	).Scan(&approved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load device approval: %w", err)
+	}
+	return approved, nil
+}
+
 func (s *Store) ListObservations(
 	ctx context.Context,
 	reportID uuid.UUID,

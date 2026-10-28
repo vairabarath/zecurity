@@ -1,10 +1,12 @@
 import { useMemo } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
-import { Laptop, ShieldOff } from 'lucide-react'
+import { BadgeCheck, Laptop, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
 import {
+  ApproveDeviceDocument,
   GetClientDevicesDocument,
   RevokeDeviceDocument,
+  UnapproveDeviceDocument,
   type GetClientDevicesQuery,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -35,6 +37,11 @@ export default function DeviceManagement() {
     awaitRefetchQueries: true,
   })
 
+  // ADR-030: approval marks a company device; profiles that require
+  // "Approved by an admin" admit only approved devices.
+  const [approveDevice, { loading: approving }] = useMutation(ApproveDeviceDocument)
+  const [unapproveDevice, { loading: unapproving }] = useMutation(UnapproveDeviceDocument)
+
   const devices = useMemo<Device[]>(() => data?.clientDevices ?? [], [data])
   const activeCount = devices.filter((d) => !d.revokedAt).length
 
@@ -45,6 +52,22 @@ export default function DeviceManagement() {
       toast.success('Device revoked.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to revoke device.'
+      toast.error(msg)
+    }
+  }
+
+  async function handleApproval(device: Device) {
+    const approve = !device.approvedAt
+    const prompt = approve
+      ? `Approve "${device.name}" as a company device? It will be admitted to resources whose profile requires an approved device.`
+      : `Remove approval from "${device.name}"? It will lose access to resources whose profile requires an approved device.`
+    if (!window.confirm(prompt)) return
+    try {
+      if (approve) await approveDevice({ variables: { deviceId: device.id } })
+      else await unapproveDevice({ variables: { deviceId: device.id } })
+      toast.success(approve ? 'Device approved.' : 'Approval removed.')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update device approval.'
       toast.error(msg)
     }
   }
@@ -69,14 +92,14 @@ export default function DeviceManagement() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1200px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_120px] gap-4 px-5 py-4">
-            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Status', 'Actions'].map((label, index) => (
-              <div key={label} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
+          <div className="table-head grid min-w-[1380px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_140px_240px] gap-4 px-5 py-4">
+            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Status', 'Approval', 'Actions'].map((label, index) => (
+              <div key={label} className={`table-head-label ${index === 7 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[1200px] p-5 space-y-3">
+            <div className="min-w-[1380px] p-5 space-y-3">
               {Array.from({ length: 5 }).map((_, index) => (
                 <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
               ))}
@@ -88,11 +111,11 @@ export default function DeviceManagement() {
               description="Devices appear here as users enroll through the client."
             />
           ) : (
-            <div className="min-w-[1200px]">
+            <div className="min-w-[1380px]">
               {devices.map((device) => {
                 const revoked = !!device.revokedAt
                 return (
-                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_120px] gap-4 px-5 py-4">
+                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_140px_240px] gap-4 px-5 py-4">
                     <div className="flex min-w-0 items-center gap-3">
                       <span className="grid h-9 w-9 place-items-center rounded-xl border border-[oklch(0.78_0.09_310/0.25)] bg-[oklch(0.78_0.09_310/0.14)] text-[oklch(0.78_0.09_310)]">
                         <Laptop className="h-4 w-4" />
@@ -123,20 +146,45 @@ export default function DeviceManagement() {
                       <StatusPill label={revoked ? 'revoked' : 'active'} tone={revoked ? 'danger' : 'ok'} />
                     </div>
 
-                    <div className="text-right">
+                    <div
+                      title={
+                        device.approvedAt
+                          ? `Approved ${relativeTime(device.approvedAt)}${device.approvedByEmail ? ` by ${device.approvedByEmail}` : ''}`
+                          : undefined
+                      }
+                    >
+                      <StatusPill
+                        label={device.approvedAt ? 'approved' : 'not approved'}
+                        tone={device.approvedAt ? 'info' : 'muted'}
+                      />
+                    </div>
+
+                    <div className="flex justify-end gap-1">
                       {revoked ? (
                         <span className="text-[12.5px] text-muted-foreground/60">—</span>
                       ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={revoking}
-                          onClick={() => handleRevoke(device)}
-                          className="gap-1.5 text-[oklch(0.75_0.16_25)] hover:bg-[oklch(0.75_0.16_25/0.1)]"
-                        >
-                          <ShieldOff className="h-3.5 w-3.5" />
-                          Revoke
-                        </Button>
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={approving || unapproving}
+                            onClick={() => handleApproval(device)}
+                            className="gap-1.5"
+                          >
+                            <BadgeCheck className="h-3.5 w-3.5" />
+                            {device.approvedAt ? 'Remove approval' : 'Approve'}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={revoking}
+                            onClick={() => handleRevoke(device)}
+                            className="gap-1.5 text-[oklch(0.75_0.16_25)] hover:bg-[oklch(0.75_0.16_25/0.1)]"
+                          >
+                            <ShieldOff className="h-3.5 w-3.5" />
+                            Revoke
+                          </Button>
+                        </>
                       )}
                     </div>
                   </div>

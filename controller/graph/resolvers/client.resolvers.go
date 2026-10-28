@@ -70,6 +70,16 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 	return true, nil
 }
 
+// ApproveDevice is the resolver for the approveDevice field.
+func (r *mutationResolver) ApproveDevice(ctx context.Context, deviceID string) (*graph.ClientDevice, error) {
+	return r.setDeviceApproval(ctx, deviceID, true)
+}
+
+// UnapproveDevice is the resolver for the unapproveDevice field.
+func (r *mutationResolver) UnapproveDevice(ctx context.Context, deviceID string) (*graph.ClientDevice, error) {
+	return r.setDeviceApproval(ctx, deviceID, false)
+}
+
 // MyDevices is the resolver for the myDevices field.
 func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, error) {
 	tc, ok := tenant.Get(ctx)
@@ -78,11 +88,12 @@ func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, e
 	}
 
 	rows, err := r.Pool.Query(ctx,
-		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
-		   FROM client_devices
-		  WHERE user_id = $1
-		    AND workspace_id = $2
-		  ORDER BY created_at DESC`,
+		`SELECT `+clientDeviceColumns+`
+		   FROM client_devices d
+		   LEFT JOIN users u ON u.id = d.approved_by
+		  WHERE d.user_id = $1
+		    AND d.workspace_id = $2
+		  ORDER BY d.created_at DESC`,
 		tc.UserID, tc.TenantID,
 	)
 	if err != nil {
@@ -113,10 +124,11 @@ func (r *queryResolver) ClientDevices(ctx context.Context) ([]*graph.ClientDevic
 	}
 
 	rows, err := r.Pool.Query(ctx,
-		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
-		   FROM client_devices
-		  WHERE workspace_id = $1
-		  ORDER BY created_at DESC`,
+		`SELECT `+clientDeviceColumns+`
+		   FROM client_devices d
+		   LEFT JOIN users u ON u.id = d.approved_by
+		  WHERE d.workspace_id = $1
+		  ORDER BY d.created_at DESC`,
 		tc.TenantID,
 	)
 	if err != nil {

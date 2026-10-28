@@ -49,16 +49,18 @@ type ComplexityRoot struct {
 	}
 
 	ClientDevice struct {
-		CertNotAfter func(childComplexity int) int
-		CommonName   func(childComplexity int) int
-		CreatedAt    func(childComplexity int) int
-		ID           func(childComplexity int) int
-		LastSeenAt   func(childComplexity int) int
-		Name         func(childComplexity int) int
-		Os           func(childComplexity int) int
-		RevokedAt    func(childComplexity int) int
-		SpiffeID     func(childComplexity int) int
-		UserID       func(childComplexity int) int
+		ApprovedAt      func(childComplexity int) int
+		ApprovedByEmail func(childComplexity int) int
+		CertNotAfter    func(childComplexity int) int
+		CommonName      func(childComplexity int) int
+		CreatedAt       func(childComplexity int) int
+		ID              func(childComplexity int) int
+		LastSeenAt      func(childComplexity int) int
+		Name            func(childComplexity int) int
+		Os              func(childComplexity int) int
+		RevokedAt       func(childComplexity int) int
+		SpiffeID        func(childComplexity int) int
+		UserID          func(childComplexity int) int
 	}
 
 	Connector struct {
@@ -166,6 +168,7 @@ type ComplexityRoot struct {
 		AcceptScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
 		AddGroupMember                 func(childComplexity int, groupID string, userID string) int
 		AddProfileRequirement          func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
+		ApproveDevice                  func(childComplexity int, deviceID string) int
 		AssignResourceToGroup          func(childComplexity int, resourceID string, groupID string) int
 		BindResourceToProfile          func(childComplexity int, profileID string, resourceID string) int
 		CreateDeviceProfile            func(childComplexity int, name string, manualTrust *bool) int
@@ -203,6 +206,7 @@ type ComplexityRoot struct {
 		SetPlatformLoginEnabled        func(childComplexity int, enabled bool) int
 		TestIdpConnection              func(childComplexity int, id string) int
 		TriggerScan                    func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnapproveDevice                func(childComplexity int, deviceID string) int
 		UnassignResourceFromGroup      func(childComplexity int, resourceID string, groupID string) int
 		UnbindResourceFromProfile      func(childComplexity int, profileID string, resourceID string) int
 		UnprotectResource              func(childComplexity int, id string) int
@@ -448,6 +452,8 @@ type MutationResolver interface {
 	TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error)
 	CreateInvitation(ctx context.Context, email string) (*Invitation, error)
 	RevokeDevice(ctx context.Context, deviceID string) (bool, error)
+	ApproveDevice(ctx context.Context, deviceID string) (*ClientDevice, error)
+	UnapproveDevice(ctx context.Context, deviceID string) (*ClientDevice, error)
 	CreateGroup(ctx context.Context, name string, description *string) (*Group, error)
 	UpdateGroup(ctx context.Context, id string, name *string, description *string) (*Group, error)
 	DeleteGroup(ctx context.Context, id string) (bool, error)
@@ -548,6 +554,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.AuthInitPayload.State(childComplexity), true
 
+	case "ClientDevice.approvedAt":
+		if e.ComplexityRoot.ClientDevice.ApprovedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ApprovedAt(childComplexity), true
+	case "ClientDevice.approvedByEmail":
+		if e.ComplexityRoot.ClientDevice.ApprovedByEmail == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ApprovedByEmail(childComplexity), true
 	case "ClientDevice.certNotAfter":
 		if e.ComplexityRoot.ClientDevice.CertNotAfter == nil {
 			break
@@ -1061,6 +1079,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool)), true
+	case "Mutation.approveDevice":
+		if e.ComplexityRoot.Mutation.ApproveDevice == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_approveDevice_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.ApproveDevice(childComplexity, args["deviceId"].(string)), true
 	case "Mutation.assignResourceToGroup":
 		if e.ComplexityRoot.Mutation.AssignResourceToGroup == nil {
 			break
@@ -1468,6 +1497,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.TriggerScan(childComplexity, args["connectorId"].(string), args["targets"].([]string), args["ports"].([]int)), true
+	case "Mutation.unapproveDevice":
+		if e.ComplexityRoot.Mutation.UnapproveDevice == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_unapproveDevice_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UnapproveDevice(childComplexity, args["deviceId"].(string)), true
 	case "Mutation.unassignResourceFromGroup":
 		if e.ComplexityRoot.Mutation.UnassignResourceFromGroup == nil {
 			break
@@ -2733,6 +2773,10 @@ func (ec *executionContext) childFields_ClientDevice(ctx context.Context, field 
 		return ec.fieldContext_ClientDevice_createdAt(ctx, field)
 	case "revokedAt":
 		return ec.fieldContext_ClientDevice_revokedAt(ctx, field)
+	case "approvedAt":
+		return ec.fieldContext_ClientDevice_approvedAt(ctx, field)
+	case "approvedByEmail":
+		return ec.fieldContext_ClientDevice_approvedByEmail(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ClientDevice", field.Name)
 }
@@ -3503,6 +3547,20 @@ func (ec *executionContext) field_Mutation_addProfileRequirement_args(ctx contex
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_approveDevice_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "deviceId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["deviceId"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_assignResourceToGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -4250,6 +4308,20 @@ func (ec *executionContext) field_Mutation_triggerScan_args(ctx context.Context,
 		return nil, err
 	}
 	args["ports"] = arg2
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_unapproveDevice_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "deviceId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["deviceId"] = arg0
 	return args, nil
 }
 
@@ -5040,6 +5112,52 @@ func (ec *executionContext) _ClientDevice_revokedAt(ctx context.Context, field g
 	)
 }
 func (ec *executionContext) fieldContext_ClientDevice_revokedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_approvedAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_approvedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ApprovedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_approvedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_approvedByEmail(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_approvedByEmail(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ApprovedByEmail, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_approvedByEmail(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
@@ -7806,6 +7924,130 @@ func (ec *executionContext) fieldContext_Mutation_revokeDevice(ctx context.Conte
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_revokeDevice_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_approveDevice(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_approveDevice(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().ApproveDevice(ctx, fc.Args["deviceId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ClientDevice
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ClientDevice
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ClientDevice) graphql.Marshaler {
+			return ec.marshalNClientDevice2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_approveDevice(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ClientDevice(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_approveDevice_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_unapproveDevice(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_unapproveDevice(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UnapproveDevice(ctx, fc.Args["deviceId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ClientDevice
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ClientDevice
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ClientDevice) graphql.Marshaler {
+			return ec.marshalNClientDevice2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_unapproveDevice(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ClientDevice(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_unapproveDevice_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -15687,6 +15929,10 @@ func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.Selection
 			}
 		case "revokedAt":
 			out.Values[i] = ec._ClientDevice_revokedAt(ctx, field, obj)
+		case "approvedAt":
+			out.Values[i] = ec._ClientDevice_approvedAt(ctx, field, obj)
+		case "approvedByEmail":
+			out.Values[i] = ec._ClientDevice_approvedByEmail(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -16586,6 +16832,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "revokeDevice":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_revokeDevice(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "approveDevice":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_approveDevice(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "unapproveDevice":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_unapproveDevice(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -19146,6 +19406,10 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) marshalNClientDevice2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx context.Context, sel ast.SelectionSet, v ClientDevice) graphql.Marshaler {
+	return ec._ClientDevice(ctx, sel, &v)
 }
 
 func (ec *executionContext) marshalNClientDevice2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDeviceᚄ(ctx context.Context, sel ast.SelectionSet, v []*ClientDevice) graphql.Marshaler {
