@@ -192,10 +192,10 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 
 > **Phase file:** [[Sprint22/Member2-Go-Rust/Phase4-Relay-Revoke-Delete-Console]]. **Depends on A merged.**
 
-- [ ] **X1** Tests first: danger-zone visibility (super-admin only; hidden on revoked/deleted), required reason, typed name enables the button, error mapping, refresh after success.
-- [ ] **X2** `ConfirmDangerDialog` (reason + typed confirmation), reused by D.
-- [ ] **X3** Relay detail "Danger zone": Revoke and Delete; API-surface pin.
-- [ ] **X-gate**
+- [x] **X1** Tests first: danger-zone visibility (super-admin only; hidden on revoked/deleted), required reason, typed name enables the button, error mapping, refresh after success.
+- [x] **X2** `ConfirmDangerDialog` (reason + typed confirmation), reused by D.
+- [x] **X3** Relay detail "Danger zone": Revoke and Delete; API-surface pin. *(Delete also stays available on a revoked relay; the provider CORS policy now allows `DELETE`, see the phase file.)*
+- [x] **X-gate** *(2026-10-28: console 469 pass, lint and build clean; middleware tests pass. Live AT-X2, AT-X3, AT-X4 and AT-X5 PASS on isolated stacks with the console on its own origin; AT-X4 with a real connector migrating to the other relay (traffic continuity not exercised: no client tunnel).)*
 
 ### Phase D — M2: Drain and resume (D-32)
 

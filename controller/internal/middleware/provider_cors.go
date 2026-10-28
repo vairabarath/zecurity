@@ -23,7 +23,7 @@ import (
 
 const (
 	providerPathPrefix       = "/provider/"
-	providerCORSAllowMethods = "GET, POST, PATCH, OPTIONS"
+	providerCORSAllowMethods = "GET, POST, PATCH, DELETE, OPTIONS" // DELETE: relay delete (Sprint 22 Phase X)
 	providerCORSAllowHeaders = "Authorization, Content-Type"
 	providerCORSMaxAgeSecs   = "600"
 )

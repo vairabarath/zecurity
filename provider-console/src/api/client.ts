@@ -70,7 +70,7 @@ async function readErrorBody(res: Response): Promise<ErrorBody> {
 }
 
 export async function request<T>(
-  method: 'GET' | 'POST' | 'PATCH',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
   { body, auth = true, credentialCheck = false }: RequestOptions = {},
 ): Promise<T> {

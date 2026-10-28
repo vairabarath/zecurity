@@ -148,6 +148,24 @@ Found and fixed during the run: **Add relay** reopened with the previous relay's
 | AT-X4 | **Live:** revoke a relay carrying a connector | Connector logs "Active relay absent from new list; migrating immediately"; traffic continues; CRL lists the serial; audit shows the reason |
 | AT-X5 | **Live:** delete a relay | Relay leaves the default list; certificates revoked; audit shows the reason |
 
+### Live run — Phase X (2026-10-28)
+
+**Setup:** isolated local stack, not the lab: controller built from the Phase X working tree on a throwaway database, the test Valkey, ports 18080/19090; the console under Vite on its **own origin** (`:5174`, `VITE_PROVIDER_API_BASE` pointing at the controller, `PROVIDER_CONSOLE_ORIGIN` set), so every write went through real CORS as in production. Super-admin signed in for real (bootstrap password → change → TOTP enrolment, code computed from the setup key). One relay provisioned with the real relay binary (certificate serial `a4b780e8…`), one left pending. The database was dropped afterwards.
+
+| Case | Result | Evidence |
+|---|---|---|
+| CORS | PASS | Preflight `OPTIONS` for `DELETE` from the console origin → 204 with `GET, POST, PATCH, DELETE, OPTIONS`; from a foreign origin → 403. |
+| AT-X1 | Covered by tests, not run live | relay-ops gets no danger zone (`RelayDetail.test.tsx`); unknown roles can't open the page. |
+| AT-X2 | PASS | After the revoke only **Delete relay** remained; after each delete the danger zone was gone. |
+| AT-X3 | PASS | Confirm disabled with no input and with `Live-X-Relay1` (wrong case); enabled with the exact name. |
+| AT-X4 | PASS (second run, below) | First run: revoke itself PASS (status, CRL, audit). Connector migration verified in the second run. |
+| AT-X5 | PASS | The revoked relay and the pending relay (D-20 path) deleted from the browser (cross-origin `DELETE`): both `deleted`, absent from the default list, one `relay.delete` audit row each with its reason. |
+
+**Second run, AT-X4 with a real connector (2026-10-28):** same kind of isolated stack, with throwaway PKI, JWT and provider secrets. A workspace and its admin were provisioned by the real `bootstrap.Service` (a scratch seed program; never committed); the remote network and connector came from the real GraphQL mutations, the enrollment token from `POST /api/connectors/{id}/token`. Two real relays (rebuilt from current source) reached the controller over the LAN IP, so they were advertised at private addresses (`192.168.1.223:19094` / `:19095`, `RELAY_DEV_ALLOW_PRIVATE_ADDR`). A real connector enrolled and attached to `x4-relay-b`. The super-admin revoked `x4-relay-b` from the console (Orca, cross-origin):
+- 111 ms later the connector logged `received LabelledRelayList push … relay_count=1` and **`Active relay absent from new list; migrating immediately relay_id=<x4-relay-b>`**; 31 ms after that `Connector registered with Relay` (now `x4-relay-a`), then `old relay drain completed after active streams reached zero`. The placement row moved to `x4-relay-a`.
+- `x4-relay-b` `revoked`; its certificate revoked with the typed reason; `/relay.crl` lists the serial; one `relay.revoke` audit row with the actor, reason and `serials_revoked: 1`.
+- Not exercised: "traffic continues" — no client tunnel was open (zero active streams at migration).
+
 ## Phase D — Drain and resume
 
 | ID | Scenario | Expected |

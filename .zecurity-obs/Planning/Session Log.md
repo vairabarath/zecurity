@@ -3246,3 +3246,13 @@ serves on `127.0.0.1:9102`.
 - Gates: Go 1420 pass / 0 fail / 2 skip (unconditional stubs); console 436 pass, lint/build clean.
 - Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
 - Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
+
+
+## 2026-10-28 — Sprint 22 Phase X (relay revoke/delete in the console): implemented, live AT-X2/X3/X5 PASS
+- Branch `sprint22/phase-x-relay-revoke-delete` (from `fixed-pendings` `a3ac8518`); not committed.
+- Console: shared `ConfirmDangerDialog` (reason counted like the server, exact name), relay detail "Danger zone" (super-admin only; Delete also on revoked and pending relays), `revokeRelay` / `deleteRelay` (body, never URL), error mapping, outcome notice that survives the reload.
+- Found and fixed: provider CORS didn't allow `DELETE`, so Delete would fail in production (console on its own origin). One-line controller change with a test.
+- Gates: console 469 pass, lint/build clean; middleware tests pass. Live (isolated stack, cross-origin): revoke → CRL + audit with reason; delete of a revoked and a pending relay.
+- AT-X4 also PASS live: a real connector on a revoked relay logged "Active relay absent from new list; migrating immediately" and registered with the other relay within ~150 ms; CRL and audit verified. Traffic continuity not exercised (no client tunnel).
+- Note: a Postgres crash during one full Go run (automatic recovery, ~2 min; 1234 databases on the dev server, mostly leaked `resolvers_updsc_*` test databases). The rerun passed in full. Cleanup of leaked test databases pending approval.
+
