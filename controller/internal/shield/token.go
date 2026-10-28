@@ -2,9 +2,6 @@ package shield
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -19,6 +16,7 @@ import (
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/netutil"
+	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
 const enrollmentJTIPrefix = "shield:enrollment:jti:"
@@ -240,21 +238,7 @@ func (s *service) loadWorkspaceIdentity(ctx context.Context, workspaceID string)
 }
 
 func (s *service) loadCAFingerprint(ctx context.Context) (string, error) {
-	var certPEM string
-	err := s.db.QueryRow(ctx,
-		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
-	).Scan(&certPEM)
-	if err != nil {
-		return "", fmt.Errorf("load intermediate ca: %w", err)
-	}
-
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		return "", fmt.Errorf("decode intermediate ca pem")
-	}
-
-	sum := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(sum[:]), nil
+	return pki.IntermediateFingerprint(ctx, s.db)
 }
 
 func (s *service) selectConnector(ctx context.Context, remoteNetworkID, tenantID string) (connectorID, connectorAddr string, err error) {

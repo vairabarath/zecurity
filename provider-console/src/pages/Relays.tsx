@@ -1,24 +1,34 @@
-import { useCallback } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { useCallback, useState } from 'react'
+import { Plus, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { listRelays } from '@/api/reads'
+import { createRelay } from '@/api/relays'
 import { RELAY_STATUSES, type Page, type RelayStatus, type RelaySummary } from '@/api/types'
+import { hasRole } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
+import { AddRelayDialog, type NewRelay } from '@/components/AddRelayDialog'
 import { CapacityTier, ConnectionsBar } from '@/components/Capacity'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
+import { ProvisioningTokenDialog, type IssuedRelay } from '@/components/ProvisioningTokenDialog'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime, formatScope } from '@/lib/format'
+import { relayErrorMessage } from '@/lib/relay-errors'
 import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 
-// Relays (Phase P, relay.read: super-admin and relay-ops). Read-only: the
-// only controls are the status filter, paging, Refresh and Retry.
+// Relays (Phase P, relay.read: super-admin and relay-ops). Besides the
+// status filter, paging, Refresh and Retry, the only control is Add relay
+// (Sprint 22 Phase E, D-30): super-admin and relay-ops may create relays
+// (D-31). Hiding the button is UX only; the controller decides.
+
+const CAN_CREATE = ['super-admin', 'relay-ops'] as const
 
 const FILTER_KEYS = ['status'] as const
 const ALL = 'all' // chip value for "no status filter" (every status except deleted)
@@ -43,6 +53,43 @@ function fetchRelays(f: Filters, cursor: string | undefined): Promise<Page<Relay
 export function Relays() {
   const q = usePagedQuery<Page<RelaySummary>>({ filterKeys: FILTER_KEYS, validate: validStatus, fetchPage: fetchRelays })
   const onStatus = useCallback((v: string) => q.setFilters(v === ALL ? {} : { status: v }), [q])
+  const canCreate = hasRole(useSessionStore((s) => s.me?.role), CAN_CREATE)
+  const [adding, setAdding] = useState(false)
+  // Bumped on every opening so the form starts empty (it keeps its own state).
+  const [addKey, setAddKey] = useState(0)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string>()
+  // The one-time token lives here only while its dialog is open.
+  const [issued, setIssued] = useState<IssuedRelay | null>(null)
+
+  async function onCreate(relay: NewRelay) {
+    setPending(true)
+    setError(undefined)
+    try {
+      const res = await createRelay(relay.name, relay.dnsAllowlist, relay.ipAllowlist)
+      setAdding(false)
+      setIssued({
+        name: relay.name,
+        expiresAt: res.expires_at,
+        relayId: res.relay_id,
+        provisioningToken: res.provisioning_token,
+        caFingerprint: res.ca_fingerprint,
+        controllerGrpcAddr: res.controller_grpc_addr,
+        controllerHttpAddr: res.controller_http_addr,
+        dnsSans: relay.dnsAllowlist,
+        ipSans: relay.ipAllowlist,
+      })
+    } catch (err) {
+      setError(relayErrorMessage(err))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  function closeIssued() {
+    setIssued(null)
+    q.retry()
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -50,10 +97,24 @@ export function Relays() {
         title="Relays"
         description="The relay fleet that carries connector and client traffic: liveness, capacity and certificates."
         actions={
-          <Button variant="outline" onClick={q.retry} aria-label="Refresh relays">
-            <RefreshCw aria-hidden />
-            Refresh
-          </Button>
+          <>
+            <Button variant="outline" onClick={q.retry} aria-label="Refresh relays">
+              <RefreshCw aria-hidden />
+              Refresh
+            </Button>
+            {canCreate && (
+              <Button
+                onClick={() => {
+                  setError(undefined)
+                  setAddKey((k) => k + 1)
+                  setAdding(true)
+                }}
+              >
+                <Plus aria-hidden />
+                Add relay
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -99,6 +160,9 @@ export function Relays() {
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={r.status} />
+                      {r.status === 'pending' && (
+                        <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Waiting for enrolment</div>
+                      )}
                     </TableCell>
                     <TableCell className="font-mono text-[13px] text-subtle-foreground">{r.version ?? '—'}</TableCell>
                     <TableCell className="min-w-36">
@@ -122,6 +186,18 @@ export function Relays() {
           </Card>
         )}
       </DataState>
+
+      {canCreate && (
+        <AddRelayDialog
+          key={addKey}
+          open={adding}
+          pending={pending}
+          error={error}
+          onSubmit={(relay) => void onCreate(relay)}
+          onCancel={() => setAdding(false)}
+        />
+      )}
+      <ProvisioningTokenDialog relay={issued} onClose={closeIssued} />
     </div>
   )
 }

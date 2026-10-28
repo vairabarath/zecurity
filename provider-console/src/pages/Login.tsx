@@ -106,7 +106,7 @@ export function Login() {
             ))}
           </ul>
         </div>
-        <p className="text-[13px] text-faint">Read-only fleet view. Operator management is limited to super-admins.</p>
+        <p className="text-[13px] text-faint">Relay changes are limited to relay operators and super-admins; operator management to super-admins.</p>
       </section>
 
       <section aria-label="Sign in form" className="flex flex-[1_1_440px] items-center justify-center px-6 py-12">
