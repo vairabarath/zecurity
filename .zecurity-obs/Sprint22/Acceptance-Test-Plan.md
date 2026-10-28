@@ -95,6 +95,20 @@ No provisioning token, TOTP secret or `otpauth` URI appeared in the controller l
 | AT-E4 | **Live:** paste the install block on a lab host | Relay goes pending → active; token used up (Valkey JTI gone) |
 | AT-E5 | Pending relay whose token expired | Hint explains D-20; delete + add new works |
 
+### Live run — Phase E (2026-10-27): AT-E1 … AT-E3 PASS
+
+**Setup:** isolated local stack, not the lab. A controller built from the Phase E working tree on a throwaway database (`zecurity_live_phasee_*`, 45 migrations), the test Valkey `:6390`, ports 18080/19090, `PROVIDER_RELAY_CONTROLLER_ADDR=localhost:19090`, `PROVIDER_RELAY_CONTROLLER_HTTP_ADDR=localhost:18080`. The console ran under Vite against it and was driven in a real browser (Orca). The super-admin signed in for real (bootstrap password → change → TOTP enrolment, code computed from the setup key). The dev database was not touched; the throwaway database was dropped afterwards.
+
+| Case | Result | Evidence |
+|---|---|---|
+| AT-E1 | PASS | `POST /provider/relays` → 201, `Cache-Control: no-store`, body has `ca_fingerprint`, `controller_grpc_addr=localhost:19090`, `controller_http_addr=localhost:18080`; the fingerprint equals `curl /ca.crt \| openssl x509 -outform DER \| sha256sum`. A malformed `PROVIDER_RELAY_CONTROLLER_HTTP_ADDR=http://…` stops startup with a clear message. |
+| AT-E2 | PASS | `127.0.0.01` in IP addresses → "Enter an IP address in canonical form…", Create disabled; fixed → enabled. |
+| AT-E3 | PASS | Token dialog "Install live-e-relay1": installer + direct command + token, 24 h expiry. After **I’ve saved it, close**: token absent from the DOM, `sessionStorage`, `localStorage` and the URL; the list reloaded. A second relay left pending shows "Waiting for enrolment". Token not in the controller log; the `relay.create` audit row holds name/SANs/TTL and IP `::1`, no token. |
+| AT-E4 (local stand-in) | PASS locally; **lab run pending** | The direct command copied from the dialog was run unmodified (only `RELAY_BIND` and `RELAY_STATE_DIR` added through the outer environment) with `relay/target/debug/zecurity-relay`: "verified controller Intermediate CA fingerprint", certificate stored, relay `active` within a second. *Valkey JTI consumption not checked in this run.* |
+| AT-E5 | Not run live | Needs an expired token (24 h) and Phase X delete. The hint is shown in the token dialog and on the pending relay's detail page (tests). |
+
+Found and fixed during the run: **Add relay** reopened with the previous relay's values (see the phase file → Post-Phase Fixes). Tooling note: in Orca, clicking **Confirm and continue** on `/mfa` and the token dialog's close button didn't fire; `requestSubmit()` / a DOM click did. The login and password forms clicked normally. Worth a glance in AT-T with a real browser and authenticator.
+
 ## Phase X — Revoke and delete in the console
 
 | ID | Scenario | Expected |

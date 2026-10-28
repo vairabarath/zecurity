@@ -159,3 +159,19 @@ func TestAdminRevokeRequiresRelayID(t *testing.T) {
 		t.Fatalf("missing id: got %d, want 400", rec.Code)
 	}
 }
+
+// Phase E: the controller addresses printed in the install command are
+// host:port (the relay prepends the scheme itself). Empty means "not
+// configured" and is allowed.
+func TestValidateInstallAddr(t *testing.T) {
+	for _, ok := range []string{"", "controller.example.com:9090", "10.0.0.5:8080", "[2001:db8::1]:9090"} {
+		if err := ValidateInstallAddr(ok); err != nil {
+			t.Errorf("ValidateInstallAddr(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"https://controller.example.com", "http://c:8080", "controller.example.com", ":9090", "c:", "c :9090", "c:9090/path", "c:port", "c:99999"} {
+		if err := ValidateInstallAddr(bad); err == nil {
+			t.Errorf("ValidateInstallAddr(%q) = nil, want error", bad)
+		}
+	}
+}

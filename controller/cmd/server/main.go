@@ -486,6 +486,11 @@ func main() {
 		JWTSecret:     mustEnv("JWT_SECRET"),
 		Authz:         providerAuthz,
 		ProviderStore: providerStore,
+		CAFingerprint: func(ctx context.Context) (string, error) {
+			return pki.IntermediateFingerprint(ctx, db.Pool)
+		},
+		ControllerGRPCAddr: optionalInstallAddr("PROVIDER_RELAY_CONTROLLER_ADDR"),
+		ControllerHTTPAddr: optionalInstallAddr("PROVIDER_RELAY_CONTROLLER_HTTP_ADDR"),
 	}
 	// Post-commit convergence when a relay is revoked/deleted: rebuild+broadcast the
 	// relay list (connectors migrate) AND invalidate the transport snapshot for each
@@ -970,6 +975,16 @@ func mustProviderIdentity() *provider.IdentityService {
 		log.Fatalf("provider identity: %v", err)
 	}
 	return ids
+}
+
+// optionalInstallAddr reads a controller address printed in the relay install
+// command (Phase E). Unset is fine; a malformed value stops startup.
+func optionalInstallAddr(key string) string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if err := relay.ValidateInstallAddr(v); err != nil {
+		log.Fatalf("%s: %v", key, err)
+	}
+	return v
 }
 
 func mustEnv(key string) string {

@@ -182,11 +182,11 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 
 > **Phase file:** [[Sprint22/Member2-Go-Rust/Phase3-Relay-Enrollment]]. **Depends on A merged.**
 
-- [ ] **E1** Tests first: create response fields, `no-store`, fingerprint equals `/ca.crt` SHA-256, optional settings empty/set; console dialog, token never in URL/storage, cleared on close.
-- [ ] **E2** Controller: `ca_fingerprint` (shared helper with the shield token), `controller_grpc_addr` / `controller_http_addr` from the optional settings; `.env.example` entries.
-- [ ] **E3** Console: "Add relay" on Relays (super-admin and relay-ops); form with DNS/IP chip inputs validated like the server; one-time token dialog with Copy and the install block; pending-relay hint (D-20).
-- [ ] **E4** Clipboard static guard extended to the token dialog only; API-surface pin.
-- [ ] **E-gate**
+- [x] **E1** Tests first: create response fields, `no-store`, fingerprint equals `/ca.crt` SHA-256, optional settings empty/set; console dialog, token never in URL/storage, cleared on close.
+- [x] **E2** Controller: `ca_fingerprint` (shared helper with the shield token), `controller_grpc_addr` / `controller_http_addr` from the optional settings; `.env.example` entries.
+- [x] **E3** Console: "Add relay" on Relays (super-admin and relay-ops); form with DNS/IP inputs (plain comma/space-separated fields, not chips) validated like the server; one-time token dialog with Copy and the install block; pending-relay hint (D-20).
+- [x] **E4** Clipboard static guard extended to the token dialog only; API-surface pin.
+- [x] **E-gate** *(2026-10-27, local: `go test ./...` 1420 pass / 0 fail / 2 skip, both unconditional stubs; every DB- and Valkey-backed test ran. Console 436 pass, lint and build clean. Live AT-E1…E3 PASS on an isolated stack; AT-E4/E5 on the lab pending (M1).)*
 
 ### Phase X — M2: Revoke and delete in the console (D-17, D-31)
 
@@ -212,7 +212,7 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 ### Phase V — M1: Acceptance
 
 - [ ] **V1** Run AT-T on the lab after T merges.
-- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E and AT-X pending.)*
+- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4/E5 on the lab pending. AT-X pending.)*
 - [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges.
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
 

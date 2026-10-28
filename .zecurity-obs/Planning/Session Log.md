@@ -3144,3 +3144,12 @@ serves on `127.0.0.1:9102`.
 - Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
 - Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
 - Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
+
+
+## 2026-10-27 — Sprint 22 Phase E (relay enrolment from the console): implemented, live AT-E1…E3 PASS
+- Branch `sprint22/phase-e-relay-enrollment` (local, not committed).
+- Controller: shared `pki.IntermediateFingerprint` (shield + connector token now use it); `POST /provider/relays` adds `ca_fingerprint`, `controller_grpc_addr`, `controller_http_addr` (fingerprint read before any write); optional `PROVIDER_RELAY_CONTROLLER_ADDR` / `_HTTP_ADDR` (validated host:port, fail-fast).
+- Console: Add relay (super-admin, relay-ops), SAN checks mirroring the server, one-time token dialog with installer + direct commands, pending hints (list + detail, D-20); API-surface + clipboard guards updated.
+- Gates: Go 1420 pass / 0 fail / 2 skip (unconditional stubs); console 436 pass, lint/build clean.
+- Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
+- Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
