@@ -3211,3 +3211,13 @@ serves on `127.0.0.1:9102`.
 - Console (Orca browser): forced change → QR + setup key → confirm → dashboard; sign out → verify page → wrong code alert → correct code → dashboard.
 - Note: on the 5-wrong-codes lockout, the 6th attempt gets 429.
 - Recorded in Acceptance-Test-Plan → "Live run — Phase T"; Sprint22 path.md V1 ticked. Branch `sprint22/at-t-live-run` (local).
+
+
+## 2026-10-28 — Device posture live test; firewall check false-pass fixed
+- Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
+  - ENFORCE denies a device whose firewall check fails;
+  - a PASS report restores access at the next sync;
+  - the connector refuses a client with a stale ACL;
+  - AUDIT allows access and records the reason.
+- Found: a forward-only `policy drop` made the firewall check PASS while inbound was open (proven from nika). Fixed in `client/src/posture.rs` (`c7d812cb`, branch `fix/posture-firewall-input-chain`, local): the check reads `nft -j` and requires an IPv4 input-hook drop/reject chain. Live re-check: forward-only now FAILs, a real input drop PASSes.
+- Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
