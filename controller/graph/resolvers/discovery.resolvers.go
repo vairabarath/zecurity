@@ -39,16 +39,26 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 		return nil, fmt.Errorf("promoteDiscoveredService: service %s/%d not found on shield %s", protocol, port, shieldID)
 	}
 
+	// The resource lives in the discovering shield's network (FU-4).
+	rnID, err := discovery.ShieldRemoteNetwork(ctx, r.Pool, tc.TenantID, shieldID)
+	if err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: shield network: %w", err)
+	}
+
 	name := fmt.Sprintf("%s on %s", target.ServiceName, shieldID[:8])
 	row, err := resource.Create(ctx, r.Pool, tc.TenantID, resource.CreateInput{
-		Name:     name,
-		Host:     target.BoundIP,
-		Protocol: protocol,
-		PortFrom: port,
-		PortTo:   port,
+		RemoteNetworkID: rnID,
+		Name:            name,
+		Host:            target.BoundIP,
+		Protocol:        protocol,
+		PortFrom:        port,
+		PortTo:          port,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: create resource: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: notify policy change: %w", err)
 	}
 
 	return toResourceGQL(row), nil

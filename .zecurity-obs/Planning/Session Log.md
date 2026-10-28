@@ -3246,3 +3246,14 @@ serves on `127.0.0.1:9102`.
 - Gates: Go 1420 pass / 0 fail / 2 skip (unconditional stubs); console 436 pass, lint/build clean.
 - Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
 - Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
+
+## 2026-10-28 — M1: Sprint 22 T-gate PASS, FU-4 fixed, SCIM test DB leak fixed
+- Branch `fix/m1-tgate-fu4` (base `fixed-pendings` `84a06023`); local fixed-pendings fast-forwarded (was 94 behind, 0 ahead).
+- **T-gate PASS** in a worktree at `84a06023` with a CI-style env (empty `ci_empty_admin`, throwaway Valkey `:6390/15`):
+  - Go: gate packages 338 pass, 0 skip; whole controller 1457 / 0 / 2 (unconditional stubs).
+  - Console: 395 pass, lint and build ok.
+  - Schema: scratch-volume init, 45 files, 0 errors; controller starts; TOTP columns present.
+  - Ticked in `Sprint22/path.md`.
+- **FU-4:** `promoteDiscoveredService` creates the resource in the shield's network and notifies the policy; 2 mutants killed.
+- **Test hygiene:** the SCIM harness leaked one dev-Postgres database per test (6 per run, 315 accumulated). The drop now goes through the admin DSN in `t.Cleanup`, and the leaked databases are removed.
+- Controller after both fixes: 1457 pass / 0 fail / 2 skip, no databases left behind.
