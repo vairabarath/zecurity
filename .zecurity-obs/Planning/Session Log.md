@@ -3246,3 +3246,12 @@ serves on `127.0.0.1:9102`.
 - Gates: Go 1420 pass / 0 fail / 2 skip (unconditional stubs); console 436 pass, lint/build clean.
 - Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
 - Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
+
+## 2026-10-28 — Device posture live test; firewall check false-pass fixed
+- Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
+  - ENFORCE denies a device whose firewall check fails;
+  - a PASS report restores access at the next sync;
+  - the connector refuses a client with a stale ACL;
+  - AUDIT allows access and records the reason.
+- Found: a forward-only `policy drop` made the firewall check PASS while inbound was open (proven from nika). Fixed in `client/src/posture.rs` (`c7d812cb`, branch `fix/posture-firewall-input-chain`, local): the check reads `nft -j` and requires an IPv4 input-hook drop/reject chain. Live re-check: forward-only now FAILs, a real input drop PASSes.
+- Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
