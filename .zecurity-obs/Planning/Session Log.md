@@ -3248,4 +3248,12 @@ serves on `127.0.0.1:9102`.
   - Evaluations of one device are serialized (process-local lock, D-02), so an in-flight evaluation can't store a stale PASS after an un-approve (from the automated security review).
 - Admin UI: Devices page Approval column + Approve / Remove approval; the profile panels replace the locked Manual Trust switch with "Approved by an admin" (BYOD when off).
 - Tests: controller 1460 pass / 0 fail / 2 skip (unconditional stubs), all DB variables set; 9 mutants killed (overlay, revoked, workspace scope, client self-report, re-evaluation, revoked approvable, resolver scope, no-op re-audit, evaluation lock). Admin 119 tests pass, build green, eslint clean on changed files.
-- Not done: live lab test (approve → access to a company-only resource; un-approve → denied; BYOD resource unaffected).
+- **Live test PASS (2026-10-28):**
+  - Setup: controller `822a038b` (this branch; `044` applied by hand to the lab DB), connector on inkyank .75, client `c5e0c5eb` on .164. `appr-company` (:8811) was bound to an ENFORCE profile requiring `zecurity.device.approved`; `appr-byod` (:8812) had no profile. A local nft rule dropped untunnelled traffic to both ports.
+  - Unapproved: :8811 dropped, :8812 200.
+  - First approve (06:45:10): the device's last report was 90 min old (the lab controller had been down), so the immediate re-evaluation stayed FAIL ("posture report is stale"), which is fail-closed as designed. Access came with the next report: the connector got ACL v11 at 06:45:26, the client polled it at 06:46:26, and :8811 returned 200 76.6 s after the approve.
+  - With a fresh report:
+    - remove approval (06:46:49.715): connector ACL v12 in 46 ms; :8811 denied at once (`tunnel denied: access denied`, session ended);
+    - re-approve (06:46:51.934): ACL v13 in 56 ms; :8811 200 at once.
+  - :8812 (BYOD) returned 200 throughout. Audit: `device.approve`, `device.unapprove`, `device.approve`.
+  - Cleaned up: approval removed; profile, resources and connector deleted or revoked; web servers and nft table removed; controller stopped. The lab DB keeps the nullable `044` columns.
