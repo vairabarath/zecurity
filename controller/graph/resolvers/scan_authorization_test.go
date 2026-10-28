@@ -1,9 +1,12 @@
 package resolvers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +112,9 @@ func (f *scanFixture) results(t *testing.T, w scanWS, requestID string) []string
 
 func TestScanIsolation_TriggerScanSameAnswerForEveryUnavailableConnector(t *testing.T) {
 	f := newScanFixture(t)
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	var want string
 	for _, c := range []struct{ name, id string }{
 		{"foreign connector", f.b.conn},
@@ -127,6 +133,12 @@ func TestScanIsolation_TriggerScanSameAnswerForEveryUnavailableConnector(t *test
 		}
 		if msg != "connector not found or not connected" || msg != want {
 			t.Errorf("%s: client sees %q, want %q for every case", c.name, msg, "connector not found or not connected")
+		}
+	}
+	// Operators still see which connector each refusal named (FU-3).
+	for _, id := range []string{f.b.conn, "not-a-uuid"} {
+		if !strings.Contains(logs.String(), fmt.Sprintf("connector=%q reason=not_in_workspace", id)) {
+			t.Errorf("refusal for %q not logged with its connector: %q", id, logs.String())
 		}
 	}
 	// No refused or unsent request stays bound to a connector (FU-5).

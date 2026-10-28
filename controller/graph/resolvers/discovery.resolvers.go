@@ -103,7 +103,13 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		return "", fmt.Errorf("triggerScan: record request: %w", err)
 	}
 	if !recorded {
-		log.Printf("security: scan dispatch refused: workspace=%s reason=not_in_workspace", tc.TenantID)
+		// Same form as PushScanCommand's refusals: the ID comes from the
+		// client, so it is quoted and truncated.
+		logID := connectorID
+		if len(logID) > 64 {
+			logID = logID[:64] + "…"
+		}
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_in_workspace", tc.TenantID, logID)
 		return "", fmt.Errorf("triggerScan: %w", connector.ErrConnectorNotAvailable)
 	}
 	// Only a connector of the caller's workspace can receive it (FU-3).
