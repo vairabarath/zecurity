@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -513,6 +514,10 @@ func TestAdminDB_CreateByRelayOps(t *testing.T) {
 	if name != "relay-new" || jti == "" {
 		t.Fatalf("stored relay: name=%q jti=%q", name, jti)
 	}
+	// The committed relay's token is usable: its jti is live and names it.
+	if got, err := e.rdb.Get(ctx, provisioningJTIPrefix+jti).Result(); err != nil || got != out.RelayID {
+		t.Fatalf("valkey jti -> %q, %v; want %s", got, err, out.RelayID)
+	}
 	rows := e.auditRows(t, provider.ActionRelayCreate)
 	if len(rows) != 1 || rows[0]["ip"] != "192.0.2.10" || strings.Contains(rows[0]["details"].(map[string]any)["name"].(string), out.ProvisioningToken) {
 		t.Fatalf("create audit: %+v", rows)
@@ -614,4 +619,65 @@ func TestAdminDB_CreateWithoutIntermediateLeavesNoState(t *testing.T) {
 	if relays != 0 || audits != 0 {
 		t.Fatalf("failed create left %d relays / %d audit rows", relays, audits)
 	}
+}
+
+// D-14 for create (Sprint 22 FU-1): a failed audit write rolls back the relay
+// row and its jti, and the Valkey jti written inside the transaction is
+// removed again, so no token is left for a relay that doesn't exist.
+func TestAdminDB_CreateAuditFailureRollsBack(t *testing.T) {
+	e := newAdminEnv(t, true)
+	e.seedIntermediate(t)
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `ALTER TABLE provider_audit_logs ADD CONSTRAINT fu1_test_block CHECK (action <> 'relay.create')`); err != nil {
+		t.Fatal(err)
+	}
+	before := provisioningKeys(t, e)
+	r := e.do(t, provider.RoleRelayOps, http.MethodPost, "/provider/relays", map[string]any{"name": "relay-x"}, nil)
+	if r.code != http.StatusInternalServerError || strings.TrimSpace(r.body) != `{"error":"server_error"}` {
+		t.Fatalf("create with failing audit: %d %q", r.code, r.body)
+	}
+	var relays int
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM relays`).Scan(&relays)
+	if relays != 0 {
+		t.Fatalf("failed create left %d relay rows", relays)
+	}
+	if after := provisioningKeys(t, e); len(after) != len(before) {
+		t.Fatalf("failed create left provisioning jtis: before %d, after %d", len(before), len(after))
+	}
+}
+
+// A Valkey failure while storing the jti creates nothing: no relay row, no
+// audit row.
+func TestAdminDB_CreateValkeyFailureLeavesNoRelay(t *testing.T) {
+	e := newAdminEnv(t, true)
+	e.seedIntermediate(t)
+	ctx := context.Background()
+	e.handler.Redis = failingSet{e.rdb}
+	r := e.do(t, provider.RoleRelayOps, http.MethodPost, "/provider/relays", map[string]any{"name": "relay-y"}, nil)
+	if r.code != http.StatusInternalServerError {
+		t.Fatalf("create with failing valkey: %d %q", r.code, r.body)
+	}
+	var relays, audits int
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM relays`).Scan(&relays)
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM provider_audit_logs WHERE action = 'relay.create'`).Scan(&audits)
+	if relays != 0 || audits != 0 {
+		t.Fatalf("failed create left %d relays / %d audit rows", relays, audits)
+	}
+}
+
+type failingSet struct{ valkeycompat.Cmdable }
+
+func (failingSet) Set(context.Context, string, any, time.Duration) *valkeycompat.StatusCmd {
+	cmd := &valkeycompat.StatusCmd{}
+	cmd.SetErr(errors.New("valkey unavailable"))
+	return cmd
+}
+
+func provisioningKeys(t *testing.T, e *adminEnv) []string {
+	t.Helper()
+	keys, err := e.rdb.Keys(context.Background(), provisioningJTIPrefix+"*").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
 }

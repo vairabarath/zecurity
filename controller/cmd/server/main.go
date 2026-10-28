@@ -201,6 +201,9 @@ func main() {
 		JWTSecret:           mustEnv("JWT_SECRET"),
 		RenewalWindow:       mustDuration("CONNECTOR_RENEWAL_WINDOW", 48*time.Hour),
 	}
+	if msg := connectorRenewalWarning(connectorCfg.CertTTL, connectorCfg.RenewalWindow); msg != "" {
+		log.Print(msg)
+	}
 
 	shieldCfg := shield.Config{
 		CertTTL:             mustDuration("SHIELD_CERT_TTL", 7*24*time.Hour),

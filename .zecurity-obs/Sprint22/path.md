@@ -248,7 +248,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 | # | Item | Source | Status |
 |---|------|--------|--------|
-| FU-1 | **Create audit atomicity (D-14).** `POST /provider/relays` writes its `relay.create` audit best-effort, outside any transaction, after the relay row, the Valkey JTI and the JTI attach. A failed audit write is only logged, and a server error part-way through can leave a pending relay without a usable token. Revoke and delete are transactionally audited (Phase A). Fix: relay row + audit in one transaction, then token, Valkey JTI and attach, with clean-up on failure. | Phase A decision, 2026-10-26 | Open — separate change; Create must not be described as transactionally audited until then |
+| FU-1 | **Create audit atomicity (D-14).** `POST /provider/relays` writes its `relay.create` audit best-effort, outside any transaction, after the relay row, the Valkey JTI and the JTI attach. A failed audit write is only logged, and a server error part-way through can leave a pending relay without a usable token. Revoke and delete are transactionally audited (Phase A). Fix: relay row + audit in one transaction, then token, Valkey JTI and attach, with clean-up on failure. | Phase A decision, 2026-10-26 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-1) |
 | FU-2 | **Workspace consistency in the schema (B-1 defense in depth).** `access_rules` has single-column foreign keys, so the database accepts a rule whose workspace, resource and group belong to different workspaces; `group_members` has no workspace column at all. Add `UNIQUE (id, tenant_id)` on `resources` and `remote_networks`, `UNIQUE (id, workspace_id)` on `groups`, composite foreign keys from `access_rules` and `resources (remote_network_id, tenant_id)` (the resource-network fix showed the application can miss such a reference); and put the reporting connector into `connector_scan_results`' key (or record which connector each scan request was sent to), so a report can never suppress or stand in for another connector's result (FU-3 residual); decide how to constrain `group_members` (column + composite FK, or trigger). Needs a migration number (043 is reserved for Phase D). | B-1 fix, 2026-10-27 | Open — the application and compiler now enforce it |
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
@@ -343,4 +343,39 @@ Reproduced on a throwaway database and with fake connector streams: B's connecto
 - The drop runs through the admin DSN with `WITH (FORCE)`, from a `t.Cleanup` registered right after `CREATE DATABASE`, so a failed setup doesn't leak either.
 - `teardown()` now only closes the pool and the fixture server.
 - The 321 leaked databases were dropped. After a full suite run only `postgres` and `ztna_platform` remain.
+
+### Fix: FU-1 relay create is transactionally audited (D-14)
+**Issue:** `POST /provider/relays` created the relay row, issued the token, stored the Valkey JTI and attached it, then wrote `relay.create` best-effort outside any transaction. A failed audit was only logged, and a failure part-way could leave a pending relay without a usable token.
+
+**Fix (`internal/relay/store.go`, `internal/relay/admin_handler.go`):**
+- `Store.CreateRelayAudited` does the following in one transaction:
+  1. inserts the relay row;
+  2. calls the handler's `issue`, which mints the token and writes the Valkey JTI;
+  3. attaches the JTI;
+  4. runs the audit `InsertAuditTx`;
+  5. commits.
+- Any failure rolls back the row, the JTI and the audit together. The handler then deletes the Valkey JTI it wrote, and the response is a plain 500 `server_error`.
+- A committed relay therefore always has a live token.
+- The one remaining edge: a crash between the Valkey write and the commit leaves a JTI for a relay that doesn't exist. Provisioning refuses it, and it expires with the token (24 h).
+- `AttachJTI` was removed, because nothing calls it any more.
+
+**Tests (DB + isolated Valkey):**
+- `TestAdminDB_CreateAuditFailureRollsBack`: no relay row and no leftover JTI.
+- `TestAdminDB_CreateValkeyFailureLeavesNoRelay`: no row and no audit.
+- `TestAdminDB_CreateByRelayOps` now also checks that the committed relay's JTI is live in Valkey and names it.
+- Mutants killed (4/4): audit error ignored; audit after commit; no JTI clean-up; Valkey error ignored.
+
+### Fix: warn when `CONNECTOR_CERT_TTL` is not longer than `CONNECTOR_RENEWAL_WINDOW`
+**Seen in the Sprint 20 G4 live run.**
+- With such settings every new connector certificate starts inside the renewal window.
+- The controller re-asks on each new Control stream (the connector ignores it as a duplicate), and connectors renew on every 10-min ReEnroll resend instead of near expiry.
+
+**Fix:**
+- The controller logs a startup warning: `connectorRenewalWarning` in `cmd/server/renewal_config.go`, with a unit test.
+- Behaviour is unchanged. Clamping the window, as the shield does with `EffectiveRenewalWindow`, would be a design change and was not made.
+
+### Observed: `TestProcessorRunReapsAbandonedIntegration` (outbox) flaky under full-suite load
+- 2026-10-28: it failed once in 3 full controller runs ("event was not reaped before timeout", 4 s deadline).
+- It passes alone (3/3, about 1.6 s) and in the other 2 full runs. It's unrelated to the changes above.
+- **Not fixed:** the cause isn't confirmed. It may be the 4 s deadline under load, or the reaped `failed` state being transient while the processor's claim loop runs.
 
