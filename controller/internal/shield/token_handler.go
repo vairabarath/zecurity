@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -59,6 +60,19 @@ func (s *service) TokenHandler() http.Handler {
 			return
 		}
 
+		// The token itself is never audited.
+		_ = audit.Record(ctx, s.db, audit.Entry{
+			TenantID:    tc.TenantID,
+			ActorUserID: tc.UserID,
+			ActorEmail:  tc.Email,
+			Action:      "shield.token.issue",
+			TargetType:  "shield",
+			TargetID:    shieldID,
+			Details:     map[string]any{"name": shieldName},
+		})
+
+		// The body carries a single-use enrollment token: never cache it.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(tokenResponse{InstallCommand: installCmd})
 	})

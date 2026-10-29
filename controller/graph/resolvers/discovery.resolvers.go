@@ -59,6 +59,7 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 	if err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: create resource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.create", "resource", row.ID, map[string]any{"source": "discovery", "shield_id": shieldID, "protocol": protocol, "port": port})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: notify policy change: %w", err)
 	}
@@ -120,6 +121,7 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		return "", fmt.Errorf("triggerScan: %w", err)
 	}
 
+	r.auditAdmin(ctx, "scan.trigger", "connector", connectorID, map[string]any{"request_id": requestID, "targets": targets, "ports": ports})
 	return requestID, nil
 }
 

@@ -61,6 +61,7 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 		return nil, fmt.Errorf("generate shield token: insert shield: %w", err)
 	}
 
+	r.auditAdmin(ctx, "shield.create", "shield", shieldID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})
 	// Token minting is lazy: the create path only reserves the pending row with a
 	// placeholder connector. The real connector selection + enrollment token
 	// (JWT + Redis jti + install command) happen on demand in the REST endpoint
@@ -83,6 +84,7 @@ func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, e
 		}
 		return false, err
 	}
+	r.auditAdmin(ctx, "shield.revoke", "shield", id, nil)
 	r.ShieldRevocations.Wake()
 	return true, nil
 }
@@ -107,6 +109,7 @@ func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, e
 		return false, fmt.Errorf("delete shield: %w", err)
 	}
 
+	r.auditAdmin(ctx, "shield.delete", "shield", id, nil)
 	return true, nil
 }
 

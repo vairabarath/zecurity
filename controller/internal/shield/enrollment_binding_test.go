@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -275,6 +276,33 @@ func (f *shieldBindingFixture) mintChain(rdb valkeycompat.Cmdable) (tokenA, toke
 		f.t.Fatalf("test setup: C's interface address %s is not A's %s", got, addrA)
 	}
 	return tokenA, tokenC
+}
+
+// The token endpoint's body is a single-use enrollment token: never cached
+// (O-1), and issuing it is audited without the token (O-2).
+func TestShieldTokenEndpoint_NoStoreAndAudited(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/shields/"+f.shieldID+"/token", nil)
+	req = req.WithContext(tenant.Set(f.ctx, tenant.TenantContext{TenantID: f.wsID}))
+	rec := httptest.NewRecorder()
+	f.svc(f.pki, f.rdb).TokenHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d (%q), want 200", rec.Code, rec.Body.String())
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	m := regexp.MustCompile(`ENROLLMENT_TOKEN=(\S+)`).FindStringSubmatch(rec.Body.String())
+	if m == nil {
+		t.Fatalf("no token in %q", rec.Body.String())
+	}
+	n := f.scalar(`SELECT count(*)::text FROM audit_logs WHERE tenant_id = $1 AND action = 'shield.token.issue' AND target_id = $2`, f.wsID, f.shieldID)
+	if n != "1" {
+		t.Fatalf("shield.token.issue rows = %s, want 1", n)
+	}
+	if d := f.scalar(`SELECT coalesce(string_agg(details::text, ''), '') FROM audit_logs WHERE tenant_id = $1 AND action = 'shield.token.issue'`, f.wsID); strings.Contains(d, m[1]) {
+		t.Fatalf("audit details carry the token: %s", d)
+	}
 }
 
 func TestShieldEnrollBinding_SupersededTokenRejected(t *testing.T) {
