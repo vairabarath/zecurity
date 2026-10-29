@@ -82,8 +82,9 @@ func TestReadActionNames(t *testing.T) {
 	}
 }
 
-// Sprint 22 Phase A (D-31, amends D-05): relay-ops may create relays and
-// issue provisioning tokens; revoke and delete are super-admin only. Pinned
+// Sprint 22 Phase A and D (D-31, amends D-05): relay-ops may create relays,
+// issue provisioning tokens, drain and resume; revoke and delete are
+// super-admin only. Pinned
 // for every relay mutation entry point and for unknown or near-miss roles.
 func TestDecide_RelayMutationMatrix(t *testing.T) {
 	a := NewAuthz()
@@ -96,10 +97,12 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		{ActionRelayIssueToken, func(x Actor) error { return a.CanIssueProvisioningToken(x, target) }},
 		{ActionRelayRevoke, func(x Actor) error { return a.CanRevokeRelay(x, target) }},
 		{ActionRelayDelete, func(x Actor) error { return a.CanDeleteRelay(x, target) }},
+		{ActionRelayDrain, func(x Actor) error { return a.CanDrainRelay(x, target) }},
+		{ActionRelayResume, func(x Actor) error { return a.CanResumeRelay(x, target) }},
 	}
 	allowed := map[string]map[string]bool{
-		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true},
-		RoleRelayOps:   {ActionRelayCreate: true, ActionRelayIssueToken: true},
+		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true, ActionRelayDrain: true, ActionRelayResume: true},
+		RoleRelayOps:   {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayDrain: true, ActionRelayResume: true},
 		"":             {},
 		"Relay-Ops":    {},
 		"relay-ops ":   {},

@@ -250,6 +250,8 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("POST /provider/relays", noop)
 	mux.Handle("POST /provider/relays/{id}/revoke", noop)
 	mux.Handle("DELETE /provider/relays/{id}", noop)
+	mux.Handle("POST /provider/relays/{id}/drain", noop)
+	mux.Handle("POST /provider/relays/{id}/resume", noop)
 	env.mux = mux
 	return env
 }

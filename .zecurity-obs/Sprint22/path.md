@@ -89,10 +89,13 @@ This sprint uses exactly two new files: **`042_provider_totp.sql`** (Phase T) an
 | D-17 server check | Revoke/delete body `{"reason": "...", "confirm_name": "<relay name>"}`. Reason trimmed, 1–500 chars; `confirm_name` must equal the relay's name exactly. | The typed confirmation can't be skipped by a script. |
 | Repeat actions | Revoke on `revoked` → 409 `already_revoked`; any action on `deleted` → 409 `already_deleted`; delete on `revoked` is allowed (revoke-then-remove). | Clear answers instead of silent no-ops. |
 | Install command | `POST /provider/relays` response adds `ca_fingerprint`, and `controller_grpc_addr` / `controller_http_addr` from new **optional** settings `PROVIDER_RELAY_CONTROLLER_ADDR` / `PROVIDER_RELAY_CONTROLLER_HTTP_ADDR` (empty → the console shows placeholders). Response is `Cache-Control: no-store`. | One paste on the relay host; fingerprint is public. |
-| Drain storage | `043_relay_drain.sql`: `relays.drain_started_at TIMESTAMPTZ NULL`. A column, not a status. | Heartbeats already move `status` between active/inactive; drain is orthogonal. |
-| Drain list rule | `BuildLabelledRelayList` adds `AND drain_started_at IS NULL`. | The content-hash version changes on its own; connectors migrate. |
-| Last-eligible guard | In one transaction: lock the currently eligible relay rows (`FOR UPDATE`, same predicate as the list); if the target is eligible and is the only one, 409 `last_eligible_relay`. A non-eligible target (inactive, low tier) may be drained. | Two concurrent drains can't empty the list. |
-| Drain states | Drain allowed on `active` / `inactive`; `pending` → 409 `invalid_state`; `revoked` / `deleted` → 409 `already_revoked` / `already_deleted`. Resume on a non-draining relay → 200 no-op, not audited. | Mirrors the operator-route no-op rule. |
+| Drain storage | `043_relay_drain.sql`: `relays.drain_started_at TIMESTAMPTZ NULL` (a column, not a status) and `relays.connection_count_at TIMESTAMPTZ NULL` (when the stored `connection_count` was measured). | Heartbeats already move `status` between active/inactive; drain is orthogonal. The stored count can be ~5 min old (DB-write throttle), so "Drained" needs its age (design review 2026-10-29, P4). |
+| Drain list rule | **One shared eligibility predicate** (`status='active'`, label high/medium, `drain_started_at IS NULL`, `NULLIF(public_addr,'')` set or public scope with `observed_ip`) used by `BuildLabelledRelayList`, the guard and the read API. | The content-hash version changes on its own; connectors migrate. The guard can't count a relay that is never published (P1). |
+| Last-eligible guard | In one transaction: lock the target and the currently eligible relay rows in one `ORDER BY id FOR UPDATE` statement; if the target is eligible and is the only one, 409 `last_eligible_relay`. A non-eligible target (inactive, low tier) may be drained. Revoke/delete are **not** guarded (security actions); the console only warns. | Two concurrent drains can't empty the list; fixed lock order (P2, P3). |
+| Drain states | Drain allowed on `active` / `inactive`; `pending` → 409 `invalid_state`; `revoked` / `deleted` → 409 `already_revoked` / `already_deleted`. Repeat drain and resume on a non-draining relay → 204 no-op, not audited, no broadcast. | Mirrors the operator-route no-op rule. |
+| Drain progress | Server-computed `drain_state`: `migrating` (connectors attached) → `unverified` (count missing or > 90 s old) → `streams_open` (count > 0) → `unverified` (count measured < 120 s after the drain started) → `drained`. Console says "Drained (as of the last heartbeat)". | `attached_connectors` drops when a connector switches, before its old session closes; only a fresh relay stream count after the 120 s window shows the relay is idle (P4). |
+| Fresh counts while draining | Valkey flag `relay:heartbeat:draining:<id>` (TTL 10 min) makes every heartbeat of a draining relay a DB write; set after drain, cleared after resume, re-set every 60 s from Postgres (`RunDrainFlagLoop`). Postgres stays authoritative. | Any flag failure only makes counts older (`unverified`), never an early `drained`. Controller only. |
+| Last-relay warning | `RelayDetail.in_relay_list` and `eligible_relay_count` (shared predicate); revoke/delete dialogs warn when the target is the only relay in the list. Advisory, never blocks. | The console can't compute eligibility itself (the read API hides `observed_ip`). |
 
 ## Open questions (answer before the phase that needs them)
 
@@ -206,19 +209,20 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 
 > **Phase file:** [[Sprint22/Member2-Go-Rust/Phase5-Relay-Drain]]. **Depends on A and X merged.**
 
-- [ ] **D1** Tests first: list exclusion and version change, resume restores, last-eligible guard incl. two concurrent drains, state rules, audit, authz (relay-ops allowed), broadcast called once post-commit.
-- [ ] **D2** `043_relay_drain.sql` `[schema: reset DB]`.
-- [ ] **D3** `POST /provider/relays/{id}/drain` and `/resume`; `relay.drain` / `relay.resume` actions; audit; `broadcastRelayList` post-commit.
-- [ ] **D4** `BuildLabelledRelayList` rule; `RelaySummary.draining_since` (additive).
-- [ ] **D5** Console: Draining badge, Drain/Resume on Relay detail, attached-connector progress and "Drained" state, Overview attention item; API-surface pin.
-- [ ] **D6** Regression: connector `relay_selector` tests run unchanged (no connector code touched).
-- [ ] **D-gate**
+- [x] **D0** Design review (2026-10-29): P1–P10 decided (shared eligibility predicate, row-lock guard, unguarded revoke with advisory warning, `drain_state` with measured count age, Valkey write flag, no new rebroadcast). See the phase file → Design decisions.
+- [x] **D1** Tests first: shared predicate, list exclusion and version change, resume restores, last-eligible guard incl. two concurrent drains, state rules, audit, authz (relay-ops allowed), broadcast and flag hooks once post-commit, heartbeat writes while draining, `drain_state` timing, eligibility fields.
+- [x] **D2** `043_relay_drain.sql` `[schema: reset DB]` (`drain_started_at`, `connection_count_at`).
+- [x] **D3** `POST /provider/relays/{id}/drain` and `/resume`; `relay.drain` / `relay.resume` actions; audit; post-commit flag and `broadcastRelayList`; heartbeat write flag and expiry-sweep reconcile.
+- [x] **D4** Shared eligibility predicate; `RelaySummary.draining_since` / `drain_state`, `RelayDetail.in_relay_list` / `eligible_relay_count` (additive).
+- [x] **D5** Console: Draining badge, Drain/Resume on Relay detail, `drain_state` progress, last-relay warning on revoke/delete, Overview attention item; dialog props; API-surface pin.
+- [x] **D6** Regression: connector `relay_selector` tests run unchanged (no connector code touched).
+- [ ] **D-gate** *(Status 2026-10-29: implementation complete; PR #156 open, not merged, CI green; live control-plane cases PASS, AT-D6 client data plane pending. Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
 
 ### Phase V — M1: Acceptance
 
 - [x] **V1** Run AT-T on the lab after T merges. *(2026-10-27, Sathiya: **PASS**, 40/40 API checks plus the console QR/verify pages. Run on an isolated local stack (throwaway DB, own Valkey, controller :18080) rather than the lab fleet: AT-T needs only the controller and the console. See Acceptance-Test-Plan → Live run — Phase T.)*
 - [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4/E5 on the lab pending. AT-X pending.)*
-- [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges.
+- [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
 
 ## Test gates (a phase can't be ticked without these)
@@ -253,8 +257,13 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
+| FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | Open |
+| FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | Open |
 
 ## Post-Sprint Fixes
+
+### Fix: Phase D review — post-commit hooks detached from the request (Medium)
+Drain/resume and revoke/delete fan-out hooks ran on the request context; a disconnecting client could cancel the relay-list broadcast of a committed change. Now `fanoutContext(r)` (`context.WithoutCancel` + 10 s). Also: broadcast failures logged with the relay id (`relay.DrainFanout`), and an inactive draining relay gets its own console text. Details and accepted follow-ups (FU-7): Phase D file → Post-Phase Fixes.
 
 ### Fix: B-1 cross-tenant access rules, groups and memberships (security, High)
 **Issue:** an admin of one workspace could read and change another workspace's policy data by sending its IDs (reproduced on a throwaway database with two fabricated workspaces):

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 )
 
 // RelayStatuses is the relays.status vocabulary (CHECK constraint, 028).
@@ -39,6 +40,58 @@ type RelaySummary struct {
 	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at"`
 	AttachedConnectors int64      `json:"attached_connectors"`
 	CreatedAt          time.Time  `json:"created_at"`
+	// DrainingSince and DrainState (Sprint 22 Phase D) are null unless the
+	// relay is draining; revoked and deleted relays never show them.
+	DrainingSince *time.Time `json:"draining_since"`
+	DrainState    *string    `json:"drain_state"`
+
+	// connectionCountAt is when ConnectionCount was measured; it decides
+	// DrainState and is not part of the response.
+	connectionCountAt *time.Time
+}
+
+// Drain progress (Sprint 22 Phase D, P4), decided here and never by the
+// console. connection_count is the relay's live bridged streams; it is only
+// trusted when measured at least DrainWindow after the drain started (a
+// migrated connector keeps its old session up to the connector's default
+// relay_drain_timeout_secs) and at most DrainFreshness ago (three heartbeats).
+const (
+	DrainWindow    = 120 * time.Second
+	DrainFreshness = 90 * time.Second
+
+	DrainMigrating   = "migrating"    // connectors still placed on the relay
+	DrainUnverified  = "unverified"   // no count fresh enough, or measured inside the window
+	DrainStreamsOpen = "streams_open" // no connectors placed, but the relay still bridges streams
+	DrainDrained     = "drained"      // as of the last heartbeat: no connectors, no streams
+)
+
+// drainState applies the P4 rules in order. The result is "drained" only when
+// every piece of evidence is present and fresh; anything missing or stale is
+// "unverified".
+func drainState(status string, drainStartedAt *time.Time, attached int64, count int32, countAt *time.Time, now time.Time) *string {
+	if drainStartedAt == nil || status == "revoked" || status == "deleted" {
+		return nil
+	}
+	state := DrainDrained
+	switch {
+	case attached > 0:
+		state = DrainMigrating
+	case countAt == nil || now.Sub(*countAt) > DrainFreshness:
+		state = DrainUnverified
+	case count > 0:
+		state = DrainStreamsOpen
+	case countAt.Before(drainStartedAt.Add(DrainWindow)):
+		state = DrainUnverified
+	}
+	return &state
+}
+
+// withDrain fills DrainingSince and DrainState at now.
+func (s *RelaySummary) withDrain(now time.Time) {
+	s.DrainState = drainState(s.Status, s.DrainingSince, s.AttachedConnectors, s.ConnectionCount, s.connectionCountAt, now)
+	if s.DrainState == nil {
+		s.DrainingSince = nil
+	}
 }
 
 // RelayCertificate is one row of a relay's certificate history.
@@ -71,6 +124,12 @@ type RelayDetail struct {
 	CertificatesTruncated bool               `json:"certificates_truncated"`
 	Attachments           []RelayAttachment  `json:"attachments"`
 	AttachmentsTruncated  bool               `json:"attachments_truncated"`
+	// InRelayList: the relay is in the list published to connectors now.
+	// EligibleRelayCount: how many relays are. Both use the predicate the list
+	// and the drain guard use; the console warns before revoking or deleting
+	// the only listed relay (advisory; Sprint 22 Phase D, P3).
+	InRelayList        bool  `json:"in_relay_list"`
+	EligibleRelayCount int64 `json:"eligible_relay_count"`
 }
 
 // RelayFilter narrows ListRelays. Status "" means every status except
@@ -88,14 +147,14 @@ const relaySummaryColumns = `
        r.capacity_label, r.connection_count, r.max_connections, r.cert_serial, r.cert_not_after,
        r.last_heartbeat_at,
        (SELECT count(*) FROM connector_relay_placement p WHERE p.relay_id = r.id),
-       r.created_at`
+       r.created_at, r.drain_started_at, r.connection_count_at`
 
 func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	var s RelaySummary
 	dest := append([]any{
 		&s.ID, &s.Name, &s.Status, &s.Version, &s.Hostname, &s.PublicAddr, &s.AddressScope,
 		&s.CapacityLabel, &s.ConnectionCount, &s.MaxConnections, &s.CertSerial, &s.CertNotAfter,
-		&s.LastHeartbeatAt, &s.AttachedConnectors, &s.CreatedAt,
+		&s.LastHeartbeatAt, &s.AttachedConnectors, &s.CreatedAt, &s.DrainingSince, &s.connectionCountAt,
 	}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return RelaySummary{}, err
@@ -103,6 +162,7 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	s.CertNotAfter = utcPtr(s.CertNotAfter)
 	s.LastHeartbeatAt = utcPtr(s.LastHeartbeatAt)
 	s.CreatedAt = s.CreatedAt.UTC()
+	s.DrainingSince = utcPtr(s.DrainingSince)
 	return s, nil
 }
 
@@ -182,8 +242,10 @@ SELECT`+relaySummaryColumns+`
 		next := EncodeCursor(last.CreatedAt, last.ID)
 		page.NextCursor = &next
 	}
+	now := time.Now()
 	for i := range page.Items {
 		page.Items[i].LastHeartbeatAt = effectiveHeartbeat(ctx, hb, page.Items[i].ID, page.Items[i].LastHeartbeatAt)
+		page.Items[i].withDrain(now)
 	}
 	return page, nil
 }
@@ -197,9 +259,11 @@ func GetRelay(ctx context.Context, q Querier, hb HeartbeatSource, id string) (Re
 	}
 	var d RelayDetail
 	s, err := scanRelaySummary(q.QueryRow(ctx, `
-SELECT`+relaySummaryColumns+`, r.dns_allowlist, r.ip_allowlist
+SELECT`+relaySummaryColumns+`, r.dns_allowlist, r.ip_allowlist,
+       r.id IN (SELECT id FROM relays WHERE `+eligible.Where+`),
+       (SELECT count(*) FROM relays WHERE `+eligible.Where+`)
   FROM relays r
- WHERE r.id = $1`, id), &d.DNSAllowlist, &d.IPAllowlist)
+ WHERE r.id = $1`, id), &d.DNSAllowlist, &d.IPAllowlist, &d.InRelayList, &d.EligibleRelayCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RelayDetail{}, ErrNotFound
 	}
@@ -207,6 +271,7 @@ SELECT`+relaySummaryColumns+`, r.dns_allowlist, r.ip_allowlist
 		return RelayDetail{}, fmt.Errorf("get relay: %w", err)
 	}
 	s.LastHeartbeatAt = effectiveHeartbeat(ctx, hb, s.ID, s.LastHeartbeatAt)
+	s.withDrain(time.Now())
 	d.RelaySummary = s
 
 	if d.Certificates, d.CertificatesTruncated, err = relayCertificates(ctx, q, id); err != nil {

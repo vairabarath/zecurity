@@ -15,6 +15,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { ProvisioningTokenDialog, type IssuedRelay } from '@/components/ProvisioningTokenDialog'
 import { StatusBadge } from '@/components/StatusBadge'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -159,7 +160,10 @@ export function Relays() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <StatusBadge status={r.status} />
+                      <span className="inline-flex flex-wrap items-center gap-1.5">
+                        <StatusBadge status={r.status} />
+                        {r.draining_since && <Badge variant="warning">Draining</Badge>}
+                      </span>
                       {r.status === 'pending' && (
                         <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Waiting for enrolment</div>
                       )}

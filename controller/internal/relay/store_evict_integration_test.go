@@ -71,7 +71,7 @@ func TestEvictRelaysIntegration_HeartbeatWinsRace(t *testing.T) {
 	// The racing relay's heartbeat is persisted between candidate selection and
 	// eviction (the throttled DB write came due).
 	if err := store.RecordHeartbeat(ctx, racing, "2a", time.Now().Add(time.Hour),
-		"1.0.0", "relay-a", "", 0, "", "", 0, 1024); err != nil {
+		"1.0.0", "relay-a", "", 0, "", "", 0, 1024, time.Now()); err != nil {
 		t.Fatalf("RecordHeartbeat: %v", err)
 	}
 

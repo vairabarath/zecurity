@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	connectorpb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 )
 
 var ErrRelayNotFound = errors.New("relay not found")
@@ -441,8 +442,6 @@ func (s *Store) RevokeRelayGuarded(ctx context.Context, relayID, reason string,
 	return int(tag.RowsAffected()), nil
 }
 
-// RecordHeartbeat marks an authenticated Relay healthy and refreshes its
-// runtime and certificate metadata.
 // UpsertPlacement inserts or updates a connector_relay_placement row.
 // Returns true when the relay_id actually changed (new attachment or different relay)
 // so the caller can decide whether to invalidate the policy cache.
@@ -716,9 +715,10 @@ type CapacityLabelTransition struct {
 const labelledRelayDefaultPort = "9093"
 
 // BuildLabelledRelayList assembles the current ADR-016 eligibility list for
-// connector control-stream push. Includes only active relays whose published
-// capacity_label is high or medium and that have a routable address (either
-// an explicit public_addr or an observed public IP). The version field is
+// connector control-stream push. Includes only the relays eligible.Where
+// accepts: active, published capacity_label high or medium, not draining
+// (Sprint 22 Phase D), and with a routable address (an explicit public_addr or
+// an observed public IP). The drain guard uses the same predicate. The version field is
 // the latest last_label_changed_at observed across those rows, expressed as
 // epoch seconds — monotonic across promotions so the connector can skip a
 // re-probe when nothing has changed.
@@ -730,9 +730,7 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 		       COALESCE(address_scope, ''),
 		       capacity_label
 		  FROM relays
-		 WHERE status = 'active'
-		   AND capacity_label IN ('high', 'medium')
-		   AND (public_addr IS NOT NULL OR address_scope = 'public')`)
+		 WHERE `+eligible.Where)
 	if err != nil {
 		return nil, fmt.Errorf("list labelled relays: %w", err)
 	}
@@ -749,6 +747,7 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 			addr = net.JoinHostPort(observedIP, labelledRelayDefaultPort)
 		}
 		if addr == "" {
+			// eligible.Where already requires an address; defensive only.
 			continue
 		}
 		var lbl connectorpb.RelayCapacityLabel
@@ -878,7 +877,11 @@ func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdD
 	}, nil
 }
 
-func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
+// RecordHeartbeat marks an authenticated Relay healthy and refreshes its
+// runtime and certificate metadata. measuredAt is when the heartbeat carrying
+// connectionCount arrived; it is stored as connection_count_at, so a reader can
+// tell how old the count is (Sprint 22 Phase D).
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
 		    SET status            = 'active',
@@ -892,11 +895,12 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        public_addr       = NULLIF($9, ''),
 		        connection_count  = $10,
 		        max_connections   = $11,
+		        connection_count_at = $12,
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND status NOT IN ('deleted', 'revoked')`,
-		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections,
+		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt,
 	)
 	if err != nil {
 		return fmt.Errorf("record relay heartbeat: %w", err)

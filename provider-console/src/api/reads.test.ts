@@ -33,6 +33,8 @@ const relay: RelaySummary = {
   last_heartbeat_at: null,
   attached_connectors: 0,
   created_at: '2026-10-01T00:00:00Z',
+  draining_since: null,
+  drain_state: null,
 }
 
 function signedIn() {
@@ -88,6 +90,8 @@ describe('read wrappers', () => {
     signedIn()
     const detail: RelayDetail = {
       ...relay,
+      in_relay_list: false,
+      eligible_relay_count: 0,
       dns_allowlist: [],
       ip_allowlist: [],
       certificates: [],

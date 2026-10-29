@@ -291,12 +291,27 @@ const KIND_LABELS: Record<string, string> = {
   workspace_ca: 'Workspace CA',
 }
 
+const DRAIN_NOTES: Record<NonNullable<RelaySummary['drain_state']>, string> = {
+  migrating: 'Connectors still attached',
+  streams_open: 'Connections still open',
+  unverified: 'Not confirmed yet',
+  drained: 'Drained, as of the last heartbeat',
+}
+
+function drainNote(r: RelaySummary): string {
+  const note = r.drain_state ? DRAIN_NOTES[r.drain_state] : 'Draining'
+  return r.drain_state === 'migrating' ? `${note}: ${r.attached_connectors.toLocaleString()}` : note
+}
+
 function relayItems(relays: RelaySummary[]): AttentionItem[] {
   const items: AttentionItem[] = []
   for (const r of relays) {
     const to = `/relays/${encodeURIComponent(r.id)}`
     if (r.status === 'inactive') {
       items.push({ key: `${r.id}:inactive`, to, tag: <Badge variant="warning">Inactive</Badge>, title: `${r.name} is inactive`, note: `Last heartbeat ${formatRelative(r.last_heartbeat_at)}` })
+    }
+    if (r.draining_since) {
+      items.push({ key: `${r.id}:draining`, to, tag: <Badge variant="warning">Draining</Badge>, title: `${r.name} is draining`, note: drainNote(r) })
     }
     if (r.status === 'active' && r.capacity_label === 'low') {
       items.push({
