@@ -92,6 +92,9 @@ export const ErrorCode = {
   alreadyRevoked: 'already_revoked',
   alreadyDeleted: 'already_deleted',
   confirmationMismatch: 'confirmation_mismatch',
+  // relay drain/resume (Sprint 22 Phase D)
+  invalidState: 'invalid_state',
+  lastEligibleRelay: 'last_eligible_relay',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -183,7 +186,18 @@ export interface RelaySummary {
   last_heartbeat_at: string | null
   attached_connectors: number
   created_at: string
+  /** Set while the relay drains (Phase D); null otherwise and on revoked/deleted relays. */
+  draining_since: string | null
+  /** Drain progress, decided by the controller from fresh telemetry only. */
+  drain_state: DrainState | null
 }
+
+/**
+ * Phase D (P4): `migrating` connectors still placed on the relay;
+ * `unverified` no fresh measured count yet (or inside the 120 s window);
+ * `streams_open` streams still bridged; `drained` none, as of the last heartbeat.
+ */
+export type DrainState = 'migrating' | 'unverified' | 'streams_open' | 'drained'
 
 export interface RelayCertificate {
   serial: string
@@ -210,6 +224,10 @@ export interface RelayDetail extends RelaySummary {
   certificates_truncated: boolean
   attachments: RelayAttachment[]
   attachments_truncated: boolean
+  /** In the relay list connectors are offered right now (Phase D). */
+  in_relay_list: boolean
+  /** How many relays are in that list. */
+  eligible_relay_count: number
 }
 
 export const TENANT_STATUSES = ['provisioning', 'active', 'suspended', 'deleted'] as const

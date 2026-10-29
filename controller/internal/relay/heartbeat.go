@@ -31,7 +31,7 @@ const (
 )
 
 type heartbeatStore interface {
-	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
+	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
 	// LoadRelayByID lets Provision validate the operator-registered row
 	// (status + SAN allowlists) before the provisioning token is burned.
@@ -64,6 +64,10 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
+	// When the relay's connection count was measured: it reads its counter while
+	// building the request, so the receive time is off by one RPC's transit.
+	// Taken before any cache or DB work (Sprint 22 Phase D).
+	receivedAt := time.Now().UTC()
 	relayID, leaf, err := authenticatedRelay(ctx)
 	if err != nil {
 		return nil, err
@@ -120,6 +124,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		addr.PublicAddr,
 		req.ConnectionCount,
 		req.MaxConnections,
+		receivedAt,
 	); err != nil {
 		log.Printf("relay heartbeat: record %s: %v", relayID, err)
 		if errors.Is(err, ErrRelayNotFound) {
@@ -222,6 +227,15 @@ func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial s
 		return true, true, fmt.Errorf("get db-write marker: %w", err)
 	}
 	dbWriteDue := err == valkeycompat.Nil
+	// A draining relay persists every heartbeat, so the console sees a fresh
+	// connection count (Sprint 22 Phase D). A failed flag read counts as due.
+	if !dbWriteDue {
+		draining, flagErr := s.drainingFlagSet(ctx, relayID)
+		if flagErr != nil {
+			log.Printf("relay heartbeat: read draining flag %s: %v", relayID, flagErr)
+		}
+		dbWriteDue = draining || flagErr != nil
+	}
 
 	if err := s.redis.Set(ctx, metadataKey, metadataValue, livenessTTL).Err(); err != nil {
 		return true, true, fmt.Errorf("set metadata key: %w", err)

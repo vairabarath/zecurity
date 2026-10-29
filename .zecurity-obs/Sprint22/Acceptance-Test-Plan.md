@@ -170,13 +170,18 @@ Found and fixed during the run: **Add relay** reopened with the previous relay's
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| AT-D1 | Drain an eligible relay (2+ eligible) | 204; relay absent from the published list; list version changed; audit `relay.drain` |
+| AT-D1 | Drain an eligible relay (2+ eligible) | 204; relay absent from the published list; list version changed; audit `relay.drain` with actor, reason, client IP |
 | AT-D2 | Drain the only eligible relay | 409 `last_eligible_relay`; nothing changed |
-| AT-D3 | Two operators drain the last two eligible relays at once | Exactly one succeeds |
+| AT-D3 | Two operators drain the last two eligible relays at once | Exactly one 204, the other 409 `last_eligible_relay`; the **published list** still holds one relay (automated: goroutines released together on a real DB) |
 | AT-D4 | Resume | 204; relay back in the list; version equals the pre-drain value; audit `relay.resume` |
 | AT-D5 | relay-ops drains and resumes | Allowed; revoke/delete still 403 |
-| AT-D6 | **Live:** drain a relay with a long download and open a new connection | New connection lands on another relay; download finishes, or is cut at ~120 s; attached count reaches 0; console shows "Drained" |
+| AT-D6 | **Live:** drain a relay with a long download and open a new connection | New connection lands on another relay; download finishes, or is cut at ~120 s; console goes `migrating` → `streams_open` → "Drained (as of the last heartbeat)" |
 | AT-D7 | Drain pending / revoked / deleted relays; repeat drain; resume a non-draining relay | 409 `invalid_state` / `already_revoked` / `already_deleted`; 204 no-op, no audit; 204 no-op, no audit |
+| AT-D8 | `drain_state` timing (automated, explicit timestamps, no sleeps) | Zero count measured before `drain_started_at + 120 s` → not `drained`; zero count older than 90 s → `unverified`; fresh zero after the window with 0 attached → `drained`; non-zero with 0 attached → `streams_open`; a stale zero can't hide newer streams; attached > 0 → `migrating` |
+| AT-D9 | Valkey bookkeeping fails (automated) | Flag set fails after drain, flag delete fails after resume, controller restart while draining, flag expired, flag read error: never an early `drained` (only `unverified` or a later `drained`); the expiry sweep restores the flag |
+| AT-D10 | Eligibility fields (automated) | `in_relay_list` and `eligible_relay_count` match `BuildLabelledRelayList` for empty/NULL address, public scope without observed IP, low tier, inactive and draining relays; draining a relay updates both |
+| AT-D11 | Last-relay warning in the console | Revoke/delete of the only relay in the list shows the warning; confirm stays enabled and the action succeeds; no warning when another relay is eligible |
+| AT-D12 | Broadcast failure (automated) | Logged with the relay id; the drain stays committed; a reconnecting connector receives the current list without the drained relay |
 
 ---
 

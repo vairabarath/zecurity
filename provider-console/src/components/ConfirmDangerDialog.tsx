@@ -32,7 +32,10 @@ function codePoints(s: string): number {
 // and the target's exact name typed to confirm. The reason is trimmed and
 // limited to 500 characters like the server; the name is compared exactly
 // (no trimming, case matters), like the server. The server checks both again.
-// The caller runs the request and passes back `pending` and `error`.
+// Drain is reversible and not D-17, so it turns both off (`reasonRequired`,
+// `requireConfirmText`); the defaults keep revoke and delete as they are.
+// `warning` is advisory text shown above the fields; it never disables
+// confirming. The caller runs the request and passes back `pending` and `error`.
 export function ConfirmDangerDialog({
   title,
   description,
@@ -43,10 +46,13 @@ export function ConfirmDangerDialog({
   error,
   onConfirm,
   onCancel,
+  reasonRequired = true,
+  requireConfirmText = true,
+  warning,
 }: {
   title: string
   description: ReactNode
-  /** What the operator must type, exactly. */
+  /** What the operator must type, exactly (ignored when requireConfirmText is false). */
   confirmText: string
   confirmLabel: string
   pendingLabel: string
@@ -55,13 +61,18 @@ export function ConfirmDangerDialog({
   /** The trimmed reason and the name exactly as typed (equal to confirmText). */
   onConfirm: (reason: string, typedName: string) => void
   onCancel: () => void
+  /** False: an empty reason is allowed (it is then not sent). */
+  reasonRequired?: boolean
+  /** False: no typed name; onConfirm gets an empty name. */
+  requireConfirmText?: boolean
+  warning?: ReactNode
 }) {
   const [reason, setReason] = useState('')
   const [typed, setTyped] = useState('')
   const trimmed = reason.trim()
   const length = codePoints(trimmed)
   const tooLong = length > MAX_DANGER_REASON
-  const valid = trimmed !== '' && !tooLong && typed === confirmText
+  const valid = (!reasonRequired || trimmed !== '') && !tooLong && (!requireConfirmText || typed === confirmText)
 
   const reasonError = error?.field === 'reason' ? error.message : tooLong ? 'Keep the reason to 500 characters or fewer.' : undefined
   const confirmError = error?.field === 'confirm' ? error.message : undefined
@@ -69,7 +80,7 @@ export function ConfirmDangerDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    if (valid && !pending) onConfirm(trimmed, typed)
+    if (valid && !pending) onConfirm(trimmed, requireConfirmText ? typed : '')
   }
 
   return (
@@ -80,6 +91,11 @@ export function ConfirmDangerDialog({
             <DialogTitle>{title}</DialogTitle>
             <DialogDescription>{description}</DialogDescription>
           </DialogHeader>
+          {warning && (
+            <Alert role="note">
+              <AlertDescription>{warning}</AlertDescription>
+            </Alert>
+          )}
           {generalError && (
             <Alert variant="destructive" role="alert">
               <AlertDescription>{generalError}</AlertDescription>
@@ -99,32 +115,34 @@ export function ConfirmDangerDialog({
             />
             <p id="danger-reason-hint" className="flex justify-between gap-3 text-xs">
               <span className={cn(reasonError ? 'text-destructive' : 'text-muted-foreground')}>
-                {reasonError ?? 'Required. Recorded in the provider audit log.'}
+                {reasonError ?? (reasonRequired ? 'Required. Recorded in the provider audit log.' : 'Optional. Recorded in the provider audit log.')}
               </span>
               <span className={cn('tabular-nums', tooLong ? 'text-destructive' : 'text-muted-foreground')}>
                 {length} / {MAX_DANGER_REASON}
               </span>
             </p>
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="danger-confirm">
-              Type <span className="font-mono font-semibold text-foreground">{confirmText}</span> to confirm
-            </Label>
-            <Input
-              id="danger-confirm"
-              value={typed}
-              autoComplete="off"
-              spellCheck={false}
-              aria-invalid={confirmError !== undefined}
-              aria-describedby={confirmError ? 'danger-confirm-error' : undefined}
-              onChange={(e) => setTyped(e.target.value)}
-            />
-            {confirmError && (
-              <p id="danger-confirm-error" className="text-xs text-destructive">
-                {confirmError}
-              </p>
-            )}
-          </div>
+          {requireConfirmText && (
+            <div className="grid gap-2">
+              <Label htmlFor="danger-confirm">
+                Type <span className="font-mono font-semibold text-foreground">{confirmText}</span> to confirm
+              </Label>
+              <Input
+                id="danger-confirm"
+                value={typed}
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={confirmError !== undefined}
+                aria-describedby={confirmError ? 'danger-confirm-error' : undefined}
+                onChange={(e) => setTyped(e.target.value)}
+              />
+              {confirmError && (
+                <p id="danger-confirm-error" className="text-xs text-destructive">
+                  {confirmError}
+                </p>
+              )}
+            </div>
+          )}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={onCancel} disabled={pending}>
               Cancel

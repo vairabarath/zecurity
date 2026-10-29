@@ -3335,3 +3335,12 @@ serves on `127.0.0.1:9102`.
 - AT-X4 also PASS live: a real connector on a revoked relay logged "Active relay absent from new list; migrating immediately" and registered with the other relay within ~150 ms; CRL and audit verified. Traffic continuity not exercised (no client tunnel).
 - Note: a Postgres crash during one full Go run (automatic recovery, ~2 min; 1234 databases on the dev server, mostly leaked `resolvers_updsc_*` test databases). The rerun passed in full. Cleanup of leaked test databases pending approval.
 
+
+## 2026-10-29 — M2: Provider feature tracker (PR #155); Sprint 22 Phase D (relay drain and resume) design review and implementation
+
+- Feature tracker F1–F40 (must have / can have, quick-win queue) merged as PR #155.
+- Phase D design review: problem statements P1–P10 reviewed with an external review (ChatGPT). Decided: one shared eligibility predicate (the guard could otherwise count a relay never published); row-lock guard in id order; revoke/delete stay unguarded with an advisory console warning; server-computed `drain_state` because the stored `connection_count` can be ~5 min old (DB-write throttle) and connectors keep old sessions up to 120 s after switching; `connection_count_at` + Valkey write flag (Postgres authoritative, fail-safe to `unverified`); no new rebroadcast (FU-6).
+- Implemented on `sprint22/phase-d-relay-drain`: `043_relay_drain.sql` (`[schema: reset DB]`), `internal/relay/eligible`, drain/resume store + handlers + routes, heartbeat flag, read API fields, console Drain card, badges, Overview item, last-relay warning. No connector, relay or proto change.
+- Independent read-only review: ready with follow-ups. Fixed before commit: post-commit hooks (drain/resume and revoke/delete) detached from the request context; broadcast failures logged with the relay id (`relay.DrainFanout`); inactive draining relay text. Added AT-D12 and hook-ordering tests. Residuals tracked as FU-7.
+- Gates: Go 1520 pass / 0 fail / 2 expected skips; console 507 pass, lint/build clean; `cargo test relay_selector` 27 pass. Mutation checks on the row locks, the shared predicate, the warning condition and the detached hook context.
+- Pending: live AT-D on the lab fleet (M1, V3).

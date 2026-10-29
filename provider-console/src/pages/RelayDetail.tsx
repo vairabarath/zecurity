@@ -6,6 +6,7 @@ import type { RelayDetail as RelayDetailDTO } from '@/api/types'
 import { CapacityTier } from '@/components/Capacity'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
+import { RelayDrainCard } from '@/components/RelayDrainCard'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -17,8 +18,9 @@ import { formatRelative } from '@/lib/expiry'
 import { formatDateTime, formatScope } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 
-// Relay detail (Phase P, relay.read). Read-only. One request when the page
-// opens; Refresh and Retry are the only other requests. Certificate state
+// Relay detail (Phase P, relay.read). One request when the page opens;
+// Refresh and Retry are the only other reads. The writes are the Drain card
+// (Phase D, both roles) and the Danger zone (Phase X, super-admin). Certificate state
 // comes from the API alone: "Current" is is_current, revocation is
 // revoked_at/revocation_reason; only the expiry badge is derived (bucketFor).
 
@@ -181,6 +183,7 @@ function RelayView({
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="font-mono text-[26px] font-medium tracking-tight">{r.name}</h1>
             <StatusBadge status={r.status} />
+            {r.draining_since && <Badge variant="warning">Draining</Badge>}
           </div>
           <p className="text-sm text-subtle-foreground">
             {formatScope(r.address_scope)} address · version <span className="font-mono">{r.version ?? '—'}</span> · created {formatDateTime(r.created_at)}
@@ -366,6 +369,7 @@ function RelayView({
         <TruncatedNote show={r.attachments_truncated} />
       </Section>
 
+      <RelayDrainCard relay={r} onDone={onActionDone} />
       <RelayDangerZone relay={r} onDone={onActionDone} />
     </div>
   )

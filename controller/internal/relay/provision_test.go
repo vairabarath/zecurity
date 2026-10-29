@@ -214,7 +214,7 @@ func (f *fakeProvisionStore) RecordRenewedCert(context.Context, string, string, 
 	return 0, ErrRelayNotFound
 }
 
-func (f *fakeProvisionStore) RecordHeartbeat(context.Context, string, string, time.Time, string, string, string, int, string, string, uint32, uint32) error {
+func (f *fakeProvisionStore) RecordHeartbeat(context.Context, string, string, time.Time, string, string, string, int, string, string, uint32, uint32, time.Time) error {
 	return nil
 }
 

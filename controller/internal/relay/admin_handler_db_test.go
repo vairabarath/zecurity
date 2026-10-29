@@ -43,6 +43,7 @@ type adminEnv struct {
 	opsID    string
 	mu       sync.Mutex
 	fanout   []string
+	drains   []string // OnRelayDrainChanged calls, "drain:<id>" / "resume:<id>"
 	rdb      valkeycompat.Cmdable
 	rdbClose func()
 }
@@ -102,11 +103,22 @@ func newAdminEnv(t *testing.T, withValkey bool) *adminEnv {
 			e.fanout = append(e.fanout, relayID)
 			e.mu.Unlock()
 		},
+		OnRelayDrainChanged: func(_ context.Context, relayID string, draining bool) {
+			kind := "resume:"
+			if draining {
+				kind = "drain:"
+			}
+			e.mu.Lock()
+			e.drains = append(e.drains, kind+relayID)
+			e.mu.Unlock()
+		},
 	}
 	e.mux = http.NewServeMux()
 	e.mux.HandleFunc("POST /provider/relays", e.handler.Create)
 	e.mux.HandleFunc("POST /provider/relays/{id}/revoke", e.handler.Revoke)
 	e.mux.HandleFunc("DELETE /provider/relays/{id}", e.handler.Delete)
+	e.mux.HandleFunc("POST /provider/relays/{id}/drain", e.handler.Drain)
+	e.mux.HandleFunc("POST /provider/relays/{id}/resume", e.handler.Resume)
 	return e
 }
 

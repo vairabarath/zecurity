@@ -33,6 +33,8 @@ export function RelayDangerZone({ relay, onDone }: { relay: RelayDetail; onDone:
 
   if (!hasRole(role, SUPER_ADMIN) || relay.status === 'deleted') return null
   const canRevoke = relay.status !== 'revoked'
+  // Phase D (P3): advisory only, as of the page load; never blocks the action.
+  const lastListed = relay.in_relay_list && relay.eligible_relay_count === 1
 
   function open(next: RelayAction) {
     setError(undefined)
@@ -114,6 +116,11 @@ export function RelayDangerZone({ relay, onDone }: { relay: RelayDetail; onDone:
                 can’t be undone; to replace it, add a new relay.
               </>
             )
+          }
+          warning={
+            lastListed
+              ? 'No eligible relays will remain: this is the only relay in the list connectors use. New connections may fail until another relay is eligible.'
+              : undefined
           }
           confirmText={relay.name}
           confirmLabel={action === 'revoke' ? 'Revoke relay' : 'Delete relay'}

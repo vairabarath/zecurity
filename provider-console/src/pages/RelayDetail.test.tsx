@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { RelayDetail } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
 import { RelayDangerZone } from '@/components/RelayDangerZone'
+import { RelayDrainCard } from '@/components/RelayDrainCard'
 import { renderApp, signedInAs } from '@/test/render'
 
 const ID = '11111111-1111-1111-1111-111111111111'
@@ -28,6 +29,10 @@ function detail(over: Partial<RelayDetail> = {}): RelayDetail {
     last_heartbeat_at: iso(-60_000),
     attached_connectors: 1,
     created_at: '2026-10-01T00:00:00Z',
+    draining_since: null,
+    drain_state: null,
+    in_relay_list: true,
+    eligible_relay_count: 2,
     dns_allowlist: ['relay.example.com'],
     ip_allowlist: ['203.0.113.5'],
     certificates: [
@@ -161,26 +166,28 @@ describe('Relay detail', () => {
     expect(await screen.findByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
   })
 
-  it('is read-only for relay-ops: only Refresh, no mutating controls, GETs only', async () => {
+  // Phase D (D-31): relay-ops may drain and resume, nothing else.
+  it('relay-ops sees only Refresh and Drain relay, no other mutating controls; loading sends GETs only', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Drain relay'])
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
 
-  // Sprint 22 Phase X (D-30, D-31): the only mutating controls on this page
-  // are a super-admin's Revoke and Delete; opening the page sends GETs only.
-  it('a super-admin sees exactly Refresh, Revoke relay and Delete relay; loading sends GETs only', async () => {
+  // Sprint 22 Phase X and D (D-30, D-31): the only mutating controls on this
+  // page are Drain (both roles) and a super-admin's Revoke and Delete;
+  // opening the page sends GETs only.
+  it('a super-admin sees exactly Refresh, Drain relay, Revoke relay and Delete relay; loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Revoke relay', 'Delete relay'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Drain relay', 'Revoke relay', 'Delete relay'])
     expect(within(main).queryByText(/\b(edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
@@ -435,5 +442,211 @@ describe('Relay detail: revoke and delete errors', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(/didn’t go through/)
     expect(screen.queryByText(/relay-a is revoked/)).not.toBeInTheDocument()
     expect(gets(calls)).toHaveLength(1)
+  })
+})
+
+// ── Sprint 22 Phase D: drain and resume (D-30, D-31, D-32) ─────────────────
+
+const draining = (over: Partial<RelayDetail> = {}) =>
+  detail({ draining_since: iso(-5 * 60_000), drain_state: 'migrating', in_relay_list: false, eligible_relay_count: 1, ...over })
+
+describe('Relay detail: drain card', () => {
+  it.each([
+    ['active', true],
+    ['inactive', true],
+    ['pending', false],
+    ['revoked', false],
+    ['deleted', false],
+  ] as const)('%s relay: drain card shown = %s, for both roles', async (status, shown) => {
+    for (const me of [superAdminMe, relayOpsMe]) {
+      cleanup()
+      signedInAs(me)
+      mockFetch(relayRoutes([detail({ status })]))
+      renderApp(`/relays/${ID}`)
+      await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+      expect(!!screen.queryByRole('region', { name: 'Drain' })).toBe(shown)
+    }
+  })
+
+  it('an unknown role: the card itself refuses to render', () => {
+    signedInAs({ ...superAdminMe, role: 'auditor' })
+    render(<RelayDrainCard relay={detail()} onDone={() => {}} />)
+    expect(screen.queryByRole('region', { name: 'Drain' })).not.toBeInTheDocument()
+  })
+
+  it('says what draining does before confirming, including reduced availability', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([detail()]))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
+    expect(within(dialog).getByRole('note')).toHaveTextContent(/reduces relay availability/)
+    expect(dialog).toHaveTextContent(/up to 120 seconds/)
+    expect(within(dialog).queryByLabelText(/to confirm/)).not.toBeInTheDocument() // no typed name
+    expect(within(dialog).getByText(/Optional\. Recorded in the provider audit log\./)).toBeInTheDocument()
+  })
+
+  it('drain: one POST with the trimmed reason, then a refresh shows it draining', async () => {
+    signedInAs(relayOpsMe)
+    const { calls } = mockFetch(relayRoutes([detail(), draining()], { [`POST /provider/relays/${ID}/drain`]: { status: 204 } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
+    await user.type(within(dialog).getByLabelText('Reason'), '  kernel upgrade ')
+    await user.click(within(dialog).getByRole('button', { name: 'Drain relay' }))
+
+    expect(await screen.findByText(/relay-a is draining/)).toBeInTheDocument()
+    expect(writes(calls)).toEqual([
+      expect.objectContaining({ method: 'POST', path: `/provider/relays/${ID}/drain`, search: '', body: { reason: 'kernel upgrade' } }),
+    ])
+    expect(gets(calls)).toHaveLength(2)
+    const card = screen.getByRole('region', { name: 'Drain' })
+    expect(within(card).getByText('Draining')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Resume relay' })).toBeInTheDocument()
+  })
+
+  it('drain without a reason sends an empty body object; a double click sends one request', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(relayRoutes([detail(), draining()], { [`POST /provider/relays/${ID}/drain`]: { status: 204 } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
+    await user.dblClick(within(dialog).getByRole('button', { name: 'Drain relay' }))
+    await screen.findByText(/relay-a is draining/)
+    expect(writes(calls)).toEqual([expect.objectContaining({ path: `/provider/relays/${ID}/drain`, body: {} })])
+  })
+
+  it('last_eligible_relay: explained inside the dialog, nothing refreshed', async () => {
+    signedInAs(relayOpsMe)
+    const { calls } = mockFetch(
+      relayRoutes([detail()], { [`POST /provider/relays/${ID}/drain`]: { status: 409, body: { error: 'last_eligible_relay' } } }),
+    )
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
+    await user.click(within(dialog).getByRole('button', { name: 'Drain relay' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/only relay connectors can use right now/)
+    expect(gets(calls)).toHaveLength(1)
+  })
+
+  it.each([
+    ['invalid_state', /hasn’t enrolled yet/],
+    ['already_revoked', /has been revoked/],
+    ['already_deleted', /has been deleted/],
+  ])('%s: the dialog closes, the page refreshes and explains', async (code, message) => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(relayRoutes([detail(), detail({ status: 'revoked' })], { [`POST /provider/relays/${ID}/drain`]: { status: 409, body: { error: code } } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
+    await user.click(within(await screen.findByRole('dialog', { name: 'Drain relay' })).getByRole('button', { name: 'Drain relay' }))
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(gets(calls)).toHaveLength(2)
+  })
+
+  it('resume: one POST with an empty body, no dialog, then a refresh shows it back', async () => {
+    signedInAs(relayOpsMe)
+    const { calls } = mockFetch(relayRoutes([draining(), detail()], { [`POST /provider/relays/${ID}/resume`]: { status: 204 } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Resume relay' }))
+    expect(await screen.findByText(/relay-a is back in the relay list/)).toBeInTheDocument()
+    expect(writes(calls)).toEqual([expect.objectContaining({ method: 'POST', path: `/provider/relays/${ID}/resume`, search: '', body: {} })])
+    expect(within(screen.getByRole('region', { name: 'Drain' })).getByRole('button', { name: 'Drain relay' })).toBeInTheDocument()
+  })
+
+  it('a failed resume is shown in the card', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([draining()], { [`POST /provider/relays/${ID}/resume`]: { status: 500, body: { error: 'server_error' } } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Resume relay' }))
+    expect(await within(screen.getByRole('region', { name: 'Drain' })).findByRole('alert')).toHaveTextContent(/resume didn’t go through/)
+  })
+})
+
+describe('Relay detail: drain progress comes from drain_state only', () => {
+  it.each([
+    ['migrating', { attached_connectors: 3 }, /3 connectors still attached/],
+    ['migrating', { attached_connectors: 1 }, /1 connector still attached/],
+    ['streams_open', { attached_connectors: 0, connection_count: 2 }, /2 connections still open/],
+    ['unverified', { attached_connectors: 0, connection_count: 0 }, /Not confirmed yet/],
+    ['drained', { attached_connectors: 0, connection_count: 0 }, /Drained \(as of the last heartbeat\)/],
+  ] as const)('%s', async (state, over, text) => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([draining({ drain_state: state, ...over })]))
+    renderApp(`/relays/${ID}`)
+    const card = await screen.findByRole('region', { name: 'Drain' })
+    expect(within(card).getByText(text)).toHaveAttribute('data-drain-state', state)
+  })
+
+  it('unverified on an inactive relay says it can’t confirm, instead of asking to wait', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([draining({ status: 'inactive', drain_state: 'unverified', attached_connectors: 0, connection_count: 0 })]))
+    renderApp(`/relays/${ID}`)
+    const card = await screen.findByRole('region', { name: 'Drain' })
+    expect(within(card).getByText(/the relay is inactive \(no recent heartbeat\)/)).toHaveAttribute('data-drain-state', 'unverified')
+    expect(within(card).queryByText(/Refresh in a minute/)).not.toBeInTheDocument()
+  })
+
+  it('zero counts alone never read as drained: the state decides', async () => {
+    signedInAs(superAdminMe)
+    mockFetch(relayRoutes([draining({ drain_state: 'unverified', attached_connectors: 0, connection_count: 0 })]))
+    renderApp(`/relays/${ID}`)
+    const card = await screen.findByRole('region', { name: 'Drain' })
+    expect(within(card).queryByText(/^Drained/)).not.toBeInTheDocument()
+    expect(within(card).queryByText(/can now be revoked or deleted/)).not.toBeInTheDocument()
+  })
+
+  it('drained: a super-admin is told it can now be revoked or deleted; relay-ops is not', async () => {
+    signedInAs(superAdminMe)
+    mockFetch(relayRoutes([draining({ drain_state: 'drained', attached_connectors: 0, connection_count: 0 })]))
+    renderApp(`/relays/${ID}`)
+    expect(await screen.findByText(/can now be revoked or deleted/)).toBeInTheDocument()
+    cleanup()
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([draining({ drain_state: 'drained', attached_connectors: 0, connection_count: 0 })]))
+    renderApp(`/relays/${ID}`)
+    await screen.findByRole('region', { name: 'Drain' })
+    expect(screen.queryByText(/can now be revoked or deleted/)).not.toBeInTheDocument()
+  })
+
+  it('the header shows a Draining badge next to the status', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(relayRoutes([draining()]))
+    renderApp(`/relays/${ID}`)
+    const heading = await screen.findByRole('heading', { name: 'relay-a', level: 1 })
+    expect(within(heading.parentElement as HTMLElement).getByText('Draining')).toBeInTheDocument()
+  })
+})
+
+// Phase D (P3): the last-relay warning is advisory: shown, never blocking.
+describe('Relay detail: last-relay warning on revoke and delete', () => {
+  it.each(['Revoke relay', 'Delete relay'] as const)('%s of the only listed relay warns, and still goes through', async (action) => {
+    signedInAs(superAdminMe)
+    const key = action === 'Revoke relay' ? `POST /provider/relays/${ID}/revoke` : `DELETE /provider/relays/${ID}`
+    const { calls } = mockFetch(relayRoutes([detail({ in_relay_list: true, eligible_relay_count: 1 }), detail({ status: 'deleted' })], { [key]: { status: 204 } }))
+    renderApp(`/relays/${ID}`)
+    const user = userEvent.setup()
+    const dialog = await openAction(user, action)
+    expect(within(dialog).getByRole('note')).toHaveTextContent(/No eligible relays will remain/)
+    await fillAndConfirm(user, dialog, action)
+    await waitFor(() => expect(writes(calls)).toHaveLength(1))
+  })
+
+  it.each([
+    ['another relay is listed', { in_relay_list: true, eligible_relay_count: 2 }],
+    ['this relay is not listed', { in_relay_list: false, eligible_relay_count: 1 }],
+  ])('no warning when %s', async (_n, over) => {
+    signedInAs(superAdminMe)
+    mockFetch(relayRoutes([detail(over)]))
+    renderApp(`/relays/${ID}`)
+    const dialog = await openAction(userEvent.setup(), 'Revoke relay')
+    expect(within(dialog).queryByRole('note')).not.toBeInTheDocument()
   })
 })

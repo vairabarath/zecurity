@@ -115,3 +115,60 @@ describe('ConfirmDangerDialog', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Only super-admins can do this.')
   })
 })
+
+// Sprint 22 Phase D: drain is reversible and not D-17: no typed name, and an
+// optional reason (still limited to 500 code points). The warning is advisory.
+describe('ConfirmDangerDialog: optional reason, no typed name, warning', () => {
+  function setupDrain(warning?: string) {
+    const onConfirm = vi.fn()
+    render(
+      <ConfirmDangerDialog
+        title="Drain relay"
+        description="It leaves the relay list."
+        confirmText="relay-a"
+        confirmLabel="Drain relay"
+        pendingLabel="Draining…"
+        pending={false}
+        reasonRequired={false}
+        requireConfirmText={false}
+        warning={warning}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    )
+    return { user: userEvent.setup(), onConfirm, button: () => screen.getByRole('button', { name: 'Drain relay' }) }
+  }
+
+  it('confirms with no reason and no typed name; the name field is absent', async () => {
+    const { user, onConfirm, button } = setupDrain()
+    expect(screen.queryByLabelText(/to confirm/)).not.toBeInTheDocument()
+    expect(screen.getByText('Optional. Recorded in the provider audit log.')).toBeInTheDocument()
+    expect(button()).toBeEnabled()
+    await user.click(button())
+    expect(onConfirm).toHaveBeenCalledWith('', '')
+  })
+
+  it('sends a given reason trimmed; a too-long one still blocks', async () => {
+    const { user, onConfirm, button } = setupDrain()
+    await user.type(screen.getByLabelText('Reason'), '  patching  ')
+    await user.click(button())
+    expect(onConfirm).toHaveBeenCalledWith('patching', '')
+    await user.clear(screen.getByLabelText('Reason'))
+    await user.click(screen.getByLabelText('Reason'))
+    await user.paste('x'.repeat(501))
+    expect(button()).toBeDisabled()
+  })
+
+  it('a warning is shown as a note and never disables confirming', async () => {
+    const { button } = setupDrain('Draining reduces relay availability.')
+    expect(screen.getByRole('note')).toHaveTextContent('Draining reduces relay availability.')
+    expect(button()).toBeEnabled()
+  })
+
+  it('the defaults keep revoke/delete strict: no warning, reason and name required', () => {
+    setup()
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+    expect(screen.getByText('Required. Recorded in the provider audit log.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Revoke relay' })).toBeDisabled()
+  })
+})

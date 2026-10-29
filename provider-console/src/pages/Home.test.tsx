@@ -26,6 +26,8 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     last_heartbeat_at: iso(-1 * MIN),
     attached_connectors: 4,
     created_at: '2026-10-01T00:00:00Z',
+    draining_since: null,
+    drain_state: null,
     ...over,
   }
 }
@@ -156,5 +158,31 @@ describe('Overview', () => {
     await screen.findByText('relay-low is in the low capacity tier')
     expect(await screen.findByText(/Couldn’t load activity/)).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Your session' })).toBeInTheDocument()
+  })
+})
+
+// Sprint 22 Phase D: draining relays need attention, with their drain state.
+describe('Overview: draining relays', () => {
+  it.each([
+    ['migrating', { attached_connectors: 2 }, 'Connectors still attached: 2'],
+    ['streams_open', {}, 'Connections still open'],
+    ['unverified', {}, 'Not confirmed yet'],
+    ['drained', {}, 'Drained, as of the last heartbeat'],
+  ] as const)('%s', async (state, over, note) => {
+    signedInAs(relayOpsMe)
+    const d = relay({ id: '55555555-5555-5555-5555-555555555555', name: 'relay-drain', draining_since: iso(-MIN), drain_state: state, ...over })
+    mockFetch({ 'GET /provider/relays': { status: 200, body: { items: [RELAYS[0], d], next_cursor: null } } })
+    renderApp('/')
+    const link = await screen.findByRole('link', { name: /relay-drain is draining/ })
+    expect(link).toHaveAttribute('href', `/relays/${d.id}`)
+    expect(link).toHaveTextContent(note)
+  })
+
+  it('a relay that is not draining has no draining item', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch(routes)
+    renderApp('/')
+    await screen.findByText('relay-low is in the low capacity tier')
+    expect(screen.queryByText(/is draining/)).not.toBeInTheDocument()
   })
 })
