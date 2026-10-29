@@ -253,6 +253,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
+| FU-6 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
 
 ## Post-Sprint Fixes
 
@@ -471,6 +472,39 @@ Also, a scan result's key `(request_id, ip, port, protocol)` didn't include the 
   - controller 1500 pass / 0 fail / 2 skip (unconditional stubs);
   - fresh-volume init of all 48 SQL files: 0 errors, 28 `*_same_workspace_fkey`;
   - the controller starts.
+
+### Fix: live E2E run findings — firewall posture on iptables-legacy (F-1), token no-store (O-1), admin audit (O-2), login exit code (O-4)
+Found by the live end-to-end run of `fixed-pendings` `35cb31c5` (2026-10-29, M1; record:
+`Sprint22/Live-E2E-Run-2026-10-29.md`). Branch `fix/e2e-live-findings`.
+
+- **F-1** `client/src/posture.rs`: the firewall check failed with ufw active on an iptables-legacy host. Fixed with
+  an iptables-legacy-only ufw config fallback (user decision). Details in
+  `Sprint15/Member2-Rust-Client/Phase1-Proto-and-Linux-Collectors.md` → Post-Phase Fixes.
+- **O-1** `internal/connector/token_handler.go`, `internal/shield/token_handler.go`: the token responses carry a
+  single-use enrollment JWT but had no `Cache-Control`. Now `no-store` (as the relay provisioning response).
+- **O-2** workspace admin changes wrote no audit row (only device, IdP, SCIM and force-delete did). New
+  `graph/resolvers/audit_helpers.go` `auditAdmin` (best-effort `audit.Record`, after the change commits and before
+  its notifications) in every unaudited admin mutation: `remote_network.create/delete`,
+  `connector.create/revoke/delete`, `shield.create/revoke/delete`, `resource.create/update/protect/unprotect/delete`,
+  `group.create/update/delete`, `group.member.add/remove`, `resource.group.assign/unassign`,
+  `device_profile.create/mode/manual_trust/delete/requirement.add/requirement.remove/bind/unbind`,
+  `scan.trigger`, `invitation.create`, `device.revoke`; plus `connector.token.issue` / `shield.token.issue` from the
+  REST token endpoints. No row carries a token. `TestEveryMutationIsAudited` (go/ast) fails for any new mutation that
+  neither audits nor is listed with a reason (`initiateAuth`, `testIdpConnection`, device approval and SCIM conflict
+  actions are audited elsewhere or change nothing).
+- **O-4** `client/src/cmd/login.rs`: after a successful login the daemon's `PostLoginState` has already brought the
+  tunnel up; `login` then sent a second `Up`, got `already up` and exited non-zero after a good login. The redundant
+  `Up` is gone.
+
+**Tests:** client 293 pass (F-1: 8 new tests, 4/4 mutants); controller 1504 / 0 / 2 (skips unchanged), incl.
+`TestAdminAudit_ChangesRecordedWithActor` (6 changes audited with actor and target, refused ones not; 2/2 mutants:
+dropped call, audit before the change), `TestEveryMutationIsAudited` (catches a removed call),
+`TestShieldTokenEndpoint_NoStoreAndAudited`, `TestEnrollBinding_TokenIssueAuditedWithoutToken`, and every connector
+token reissue now asserts `no-store`.
+
+**Live (2026-10-29):** F-1 PASS/FAIL both ways (see the phase file); `POST /api/connectors/{id}/token` →
+`Cache-Control: no-store`; `connector.create` / `connector.token.issue` / `connector.delete` /
+`device_profile.requirement.add` rows with actor and details, no token; logout + login → `Zecurity is up.`, exit 0.
 
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**

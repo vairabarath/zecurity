@@ -3327,3 +3327,17 @@ serves on `127.0.0.1:9102`.
 - **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
 - **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
 
+
+## 2026-10-29 — M1: live end-to-end run of `fixed-pendings` (journeys 1–2) and fixes F-1, O-1, O-2, O-4
+- Record: `.zecurity-obs/Sprint22/Live-E2E-Run-2026-10-29.md` (7 real-user journeys; 1 and 2 done).
+- Lab: controller + client on .164 (ufw on), connectors on inkyank .75 and manoj .53, shield + test web server on
+  nika .44, spare host seechan5 .42 for the relay journey. Branch builds installed with the update timers disabled.
+- **Journey 1 (admin onboarding) PASS; journey 2 (first day) PASS with F-1.**
+- **F-1** firewall posture failed with ufw on an iptables-legacy host → ufw config fallback on legacy hosts only.
+- **O-1** token responses now `Cache-Control: no-store`; **O-2** every workspace admin change is audited
+  (`auditAdmin`, guard test); **O-4** `zecurity-client login` no longer exits non-zero after a good login.
+- **O-3** (clients learn regained access on a 60 s poll) left as is by decision → Sprint22 FU-6.
+- Gates: client 293 pass; controller 1504 / 0 / 2; live re-check of all four PASS. Branch `fix/e2e-live-findings`,
+  committed locally, not pushed.
+- Seen, to check in journey 3: after `systemctl restart zecurity-client` the daemon loads its state but doesn't
+  bring the tunnel back up until `zecurity-client up`.
