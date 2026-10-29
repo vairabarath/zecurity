@@ -3257,7 +3257,7 @@ serves on `127.0.0.1:9102`.
 - Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
 
 ## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
-- Branch `feat/device-approval` (base `84a06023` = main); committed locally, not pushed. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
+- Branch `feat/device-approval` (base `84a06023` = main); pushed 2026-10-29. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
 - Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.
 - Controller:
   - `client_devices.approved_at` / `approved_by`; `approveDevice` / `unapproveDevice` (admin, workspace-scoped, revoked refused, no-op when unchanged), audited as `device.approve` / `device.unapprove` in the same transaction; the device is re-evaluated at once.
@@ -3344,3 +3344,43 @@ serves on `127.0.0.1:9102`.
 - Independent read-only review: ready with follow-ups. Fixed before commit: post-commit hooks (drain/resume and revoke/delete) detached from the request context; broadcast failures logged with the relay id (`relay.DrainFanout`); inactive draining relay text. Added AT-D12 and hook-ordering tests. Residuals tracked as FU-7.
 - Gates: Go 1520 pass / 0 fail / 2 expected skips; console 507 pass, lint/build clean; `cargo test relay_selector` 27 pass. Mutation checks on the row locks, the shared predicate, the warning condition and the detached hook context.
 - Pending: live AT-D on the lab fleet (M1, V3).
+
+## 2026-10-29 — M1: live end-to-end run of `fixed-pendings` (journeys 1–2) and fixes F-1, O-1, O-2, O-4
+- Record: `.zecurity-obs/Sprint22/Live-E2E-Run-2026-10-29.md` (7 real-user journeys; 1 and 2 done).
+- Lab: controller + client on .164 (ufw on), connectors on inkyank .75 and manoj .53, shield + test web server on
+  nika .44, spare host seechan5 .42 for the relay journey. Branch builds installed with the update timers disabled.
+- **Journey 1 (admin onboarding) PASS; journey 2 (first day) PASS with F-1.**
+- **F-1** firewall posture failed with ufw on an iptables-legacy host → ufw config fallback on legacy hosts only.
+- **O-1** token responses now `Cache-Control: no-store`; **O-2** every workspace admin change is audited
+  (`auditAdmin`, guard test); **O-4** `zecurity-client login` no longer exits non-zero after a good login.
+- **O-3** (clients learn regained access on a 60 s poll) left as is by decision → Sprint22 FU-8.
+- Gates: client 293 pass; controller 1504 / 0 / 2; live re-check of all four PASS. Branch `fix/e2e-live-findings`,
+  pushed 2026-10-29.
+- Seen, to check in journey 3: after `systemctl restart zecurity-client` the daemon loads its state but doesn't
+  bring the tunnel back up until `zecurity-client up`.
+
+## 2026-10-29 — M1: live E2E journey 3 (day-to-day) and fixes F-3, O-5 status
+- Journey 3 PASS with findings: renewals under traffic clean (50/50); connector stop → 1 failed request; start → none;
+  resource rename audited and seen by the client.
+- **F-3** connector restart cut users for 32 s → `SHIELD_NOT_ATTACHED` now resyncs and recovery re-checks a changed
+  map → **3 s** live. **O-5** `status` shows `Tunnel: up/down`.
+- **F-2** slow readers (25 KB/s) cut by the Fix 14 2 s stall limit → FU-9 (per-tunnel flow control); restoring the
+  tunnel at daemon start → FU-10.
+- Client 296 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
+
+## 2026-10-29 — M1: live E2E journey 4 (offboarding) and fix F-4
+- Member removed / device revoked / connector revoked mid-traffic: connector cut in 58 / 56 / 62 ms; connector revoke
+  cost 3 s of failed requests (shield moved to the other connector); a revoked connector stays revoked after a
+  restart; revokes audited. Replacement connector `e2e-conn-manoj2` installed.
+- **F-4** signing in after a device revoke failed and left orphan devices → `login` clears the revoked state and
+  reaches the daemon before enrolling (D-D kept). Live: one `login` restores access; no orphan on failure.
+- **O-6** after a cut, already-buffered data still reaches the app (~24 s at 300 KB/s); low.
+- Client 297 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
+
+## 2026-10-29 — M1: live E2E journey 5 (discovery and scan) and fixes F-5, O-7
+- Discovery found the new service within one round; promote → resource in the shield's network → protect, assign →
+  tunnel 200; scan bound to its connector and audited; protected resources invisible to a scan; refused scans leave
+  no request.
+- **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
+  re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
+

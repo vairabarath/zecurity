@@ -186,3 +186,42 @@ The enforcement path was verified the same day with the old client:
 - a passing report restored access;
 - the connector refused a stale-ACL client;
 - AUDIT allowed access while recording the reason.
+
+### Fix: the firewall check failed with ufw on an iptables-legacy host (2026-10-29, live E2E run F-1)
+**Issue:** on a host whose `iptables` is the legacy backend (here `iptables v1.8.10 (legacy)`), ufw active with
+`DEFAULT_INPUT_POLICY="DROP"` was reported `FAIL: nftables present but no default-deny input chain`, so an ENFORCE
+profile requiring `linux.firewall.active` refused a protected device.
+
+**Root Cause:** legacy iptables rules (ufw's included) are not in the nftables ruleset. The daemon has
+`CAP_NET_ADMIN`, so `nft -j list ruleset` succeeds, and `collect_firewall` returned its FAIL without trying another
+backend. The fallbacks couldn't help as written: measured as the daemon's user with only `CAP_NET_ADMIN`,
+`iptables -L` fails (`can't open lock file /run/xtables.lock: Permission denied`) and `ufw status` fails
+(`You need to be root`). A non-root `ufw status` was also misreported as `ufw inactive`. Before `c7d812cb` the text
+match on `policy drop` had passed this host only by accident (Docker's forward chain).
+
+**Fix Applied (`client/src/posture.rs`, `collect_firewall(runner, root)`; user decision: ufw config fallback):**
+```rust
+// BEFORE: if let Some(c) = nft_input_default_deny(runner).await { return c; }   // nft FAIL was final
+// AFTER:
+// 1. nft input default-deny → PASS.
+// 2. iptables_is_legacy() (`iptables --version` contains "(legacy)", unprivileged): if NOT legacy,
+//    nft's answer stands (ufw's rules would be in the nft ruleset).
+// 3. legacy: readable `iptables -L -n` decides; an unreadable one (Error) settles nothing.
+// 4. `ufw status` decides only when it exits 0 (root); a refusal is not "inactive".
+// 5. legacy: ufw_config_default_deny(root): /etc/ufw/ufw.conf ENABLED=yes and /etc/default/ufw
+//    DEFAULT_INPUT_POLICY DROP|REJECT → PASS "ufw enabled per /etc/ufw/ufw.conf, default input policy DROP
+//    (iptables-legacy: runtime rules not readable)"; ENABLED=no or ACCEPT → FAIL.
+// 6. otherwise nft's FAIL, or "no firewall backend found".
+```
+Known gap (accepted): on a legacy host a manual `iptables -P INPUT ACCEPT` with ufw still enabled in its config is
+not seen; `ufw enable` / `ufw disable` keep the config in step.
+
+**Tests (`client/src/posture_tests.rs`):** legacy + ufw enabled (DROP, REJECT) → PASS; disabled or ACCEPT → FAIL;
+nf_tables + enabled config + no nft deny → FAIL; config ignored without legacy iptables; legacy without ufw config →
+FAIL; readable legacy iptables decides both ways; a refused `ufw status` is not "inactive". 4/4 mutants killed (nft
+not authoritative, config without legacy, legacy iptables error returned, ACCEPT policy passing). Client 293 pass.
+
+**Live (2026-10-29, this PC, client `8467ebd98d7c2d61`):** ufw on → `PASS ufw enabled per /etc/ufw/ufw.conf, default
+input policy DROP (…)`, profile satisfied, tunnel 200; `sudo ufw disable` → `FAIL ufw disabled (/etc/ufw/ufw.conf)`,
+profile unsatisfied, tunnel refused.
+

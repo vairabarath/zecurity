@@ -32,6 +32,7 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 	if err != nil {
 		return nil, fmt.Errorf("createResource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.create", "resource", row.ID, resourceAuditDetails(row))
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("createResource: notify policy change: %w", err)
 	}
@@ -57,6 +58,7 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
 
+	r.auditAdmin(ctx, "resource.update", "resource", id, resourceAuditDetails(res.Row))
 	// Sprint 20 Fix 02 (F35): this is the one notify for an update. An extra
 	// unconditional notify from a parallel branch (49c4732, merged with 391b28b
 	// in df5a041) fired twice for every relevant change and once for irrelevant
@@ -94,6 +96,7 @@ func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*gra
 	if err != nil {
 		return nil, fmt.Errorf("protectResource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.protect", "resource", id, nil)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("protectResource: notify policy change: %w", err)
 	}
@@ -112,6 +115,7 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 		return nil, fmt.Errorf("unprotectResource: %w", err)
 	}
 
+	r.auditAdmin(ctx, "resource.unprotect", "resource", id, nil)
 	// Only instruct a shield when there is one to instruct. If the bound shield was
 	// revoked/gone, MarkUnprotecting resolved straight to 'unprotected' (Finding 7):
 	// no shield to remove the rule or ack, so there is nothing to push.
@@ -143,6 +147,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
 		if deleted {
+			r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
 			if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 				return false, fmt.Errorf("deleteResource notify: %w", err)
 			}
@@ -162,6 +167,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		if err != nil {
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
+		r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
 		r.ConnectorRegistry.PushInstruction(delRow)
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
@@ -172,6 +178,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
+		r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
 		// The row left the ACL compiler's output — invalidate the workspace snapshot.
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return false, fmt.Errorf("deleteResource notify: %w", err)

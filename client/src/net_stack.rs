@@ -1572,6 +1572,12 @@ async fn relay_tcp_to_quic_ctl(
                     port,
                     "shield not attached, trying next connector"
                 );
+                // The shield may be re-homing (its connector restarting): a
+                // routing state, not a denial, so it warrants a transport
+                // resync. Treated as a denial, a connector restart left
+                // clients on a stale map until the 60 s tick (live run
+                // 2026-10-29, F-3).
+                saw_transport_failure = true;
                 continue;
             }
             _ => {
@@ -2264,6 +2270,54 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(end, RelayEnd::Normal);
+    }
+
+    /// A connector that answers with `body` to every tunnel request.
+    struct ReplyOpener(&'static [u8]);
+    #[async_trait::async_trait]
+    impl DirectOpener for ReplyOpener {
+        async fn open(
+            &self,
+            _addr: SocketAddr,
+        ) -> std::result::Result<AuthenticatedStream, TunnelOpenError> {
+            let mut reply = (self.0.len() as u32).to_be_bytes().to_vec();
+            reply.extend_from_slice(self.0);
+            Ok(Box::new(tokio::io::join(
+                std::io::Cursor::new(reply),
+                tokio::io::sink(),
+            )))
+        }
+    }
+
+    async fn resync_after_reply(body: &'static [u8]) -> bool {
+        let t = Arc::new(ClientTransport::new(
+            Arc::new(ReplyOpener(body)),
+            "127.0.0.1:9092".parse().unwrap(),
+            None,
+        ));
+        let (_tcp_tx, tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let (quic_tx, _quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let resync = Arc::new(Notify::new());
+        let end = relay_tcp_to_quic(vec![t], "10.0.0.1".into(), 80, tcp_rx, quic_tx, resync.clone()).await;
+        assert!(end.is_err(), "no connector accepted, the flow must fail");
+        tokio::time::timeout(Duration::from_millis(100), resync.notified())
+            .await
+            .is_ok()
+    }
+
+    /// F-3 (live run 2026-10-29): SHIELD_NOT_ATTACHED from every connector is
+    /// a routing state (the shield re-homing while its connector restarts),
+    /// so it signals a transport resync; a denial still doesn't.
+    #[tokio::test]
+    async fn shield_not_attached_signals_resync_but_a_denial_does_not() {
+        assert!(
+            resync_after_reply(br#"{"ok":false,"error":"SHIELD_NOT_ATTACHED"}"#).await,
+            "shield not attached must signal a transport resync"
+        );
+        assert!(
+            !resync_after_reply(br#"{"ok":false,"error":"ACCESS_DENIED"}"#).await,
+            "a denial must fail closed without a resync"
+        );
     }
 
     /// Mid-session transport failure → RelayEnd::Failed (→ RST to the client)

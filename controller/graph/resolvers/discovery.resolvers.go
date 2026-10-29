@@ -7,12 +7,15 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/resource"
@@ -42,12 +45,12 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 	}
 
 	// The resource lives in the discovering shield's network (FU-4).
-	rnID, err := discovery.ShieldRemoteNetwork(ctx, r.Pool, tc.TenantID, shieldID)
+	rnID, shieldName, err := discovery.ShieldNetworkAndName(ctx, r.Pool, tc.TenantID, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: shield network: %w", err)
 	}
 
-	name := fmt.Sprintf("%s on %s", target.ServiceName, shieldID[:8])
+	name := discovery.PromotedResourceName(target.ServiceName, protocol, port, shieldName)
 	row, err := resource.Create(ctx, r.Pool, tc.TenantID, resource.CreateInput{
 		RemoteNetworkID: rnID,
 		Name:            name,
@@ -57,8 +60,13 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 		PortTo:          port,
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return nil, apperr.UserErrorf("promoteDiscoveredService: %s/%d is already a resource (%q)", protocol, port, name)
+		}
 		return nil, fmt.Errorf("promoteDiscoveredService: create resource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.create", "resource", row.ID, map[string]any{"source": "discovery", "shield_id": shieldID, "protocol": protocol, "port": port})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: notify policy change: %w", err)
 	}
@@ -74,6 +82,11 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 	}
 	if len(ports) > 16 {
 		return "", fmt.Errorf("triggerScan: too many ports (max 16)")
+	}
+	for _, t := range targets {
+		if err := discovery.CheckScanTarget(t); err != nil {
+			return "", fmt.Errorf("triggerScan: %q: %w", t, err)
+		}
 	}
 
 	requestID := uuid.New().String()
@@ -120,6 +133,7 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		return "", fmt.Errorf("triggerScan: %w", err)
 	}
 
+	r.auditAdmin(ctx, "scan.trigger", "connector", connectorID, map[string]any{"request_id": requestID, "targets": targets, "ports": ports})
 	return requestID, nil
 }
 

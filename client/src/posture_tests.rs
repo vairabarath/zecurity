@@ -181,7 +181,7 @@ async fn firewall_pass_via_nft_default_deny() {
     );
     let runner = Arc::new(FakeCommandRunner { responses });
 
-    let result = collect_firewall(runner).await;
+    let result = collect_firewall(runner, no_root()).await;
     assert_eq!(result.status, CheckStatus::Pass as i32);
 }
 
@@ -194,7 +194,7 @@ async fn firewall_fail_when_nft_present_but_permissive() {
     );
     let runner = Arc::new(FakeCommandRunner { responses });
 
-    let result = collect_firewall(runner).await;
+    let result = collect_firewall(runner, no_root()).await;
     assert_eq!(result.status, CheckStatus::Fail as i32);
 }
 
@@ -217,7 +217,7 @@ async fn firewall_status_for(chains: &[(&str, &str, &str, &str, &str)]) -> (i32,
         FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
         make_output(0, &nft_json(chains)),
     );
-    let result = collect_firewall(Arc::new(FakeCommandRunner { responses })).await;
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), no_root()).await;
     (result.status, result.detail)
 }
 
@@ -269,7 +269,7 @@ async fn firewall_error_when_nft_output_is_not_json() {
         FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
         make_output(0, "table inet filter { chain input { policy drop } }"),
     );
-    let result = collect_firewall(Arc::new(FakeCommandRunner { responses })).await;
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), no_root()).await;
     assert_eq!(result.status, CheckStatus::Error as i32);
 }
 
@@ -283,7 +283,7 @@ async fn firewall_falls_through_to_iptables_when_nft_absent() {
     let runner = Arc::new(FakeCommandRunner { responses });
     // nft is intentionally absent from `responses` -> FakeCommandRunner returns NotFound for it
 
-    let result = collect_firewall(runner).await;
+    let result = collect_firewall(runner, no_root()).await;
     assert_eq!(result.status, CheckStatus::Pass as i32);
 }
 
@@ -292,7 +292,7 @@ async fn firewall_fail_when_no_backend_found() {
     let runner = Arc::new(FakeCommandRunner { responses: HashMap::new() });
     // nft, iptables, and ufw all return NotFound
 
-    let result = collect_firewall(runner).await;
+    let result = collect_firewall(runner, no_root()).await;
     assert_eq!(result.status, CheckStatus::Fail as i32);
 }
 
@@ -305,8 +305,168 @@ async fn firewall_error_when_nft_execution_fails() {
     );
     let runner = Arc::new(FakeCommandRunner { responses });
 
-    let result = collect_firewall(runner).await;
+    let result = collect_firewall(runner, no_root()).await;
     assert_eq!(result.status, CheckStatus::Error as i32);
+}
+
+/// A root with no ufw configuration, so the host's real /etc never leaks in.
+fn no_root() -> &'static Path {
+    Path::new("/nonexistent-posture-root")
+}
+
+const NFT_NO_INPUT_DENY: &[(&str, &str, &str, &str, &str)] =
+    &[("ip", "filter", "FORWARD", "forward", "drop")];
+
+/// A non-root daemon on an iptables-legacy host: nft works (CAP_NET_ADMIN) but
+/// holds none of ufw's rules; iptables can't take root's xtables lock and
+/// `ufw status` refuses. Found live (F-1, 2026-10-29).
+fn legacy_unprivileged_responses() -> HashMap<String, io::Result<Output>> {
+    let mut responses = HashMap::new();
+    responses.insert(
+        FakeCommandRunner::key("nft", &["-j", "list", "ruleset"]),
+        make_output(0, &nft_json(NFT_NO_INPUT_DENY)),
+    );
+    responses.insert(
+        FakeCommandRunner::key("iptables", &["--version"]),
+        make_output(0, "iptables v1.8.10 (legacy)\n"),
+    );
+    responses.insert(
+        FakeCommandRunner::key("iptables", &["-L", "-n"]),
+        make_output(4, ""),
+    );
+    responses.insert(
+        FakeCommandRunner::key("ufw", &["status"]),
+        make_output(1, ""),
+    );
+    responses
+}
+
+fn ufw_root(enabled: &str, policy: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("etc/ufw")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("etc/default")).unwrap();
+    std::fs::write(
+        tmp.path().join("etc/ufw/ufw.conf"),
+        format!("# /etc/ufw/ufw.conf\nENABLED={enabled}\nLOGLEVEL=low\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("etc/default/ufw"),
+        format!("IPV6=yes\nDEFAULT_INPUT_POLICY=\"{policy}\"\nDEFAULT_OUTPUT_POLICY=\"ACCEPT\"\n"),
+    )
+    .unwrap();
+    tmp
+}
+
+#[tokio::test]
+async fn firewall_pass_on_legacy_host_with_ufw_enabled_by_config() {
+    for policy in ["DROP", "REJECT"] {
+        let root = ufw_root("yes", policy);
+        let runner = Arc::new(FakeCommandRunner {
+            responses: legacy_unprivileged_responses(),
+        });
+        let result = collect_firewall(runner, root.path()).await;
+        assert_eq!(
+            result.status,
+            CheckStatus::Pass as i32,
+            "{policy}: {}",
+            result.detail
+        );
+        assert!(
+            result.detail.contains("ufw enabled per /etc/ufw/ufw.conf"),
+            "{}",
+            result.detail
+        );
+    }
+}
+
+#[tokio::test]
+async fn firewall_fail_on_legacy_host_with_ufw_disabled_or_accepting() {
+    for (enabled, policy) in [("no", "DROP"), ("yes", "ACCEPT")] {
+        let root = ufw_root(enabled, policy);
+        let runner = Arc::new(FakeCommandRunner {
+            responses: legacy_unprivileged_responses(),
+        });
+        let result = collect_firewall(runner, root.path()).await;
+        assert_eq!(
+            result.status,
+            CheckStatus::Fail as i32,
+            "{enabled}/{policy}: {}",
+            result.detail
+        );
+    }
+}
+
+/// On an iptables-nft host ufw's rules are in the nft ruleset: nft's answer
+/// stands and an enabled ufw.conf can't turn its FAIL into a PASS.
+#[tokio::test]
+async fn firewall_config_never_overrides_nft_on_nf_tables_host() {
+    let root = ufw_root("yes", "DROP");
+    let mut responses = legacy_unprivileged_responses();
+    responses.insert(
+        FakeCommandRunner::key("iptables", &["--version"]),
+        make_output(0, "iptables v1.8.10 (nf_tables)\n"),
+    );
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), root.path()).await;
+    assert_eq!(result.status, CheckStatus::Fail as i32, "{}", result.detail);
+    assert!(
+        result.detail.contains("nftables present"),
+        "{}",
+        result.detail
+    );
+}
+
+/// Without an iptables-legacy backend ufw can't be what filters the host, so
+/// its config is never consulted, even when nft is absent.
+#[tokio::test]
+async fn firewall_config_ignored_without_legacy_iptables() {
+    let root = ufw_root("yes", "DROP");
+    let mut responses = HashMap::new();
+    responses.insert(FakeCommandRunner::key("ufw", &["status"]), make_output(1, ""));
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), root.path()).await;
+    assert_eq!(result.status, CheckStatus::Fail as i32, "{}", result.detail);
+}
+
+/// A legacy host with no ufw configuration keeps nft's FAIL.
+#[tokio::test]
+async fn firewall_fail_on_legacy_host_without_ufw_config() {
+    let runner = Arc::new(FakeCommandRunner {
+        responses: legacy_unprivileged_responses(),
+    });
+    let result = collect_firewall(runner, no_root()).await;
+    assert_eq!(result.status, CheckStatus::Fail as i32, "{}", result.detail);
+}
+
+/// Readable legacy rules (daemon running as root) are the runtime truth and
+/// beat the config either way.
+#[tokio::test]
+async fn firewall_legacy_readable_iptables_decides() {
+    for (listing, want) in [
+        ("Chain INPUT (policy DROP)\n", CheckStatus::Pass),
+        ("Chain INPUT (policy ACCEPT)\n", CheckStatus::Fail),
+    ] {
+        let root = ufw_root("yes", "DROP");
+        let mut responses = legacy_unprivileged_responses();
+        responses.insert(
+            FakeCommandRunner::key("iptables", &["-L", "-n"]),
+            make_output(0, listing),
+        );
+        let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), root.path()).await;
+        assert_eq!(result.status, want as i32, "{listing}: {}", result.detail);
+    }
+}
+
+/// A non-root `ufw status` exits non-zero ("You need to be root"); that is
+/// not "ufw inactive".
+#[tokio::test]
+async fn firewall_ufw_status_refused_is_not_reported_inactive() {
+    let mut responses = HashMap::new();
+    responses.insert(
+        FakeCommandRunner::key("ufw", &["status"]),
+        make_output(1, ""),
+    );
+    let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), no_root()).await;
+    assert!(!result.detail.contains("inactive"), "{}", result.detail);
 }
 
 // ---------- Isolation wrapper: panic / timeout ----------

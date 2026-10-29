@@ -24,6 +24,7 @@ func (r *mutationResolver) CreateGroup(ctx context.Context, name string, descrip
 	if err != nil {
 		return nil, fmt.Errorf("createGroup: %w", err)
 	}
+	r.auditAdmin(ctx, "group.create", "group", row.ID, map[string]any{"name": row.Name})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("createGroup notify: %w", err)
 	}
@@ -55,6 +56,7 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 		}
 		return nil, fmt.Errorf("updateGroup: %w", err)
 	}
+	r.auditAdmin(ctx, "group.update", "group", id, map[string]any{"name": row.Name})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("updateGroup notify: %w", err)
 	}
@@ -85,6 +87,7 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 		}
 		return false, fmt.Errorf("deleteGroup: %w", err)
 	}
+	r.auditAdmin(ctx, "group.delete", "group", id, map[string]any{"name": existing.Name})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("deleteGroup notify: %w", err)
 	}
@@ -116,6 +119,7 @@ func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, u
 		}
 		return nil, fmt.Errorf("addGroupMember: %w", err)
 	}
+	r.auditAdmin(ctx, "group.member.add", "group", groupID, map[string]any{"user_id": userID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("addGroupMember notify: %w", err)
 	}
@@ -146,6 +150,7 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 		}
 		return nil, fmt.Errorf("removeGroupMember: %w", err)
 	}
+	r.auditAdmin(ctx, "group.member.remove", "group", groupID, map[string]any{"user_id": userID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("removeGroupMember notify: %w", err)
 	}
@@ -163,6 +168,7 @@ func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID
 		}
 		return nil, fmt.Errorf("assignResourceToGroup: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.group.assign", "resource", resourceID, map[string]any{"group_id": groupID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("assignResourceToGroup notify: %w", err)
 	}
@@ -179,6 +185,7 @@ func (r *mutationResolver) UnassignResourceFromGroup(ctx context.Context, resour
 		}
 		return nil, fmt.Errorf("unassignResourceFromGroup: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.group.unassign", "resource", resourceID, map[string]any{"group_id": groupID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("unassignResourceFromGroup notify: %w", err)
 	}

@@ -259,6 +259,9 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
 | FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | Open |
 | FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | Open |
+| FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
+| FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
+| FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
 
 ## Post-Sprint Fixes
 
@@ -480,6 +483,76 @@ Also, a scan result's key `(request_id, ip, port, protocol)` didn't include the 
   - controller 1500 pass / 0 fail / 2 skip (unconditional stubs);
   - fresh-volume init of all 48 SQL files: 0 errors, 28 `*_same_workspace_fkey`;
   - the controller starts.
+
+### Fix: live E2E run findings — firewall posture on iptables-legacy (F-1), token no-store (O-1), admin audit (O-2), login exit code (O-4)
+Found by the live end-to-end run of `fixed-pendings` `35cb31c5` (2026-10-29, M1; record:
+`Sprint22/Live-E2E-Run-2026-10-29.md`). Branch `fix/e2e-live-findings`.
+
+- **F-1** `client/src/posture.rs`: the firewall check failed with ufw active on an iptables-legacy host. Fixed with
+  an iptables-legacy-only ufw config fallback (user decision). Details in
+  `Sprint15/Member2-Rust-Client/Phase1-Proto-and-Linux-Collectors.md` → Post-Phase Fixes.
+- **O-1** `internal/connector/token_handler.go`, `internal/shield/token_handler.go`: the token responses carry a
+  single-use enrollment JWT but had no `Cache-Control`. Now `no-store` (as the relay provisioning response).
+- **O-2** workspace admin changes wrote no audit row (only device, IdP, SCIM and force-delete did). New
+  `graph/resolvers/audit_helpers.go` `auditAdmin` (best-effort `audit.Record`, after the change commits and before
+  its notifications) in every unaudited admin mutation: `remote_network.create/delete`,
+  `connector.create/revoke/delete`, `shield.create/revoke/delete`, `resource.create/update/protect/unprotect/delete`,
+  `group.create/update/delete`, `group.member.add/remove`, `resource.group.assign/unassign`,
+  `device_profile.create/mode/manual_trust/delete/requirement.add/requirement.remove/bind/unbind`,
+  `scan.trigger`, `invitation.create`, `device.revoke`; plus `connector.token.issue` / `shield.token.issue` from the
+  REST token endpoints. No row carries a token. `TestEveryMutationIsAudited` (go/ast) fails for any new mutation that
+  neither audits nor is listed with a reason (`initiateAuth`, `testIdpConnection`, device approval and SCIM conflict
+  actions are audited elsewhere or change nothing).
+- **O-4** `client/src/cmd/login.rs`: after a successful login the daemon's `PostLoginState` has already brought the
+  tunnel up; `login` then sent a second `Up`, got `already up` and exited non-zero after a good login. The redundant
+  `Up` is gone.
+
+**Tests:** client 293 pass (F-1: 8 new tests, 4/4 mutants); controller 1504 / 0 / 2 (skips unchanged), incl.
+`TestAdminAudit_ChangesRecordedWithActor` (6 changes audited with actor and target, refused ones not; 2/2 mutants:
+dropped call, audit before the change), `TestEveryMutationIsAudited` (catches a removed call),
+`TestShieldTokenEndpoint_NoStoreAndAudited`, `TestEnrollBinding_TokenIssueAuditedWithoutToken`, and every connector
+token reissue now asserts `no-store`.
+
+**Live (2026-10-29):** F-1 PASS/FAIL both ways (see the phase file); `POST /api/connectors/{id}/token` →
+`Cache-Control: no-store`; `connector.create` / `connector.token.issue` / `connector.delete` /
+`device_profile.requirement.add` rows with actor and details, no token; logout + login → `Zecurity is up.`, exit 0.
+
+### Fix: live E2E run — connector restart outage (F-3) and `status` tunnel line (O-5)
+Found in journey 3 of the live E2E run (2026-10-29, record `Sprint22/Live-E2E-Run-2026-10-29.md`). Branch
+`fix/e2e-live-findings`.
+
+**Issue (F-3):** restarting the connector a shield is attached to cut that shield's resources for 32 s, though a
+second connector was healthy and the restarted one served again within 2 s.
+
+**Root Cause:** `client/src/net_stack.rs` counted `SHIELD_NOT_ATTACHED` as a denial ("re-polling won't help"), so once
+the early resync had applied a map taken while the connector was marked disconnected, the client failed closed with
+no further resync until the 60 s tick; `run_transport_recovery` also stopped at the first changed map.
+
+**Fix Applied:**
+```rust
+// net_stack.rs, Some("SHIELD_NOT_ATTACHED") arm — AFTER:
+saw_transport_failure = true; // a shield re-homing is routing, not a denial
+// daemon.rs run_transport_recovery — BEFORE: Ok(true) => { apply; break }
+// AFTER: recovery_step(changed, applied): Apply (and check again after the backoff) | Retry | Stop once unchanged after a change
+```
+**O-5:** `status` now prints `Tunnel: up` / `Tunnel: down — … run zecurity-client up` (`IpcResponse.tunnel_up`).
+
+**Tests:** see the run record; client 296 pass. **Live:** restart outage 32 s → 3 s; status line correct after a
+daemon restart. F-2 and restoring the tunnel at start → FU-9, FU-10.
+
+### Fix: live E2E run — signing in again after a device revoke (F-4)
+Found in journey 4 (2026-10-29). After `revokeDevice` the daemon exits (Sprint 19 D-D, kept); `login` then failed and
+every attempt left an active orphan device, because the revoked state on disk made each daemon start exit again and
+`login` enrolled before reaching the daemon. `client/src/cmd/login.rs` now clears a revoked device's state
+(`state_store::clear_revoked_state`) and checks the daemon before the browser flow. Live: one `login` restores access;
+an unreachable daemon stops `login` with a clear message and no device. Details in the Sprint 19 Track 2 file.
+
+### Fix: live E2E run — promoted resource names, repeated promote, unscannable targets (F-5, O-7)
+Found in journey 5 (2026-10-29). `promoteDiscoveredService` named an unnamed service `" on <shield id>"` and answered a
+repeated promote with the raw unique-violation error; `triggerScan` accepted loopback/multicast/unspecified targets the
+connector silently drops. Now `discovery.PromotedResourceName` (`<service or proto/port> on <shield name>`), a user
+error "already a resource", and `discovery.CheckScanTarget` before the request is recorded. Tests and live re-check in
+the run record (`Sprint22/Live-E2E-Run-2026-10-29.md`).
 
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**
