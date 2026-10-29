@@ -531,6 +531,13 @@ saw_transport_failure = true; // a shield re-homing is routing, not a denial
 **Tests:** see the run record; client 296 pass. **Live:** restart outage 32 s → 3 s; status line correct after a
 daemon restart. F-2 and restoring the tunnel at start → FU-7, FU-8.
 
+### Fix: live E2E run — signing in again after a device revoke (F-4)
+Found in journey 4 (2026-10-29). After `revokeDevice` the daemon exits (Sprint 19 D-D, kept); `login` then failed and
+every attempt left an active orphan device, because the revoked state on disk made each daemon start exit again and
+`login` enrolled before reaching the daemon. `client/src/cmd/login.rs` now clears a revoked device's state
+(`state_store::clear_revoked_state`) and checks the daemon before the browser flow. Live: one `login` restores access;
+an unreachable daemon stops `login` with a clear message and no device. Details in the Sprint 19 Track 2 file.
+
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**
 - Dev DB recreated from all 48 files (28 `*_same_workspace_fkey`, `scan_requests`).

@@ -3351,3 +3351,12 @@ serves on `127.0.0.1:9102`.
   tunnel at daemon start → FU-8.
 - Client 296 pass; branch `fix/e2e-live-findings`, local only.
 
+## 2026-10-29 — M1: live E2E journey 4 (offboarding) and fix F-4
+- Member removed / device revoked / connector revoked mid-traffic: connector cut in 58 / 56 / 62 ms; connector revoke
+  cost 3 s of failed requests (shield moved to the other connector); a revoked connector stays revoked after a
+  restart; revokes audited. Replacement connector `e2e-conn-manoj2` installed.
+- **F-4** signing in after a device revoke failed and left orphan devices → `login` clears the revoked state and
+  reaches the daemon before enrolling (D-D kept). Live: one `login` restores access; no orphan on failure.
+- **O-6** after a cut, already-buffered data still reaches the app (~24 s at 300 KB/s); low.
+- Client 297 pass; branch `fix/e2e-live-findings`, local only.
+
