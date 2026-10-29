@@ -9,6 +9,21 @@ use crate::{
 pub async fn run() -> Result<()> {
     let conf = load()?;
 
+    // F-4 (live run 2026-10-29): a device the admin revoked leaves a state
+    // that makes every daemon start exit again; signing in registers a new
+    // device, so the dead one's state goes first.
+    if crate::state_store::clear_revoked_state(&conf.workspace)? {
+        println!("This device was revoked; signing in registers it again as a new device.");
+    }
+    // Reach the daemon before enrolling: enrolling first left an active
+    // device on the server, never saved here, on every failed attempt.
+    if ensure_daemon_and_send(&IpcRequest::Status).await.is_err() {
+        anyhow::bail!(
+            "the Zecurity client service is not running — start it with \
+             `sudo systemctl start zecurity-client`, then run `zecurity-client login` again"
+        );
+    }
+
     println!("Authenticating...");
     let result = login::run(&conf, None).await?; /* the values are = 
         workspace: WorkspaceInfo {

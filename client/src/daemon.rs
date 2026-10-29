@@ -6492,6 +6492,36 @@ mod directive_tests {
         assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
         assert_eq!(s.device_state, DeviceState::Active);
     }
+    /// F-4: after a revoke, clear_revoked_state removes the dead device's
+    /// state (so a daemon start no longer exits on it and `login` can reach
+    /// it); any other state is left alone.
+    #[tokio::test]
+    async fn revoked_state_is_cleared_for_a_new_login_other_state_kept() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-f4");
+        assert!(
+            !state_store::clear_revoked_state("ws-f4").unwrap(),
+            "an active device's state must be kept"
+        );
+        assert!(state_store::load_workspace_state("ws-f4").is_ok());
+
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "revoked".into(),
+        )
+        .await
+        .unwrap();
+        assert!(state_store::clear_revoked_state("ws-f4").unwrap());
+        assert!(state_store::load_workspace_state("ws-f4").is_err());
+        assert!(!state_store::clear_revoked_state("ws-f4").unwrap());
+    }
+
 }
 
 /// Cert renewal tests (Sprint 19 Track 3 / PENDING-13, ADR-028 D1).

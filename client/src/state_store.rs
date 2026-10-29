@@ -350,6 +350,20 @@ pub fn mark_device_state(workspace_slug: &str, device_state: &str) -> Result<()>
     Ok(())
 }
 
+/// Removes the workspace state when it belongs to a device the controller
+/// revoked (its key is already wiped; only the marker is left). Returns
+/// whether it did. A revoked device can't be used again, and while its state
+/// is on disk every daemon start re-checks it and exits, so `login` (a new
+/// device) could never reach the daemon (live run 2026-10-29, F-4).
+pub fn clear_revoked_state(workspace_slug: &str) -> Result<bool> {
+    match load_workspace_state(workspace_slug) {
+        Ok(state) if state.device.device_state == "revoked" => {
+            clear_workspace_state(workspace_slug)
+        }
+        _ => Ok(false),
+    }
+}
+
 pub fn clear_workspace_state(workspace_slug: &str) -> Result<bool> {
     let state = state_path(workspace_slug);
     let key = key_path(workspace_slug);
