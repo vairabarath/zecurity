@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +30,8 @@ const ProvisioningTokenTTL = 24 * time.Hour
 //	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist} → 201 {relay_id, provisioning_token, expires_at, ca_fingerprint, controller_grpc_addr, controller_http_addr}
 //	POST   /provider/relays/{id}/revoke   super-admin             {reason, confirm_name} → 204
 //	DELETE /provider/relays/{id}          super-admin             {reason, confirm_name} → 204
+//	POST   /provider/relays/{id}/drain    super-admin, relay-ops  {reason?} → 204 (Phase D, D-32)
+//	POST   /provider/relays/{id}/resume   super-admin, relay-ops  none or {} → 204 (Phase D, D-32)
 //
 // Every error is {"error":"<code>"} (with a safe "detail" for SAN validation);
 // internal errors are logged, never returned. Revoke and delete check the
@@ -67,6 +71,10 @@ type AdminHandler struct {
 	// it rebuilds+broadcasts the relay list and invalidates the transport snapshot
 	// for affected workspaces so connectors AND clients converge. Wired in main.go.
 	OnRelayRevoked func(ctx context.Context, relayID string)
+	// OnRelayDrainChanged, if set, runs post-commit after a drain or resume
+	// that changed state: it sets or clears the heartbeat draining flag and
+	// broadcasts the relay list. Never on a no-op or an error. Wired in main.go.
+	OnRelayDrainChanged func(ctx context.Context, relayID string, draining bool)
 }
 
 type createRelayRequest struct {
@@ -271,29 +279,41 @@ func (h *AdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// authorizeRelayAction is the shared start of every {id} route: the injected
+// actor, the authorization decision, then the id. ok=false means the response
+// is written.
+func (h *AdminHandler) authorizeRelayAction(w http.ResponseWriter, r *http.Request, action string,
+	authorize func(provider.Actor, provider.Target) error) (provider.Actor, string, bool) {
+	actor, ok := provider.ActorFromContext(r.Context())
+	if !ok {
+		log.Printf("relay admin: %s without provider actor (wiring bug)", action)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
+		return provider.Actor{}, "", false
+	}
+	relayID := r.PathValue("id")
+	if relayID == "" {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
+		return provider.Actor{}, "", false
+	}
+	if err := authorize(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
+		provider.WriteError(w, http.StatusForbidden, "forbidden")
+		return provider.Actor{}, "", false
+	}
+	// Validated before any query, so a malformed id never reaches a UUID cast.
+	if _, err := uuid.Parse(relayID); err != nil {
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+		return provider.Actor{}, "", false
+	}
+	return actor, relayID, true
+}
+
 // destructive is the shared revoke/delete path: authorize, validate the id and
 // the D-17 body, then revoke under the row lock with the name/status guard and
 // the audit row in the same transaction, and fan out only after commit.
 func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, action string,
 	authorize func(provider.Actor, provider.Target) error) {
-	actor, ok := provider.ActorFromContext(r.Context())
+	actor, relayID, ok := h.authorizeRelayAction(w, r, action, authorize)
 	if !ok {
-		log.Printf("relay admin: %s without provider actor (wiring bug)", action)
-		provider.WriteError(w, http.StatusInternalServerError, "server_error")
-		return
-	}
-	relayID := r.PathValue("id")
-	if relayID == "" {
-		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if err := authorize(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
-		provider.WriteError(w, http.StatusForbidden, "forbidden")
-		return
-	}
-	// Validated before any query, so a malformed id never reaches a UUID cast.
-	if _, err := uuid.Parse(relayID); err != nil {
-		provider.WriteError(w, http.StatusNotFound, "not_found")
 		return
 	}
 	var req destructiveRequest
@@ -362,7 +382,151 @@ func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, actio
 	}
 	// Convergence fan-out (broadcast + transport invalidation), post-commit.
 	if h.OnRelayRevoked != nil {
-		h.OnRelayRevoked(ctx, relayID)
+		hookCtx, cancelHook := fanoutContext(r)
+		defer cancelHook()
+		h.OnRelayRevoked(hookCtx, relayID)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// drainRequest is the drain body. The reason is optional (drain is reversible;
+// D-17 applies to revoke and delete) and is audited when given.
+type drainRequest struct {
+	Reason string `json:"reason"`
+}
+
+// Drain: POST /provider/relays/{id}/drain {reason?}. Super-admin and relay-ops
+// (D-31). The relay leaves the published relay list; connectors migrate away
+// through their existing path (D-32). Refused for the last eligible relay.
+// Draining a draining relay is a 204 no-op: not audited, no broadcast.
+func (h *AdminHandler) Drain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		provider.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	actor, relayID, ok := h.authorizeRelayAction(w, r, provider.ActionRelayDrain, h.Authz.CanDrainRelay)
+	if !ok {
+		return
+	}
+	var req drainRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if utf8.RuneCountInString(reason) > maxReasonRunes {
+		provider.WriteError(w, http.StatusBadRequest, "reason_too_long")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	changed, err := h.Store.DrainRelay(ctx, relayID, func(ctx context.Context, tx pgx.Tx, _ time.Time) error {
+		details := map[string]any{}
+		if reason != "" {
+			details["reason"] = reason
+		}
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayDrain,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        details,
+			IPAddress:      provider.ClientIP(r),
+		})
+	})
+	h.finishDrainChange(w, r, provider.ActionRelayDrain, relayID, true, changed, err)
+}
+
+// Resume: POST /provider/relays/{id}/resume (no body, or {}). Super-admin and
+// relay-ops (D-31). The relay returns to the published list. Resuming a relay
+// that isn't draining is a 204 no-op: not audited, no broadcast.
+func (h *AdminHandler) Resume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		provider.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	actor, relayID, ok := h.authorizeRelayAction(w, r, provider.ActionRelayResume, h.Authz.CanResumeRelay)
+	if !ok {
+		return
+	}
+	var req struct{}
+	if !decodeOptionalJSON(w, r, &req) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	changed, err := h.Store.ResumeRelay(ctx, relayID, func(ctx context.Context, tx pgx.Tx, drainedSince time.Time) error {
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayResume,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        map[string]any{"drained_since": drainedSince.UTC()},
+			IPAddress:      provider.ClientIP(r),
+		})
+	})
+	h.finishDrainChange(w, r, provider.ActionRelayResume, relayID, false, changed, err)
+}
+
+// finishDrainChange maps a drain/resume result to the response and runs the
+// post-commit hook only when the state changed.
+func (h *AdminHandler) finishDrainChange(w http.ResponseWriter, r *http.Request, action, relayID string, draining, changed bool, err error) {
+	switch {
+	case errors.Is(err, ErrRelayNotFound):
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+		return
+	case errors.Is(err, errAlreadyDeleted):
+		provider.WriteError(w, http.StatusConflict, "already_deleted")
+		return
+	case errors.Is(err, errAlreadyRevoked):
+		provider.WriteError(w, http.StatusConflict, "already_revoked")
+		return
+	case errors.Is(err, errInvalidState):
+		provider.WriteError(w, http.StatusConflict, "invalid_state")
+		return
+	case errors.Is(err, errLastEligibleRelay):
+		provider.WriteError(w, http.StatusConflict, "last_eligible_relay")
+		return
+	case err != nil:
+		log.Printf("relay admin: %s relay %s: %v", action, relayID, err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	if changed && h.OnRelayDrainChanged != nil {
+		hookCtx, cancelHook := fanoutContext(r)
+		defer cancelHook()
+		h.OnRelayDrainChanged(hookCtx, relayID, draining)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// fanoutTimeout bounds a post-commit fan-out hook.
+const fanoutTimeout = 10 * time.Second
+
+// fanoutContext is the context for a post-commit hook: detached from the
+// request, so a client that disconnects (or a request whose 5 s budget went on
+// lock waits) can't cancel the broadcast of a change that is already
+// committed; bounded by its own timeout. Request values are kept.
+func fanoutContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), fanoutTimeout)
+}
+
+// decodeOptionalJSON is provider.DecodeJSON for a body that may be empty: an
+// empty body leaves dst as it is. Anything else must be a valid, bounded JSON
+// object without unknown fields.
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	br := bufio.NewReader(r.Body)
+	if _, err := br.Peek(1); errors.Is(err, io.EOF) {
+		return true
+	}
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{br, r.Body}
+	return provider.DecodeJSON(w, r, dst)
 }

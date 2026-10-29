@@ -21,6 +21,10 @@ const (
 	ActionProviderUserManage = "provider_user.manage"
 	ActionAuditView          = "audit.view"
 	ActionRelayRevoke        = "relay.revoke"
+	// Drain and resume (Sprint 22 Phase D, D-32): relay-ops may do both
+	// (D-31), through the relay.* prefix.
+	ActionRelayDrain  = "relay.drain"
+	ActionRelayResume = "relay.resume"
 
 	// Read actions (Sprint 21 Phase R, D-05). decide()'s prefix rule gives
 	// relay-ops relay.read only; tenant.* is super-admin only (D-06) and
@@ -77,6 +81,14 @@ func (a *Authz) CanDeleteRelay(actor Actor, target Target) error {
 
 func (a *Authz) CanRevokeRelay(actor Actor, target Target) error {
 	return decide(actor, ActionRelayRevoke, target)
+}
+
+func (a *Authz) CanDrainRelay(actor Actor, target Target) error {
+	return decide(actor, ActionRelayDrain, target)
+}
+
+func (a *Authz) CanResumeRelay(actor Actor, target Target) error {
+	return decide(actor, ActionRelayResume, target)
 }
 
 func (a *Authz) CanManageProviderUser(actor Actor, target Target) error {

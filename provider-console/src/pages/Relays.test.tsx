@@ -26,6 +26,8 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     last_heartbeat_at: iso(-2 * MIN),
     attached_connectors: 4,
     created_at: '2026-10-01T00:00:00Z',
+    draining_since: null,
+    drain_state: null,
     ...over,
   }
 }
@@ -356,5 +358,19 @@ describe('Relays: add relay', () => {
     const row = await screen.findByRole('row', { name: 'relay-b' })
     expect(within(row).getByText('Waiting for enrolment')).toBeInTheDocument()
     expect(within(screen.getByRole('row', { name: 'relay-a' })).queryByText('Waiting for enrolment')).not.toBeInTheDocument()
+  })
+})
+
+// Sprint 22 Phase D: a draining relay is marked next to its status.
+describe('Relays list: draining', () => {
+  it('shows a Draining badge only on draining relays', async () => {
+    signedInAs(relayOpsMe)
+    const drained = relay({ id: '33333333-3333-3333-3333-333333333333', name: 'relay-d', draining_since: iso(-MIN), drain_state: 'migrating' })
+    mockFetch({ 'GET /provider/relays': { status: 200, body: { items: [A, drained], next_cursor: null } satisfies Page<RelaySummary> } })
+    renderApp('/relays')
+    const rowD = within(await screen.findByRole('row', { name: 'relay-d' }))
+    expect(rowD.getByText('Draining')).toBeInTheDocument()
+    expect(rowD.getByText('active')).toHaveAttribute('data-status', 'active')
+    expect(within(screen.getByRole('row', { name: 'relay-a' })).queryByText('Draining')).not.toBeInTheDocument()
   })
 })

@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -116,6 +117,29 @@ func TestNewProviderCORS_RejectsMalformedOrigins(t *testing.T) {
 	for _, good := range []string{testConsoleOrigin, "http://localhost:5174", "https://10.0.0.5:8443"} {
 		if _, err := NewProviderCORS(good); err != nil {
 			t.Errorf("%q rejected: %v", good, err)
+		}
+	}
+}
+
+// Sprint 22 Phase X: the console deletes relays (DELETE /provider/relays/{id},
+// D-30), so the preflight from the console origin must allow DELETE; every
+// method the console sends must be listed, or the browser blocks the request.
+func TestProviderCORS_PreflightAllowsEveryConsoleMethod(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete} {
+		headers := preflightHeaders(testConsoleOrigin)
+		headers["Access-Control-Request-Method"] = method
+		rec, reached := corsServe(t, testConsoleOrigin, http.MethodOptions, "/provider/relays/00000000-0000-4000-8000-000000000001", headers)
+		if rec.Code != http.StatusNoContent || reached {
+			t.Fatalf("%s preflight: code=%d reached=%v", method, rec.Code, reached)
+		}
+		allowed := false
+		for _, m := range strings.Split(rec.Header().Get("Access-Control-Allow-Methods"), ",") {
+			if strings.TrimSpace(m) == method {
+				allowed = true
+			}
+		}
+		if !allowed {
+			t.Errorf("%s not in Access-Control-Allow-Methods %q", method, rec.Header().Get("Access-Control-Allow-Methods"))
 		}
 	}
 }

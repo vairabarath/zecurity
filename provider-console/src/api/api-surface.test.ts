@@ -9,11 +9,12 @@ import * as relaysApi from './relays'
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
 // (C-b, plus reset-totp) and the relay mutations (Sprint 22 D-30: Phase E
-// adds create). Phase P adds GETs
+// adds create, Phase X revoke and delete, Phase D drain and resume). Phase P adds GETs
 // only. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
+  'DELETE /provider/relays/{id}',
   'PATCH /provider/users/{id}',
   'POST /provider/auth/login',
   'POST /provider/auth/logout',
@@ -22,6 +23,9 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
   'POST /provider/relays',
+  'POST /provider/relays/{id}/drain',
+  'POST /provider/relays/{id}/resume',
+  'POST /provider/relays/{id}/revoke',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -77,6 +81,10 @@ describe('API surface', () => {
       [`POST /provider/users/${ID}/reset-totp`]: { status: 204 },
       'GET /provider/relays': page,
       'POST /provider/relays': { status: 201, body: { relay_id: ID, provisioning_token: 't' } },
+      [`POST /provider/relays/${ID}/revoke`]: { status: 204 },
+      [`POST /provider/relays/${ID}/drain`]: { status: 204 },
+      [`POST /provider/relays/${ID}/resume`]: { status: 204 },
+      [`DELETE /provider/relays/${ID}`]: { status: 204 },
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
       'GET /provider/tenants': page,
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },

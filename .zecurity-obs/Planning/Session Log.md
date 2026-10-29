@@ -3257,7 +3257,7 @@ serves on `127.0.0.1:9102`.
 - Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
 
 ## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
-- Branch `feat/device-approval` (base `84a06023` = main); committed locally, not pushed. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
+- Branch `feat/device-approval` (base `84a06023` = main); pushed 2026-10-29. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
 - Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.
 - Controller:
   - `client_devices.approved_at` / `approved_by`; `approveDevice` / `unapproveDevice` (admin, workspace-scoped, revoked refused, no-op when unchanged), audited as `device.approve` / `device.unapprove` in the same transaction; the device is re-evaluated at once.
@@ -3327,6 +3327,23 @@ serves on `127.0.0.1:9102`.
 - **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
 - **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
 
+## 2026-10-28 — Sprint 22 Phase X (relay revoke/delete in the console): implemented, live AT-X2…X5 PASS
+- Branch `sprint22/phase-x-relay-revoke-delete` (from `fixed-pendings` `a3ac8518`; merged with #149, #150, #152, #153 before the PR).
+- Console: shared `ConfirmDangerDialog` (reason counted like the server, exact name), relay detail "Danger zone" (super-admin only; Delete also on revoked and pending relays), `revokeRelay` / `deleteRelay` (body, never URL), error mapping, outcome notice that survives the reload.
+- Found and fixed: provider CORS didn't allow `DELETE`, so Delete would fail in production (console on its own origin). One-line controller change with a test.
+- Gates: console 469 pass, lint/build clean; middleware tests pass. Live (isolated stack, cross-origin): revoke → CRL + audit with reason; delete of a revoked and a pending relay.
+- AT-X4 also PASS live: a real connector on a revoked relay logged "Active relay absent from new list; migrating immediately" and registered with the other relay within ~150 ms; CRL and audit verified. Traffic continuity not exercised (no client tunnel).
+- Note: a Postgres crash during one full Go run (automatic recovery, ~2 min; 1234 databases on the dev server, mostly leaked `resolvers_updsc_*` test databases). The rerun passed in full. Cleanup of leaked test databases pending approval.
+
+
+## 2026-10-29 — M2: Provider feature tracker (PR #155); Sprint 22 Phase D (relay drain and resume) design review and implementation
+
+- Feature tracker F1–F40 (must have / can have, quick-win queue) merged as PR #155.
+- Phase D design review: problem statements P1–P10 reviewed with an external review (ChatGPT). Decided: one shared eligibility predicate (the guard could otherwise count a relay never published); row-lock guard in id order; revoke/delete stay unguarded with an advisory console warning; server-computed `drain_state` because the stored `connection_count` can be ~5 min old (DB-write throttle) and connectors keep old sessions up to 120 s after switching; `connection_count_at` + Valkey write flag (Postgres authoritative, fail-safe to `unverified`); no new rebroadcast (FU-6).
+- Implemented on `sprint22/phase-d-relay-drain`: `043_relay_drain.sql` (`[schema: reset DB]`), `internal/relay/eligible`, drain/resume store + handlers + routes, heartbeat flag, read API fields, console Drain card, badges, Overview item, last-relay warning. No connector, relay or proto change.
+- Independent read-only review: ready with follow-ups. Fixed before commit: post-commit hooks (drain/resume and revoke/delete) detached from the request context; broadcast failures logged with the relay id (`relay.DrainFanout`); inactive draining relay text. Added AT-D12 and hook-ordering tests. Residuals tracked as FU-7.
+- Gates: Go 1520 pass / 0 fail / 2 expected skips; console 507 pass, lint/build clean; `cargo test relay_selector` 27 pass. Mutation checks on the row locks, the shared predicate, the warning condition and the detached hook context.
+- Pending: live AT-D on the lab fleet (M1, V3).
 
 ## 2026-10-29 — M1: live end-to-end run of `fixed-pendings` (journeys 1–2) and fixes F-1, O-1, O-2, O-4
 - Record: `.zecurity-obs/Sprint22/Live-E2E-Run-2026-10-29.md` (7 real-user journeys; 1 and 2 done).
@@ -3336,9 +3353,9 @@ serves on `127.0.0.1:9102`.
 - **F-1** firewall posture failed with ufw on an iptables-legacy host → ufw config fallback on legacy hosts only.
 - **O-1** token responses now `Cache-Control: no-store`; **O-2** every workspace admin change is audited
   (`auditAdmin`, guard test); **O-4** `zecurity-client login` no longer exits non-zero after a good login.
-- **O-3** (clients learn regained access on a 60 s poll) left as is by decision → Sprint22 FU-6.
+- **O-3** (clients learn regained access on a 60 s poll) left as is by decision → Sprint22 FU-8.
 - Gates: client 293 pass; controller 1504 / 0 / 2; live re-check of all four PASS. Branch `fix/e2e-live-findings`,
-  committed locally, not pushed.
+  pushed 2026-10-29.
 - Seen, to check in journey 3: after `systemctl restart zecurity-client` the daemon loads its state but doesn't
   bring the tunnel back up until `zecurity-client up`.
 
@@ -3347,9 +3364,9 @@ serves on `127.0.0.1:9102`.
   resource rename audited and seen by the client.
 - **F-3** connector restart cut users for 32 s → `SHIELD_NOT_ATTACHED` now resyncs and recovery re-checks a changed
   map → **3 s** live. **O-5** `status` shows `Tunnel: up/down`.
-- **F-2** slow readers (25 KB/s) cut by the Fix 14 2 s stall limit → FU-7 (per-tunnel flow control); restoring the
-  tunnel at daemon start → FU-8.
-- Client 296 pass; branch `fix/e2e-live-findings`, local only.
+- **F-2** slow readers (25 KB/s) cut by the Fix 14 2 s stall limit → FU-9 (per-tunnel flow control); restoring the
+  tunnel at daemon start → FU-10.
+- Client 296 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
 ## 2026-10-29 — M1: live E2E journey 4 (offboarding) and fix F-4
 - Member removed / device revoked / connector revoked mid-traffic: connector cut in 58 / 56 / 62 ms; connector revoke
@@ -3358,12 +3375,12 @@ serves on `127.0.0.1:9102`.
 - **F-4** signing in after a device revoke failed and left orphan devices → `login` clears the revoked state and
   reaches the daemon before enrolling (D-D kept). Live: one `login` restores access; no orphan on failure.
 - **O-6** after a cut, already-buffered data still reaches the app (~24 s at 300 KB/s); low.
-- Client 297 pass; branch `fix/e2e-live-findings`, local only.
+- Client 297 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
 ## 2026-10-29 — M1: live E2E journey 5 (discovery and scan) and fixes F-5, O-7
 - Discovery found the new service within one round; promote → resource in the shield's network → protect, assign →
   tunnel 200; scan bound to its connector and audited; protected resources invisible to a scan; refused scans leave
   no request.
 - **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
-  re-checked. Branch `fix/e2e-live-findings`, local only.
+  re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
 

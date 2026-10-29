@@ -340,10 +340,10 @@ func TestRelayResponses_ExcludeSensitiveFields(t *testing.T) {
 // deliberate change to this list.
 func TestRelayDTOSurface(t *testing.T) {
 	summary := []string{"address_scope", "attached_connectors", "capacity_label", "cert_not_after", "cert_serial",
-		"connection_count", "created_at", "hostname", "id", "last_heartbeat_at", "max_connections", "name",
-		"public_addr", "status", "version"}
+		"connection_count", "created_at", "drain_state", "draining_since", "hostname", "id", "last_heartbeat_at",
+		"max_connections", "name", "public_addr", "status", "version"}
 	detail := append(append([]string{}, summary...), "attachments", "attachments_truncated", "certificates",
-		"certificates_truncated", "dns_allowlist", "ip_allowlist")
+		"certificates_truncated", "dns_allowlist", "eligible_relay_count", "in_relay_list", "ip_allowlist")
 	sort.Strings(detail)
 	for name, c := range map[string]struct {
 		v    any

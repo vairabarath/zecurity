@@ -1,10 +1,12 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { getRelay } from '@/api/reads'
 import type { RelayDetail as RelayDetailDTO } from '@/api/types'
 import { CapacityTier } from '@/components/Capacity'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
+import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
+import { RelayDrainCard } from '@/components/RelayDrainCard'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -16,8 +18,9 @@ import { formatRelative } from '@/lib/expiry'
 import { formatDateTime, formatScope } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 
-// Relay detail (Phase P, relay.read). Read-only. One request when the page
-// opens; Refresh and Retry are the only other requests. Certificate state
+// Relay detail (Phase P, relay.read). One request when the page opens;
+// Refresh and Retry are the only other reads. The writes are the Drain card
+// (Phase D, both roles) and the Danger zone (Phase X, super-admin). Certificate state
 // comes from the API alone: "Current" is is_current, revocation is
 // revoked_at/revocation_reason; only the expiry badge is derived (bucketFor).
 
@@ -94,6 +97,9 @@ function ConnectionsRing({ count, max }: { count: number; max: number }) {
 export function RelayDetail() {
   const { id = '' } = useParams()
   const { state, reload } = useDetailQuery(id, getRelay)
+  // The outcome of a revoke/delete (Phase X). Kept here because the reload
+  // that follows replaces the view; tied to the relay it is about.
+  const [notice, setNotice] = useState<(RelayActionNotice & { id: string }) | null>(null)
 
   const back = (
     <Link to="/relays" className="inline-flex items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-primary">
@@ -137,11 +143,37 @@ export function RelayDetail() {
         </div>
       )
     case 'ready':
-      return <RelayView relay={state.data} back={back} onRefresh={reload} />
+      return (
+        <RelayView
+          relay={state.data}
+          back={back}
+          notice={notice?.id === id ? notice : null}
+          onRefresh={() => {
+            setNotice(null)
+            reload()
+          }}
+          onActionDone={(n) => {
+            setNotice({ ...n, id })
+            reload()
+          }}
+        />
+      )
   }
 }
 
-function RelayView({ relay: r, back, onRefresh }: { relay: RelayDetailDTO; back: ReactNode; onRefresh: () => void }) {
+function RelayView({
+  relay: r,
+  back,
+  notice,
+  onRefresh,
+  onActionDone,
+}: {
+  relay: RelayDetailDTO
+  back: ReactNode
+  notice: RelayActionNotice | null
+  onRefresh: () => void
+  onActionDone: (notice: RelayActionNotice) => void
+}) {
   const pct = r.max_connections > 0 ? Math.round((r.connection_count / r.max_connections) * 100) : null
   return (
     <div className="flex flex-col gap-6">
@@ -151,6 +183,7 @@ function RelayView({ relay: r, back, onRefresh }: { relay: RelayDetailDTO; back:
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="font-mono text-[26px] font-medium tracking-tight">{r.name}</h1>
             <StatusBadge status={r.status} />
+            {r.draining_since && <Badge variant="warning">Draining</Badge>}
           </div>
           <p className="text-sm text-subtle-foreground">
             {formatScope(r.address_scope)} address · version <span className="font-mono">{r.version ?? '—'}</span> · created {formatDateTime(r.created_at)}
@@ -166,6 +199,12 @@ function RelayView({ relay: r, back, onRefresh }: { relay: RelayDetailDTO; back:
           </Button>
         </div>
       </header>
+
+      {notice && (
+        <Alert role="status" data-tone={notice.tone}>
+          <AlertDescription>{notice.text}</AlertDescription>
+        </Alert>
+      )}
 
       {r.status === 'pending' && (
         <Alert>
@@ -329,6 +368,9 @@ function RelayView({ relay: r, back, onRefresh }: { relay: RelayDetailDTO; back:
         )}
         <TruncatedNote show={r.attachments_truncated} />
       </Section>
+
+      <RelayDrainCard relay={r} onDone={onActionDone} />
+      <RelayDangerZone relay={r} onDone={onActionDone} />
     </div>
   )
 }

@@ -148,17 +148,65 @@ Found and fixed during the run: **Add relay** reopened with the previous relay's
 | AT-X4 | **Live:** revoke a relay carrying a connector | Connector logs "Active relay absent from new list; migrating immediately"; traffic continues; CRL lists the serial; audit shows the reason |
 | AT-X5 | **Live:** delete a relay | Relay leaves the default list; certificates revoked; audit shows the reason |
 
+### Live run — Phase X (2026-10-28)
+
+**Setup:** isolated local stack, not the lab: controller built from the Phase X working tree on a throwaway database, the test Valkey, ports 18080/19090; the console under Vite on its **own origin** (`:5174`, `VITE_PROVIDER_API_BASE` pointing at the controller, `PROVIDER_CONSOLE_ORIGIN` set), so every write went through real CORS as in production. Super-admin signed in for real (bootstrap password → change → TOTP enrolment, code computed from the setup key). One relay provisioned with the real relay binary (certificate serial `a4b780e8…`), one left pending. The database was dropped afterwards.
+
+| Case | Result | Evidence |
+|---|---|---|
+| CORS | PASS | Preflight `OPTIONS` for `DELETE` from the console origin → 204 with `GET, POST, PATCH, DELETE, OPTIONS`; from a foreign origin → 403. |
+| AT-X1 | Covered by tests, not run live | relay-ops gets no danger zone (`RelayDetail.test.tsx`); unknown roles can't open the page. |
+| AT-X2 | PASS | After the revoke only **Delete relay** remained; after each delete the danger zone was gone. |
+| AT-X3 | PASS | Confirm disabled with no input and with `Live-X-Relay1` (wrong case); enabled with the exact name. |
+| AT-X4 | PASS (second run, below) | First run: revoke itself PASS (status, CRL, audit). Connector migration verified in the second run. |
+| AT-X5 | PASS | The revoked relay and the pending relay (D-20 path) deleted from the browser (cross-origin `DELETE`): both `deleted`, absent from the default list, one `relay.delete` audit row each with its reason. |
+
+**Second run, AT-X4 with a real connector (2026-10-28):** same kind of isolated stack, with throwaway PKI, JWT and provider secrets. A workspace and its admin were provisioned by the real `bootstrap.Service` (a scratch seed program; never committed); the remote network and connector came from the real GraphQL mutations, the enrollment token from `POST /api/connectors/{id}/token`. Two real relays (rebuilt from current source) reached the controller over the LAN IP, so they were advertised at private addresses (`192.168.1.223:19094` / `:19095`, `RELAY_DEV_ALLOW_PRIVATE_ADDR`). A real connector enrolled and attached to `x4-relay-b`. The super-admin revoked `x4-relay-b` from the console (Orca, cross-origin):
+- 111 ms later the connector logged `received LabelledRelayList push … relay_count=1` and **`Active relay absent from new list; migrating immediately relay_id=<x4-relay-b>`**; 31 ms after that `Connector registered with Relay` (now `x4-relay-a`), then `old relay drain completed after active streams reached zero`. The placement row moved to `x4-relay-a`.
+- `x4-relay-b` `revoked`; its certificate revoked with the typed reason; `/relay.crl` lists the serial; one `relay.revoke` audit row with the actor, reason and `serials_revoked: 1`.
+- Not exercised: "traffic continues" — no client tunnel was open (zero active streams at migration).
+
 ## Phase D — Drain and resume
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| AT-D1 | Drain an eligible relay (2+ eligible) | 204; relay absent from the published list; list version changed; audit `relay.drain` |
+| AT-D1 | Drain an eligible relay (2+ eligible) | 204; relay absent from the published list; list version changed; audit `relay.drain` with actor, reason, client IP |
 | AT-D2 | Drain the only eligible relay | 409 `last_eligible_relay`; nothing changed |
-| AT-D3 | Two operators drain the last two eligible relays at once | Exactly one succeeds |
+| AT-D3 | Two operators drain the last two eligible relays at once | Exactly one 204, the other 409 `last_eligible_relay`; the **published list** still holds one relay (automated: goroutines released together on a real DB) |
 | AT-D4 | Resume | 204; relay back in the list; version equals the pre-drain value; audit `relay.resume` |
 | AT-D5 | relay-ops drains and resumes | Allowed; revoke/delete still 403 |
-| AT-D6 | **Live:** drain a relay with a long download and open a new connection | New connection lands on another relay; download finishes, or is cut at ~120 s; attached count reaches 0; console shows "Drained" |
+| AT-D6 | **Live:** drain a relay with a long download and open a new connection | New connection lands on another relay; download finishes, or is cut at ~120 s; console goes `migrating` → `streams_open` → "Drained (as of the last heartbeat)" |
 | AT-D7 | Drain pending / revoked / deleted relays; repeat drain; resume a non-draining relay | 409 `invalid_state` / `already_revoked` / `already_deleted`; 204 no-op, no audit; 204 no-op, no audit |
+| AT-D8 | `drain_state` timing (automated, explicit timestamps, no sleeps) | Zero count measured before `drain_started_at + 120 s` → not `drained`; zero count older than 90 s → `unverified`; fresh zero after the window with 0 attached → `drained`; non-zero with 0 attached → `streams_open`; a stale zero can't hide newer streams; attached > 0 → `migrating` |
+| AT-D9 | Valkey bookkeeping fails (automated) | Flag set fails after drain, flag delete fails after resume, controller restart while draining, flag expired, flag read error: never an early `drained` (only `unverified` or a later `drained`); the expiry sweep restores the flag |
+| AT-D10 | Eligibility fields (automated) | `in_relay_list` and `eligible_relay_count` match `BuildLabelledRelayList` for empty/NULL address, public scope without observed IP, low tier, inactive and draining relays; draining a relay updates both |
+| AT-D11 | Last-relay warning in the console | Revoke/delete of the only relay in the list shows the warning; confirm stays enabled and the action succeeds; no warning when another relay is eligible |
+| AT-D12 | Broadcast failure (automated) | Logged with the relay id; the drain stays committed; a reconnecting connector receives the current list without the drained relay |
+
+### Live run — Phase D (2026-10-29, M2, isolated local stack)
+
+Branch `sprint22/phase-d-relay-drain` (`5b45c3ca`, PR #156). Throwaway database (all migrations incl. `043_`), isolated Valkey, controller on :18080/:19090 with throwaway secrets; two real relays (`d-relay-a` :19094, `d-relay-b` :19095, private LAN addresses via `RELAY_DEV_ALLOW_PRIVATE_ADDR`), one pending relay, a real connector (workspace seeded by the real bootstrap code through a scratch program, never committed); console on :5174 in the embedded browser; a relay-ops operator created through the console API. Torn down afterwards: processes stopped, database dropped, test keys deleted, secrets removed.
+
+| ID | Result | Evidence |
+|----|--------|----------|
+| AT-D1 | PASS | Console drain of `d-relay-b` (carrying the connector): connector got the new list 108 ms later (version changed, `relay_count=1`), logged "Active relay absent from new list; migrating immediately", registered with `d-relay-a` 24 ms after that; placement moved; one `relay.drain` audit row with actor, reason, IP; draining flag set (TTL ≈ 600 s). |
+| AT-D2 | PASS | Console drain of `d-relay-a` (then the only listed relay): "d-relay-a is the only relay connectors can use right now…" in the dialog; nothing changed. |
+| AT-D3 | PASS | 5 rounds of simultaneous drains of the last two relays (super-admin and relay-ops): each round exactly one 204 and one 409 `last_eligible_relay`; one relay always stayed listed. |
+| AT-D4 | PASS | Console resume: connector received list version `17993128744932725629`, identical to the pre-drain version; `relay.resume` audited with `drained_since`; flag cleared. |
+| AT-D5 | PASS | relay-ops: drain and resume 204; revoke and delete 403 `forbidden`. |
+| AT-D6 | **PARTIAL** | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
+| AT-D7 | PASS | Pending → 409 `invalid_state`; revoked → `already_revoked` (drain and resume); deleted → `already_deleted` (drain and resume); repeat drain and resume of a non-draining relay → 204 with no audit row. |
+| AT-D9 | PASS (live part) | Draining flag deleted from Valkey: restored by the reconcile loop 11 s later with a fresh TTL; state stayed `unverified` until a qualifying count. |
+| AT-D11 | PASS | Revoke and delete dialogs of the only listed relay show "No eligible relays will remain…"; a relay not in the list shows no warning. |
+| AT-D8, D10, D12 | automated | Covered by the Go tests (`relays_drain_test.go`, `drain_db_test.go`). |
+
+Connector: 2 migrations, 0 errors. Controller: 0 drain fan-out failures (post-drain step), no panics.
+
+**AT-D6 outstanding (lab fleet, an authorized operator with a client tunnel; not run here because the client needs `sudo` for its TUN device and an interactive Google sign-in):**
+1. A download already running through the relay when it is drained either completes normally or is cut at about 120 s (the connector's `relay_drain_timeout_secs`), not earlier.
+2. A new client connection opened after the drain goes through the remaining eligible relay.
+
+AT-D6 stays PARTIAL until both are run and match the design.
 
 ---
 

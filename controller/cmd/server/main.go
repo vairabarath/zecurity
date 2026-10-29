@@ -299,13 +299,18 @@ func main() {
 	// connect-time push in control_stream.go agree on it, and it changes iff
 	// the eligible set / an address / a label changes — so a connector
 	// re-probes exactly when the pool actually changed.
-	broadcastRelayList := func(ctx context.Context) {
+	publishRelayList := func(ctx context.Context) error {
 		list, err := relayStore.BuildLabelledRelayList(ctx)
 		if err != nil {
-			log.Printf("relay pool broadcast: build list: %v", err)
-			return
+			return fmt.Errorf("build list: %w", err)
 		}
 		connectorRegistry.BroadcastRelayList(list)
+		return nil
+	}
+	broadcastRelayList := func(ctx context.Context) {
+		if err := publishRelayList(ctx); err != nil {
+			log.Printf("relay pool broadcast: %v", err)
+		}
 	}
 	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
 
@@ -518,6 +523,13 @@ func main() {
 	mux.Handle("POST /provider/relays", requireProvider(http.HandlerFunc(relayAdminHandler.Create)))
 	mux.Handle("POST /provider/relays/{id}/revoke", requireProvider(http.HandlerFunc(relayAdminHandler.Revoke)))
 	mux.Handle("DELETE /provider/relays/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.Delete)))
+
+	// Sprint 22 Phase D (D-32): drain and resume. Post-commit, only on a real
+	// change: the heartbeat draining flag and the relay-list broadcast (see
+	// relay.DrainFanout).
+	relayAdminHandler.OnRelayDrainChanged = relay.DrainFanout(relaySvc, publishRelayList)
+	mux.Handle("POST /provider/relays/{id}/drain", requireProvider(http.HandlerFunc(relayAdminHandler.Drain)))
+	mux.Handle("POST /provider/relays/{id}/resume", requireProvider(http.HandlerFunc(relayAdminHandler.Resume)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -686,6 +698,14 @@ func main() {
 	go func() {
 		defer wg.Done()
 		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	}()
+
+	// Sprint 22 Phase D: re-set the heartbeat draining flags from Postgres.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		relay.ReconcileDrainFlags(ctx, relayStore, relaySvc)
+		relay.RunDrainFlagLoop(ctx, relayStore, relaySvc, 60*time.Second)
 	}()
 
 	retentionDays := envOrInt(
