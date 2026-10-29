@@ -538,6 +538,13 @@ every attempt left an active orphan device, because the revoked state on disk ma
 (`state_store::clear_revoked_state`) and checks the daemon before the browser flow. Live: one `login` restores access;
 an unreachable daemon stops `login` with a clear message and no device. Details in the Sprint 19 Track 2 file.
 
+### Fix: live E2E run — promoted resource names, repeated promote, unscannable targets (F-5, O-7)
+Found in journey 5 (2026-10-29). `promoteDiscoveredService` named an unnamed service `" on <shield id>"` and answered a
+repeated promote with the raw unique-violation error; `triggerScan` accepted loopback/multicast/unspecified targets the
+connector silently drops. Now `discovery.PromotedResourceName` (`<service or proto/port> on <shield name>`), a user
+error "already a resource", and `discovery.CheckScanTarget` before the request is recorded. Tests and live re-check in
+the run record (`Sprint22/Live-E2E-Run-2026-10-29.md`).
+
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**
 - Dev DB recreated from all 48 files (28 `*_same_workspace_fkey`, `scan_requests`).

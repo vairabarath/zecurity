@@ -3360,3 +3360,10 @@ serves on `127.0.0.1:9102`.
 - **O-6** after a cut, already-buffered data still reaches the app (~24 s at 300 KB/s); low.
 - Client 297 pass; branch `fix/e2e-live-findings`, local only.
 
+## 2026-10-29 — M1: live E2E journey 5 (discovery and scan) and fixes F-5, O-7
+- Discovery found the new service within one round; promote → resource in the shield's network → protect, assign →
+  tunnel 200; scan bound to its connector and audited; protected resources invisible to a scan; refused scans leave
+  no request.
+- **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
+  re-checked. Branch `fix/e2e-live-findings`, local only.
+
