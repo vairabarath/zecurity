@@ -124,6 +124,10 @@ func TestDiscoveryIsolation_PromoteOwnShieldCreatesResource(t *testing.T) {
 	if res.Host != "10.90.0.1" || res.PortFrom != 5432 || res.PortTo != 5432 || res.Protocol != "tcp" {
 		t.Errorf("promoted resource = %+v", res)
 	}
+	// F-5: named after the service and the shield's name, not its ID.
+	if res.Name != "postgres-a on shield-a" {
+		t.Errorf("promoted resource name = %q, want %q", res.Name, "postgres-a on shield-a")
+	}
 	var rn, tenant string
 	if err := f.pool.QueryRow(context.Background(),
 		`SELECT remote_network_id::text, tenant_id::text FROM resources WHERE id = $1`, res.ID,
@@ -142,6 +146,27 @@ func TestDiscoveryIsolation_PromoteOwnShieldCreatesResource(t *testing.T) {
 	if f.notifier.Version(f.b.id) != vB {
 		t.Error("promotion bumped another workspace's policy version")
 	}
+
+	// F-5: promoting it again is a clear user error, not a database error.
+	if _, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "tcp", 5432); err == nil {
+		t.Error("the same service was promoted twice")
+	} else if msg := presented(f.a.ctx, err); msg != `promoteDiscoveredService: tcp/5432 is already a resource ("postgres-a on shield-a")` {
+		t.Errorf("repeated promotion: client sees %q", msg)
+	}
+	// F-5: a service the shield couldn't name is named by protocol and port.
+	if _, err := f.pool.Exec(context.Background(),
+		`INSERT INTO shield_discovered_services (shield_id, protocol, port, bound_ip, service_name) VALUES ($1, 'tcp', 8813, '10.90.0.1', '')`,
+		shieldA); err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "tcp", 8813)
+	if err != nil {
+		t.Fatalf("unnamed service promotion: %v", err)
+	}
+	if unnamed.Name != "tcp/8813 on shield-a" {
+		t.Errorf("unnamed service resource name = %q, want %q", unnamed.Name, "tcp/8813 on shield-a")
+	}
+	before++
 
 	// An undiscovered port on the same shield still creates nothing.
 	if _, err := f.mr.PromoteDiscoveredService(f.a.ctx, shieldA, "udp", 9); err == nil {

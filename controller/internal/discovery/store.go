@@ -3,6 +3,9 @@ package discovery
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,23 +105,77 @@ var ErrShieldNotFound = apperr.UserErrorf("shield not found")
 // shields (an empty list if it has none). The shield's ownership is checked in
 // the same query: a foreign, missing or malformed shield ID is
 // ErrShieldNotFound, never another workspace's services.
-// ShieldRemoteNetwork returns the remote network of one of the workspace's
-// shields; a foreign, missing or malformed shield is ErrShieldNotFound.
-func ShieldRemoteNetwork(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) (string, error) {
+// ShieldNetworkAndName returns the remote network and the name of one of the
+// workspace's shields; a foreign, missing or malformed shield is
+// ErrShieldNotFound.
+func ShieldNetworkAndName(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) (string, string, error) {
 	if _, err := uuid.Parse(shieldID); err != nil {
-		return "", ErrShieldNotFound
+		return "", "", ErrShieldNotFound
 	}
-	var rn string
+	var rn, name string
 	err := db.QueryRow(ctx,
-		`SELECT remote_network_id::text FROM shields WHERE id=$1 AND tenant_id=$2`,
-		shieldID, tenantID).Scan(&rn)
+		`SELECT remote_network_id::text, name FROM shields WHERE id=$1 AND tenant_id=$2`,
+		shieldID, tenantID).Scan(&rn, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrShieldNotFound
+		return "", "", ErrShieldNotFound
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return rn, nil
+	return rn, name, nil
+}
+
+// PromotedResourceName names the resource promoted from a discovered service:
+// "<service> on <shield>", or "<protocol>/<port> on <shield>" for a service
+// the shield couldn't name (live run 2026-10-29, F-5: it was " on <id>").
+func PromotedResourceName(serviceName, protocol string, port int, shieldName string) string {
+	service := strings.TrimSpace(serviceName)
+	if service == "" {
+		service = fmt.Sprintf("%s/%d", protocol, port)
+	}
+	return service + " on " + shieldName
+}
+
+// scanTargetRanges are never scanned: the connector skips these addresses
+// (connector/src/discovery/scope.rs is_invalid_target).
+var scanTargetRanges = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("0.0.0.0/32"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("::/128"),
+}
+
+// ErrInvalidScanTarget refuses a scan target that is not an IP address or
+// CIDR, or that lies entirely in a range the connector never scans
+// (loopback, multicast, unspecified). Such a scan used to be accepted and
+// silently return nothing (live run 2026-10-29, O-7).
+var ErrInvalidScanTarget = apperr.UserErrorf("scan target must be an IP address or CIDR outside loopback, multicast and unspecified ranges")
+
+// CheckScanTarget returns ErrInvalidScanTarget for a target the connector
+// would never scan.
+func CheckScanTarget(target string) error {
+	var p netip.Prefix
+	if strings.Contains(target, "/") {
+		parsed, err := netip.ParsePrefix(target)
+		if err != nil {
+			return ErrInvalidScanTarget
+		}
+		p = parsed.Masked()
+	} else {
+		addr, err := netip.ParseAddr(target)
+		if err != nil {
+			return ErrInvalidScanTarget
+		}
+		p = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	for _, r := range scanTargetRanges {
+		if r.Addr().Is4() == p.Addr().Is4() && r.Bits() <= p.Bits() && r.Contains(p.Addr()) {
+			return ErrInvalidScanTarget
+		}
+	}
+	return nil
 }
 
 func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) ([]DiscoveredService, error) {

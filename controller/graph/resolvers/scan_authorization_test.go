@@ -151,6 +151,26 @@ func TestScanIsolation_TriggerScanSameAnswerForEveryUnavailableConnector(t *test
 	}
 }
 
+// O-7 (live run 2026-10-29): a target the connector never scans is refused
+// with a clear message before anything is recorded or sent.
+func TestScanIsolation_UnscannableTargetRefused(t *testing.T) {
+	f := newScanFixture(t)
+	for _, targets := range [][]string{{"127.0.0.1"}, {"10.0.0.1", "224.0.0.0/4"}, {"not-an-ip"}} {
+		if id, err := f.mr.TriggerScan(f.a.ctx, f.a.conn, targets, []int{22}); err == nil {
+			t.Errorf("%v: dispatched request %s", targets, id)
+		} else if msg := clientMessage(f.a.ctx, err); !strings.Contains(msg, "loopback, multicast and unspecified") {
+			t.Errorf("%v: client sees %q", targets, msg)
+		}
+	}
+	var left int
+	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM scan_requests`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Errorf("%d scan requests left after refused targets", left)
+	}
+}
+
 func TestScanIsolation_ResultsScopedToWorkspace(t *testing.T) {
 	f := newScanFixture(t)
 	f.request(t, f.a, "req-a")
