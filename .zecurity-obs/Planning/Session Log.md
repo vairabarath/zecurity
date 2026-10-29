@@ -3341,3 +3341,13 @@ serves on `127.0.0.1:9102`.
   committed locally, not pushed.
 - Seen, to check in journey 3: after `systemctl restart zecurity-client` the daemon loads its state but doesn't
   bring the tunnel back up until `zecurity-client up`.
+
+## 2026-10-29 — M1: live E2E journey 3 (day-to-day) and fixes F-3, O-5 status
+- Journey 3 PASS with findings: renewals under traffic clean (50/50); connector stop → 1 failed request; start → none;
+  resource rename audited and seen by the client.
+- **F-3** connector restart cut users for 32 s → `SHIELD_NOT_ATTACHED` now resyncs and recovery re-checks a changed
+  map → **3 s** live. **O-5** `status` shows `Tunnel: up/down`.
+- **F-2** slow readers (25 KB/s) cut by the Fix 14 2 s stall limit → FU-7 (per-tunnel flow control); restoring the
+  tunnel at daemon start → FU-8.
+- Client 296 pass; branch `fix/e2e-live-findings`, local only.
+

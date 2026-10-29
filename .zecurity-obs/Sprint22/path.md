@@ -254,6 +254,8 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
 | FU-6 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
+| FU-7 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
+| FU-8 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
 
 ## Post-Sprint Fixes
 
@@ -505,6 +507,29 @@ token reissue now asserts `no-store`.
 **Live (2026-10-29):** F-1 PASS/FAIL both ways (see the phase file); `POST /api/connectors/{id}/token` →
 `Cache-Control: no-store`; `connector.create` / `connector.token.issue` / `connector.delete` /
 `device_profile.requirement.add` rows with actor and details, no token; logout + login → `Zecurity is up.`, exit 0.
+
+### Fix: live E2E run — connector restart outage (F-3) and `status` tunnel line (O-5)
+Found in journey 3 of the live E2E run (2026-10-29, record `Sprint22/Live-E2E-Run-2026-10-29.md`). Branch
+`fix/e2e-live-findings`.
+
+**Issue (F-3):** restarting the connector a shield is attached to cut that shield's resources for 32 s, though a
+second connector was healthy and the restarted one served again within 2 s.
+
+**Root Cause:** `client/src/net_stack.rs` counted `SHIELD_NOT_ATTACHED` as a denial ("re-polling won't help"), so once
+the early resync had applied a map taken while the connector was marked disconnected, the client failed closed with
+no further resync until the 60 s tick; `run_transport_recovery` also stopped at the first changed map.
+
+**Fix Applied:**
+```rust
+// net_stack.rs, Some("SHIELD_NOT_ATTACHED") arm — AFTER:
+saw_transport_failure = true; // a shield re-homing is routing, not a denial
+// daemon.rs run_transport_recovery — BEFORE: Ok(true) => { apply; break }
+// AFTER: recovery_step(changed, applied): Apply (and check again after the backoff) | Retry | Stop once unchanged after a change
+```
+**O-5:** `status` now prints `Tunnel: up` / `Tunnel: down — … run zecurity-client up` (`IpcResponse.tunnel_up`).
+
+**Tests:** see the run record; client 296 pass. **Live:** restart outage 32 s → 3 s; status line correct after a
+daemon restart. F-2 and restoring the tunnel at start → FU-7, FU-8.
 
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**
