@@ -183,6 +183,31 @@ Found and fixed during the run: **Add relay** reopened with the previous relay's
 | AT-D11 | Last-relay warning in the console | Revoke/delete of the only relay in the list shows the warning; confirm stays enabled and the action succeeds; no warning when another relay is eligible |
 | AT-D12 | Broadcast failure (automated) | Logged with the relay id; the drain stays committed; a reconnecting connector receives the current list without the drained relay |
 
+### Live run — Phase D (2026-10-29, M2, isolated local stack)
+
+Branch `sprint22/phase-d-relay-drain` (`5b45c3ca`, PR #156). Throwaway database (all migrations incl. `043_`), isolated Valkey, controller on :18080/:19090 with throwaway secrets; two real relays (`d-relay-a` :19094, `d-relay-b` :19095, private LAN addresses via `RELAY_DEV_ALLOW_PRIVATE_ADDR`), one pending relay, a real connector (workspace seeded by the real bootstrap code through a scratch program, never committed); console on :5174 in the embedded browser; a relay-ops operator created through the console API. Torn down afterwards: processes stopped, database dropped, test keys deleted, secrets removed.
+
+| ID | Result | Evidence |
+|----|--------|----------|
+| AT-D1 | PASS | Console drain of `d-relay-b` (carrying the connector): connector got the new list 108 ms later (version changed, `relay_count=1`), logged "Active relay absent from new list; migrating immediately", registered with `d-relay-a` 24 ms after that; placement moved; one `relay.drain` audit row with actor, reason, IP; draining flag set (TTL ≈ 600 s). |
+| AT-D2 | PASS | Console drain of `d-relay-a` (then the only listed relay): "d-relay-a is the only relay connectors can use right now…" in the dialog; nothing changed. |
+| AT-D3 | PASS | 5 rounds of simultaneous drains of the last two relays (super-admin and relay-ops): each round exactly one 204 and one 409 `last_eligible_relay`; one relay always stayed listed. |
+| AT-D4 | PASS | Console resume: connector received list version `17993128744932725629`, identical to the pre-drain version; `relay.resume` audited with `drained_since`; flag cleared. |
+| AT-D5 | PASS | relay-ops: drain and resume 204; revoke and delete 403 `forbidden`. |
+| AT-D6 | **PARTIAL** | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
+| AT-D7 | PASS | Pending → 409 `invalid_state`; revoked → `already_revoked` (drain and resume); deleted → `already_deleted` (drain and resume); repeat drain and resume of a non-draining relay → 204 with no audit row. |
+| AT-D9 | PASS (live part) | Draining flag deleted from Valkey: restored by the reconcile loop 11 s later with a fresh TTL; state stayed `unverified` until a qualifying count. |
+| AT-D11 | PASS | Revoke and delete dialogs of the only listed relay show "No eligible relays will remain…"; a relay not in the list shows no warning. |
+| AT-D8, D10, D12 | automated | Covered by the Go tests (`relays_drain_test.go`, `drain_db_test.go`). |
+
+Connector: 2 migrations, 0 errors. Controller: 0 drain fan-out failures (post-drain step), no panics.
+
+**AT-D6 outstanding (lab fleet, an authorized operator with a client tunnel; not run here because the client needs `sudo` for its TUN device and an interactive Google sign-in):**
+1. A download already running through the relay when it is drained either completes normally or is cut at about 120 s (the connector's `relay_drain_timeout_secs`), not earlier.
+2. A new client connection opened after the drain goes through the remaining eligible relay.
+
+AT-D6 stays PARTIAL until both are run and match the design.
+
 ---
 
 ## 6. Development workflow checks

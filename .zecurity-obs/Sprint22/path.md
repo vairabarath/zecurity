@@ -216,13 +216,13 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 - [x] **D4** Shared eligibility predicate; `RelaySummary.draining_since` / `drain_state`, `RelayDetail.in_relay_list` / `eligible_relay_count` (additive).
 - [x] **D5** Console: Draining badge, Drain/Resume on Relay detail, `drain_state` progress, last-relay warning on revoke/delete, Overview attention item; dialog props; API-surface pin.
 - [x] **D6** Regression: connector `relay_selector` tests run unchanged (no connector code touched).
-- [ ] **D-gate** *(2026-10-29, code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
+- [ ] **D-gate** *(Status 2026-10-29: implementation complete; PR #156 open, not merged, CI green; live control-plane cases PASS, AT-D6 client data plane pending. Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
 
 ### Phase V — M1: Acceptance
 
 - [x] **V1** Run AT-T on the lab after T merges. *(2026-10-27, Sathiya: **PASS**, 40/40 API checks plus the console QR/verify pages. Run on an isolated local stack (throwaway DB, own Valkey, controller :18080) rather than the lab fleet: AT-T needs only the controller and the console. See Acceptance-Test-Plan → Live run — Phase T.)*
 - [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4/E5 on the lab pending. AT-X pending.)*
-- [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges.
+- [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
 
 ## Test gates (a phase can't be ticked without these)
