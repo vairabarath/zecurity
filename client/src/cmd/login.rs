@@ -107,14 +107,9 @@ pub async fn run() -> Result<()> {
     println!("Logged in as {}", email);
     println!("Workspace: {}", workspace);
     println!("Device ID: {}", device_id);
-    let resp = ensure_daemon_and_send(&IpcRequest::Up).await?;
-    if resp.ok {
-        println!("Zecurity is up.");
-    } else {
-        anyhow::bail!(
-            "{}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        );
-    }
+    // A successful PostLoginState has already brought the tunnel up (or
+    // restarted it onto the new state); a second Up would only fail with
+    // "already up" and turn a good login into a non-zero exit.
+    println!("Zecurity is up.");
     Ok(())
 }
