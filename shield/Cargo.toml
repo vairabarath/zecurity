@@ -12,6 +12,8 @@ tonic-prost        = "0.14"
 rcgen              = "0.14"
 tokio-rustls       = "0.26"
 rustls             = { version = "0.23", features = ["ring"] }
+# D21-R (a2): verify the controller-signed peer list (ECDSA P-384).
+ring               = "0.17"
 rustls-pemfile     = "2"
 x509-parser        = { version = "0.18", features = ["verify"] }
 sha2               = "0.11"

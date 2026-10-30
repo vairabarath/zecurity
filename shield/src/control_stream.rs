@@ -23,7 +23,7 @@ use crate::proto::{
 use crate::resources::SharedResourceState;
 use crate::tunnel::{self, TunnelHub};
 use crate::types::{ConnectorRef, ShieldState};
-use crate::{renewal, resources, tls, util};
+use crate::{peer_list, renewal, resources, tls, util};
 
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
@@ -592,12 +592,8 @@ where
     }
     info!(shield_id = %state.shield_id, "connector requested cert renewal");
     match renew(state.clone()).await {
-        Ok(mut new_state) => {
+        Ok(new_state) => {
             debounce.record_success(Instant::now());
-            // Phase E (D21): the in-memory revoked set survives the renewal.
-            new_state
-                .revoked_connectors
-                .extend(state.revoked_connectors.drain());
             info!(
                 shield_id = %new_state.shield_id,
                 new_expiry = new_state.cert_not_after,
@@ -644,6 +640,19 @@ async fn handle_connector_msg(
         // ADR-004 Phase 2: authoritative desired-state snapshot — replace the
         // active set, rebuild the chain, ack every contained resource.
         Some(Body::ResourceSnapshot(snap)) => {
+            // D21-R (a2): the signed peer list first, independent of the
+            // generation check (identical resources keep their generation).
+            if let Some(signed) = &snap.signed_peer_list {
+                match peer_list::workspace_ca_key(&cfg.state_dir) {
+                    Ok(ca_key) => {
+                        apply_signed_peer_list(state, cfg, signed, &ca_key);
+                        peers.publish(state);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "signed peer list not checked: no Workspace CA key")
+                    }
+                }
+            }
             let acks = resources::handle_snapshot(&snap, connector_id, resource_state).await;
             for ack in acks {
                 resource_state.store_ack(ack.clone());
@@ -700,9 +709,11 @@ async fn handle_connector_msg(
             tunnel::handle_tunnel_close(tunnel_hub, &close.connection_id).await;
             None
         }
-        Some(Body::PeerConnectorList(list)) => {
-            apply_peer_connector_list(state, cfg, list);
-            peers.publish(state);
+        // D21-R (a2): peers come only from the controller-signed list in
+        // a ResourceSnapshot. A Connector's own list (and its revoked ids) is
+        // ignored: it could strand the Shield on a hostile Connector.
+        Some(Body::PeerConnectorList(_)) => {
+            debug!("ignored unsigned PeerConnectorList");
             None
         }
         other => {
@@ -712,62 +723,49 @@ async fn handle_connector_msg(
     }
 }
 
-/// Apply an incoming `PeerConnectorList` to the Shield's persistent state.
+/// D21-R (a2): apply a controller-signed peer list.
 ///
-///   - Revoked ids (Phase E, D21) are added to the in-memory revoked set
-///     first and pruned from the current list at once, whichever Connector
-///     sent them; a revoked Connector is never re-added while the process
-///     runs. A pruned list is saved unless it became empty (state.json must
-///     keep a Connector to start from; the in-memory list stays empty, so
-///     the Shield dials nothing).
-///   - Empty `peers` (after dropping revoked ids) is ignored — the Shield's
-///     existing list is safer than a truncated one.
-///   - Identical content (order-insensitive by connector_id) is a no-op —
-///     no rewrite of state.json.
-///   - New content replaces the list. The current head is preserved when
-///     the new list still contains it; otherwise the new head is index 0.
-fn apply_peer_connector_list(
+///   - Rejected (logged, nothing changes) unless it verifies against the
+///     Workspace CA key and names this Shield and its trust domain.
+///   - Rejected unless issued later than the last accepted list
+///     (`peer_list_issued_at_ms`, persisted): a Connector can't roll the
+///     Shield back to an older list, across restarts either.
+///   - Otherwise it replaces `connectors`. The current head is kept when the
+///     list still contains it; otherwise the new head is index 0. Revoked
+///     Connectors are simply not in the list.
+///   - An empty list empties the in-memory list (the Shield dials nothing)
+///     but is not saved: state.json must keep a Connector to start from.
+///
+/// Returns true when the list was applied.
+fn apply_signed_peer_list(
     state: &mut ShieldState,
     cfg: &ShieldConfig,
-    list: crate::proto::PeerConnectorList,
-) {
-    let carried_revoked = !list.revoked_connector_ids.is_empty();
-    prune_revoked_connectors(state, cfg, list.revoked_connector_ids);
-    let peers: Vec<crate::proto::PeerConnector> = list
-        .peers
-        .into_iter()
-        .filter(|p| !state.revoked_connectors.contains(&p.connector_id))
-        .collect();
-    if peers.is_empty() {
-        if empty_list_is_expected(carried_revoked) {
-            debug!("PeerConnectorList carried only revoked connectors");
-        } else {
-            warn!("ignored empty PeerConnectorList");
+    signed: &crate::proto::SignedPeerList,
+    ca_key: &[u8],
+) -> bool {
+    let payload = match peer_list::verify(signed, ca_key, &state.trust_domain, &state.shield_id) {
+        Ok(payload) => payload,
+        Err(e) => {
+            warn!(error = %e, "rejected signed peer list");
+            return false;
         }
-        return;
+    };
+    if payload.issued_at_unix_ms <= state.peer_list_issued_at_ms {
+        debug!(
+            issued_at = payload.issued_at_unix_ms,
+            last = state.peer_list_issued_at_ms,
+            "ignored signed peer list: not newer than the last accepted"
+        );
+        return false;
     }
-    let mut new_list: Vec<ConnectorRef> = peers
+    let mut new_list: Vec<ConnectorRef> = payload
+        .peers
         .into_iter()
         .map(|p| ConnectorRef {
             connector_id: p.connector_id,
             connector_addr: p.connector_addr,
         })
         .collect();
-
-    let mut current_sorted = state.connectors.clone();
-    current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-    let mut new_sorted = new_list.clone();
-    new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-    if current_sorted == new_sorted {
-        info!(
-            peers = new_list.len(),
-            "PeerConnectorList unchanged, no update"
-        );
-        return;
-    }
-
-    // Preserve current head if it survives in the new list. Otherwise the
-    // new list's index-0 becomes head.
     if let Some(current_head_id) = state.connectors.first().map(|c| c.connector_id.clone()) {
         if let Some(idx) = new_list
             .iter()
@@ -776,49 +774,28 @@ fn apply_peer_connector_list(
             new_list.rotate_left(idx);
         }
     }
-
-    let peer_count = new_list.len();
+    let changed = {
+        let mut current_sorted = state.connectors.clone();
+        current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+        let mut new_sorted = new_list.clone();
+        new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+        current_sorted != new_sorted
+    };
+    state.peer_list_issued_at_ms = payload.issued_at_unix_ms;
     state.connectors = new_list;
+    if state.connectors.is_empty() {
+        warn!("signed peer list is empty: the Shield dials no Connector until a new list arrives (state.json left as is)");
+        return true;
+    }
     if let Err(e) = state.save(&cfg.state_dir) {
         warn!(error = %e, "failed to persist state.json after peer-list update");
-    } else {
-        info!(peers = peer_count, "peer connector list refreshed");
+    } else if changed {
+        info!(
+            peers = state.connectors.len(),
+            "peer connector list refreshed (signed)"
+        );
     }
-}
-
-/// Fix 13 (F41): a list holding only revoked ids is expected (a connector
-/// on a network without resources sends one every heartbeat while a revoked
-/// peer's certificate is valid); a list with nothing at all is not.
-fn empty_list_is_expected(carried_revoked: bool) -> bool {
-    carried_revoked
-}
-
-/// Phase E (D21): remember `revoked_ids` and drop them from the current list.
-fn prune_revoked_connectors(state: &mut ShieldState, cfg: &ShieldConfig, revoked_ids: Vec<String>) {
-    state
-        .revoked_connectors
-        .extend(revoked_ids.into_iter().filter(|id| !id.is_empty()));
-    let before = state.connectors.len();
-    let revoked = &state.revoked_connectors;
-    state
-        .connectors
-        .retain(|c| !revoked.contains(&c.connector_id));
-    let pruned = before - state.connectors.len();
-    if pruned == 0 {
-        return;
-    }
-    warn!(
-        pruned,
-        remaining = state.connectors.len(),
-        "revoked connectors pruned from the peer list"
-    );
-    if state.connectors.is_empty() {
-        warn!("every peer connector is revoked; the Shield dials none until a new list arrives (state.json left as is)");
-        return;
-    }
-    if let Err(e) = state.save(&cfg.state_dir) {
-        warn!(error = %e, "failed to persist state.json after pruning revoked connectors");
-    }
+    true
 }
 
 async fn send_health(
@@ -993,7 +970,7 @@ mod tests {
             interface_addr: "100.64.0.5".into(),
             enrolled_at: "2026-10-09T00:00:00Z".into(),
             cert_not_after: 1_000,
-            revoked_connectors: HashSet::new(),
+            peer_list_issued_at_ms: 0,
         }
     }
 
@@ -1392,19 +1369,64 @@ mod tests {
         assert_eq!(calls.get(), 2, "retry after a failure is not debounced");
     }
 
-    // ── Connector-revocation Phase E (D21) ─────────────────────────────────
+    // ── D21-R (a2): the controller-signed peer list ─────────────────────────
 
-    fn peer(id: &str) -> crate::proto::PeerConnector {
-        crate::proto::PeerConnector {
-            connector_id: id.into(),
-            connector_addr: format!("{id}.lan:9091"),
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P384_SHA384_ASN1_SIGNING};
+
+    /// Stands in for the Workspace CA key (and keeps its PKCS#8 form).
+    struct Ca(EcdsaKeyPair, Vec<u8>);
+
+    impl Ca {
+        fn new() -> Self {
+            let rng = SystemRandom::new();
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+            Self(
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+                    .unwrap(),
+                pkcs8.as_ref().to_vec(),
+            )
         }
-    }
 
-    fn list(peers: &[&str], revoked: &[&str]) -> crate::proto::PeerConnectorList {
-        crate::proto::PeerConnectorList {
-            peers: peers.iter().map(|p| peer(p)).collect(),
-            revoked_connector_ids: revoked.iter().map(|r| r.to_string()).collect(),
+        fn key(&self) -> Vec<u8> {
+            self.0.public_key().as_ref().to_vec()
+        }
+
+        fn sign_for(
+            &self,
+            td: &str,
+            shield: &str,
+            issued_at: u64,
+            peers: &[&str],
+        ) -> crate::proto::SignedPeerList {
+            let payload = crate::proto::PeerListPayload {
+                trust_domain: td.into(),
+                shield_id: shield.into(),
+                issued_at_unix_ms: issued_at,
+                peers: peers
+                    .iter()
+                    .map(|id| crate::proto::PeerConnector {
+                        connector_id: id.to_string(),
+                        connector_addr: format!("{id}.lan:9091"),
+                    })
+                    .collect(),
+            };
+            let payload = prost::Message::encode_to_vec(&payload);
+            let mut message = crate::peer_list::PEER_LIST_CONTEXT.to_vec();
+            message.extend_from_slice(&payload);
+            let signature = self
+                .0
+                .sign(&SystemRandom::new(), &message)
+                .unwrap()
+                .as_ref()
+                .to_vec();
+            crate::proto::SignedPeerList { payload, signature }
+        }
+
+        /// A list for test_state()'s shield.
+        fn sign(&self, issued_at: u64, peers: &[&str]) -> crate::proto::SignedPeerList {
+            self.sign_for("ws-test.zecurity.in", "shield-1", issued_at, peers)
         }
     }
 
@@ -1455,40 +1477,106 @@ mod tests {
             .collect()
     }
 
-    /// AE-1: a revoked id prunes the current list at once and is saved,
-    /// even when the list carries no peers (sender not in any RN).
+    /// A signed list replaces the peers (head kept when still listed) and is
+    /// saved with its issued_at; revoked Connectors are simply absent.
     #[test]
-    fn revoked_id_prunes_immediately_even_without_peers() {
-        let (mut state, cfg) = three_peer_state("prune");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
-        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-3"]);
-    }
-
-    /// AE-2: never re-added while the process runs — a later list (from any
-    /// connector) that offers the revoked id as a peer and no longer lists
-    /// it as revoked still leaves it out.
-    #[test]
-    fn revoked_connector_is_never_re_added() {
-        let (mut state, cfg) = three_peer_state("readd");
-        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-3"], &["conn-2"]));
-        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-2", "conn-4"], &[]));
+    fn a_signed_list_replaces_the_peers_and_is_saved() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("signed");
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &["conn-4", "conn-1"]),
+            &ca.key()
+        ));
         assert_eq!(ids(&state), vec!["conn-1", "conn-4"]);
-        assert!(!saved_ids(&cfg).contains(&"conn-2".to_string()));
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-4"]);
+        assert_eq!(
+            ShieldState::load(&cfg.state_dir)
+                .unwrap()
+                .peer_list_issued_at_ms,
+            10
+        );
     }
 
-    /// AE-3: memory only — the revoked set is not written to state.json and
-    /// a reload starts empty.
+    /// A Connector can't forge or alter a list: another key, or a payload
+    /// changed after signing, is rejected and nothing changes.
     #[test]
-    fn revoked_set_is_memory_only() {
-        let (mut state, cfg) = three_peer_state("memory");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        let raw = std::fs::read_to_string(Path::new(&cfg.state_dir).join("state.json")).unwrap();
-        assert!(!raw.contains("revoked"), "{raw}");
-        assert!(ShieldState::load(&cfg.state_dir)
-            .unwrap()
-            .revoked_connectors
-            .is_empty());
+    fn a_forged_or_altered_list_is_rejected() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("forged");
+        let forged = Ca::new().sign(10, &["hostile"]);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &forged,
+            &ca.key()
+        ));
+        let mut altered = ca.sign(10, &["conn-1"]);
+        let mut payload: crate::proto::PeerListPayload =
+            prost::Message::decode(altered.payload.as_slice()).unwrap();
+        payload.peers[0].connector_id = "hostile".into();
+        altered.payload = prost::Message::encode_to_vec(&payload);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &altered,
+            &ca.key()
+        ));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(state.peer_list_issued_at_ms, 0);
+    }
+
+    /// A genuine list for another Shield or workspace is not this Shield's.
+    #[test]
+    fn a_list_for_another_shield_or_workspace_is_rejected() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("bound");
+        let other_shield = ca.sign_for("ws-test.zecurity.in", "shield-2", 10, &["hostile"]);
+        let other_ws = ca.sign_for("ws-other.zecurity.in", "shield-1", 10, &["hostile"]);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &other_shield,
+            &ca.key()
+        ));
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &other_ws,
+            &ca.key()
+        ));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+    }
+
+    /// A Connector can't roll the Shield back to an older (or the same)
+    /// list, also after a restart: issued_at is persisted.
+    #[test]
+    fn an_older_list_is_rejected_across_restarts() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("rollback");
+        let old = ca.sign(10, &["conn-1", "conn-2", "conn-3", "hostile"]);
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(20, &["conn-1"]),
+            &ca.key()
+        ));
+        assert!(!apply_signed_peer_list(&mut state, &cfg, &old, &ca.key()));
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(20, &["hostile"]),
+            &ca.key()
+        ));
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        assert!(!apply_signed_peer_list(
+            &mut reloaded,
+            &cfg,
+            &old,
+            &ca.key()
+        ));
+        assert_eq!(ids(&reloaded), vec!["conn-1"]);
     }
 
     fn live_ids(live: &watch::Receiver<Vec<ConnectorRef>>) -> Vec<String> {
@@ -1498,34 +1586,116 @@ mod tests {
             .collect()
     }
 
-    /// Fix 13 (F39, AF13-4): a peer list received mid-session (here a
-    /// revoked prune) reaches the live list the goodbye reads.
-    #[tokio::test]
-    async fn a_received_peer_list_is_published() {
-        let (mut state, cfg) = three_peer_state("f39-msg");
-        let (peers, live) = PeerPublisher::new(&state);
+    async fn deliver(
+        state: &mut ShieldState,
+        cfg: &ShieldConfig,
+        peers: &PeerPublisher,
+        body: Body,
+    ) {
         let (out_tx, _out_rx) = mpsc::channel(8);
-        let msg = ShieldControlMessage {
-            body: Some(Body::PeerConnectorList(list(
-                &["conn-1", "conn-3"],
-                &["conn-2"],
-            ))),
-        };
         let action = handle_connector_msg(
-            msg,
+            ShieldControlMessage { body: Some(body) },
             "conn-1",
-            &mut state,
-            &cfg,
+            state,
+            cfg,
             &Arc::new(SharedResourceState::new()),
             &out_tx,
             tunnel::new_hub(),
             &mut RenewalDebounce::default(),
-            &peers,
+            peers,
         )
         .await;
         assert!(action.is_none());
-        assert_eq!(live_ids(&live), ids(&state));
-        assert!(!live_ids(&live).contains(&"conn-2".to_string()));
+    }
+
+    /// D21-R: a Connector's own PeerConnectorList no longer changes the
+    /// peers, whatever it lists as peers or revoked (it could strand the
+    /// Shield on a hostile Connector). Rewrites Phase E AE-1..AE-3 and
+    /// Fix 13 F41, which pinned the old behaviour.
+    #[tokio::test]
+    async fn an_unsigned_peer_list_is_ignored() {
+        let (mut state, cfg) = three_peer_state("unsigned");
+        let (peers, live) = PeerPublisher::new(&state);
+        deliver(
+            &mut state,
+            &cfg,
+            &peers,
+            Body::PeerConnectorList(crate::proto::PeerConnectorList {
+                peers: vec![crate::proto::PeerConnector {
+                    connector_id: "hostile".into(),
+                    connector_addr: "hostile.lan:9091".into(),
+                }],
+                revoked_connector_ids: vec!["conn-1".into(), "conn-2".into(), "conn-3".into()],
+            }),
+        )
+        .await;
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(live_ids(&live), vec!["conn-1", "conn-2", "conn-3"]);
+    }
+
+    /// Fix 13 (F39, AF13-4): a signed list arriving in a snapshot reaches
+    /// the live list the goodbye reads. The key is read from the stored
+    /// workspace_ca.crt, chosen by role.
+    #[tokio::test]
+    async fn a_signed_list_in_a_snapshot_is_applied_and_published() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa,
+            KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+        };
+        let ca_params = |cn: &str, c: BasicConstraints| {
+            let mut p = CertificateParams::default();
+            let mut dn = DistinguishedName::new();
+            dn.push(DnType::CommonName, cn);
+            p.distinguished_name = dn;
+            p.is_ca = IsCa::Ca(c);
+            p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            p
+        };
+        let root = CertifiedIssuer::self_signed(
+            ca_params("Platform Root", BasicConstraints::Constrained(2)),
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+        )
+        .unwrap();
+        let intermediate = CertifiedIssuer::signed_by(
+            ca_params("Platform Intermediate", BasicConstraints::Constrained(1)),
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+            &root,
+        )
+        .unwrap();
+        let ca = Ca::new();
+        let ws_key = KeyPair::from_pkcs8_der_and_sign_algo(
+            &rustls::pki_types::PrivatePkcs8KeyDer::from(ca.1.clone()),
+            &rcgen::PKCS_ECDSA_P384_SHA384,
+        )
+        .unwrap();
+        let workspace = CertifiedIssuer::signed_by(
+            ca_params("workspace-ws-test", BasicConstraints::Constrained(0)),
+            ws_key,
+            &intermediate,
+        )
+        .unwrap();
+
+        let (mut state, cfg) = three_peer_state("f39-msg");
+        std::fs::write(
+            Path::new(&cfg.state_dir).join("workspace_ca.crt"),
+            format!("{}{}", workspace.pem(), intermediate.pem()),
+        )
+        .unwrap();
+        let (peers, live) = PeerPublisher::new(&state);
+        deliver(
+            &mut state,
+            &cfg,
+            &peers,
+            Body::ResourceSnapshot(crate::proto::ResourceSnapshot {
+                resources: vec![],
+                generation: 0, // stale for the generation check: the list still applies
+                signed_peer_list: Some(ca.sign(10, &["conn-1", "conn-3"])),
+            }),
+        )
+        .await;
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
+        assert_eq!(live_ids(&live), vec!["conn-1", "conn-3"]);
     }
 
     /// Fix 13 (F39, AF13-4): a failover at connect time is saved and
@@ -1541,14 +1711,20 @@ mod tests {
         assert_eq!(saved_ids(&cfg), vec!["conn-3", "conn-1", "conn-2"]);
     }
 
-    /// Fix 13 (F39, AF13-5): every peer revoked → the goodbye gets the empty
-    /// live list, never the startup one, and sends nothing.
+    /// Fix 13 (F39, AF13-5): an empty signed list → the goodbye gets the
+    /// empty live list, never the startup one, and sends nothing.
     #[tokio::test]
     async fn goodbye_uses_the_live_list_even_when_empty() {
+        let ca = Ca::new();
         let (mut state, cfg) = three_peer_state("f39-empty");
         let startup = state.clone();
         let (peers, live) = PeerPublisher::new(&state);
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &[]),
+            &ca.key()
+        ));
         peers.publish(&state);
 
         let bye = with_live_peers(&startup, &live);
@@ -1556,25 +1732,20 @@ mod tests {
         assert_eq!(bye.shield_id, startup.shield_id);
         goodbye(&bye, &cfg).await; // returns without dialling (no cert files here)
     }
-    /// Fix 13 (F41, AF13-7): only a list with nothing at all is warned
-    /// about; one holding revoked ids still prunes them.
-    #[test]
-    fn an_empty_list_warns_only_when_it_carried_nothing() {
-        assert!(empty_list_is_expected(true));
-        assert!(!empty_list_is_expected(false));
-        let (mut state, cfg) = three_peer_state("f41");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &[]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"], "ignored, list kept");
-    }
 
-    /// AE-4: when every peer is revoked the Shield dials none; state.json
-    /// keeps its last non-empty list so the Shield can still start.
+    /// An empty signed list (every Connector revoked): the Shield dials
+    /// none; state.json keeps its last non-empty list so the Shield can
+    /// still start.
     #[tokio::test]
-    async fn all_peers_revoked_dials_none_and_keeps_the_file_loadable() {
+    async fn an_empty_signed_list_dials_none_and_keeps_the_file_loadable() {
+        let ca = Ca::new();
         let (mut state, cfg) = three_peer_state("all");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &[]),
+            &ca.key()
+        ));
         assert!(state.connectors.is_empty());
         assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
         for f in ["workspace_ca.crt", "shield.crt", "shield.key"] {
@@ -1585,25 +1756,5 @@ mod tests {
             .err()
             .expect("nothing to dial");
         assert!(err.to_string().contains("no peer connectors"), "{err:#}");
-    }
-
-    /// AE-5: a certificate renewal keeps the in-memory revoked set.
-    #[tokio::test]
-    async fn renewal_keeps_the_revoked_set() {
-        let mut state = test_state();
-        state.revoked_connectors.insert("conn-9".into());
-        let mut debounce = RenewalDebounce::default();
-        let calls = std::cell::Cell::new(0);
-        let out = handle_reenroll(&mut state, &mut debounce, |s| {
-            calls.set(calls.get() + 1);
-            let mut renewed = s;
-            renewed.revoked_connectors.clear(); // renew_cert builds a fresh state
-            renewed.cert_not_after = 2_000;
-            std::future::ready(Ok(renewed))
-        })
-        .await;
-        assert!(matches!(out, Some(Ok(()))));
-        assert_eq!(state.cert_not_after, 2_000);
-        assert!(state.revoked_connectors.contains("conn-9"));
     }
 }

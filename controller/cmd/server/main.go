@@ -249,6 +249,8 @@ func main() {
 		log.Printf("relay revocation checker: refresh failed: %v", err)
 	})
 	connectorRegistry := connector.NewConnectorRegistry()
+	// D21-R (a2): every shield snapshot carries a Workspace-CA-signed peer list.
+	connectorRegistry.SetPeerListSigner(pkiService)
 
 	inviteStore := invitation.NewStore(db.Pool)
 	inviteEmailer := invitation.NewEmailer(

@@ -71,7 +71,27 @@ message ResourceAck {
 // this list and rebuilds the resource_protect chain — anything absent is dropped.
 message ResourceSnapshot {
   repeated ResourceInstruction resources = 1; // action is implicitly "apply"
-  uint64 generation = 2; // monotonic; shield ignores snapshots older than the last applied
+  uint64 generation = 2; // monotonic per Connector; shield ignores snapshots older than the last applied (D21-R a1)
+  // D21-R (a2): the shield's peer Connectors, signed by the controller. The
+  // shield's only source of peers; processed before, and independently of,
+  // the generation check. Absent when the controller could not sign one.
+  SignedPeerList signed_peer_list = 3;
+}
+
+// D21-R (a2): a controller-signed peer list. `payload` is a serialized
+// PeerListPayload; `signature` is ECDSA P-384 / SHA-384 (ASN.1 DER) by the
+// Workspace CA key over "zecurity/shield-peer-list/v1\0" || payload. A
+// Connector can withhold or replay one, never forge or alter it.
+message SignedPeerList {
+  bytes payload = 1;
+  bytes signature = 2;
+}
+
+message PeerListPayload {
+  string trust_domain = 1;
+  string shield_id = 2; // the one shield this list is for
+  uint64 issued_at_unix_ms = 3; // the shield accepts only a later list than the last it accepted
+  repeated PeerConnector peers = 4; // every non-revoked Connector of the shield's Remote Network
 }
 
 // Shield → Connector: the shield's actual enforced state (ADR-004 Phase 3).

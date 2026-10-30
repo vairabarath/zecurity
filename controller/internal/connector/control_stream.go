@@ -64,6 +64,10 @@ type ConnectorRegistry struct {
 	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
 
+	// peerLists signs each shield's peer list (D21-R a2); nil until
+	// SetPeerListSigner. Set once at startup, read-only afterwards.
+	peerLists *peerListIssuer
+
 	// live holds EVERY activated, not-yet-retired Control stream per
 	// connector — the authoritative one in clients plus any superseded stream
 	// a make-before-break renewal has not finished retiring. SignalRevoked
@@ -342,7 +346,11 @@ func (r *ConnectorRegistry) ClientsForWorkspace(workspaceID string) []*connector
 // bumped only when the desired content actually changes, so the shield's
 // `generation <= last` gate dedups unchanged re-pushes and resolves out-of-order
 // deliveries (see F11). It is NOT wall-clock and not derived in this layer.
-func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*pb.ConnectorControlMessage, error) {
+//
+// It also carries the shield's controller-signed peer list (D21-R a2) when the
+// registry has a signer. A peer list that can't be built is logged and left
+// out: the snapshot still goes, and the shield keeps the peers it has.
+func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, r *ConnectorRegistry, shieldID string) (*pb.ConnectorControlMessage, error) {
 	snap, err := resource.BuildShieldSnapshot(ctx, db, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("buildSnapshotMsg: %w", err)
@@ -359,11 +367,17 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*
 		})
 	}
 
+	peers, err := r.peerListIssuer().build(ctx, db, shieldID)
+	if err != nil {
+		log.Printf("control stream: %v — snapshot for shield %s sent without a peer list", err, shieldID)
+		peers = nil
+	}
+
 	return &pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
 			ResourceSnapshots: &pb.ResourceSnapshotBatch{
 				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
-					shieldID: {Resources: resources, Generation: snap.Generation},
+					shieldID: {Resources: resources, Generation: snap.Generation, SignedPeerList: peers},
 				},
 			},
 		},
@@ -384,7 +398,7 @@ func PushSnapshotForShield(ctx context.Context, db *pgxpool.Pool, r *ConnectorRe
 	if c == nil {
 		return
 	}
-	msg, err := buildSnapshotMsg(ctx, db, shieldID)
+	msg, err := buildSnapshotMsg(ctx, db, r, shieldID)
 	if err != nil {
 		log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
 		return
@@ -830,7 +844,7 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 		// ADR-004 Phase 2: refresh this shield's cached desired-state snapshot.
 		// Sent for EVERY shield (even with nothing pending) so a shield that
 		// reboots later gets re-protected from the connector's cache.
-		if msg, err := buildSnapshotMsg(ctx, h.Pool, shieldID); err == nil {
+		if msg, err := buildSnapshotMsg(ctx, h.Pool, h.Registry, shieldID); err == nil {
 			if err := client.send(msg); err != nil {
 				log.Printf("control stream: send snapshot for shield %s: %v", shieldID, err)
 			}
@@ -957,6 +971,9 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 				log.Printf("control stream: notify topology after connector health connector=%s: %v", connectorID, err)
 			}
 		}
+		// D21-R (a2): a Connector that came back or changed address changes
+		// its network's signed peer lists.
+		PushPeerListsForNetworkOf(ctx, h.Pool, h.Registry, connectorID)
 	}
 	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
 	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
@@ -1107,6 +1124,13 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 		if connectorChanged {
 			anyConnectorChanged = true
 			log.Printf("control stream: shield %s moved to connector %s", s.ShieldId, client.connectorID)
+			// D21-R: the new Connector has no snapshot cached for this shield.
+			// Send one so the shield gets this Connector's generation baseline
+			// (a1) and a current signed peer list (a2) now, not on a later
+			// resource change. A LAN-IP change below pushes one anyway.
+			if h.Registry != nil && !lanIPChanged {
+				PushSnapshotForShield(ctx, h.Pool, h.Registry, client.connectorID, s.ShieldId)
+			}
 		}
 		if lanIPChanged {
 			anyLanIPChanged = true

@@ -162,7 +162,7 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 	// tombstones the bookkeeping pass confirmed absent.
 	if shouldResync {
 		log.Printf("reconcile: drift persisted %d reports on shield %s — re-pushing snapshot", resyncDriftRuns, report.ShieldId)
-		if msg, err := buildSnapshotMsg(ctx, db, report.ShieldId); err == nil {
+		if msg, err := buildSnapshotMsg(ctx, db, h.Registry, report.ShieldId); err == nil {
 			_ = client.send(msg)
 			metrics.Resync()
 		}

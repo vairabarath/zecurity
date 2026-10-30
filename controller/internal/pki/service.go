@@ -71,6 +71,11 @@ type Service interface {
 	// caller supplies the serials, so the PKI service needs no relay-store handle.
 	GenerateRelayCRL(ctx context.Context, revoked []RevokedEntry) ([]byte, error)
 
+	// SignShieldPeerList signs a serialized shield PeerListPayload with the
+	// tenant's Workspace CA key, domain-separated by ShieldPeerListContext
+	// (D21-R a2). Returns an ASN.1 DER ECDSA signature.
+	SignShieldPeerList(ctx context.Context, tenantID string, payload []byte) ([]byte, error)
+
 	// EncryptSecret / DecryptSecret encrypt arbitrary secrets at rest (e.g. a
 	// per-workspace OIDC client secret, PENDING-04) reusing the CA key-storage
 	// primitive (AES-256-GCM + HKDF-SHA256) under the PKI master secret. context

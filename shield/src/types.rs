@@ -1,6 +1,5 @@
 // types.rs — Shared data structures used across multiple shield modules
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -58,11 +57,10 @@ pub struct ShieldState {
     /// Updated after RenewCert so the next control stream uses fresh credentials.
     pub cert_not_after: i64,
 
-    /// Connector-revocation Phase E (D21): connector ids any peer list has
-    /// reported revoked. Pruned from `connectors` at once and never re-added
-    /// while the process runs. Memory only: never written to state.json.
-    #[serde(skip)]
-    pub revoked_connectors: HashSet<String>,
+    /// D21-R (a2): `issued_at_unix_ms` of the last controller-signed peer
+    /// list accepted. A list is accepted only when it was issued later, so a
+    /// Connector can't replay an older one, across restarts too. 0 = none yet.
+    pub peer_list_issued_at_ms: u64,
 }
 
 /// On-disk representation with both the new `connectors` list and the legacy
@@ -87,6 +85,8 @@ struct ShieldStateOnDisk {
     interface_addr: String,
     enrolled_at: String,
     cert_not_after: i64,
+    #[serde(default)]
+    peer_list_issued_at_ms: u64,
 }
 
 impl From<ShieldStateOnDisk> for ShieldState {
@@ -111,7 +111,7 @@ impl From<ShieldStateOnDisk> for ShieldState {
             interface_addr: v.interface_addr,
             enrolled_at: v.enrolled_at,
             cert_not_after: v.cert_not_after,
-            revoked_connectors: HashSet::new(),
+            peer_list_issued_at_ms: v.peer_list_issued_at_ms,
         }
     }
 }
@@ -238,7 +238,7 @@ mod tests {
             interface_addr: "100.64.0.5".into(),
             enrolled_at: "2026-07-01T00:00:00Z".into(),
             cert_not_after: 1793491200,
-            revoked_connectors: HashSet::new(),
+            peer_list_issued_at_ms: 0,
         };
         original.save(dir.to_str().unwrap()).unwrap();
         let loaded = ShieldState::load(dir.to_str().unwrap()).unwrap();
