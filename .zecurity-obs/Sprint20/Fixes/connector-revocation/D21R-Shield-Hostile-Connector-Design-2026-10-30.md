@@ -151,10 +151,24 @@ Builds from `d6818a13`: controller `3ada62421e1395e2`, connector `823c5d3513d7e4
 | Revoke under traffic | revoke 11:37:09.018 → shield refused by seechan5 at 09.036 → stream on inkyank 11:37:11.37; signed list `peers=3` at 11:37:12.997; probe 88/90 `200`, 2 failures (≈ 2.5 s); CRL with `revoked=1` forwarded at 11:37:41 (32 s after the revoke, the connector's CRL refresh) |
 | Controller restart | connector stream 11:39:11.757 → first `AuthorizationAck accepted` 11:39:11.772 (15 ms; the peer-list push for that change runs in the background); the shield stayed on inkyank, got a new CRL; tunnel `200`, resource `protected` |
 
-**Not run:**
-- **Refused at open (hostile connector):** the shield refusing a connector its stored CRL lists, at stream open.
-- **The clean-close path.**
+**Hostile connector (2026-10-30, 12:12–12:16 UTC).**
+- **Build:** a test-only connector (`e0eab84f`; built from a separate worktree off `f158ba46`, never committed) runs as `e2e-conn-hostile` on seechan5. Two switches:
+  - `ZEC_TEST_HOSTILE=1`: the serving gate always admits and fail-closed does nothing.
+  - `ZEC_TEST_ATTACK=1`: every 30 s on each shield stream it sends an unsigned empty snapshot with generation `u64::MAX`, `remove` instructions for the shield's resources, a replay of the oldest signed set it saw, an unsigned peer list naming only itself with every other connector marked revoked, and a `TunnelOpen` to `192.168.1.33:22`.
+- **Getting the shield onto it:** the honest inkyank connector was stopped, so the shield failed over to the hostile one.
 
-Both need a connector that keeps serving after revocation (the Phase A build used in the Phase E live run). Every honest revoked connector closes its shield streams itself. The unit tests cover both.
+| Case | Observed |
+|---|---|
+| Attached, attacking (12:13:09–12:14:54) | Every round: `ignored a snapshot without a signed resource set`; `refused tunnel: not a resource this shield protects` (`:22`). The rules never changed: direct `.75 → 8815` stayed `000`, tunnel `200`. A signed set forwarded by the hostile connector still applied (new resource, generation 8 at 12:13:39) |
+| Rollback replay | After generation 8, the hostile connector's replay of the genuine generation-7 set was refused every round: `ignoring stale resource set generation=7 floor=8` |
+| Unsigned peer list | Never applied: the shield's later failover walk went through all 4 signed peers (inkyank, manoj, old A, hostile), not "only the hostile one" |
+| Revoked, still serving | Revoked 12:14:06.356; the hostile connector kept the shield stream. Its own CRL refresh forwarded a CRL listing it (`revoked=2`) at 12:14:54.517, and the shield left it the same millisecond (`leaving the connector … its certificate is in the workspace CRL`) |
+| Refused at open | From 12:14:58, every ~2 s: `failed over to … 83eeea3a` then, 0.35 s later, `leaving the connector … its certificate is in the workspace CRL`, before anything was sent to it |
+| Recovery | inkyank connector started → stream 12:15:33, CRL `revoked=2`, signed peer list `peers=3` (hostile gone) at 12:15:46; tunnel `200`, direct `000` |
+
+**Still not live-tested:**
+- **Clean close without a valid CRL:** needs a connector that withholds the CRL for longer than its validity; unit-tested only.
+- **Withholding the CRL:** a hostile connector that also withholds the CRL stays attached until the stored CRL's `nextUpdate` (≤ 24 h); it can't change anything meanwhile (above).
+- **QUIC listener:** the test switch didn't cover the hostile connector's own QUIC listener, which still closed its client connections on revocation. Not relevant to the shield checks.
 
 **Lab left running:** the branch controller (user unit `e2e-controller`), file server `e2e-serve` (`:8081`), connector `e2e-conn-inkyank-d21r` (active), connector `e2e-conn-seechan-d21r` (revoked; process running, not serving), shield `e2e-shield-nika-d21r`, the client (tunnel up), a test web server on nika `:8815` (user process), and resource `e2e-d21r-web2` (protected). manoj's host was not touched.
