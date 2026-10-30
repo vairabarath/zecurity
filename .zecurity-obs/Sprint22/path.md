@@ -263,8 +263,8 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
 | FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
 | FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | Open (pre-GA) |
-| FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | Open |
-| FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | Open |
+| FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): the Connector now shuts a relayed shield-tunnel stream down on a clean end (TLS close_notify); see Post-Sprint Fixes → F-7. The probe timeouts are FU-9 |
+| FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): accidental duplicate from Sprint 17's merge fix; second start removed |
 
 ## Post-Sprint Fixes
 
@@ -566,6 +566,14 @@ Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). B
   ended (random `select`), holding `GracefulStop` and deadlocking `Stop`. Fixed with a `ctx.Done()` case
   (connector-revocation Phase A file); shutdown waits for named workers at most 15 s. Live: 6/6 stops in 10 s.
 - **F-7** investigated, not fixed → FU-12; duplicate outbox processor → FU-13.
+
+### Fix: live E2E run — relayed responses lost their end (F-7 / FU-12) and the duplicate outbox processor (FU-13)
+- **F-7** through a relay every shield-tunnel flow ended without the inner TLS `close_notify`; the Client reset the
+  app connection and the last buffered bytes were lost. `connector/src/agent_tunnel.rs` `relay_stream` now shuts the
+  device stream down on a clean Shield close (up to 120 s, cancellable); errors still end abruptly. Live: 20 MB through
+  a relay 2/2 complete, 0 close_notify errors in 55 flows. Details in `Sprint20/Fixes/Fix14-Shield-Stream-Reconnect-Sessions.md`.
+- **FU-13** `cmd/server/main.go` started `outboxProcessor.Run` twice (Sprint 17's fix for the HTTP server goroutine
+  re-added it); the duplicate is removed (claiming was already SKIP LOCKED, so only polling and reaper logs halve).
 
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**

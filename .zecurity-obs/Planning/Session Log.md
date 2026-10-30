@@ -3402,3 +3402,10 @@ serves on `127.0.0.1:9102`.
 - **F-7** sustained relay-path download torn down (direct path fine) → FU-12; duplicate outbox processor → FU-13.
 - Branch `fix/e2e-j7-findings`, local only.
 
+## 2026-10-30 — M1: F-7 (FU-12) root-caused and fixed; FU-13 fixed
+- F-7: relayed shield-tunnel flows ended without the inner TLS close_notify (Connector `relay_stream` dropped the
+  device stream on a clean end), so the Client reset the app connection and lost the tail of every relay-path
+  response. Fixed (shutdown on clean close, 120 s, cancellable); live 2/2 full 20 MB downloads, 0 errors in 55 flows.
+- FU-13: duplicate `outboxProcessor.Run` removed.
+- Diagnostics kept: relay bridge summary + full error chains, connector copy result, client relay-pool lines.
+
