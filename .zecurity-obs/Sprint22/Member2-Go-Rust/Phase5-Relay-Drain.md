@@ -189,7 +189,7 @@ Same for `OnRelayRevoked` (revoke and delete).
 
 **Tests added:** `TestDrainDB_HooksRunAfterCommitOnDetachedContext` (drain, resume and revoke hooks see committed data and a live context after the request is cancelled; mutation-checked: on the request context it fails), `TestDrainDB_BroadcastFailureKeepsDrain` (AT-D12: drain committed and audited, failure logged with the relay id, connect-time list excludes the relay), `TestDrainFanout`, console "unverified on an inactive relay".
 
-**Accepted follow-ups (not fixed, low impact):**
+**Accepted follow-ups (not fixed, low impact):** *(all fixed 2026-10-30 except the out-of-order broadcasts, which FU-6 now corrects within a minute; see the next two entries)*
 - Drain vs `EvictRelays` (multi-row `UPDATE … WHERE id = ANY`, no lock order) can deadlock; Postgres aborts one: the drain gets a 500 and can be retried, eviction retries next tick.
 - `RecordHeartbeat` has no guard against an older heartbeat overwriting a newer count (`connection_count_at <= $12`); rare, since the relay's 10 s RPC timeout cancels the server-side write.
 - `drain_started_at` (DB clock, transaction start) vs `connection_count_at` (controller clock): skew or a lock wait shortens the 120 s window slightly.
@@ -197,3 +197,33 @@ Same for `OnRelayRevoked` (revoke and delete).
 - `policy.GetActiveRelay` can pick a draining relay for the snapshot's top-level `RelayAddr`; clients use only the per-connector relay address today.
 - `eligible.Where` evaluates to NULL for `address_scope IS NULL AND observed_ip IS NOT NULL` (no write path produces it); a `COALESCE(…, false)` would make it defensive.
 - Untested: drain racing revoke/eviction/resume (reasoned safe: single-row lockers re-checked by EvalPlanQual).
+
+### Fix: FU-7 review residuals (2026-10-30, branch `sprint22/fu6-fu7-relay-drain-residuals`)
+**1. Drain vs eviction deadlock.** `EvictRelays` updated several rows in no fixed order while `DrainRelay` locks in id order; Postgres aborted one (drain → 500, eviction → retried next tick). Reproduced: the new race test fails with `deadlock detected (SQLSTATE 40P01)` on the old statement.
+```sql
+-- BEFORE: UPDATE relays SET status = 'inactive' ... WHERE id = ANY($1) AND status = 'active' AND last_heartbeat_at < $2
+-- AFTER (internal/relay/store.go):
+WITH locked AS (SELECT id FROM relays WHERE id = ANY($1::uuid[]) AND status = 'active'
+                  AND last_heartbeat_at < $2 ORDER BY id FOR UPDATE)
+UPDATE relays r SET status = 'inactive', updated_at = NOW() FROM locked WHERE r.id = locked.id
+```
+**2. Older heartbeat overwriting a newer count.** `RecordHeartbeat` now writes `connection_count` only when `connection_count_at IS NULL OR connection_count_at <= $12`, and `connection_count_at = GREATEST(connection_count_at, $12)`. The rest of the heartbeat (status, addresses, `last_heartbeat_at`) is written as before.
+
+**3. One clock for the 120 s window.** `DrainRelay` set `drain_started_at = NOW()` (database clock, transaction start, before any lock wait) while `connection_count_at` is the controller's receive time. It now sets `drain_started_at = $2` with `time.Now().UTC()` taken after the row locks are held.
+
+**4. `policy.GetActiveRelay` ignored drain.** Adds `AND drain_started_at IS NULL`. The snapshot's top-level `RelayAddr` is recompiled with the ACL, not on drain (ADR-017), so an already compiled snapshot keeps its address until its next compile; clients use the per-connector relay address today.
+
+**5. `eligible.Where` could be NULL** (`address_scope IS NULL AND observed_ip IS NOT NULL`; `DrainRelay` scans it into a Go bool, so that relay's drain was a 500). Now `COALESCE((…), false)`. `capacity_label` is `NOT NULL` in the schema; `address_scope` is the only nullable input.
+
+**Tests (`internal/relay/drain_residuals_db_test.go`, `internal/policy/active_relay_drain_test.go`):** `TestDrainDB_OlderHeartbeatKeepsNewerCount`, `TestDrainDB_EligibleWhereNeverNull`, `TestDrainDB_DrainStartIsAfterLockWait`, `TestDrainDB_DrainRacesEviction` (20 rounds, eviction in descending id order), `TestDrainDB_DrainRacesRevoke`, `TestDrainDB_DrainRacesResume`, `TestGetActiveRelay_SkipsDrainingRelay`. Each of fixes 1–5 was reverted once and its test failed.
+
+### Fix: FU-6 relay list reconciliation (2026-10-30, same branch)
+See `Sprint22/path.md` → Post-Sprint Fixes → FU-6. Per-stream record of the last relay list version sent; a 60 s sync sends the current list only to streams that are behind (the connector re-probes on every push, so a blind re-broadcast would cost every connector a probe sweep per minute).
+
+### Finding: FU-11 running streams aren't cut at the 120 s drain timeout (AT-D6 lab run, 2026-10-30; open)
+**Issue:** in the live AT-D6 run a 1 GiB download through the drained relay kept running after the connector's "old relay drain timed out with active streams still open" (+120.0 s) and completed at +442 s. The console correctly stayed at `streams_open` until it ended, then showed "Drained".
+
+**Root Cause:** `connector/src/relay_handler.rs:167` runs each relay stream as a detached `tokio::spawn` task holding its own QUIC stream. On timeout `relay_selector.rs:631` calls `old.handle.abort()`, which ends only the session task (the accept loop); the stream tasks keep the old QUIC connection alive.
+
+**Fix (not applied):** a connector change, outside Sprint 22 (D-32: no connector change). Close the old relay's QUIC connection, or abort the tracked stream tasks, when the drain timeout fires; add a selector test with a stream that outlives the timeout. Until then the console's "up to 120 seconds" overstates the cut. Tracked as FU-11 in `Sprint22/path.md`.
+
