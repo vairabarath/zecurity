@@ -227,3 +227,15 @@ See `Sprint22/path.md` → Post-Sprint Fixes → FU-6. Per-stream record of the 
 
 **Fix (not applied):** a connector change, outside Sprint 22 (D-32: no connector change). Close the old relay's QUIC connection, or abort the tracked stream tasks, when the drain timeout fires; add a selector test with a stream that outlives the timeout. Until then the console's "up to 120 seconds" overstates the cut. Tracked as FU-14 in `Sprint22/path.md`.
 
+### Fix: console no longer promises a 120 s cut (2026-10-30, branch `sprint22/drain-text-fu14`)
+**Issue:** the drain card, the drain dialog and the `streams_open` progress line said open connections end "for up to 120 seconds" / "within 120 seconds of their connector moving". The live AT-D6 run showed they run until they end (FU-14).
+
+**Fix Applied (`provider-console/src/components/RelayDrainCard.tsx`):**
+```
+// BEFORE: "connections already on it keep running until they end, for up to 120 seconds."
+// AFTER:  "connections already on it keep running until they end, which for a long transfer can take a while."
+// BEFORE (streams_open): "They end within 120 seconds of their connector moving."
+// AFTER:  "They keep running until they end, so a long transfer can keep it here; it reads as drained once they finish."
+```
+The `unverified` line ("a heartbeat measured at least 120 seconds after the drain started") is the server's measurement window and is unchanged. Tests: `RelayDetail.test.tsx` asserts the dialog says "keep running until they end" and doesn't mention 120 seconds, and checks the new `streams_open` line. Console 507 pass, lint and build clean. When FU-14 is fixed in the connector, the text can name the timeout again.
+

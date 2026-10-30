@@ -3435,3 +3435,19 @@ serves on `127.0.0.1:9102`.
   - The install dialog's token is lost when the dialog closes.
 - Pending: AT-E5 expired-token hint (24 h), V4 final run; manojinkyank still has the AT-E4 relay service installed until the operator removes it.
 
+## 2026-10-30 — M2: #159 conflicts resolved and merged; drain text fixed (#160); V4 final run PASS
+- **#159 (Sathiya, live E2E journeys 6–7):** merged `fixed-pendings` into his branch at Barath's request.
+  - The FU-6 relay-list sync worker now starts with `workers.Go` (the combined code didn't compile without it).
+  - #158's drain-timeout finding was renumbered **FU-11 → FU-14**, because #159 uses FU-11 to FU-13.
+  - Gates: Go 1541 / 0 / 2; relay 119 and connector 275 pass. Merged as `4c5f947d`.
+- **#160:** the console's drain card, dialog and `streams_open` line no longer promise a 120 s cut (FU-14).
+- **V4 targeted final run: PASS.**
+  - Automated gates: Go 1541 / 0 / 2, console 507, `relay_selector` 27, fresh DB 49 files.
+  - Live: TOTP gate, relay-ops limits and validation codes, console install on .53 (E4), drain (connector 42 ms, last-eligible 409, resume), console revoke (CRL, audit, relay stops itself in 10 s) and delete, FU-6 worker, scope checks, AT-E5 hint.
+- **Observations, not failures:**
+  - A host with another relay's leftover certificate state refuses to start the new relay. Safe, but the installer doesn't warn.
+  - With no open streams, a drained relay is dropped at once. One new connection still sent to it fails, and the client recovers in 18 ms (early resync).
+- **Kept for 2026-10-31:** V4 DB and `~/.cache/zecurity-v4-at-e5` (env, `v4-target` token, TOTP helper). After 16:34:25 IST, check that enrolment with the expired token is refused, then tick V2, V4 and "All scenarios pass", and clean up.
+- **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
+- **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
+
