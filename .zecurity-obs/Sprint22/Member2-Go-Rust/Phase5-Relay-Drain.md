@@ -220,10 +220,10 @@ UPDATE relays r SET status = 'inactive', updated_at = NOW() FROM locked WHERE r.
 ### Fix: FU-6 relay list reconciliation (2026-10-30, same branch)
 See `Sprint22/path.md` → Post-Sprint Fixes → FU-6. Per-stream record of the last relay list version sent; a 60 s sync sends the current list only to streams that are behind (the connector re-probes on every push, so a blind re-broadcast would cost every connector a probe sweep per minute).
 
-### Finding: FU-11 running streams aren't cut at the 120 s drain timeout (AT-D6 lab run, 2026-10-30; open)
+### Finding: FU-14 running streams aren't cut at the 120 s drain timeout (AT-D6 lab run, 2026-10-30; open)
 **Issue:** in the live AT-D6 run a 1 GiB download through the drained relay kept running after the connector's "old relay drain timed out with active streams still open" (+120.0 s) and completed at +442 s. The console correctly stayed at `streams_open` until it ended, then showed "Drained".
 
 **Root Cause:** `connector/src/relay_handler.rs:167` runs each relay stream as a detached `tokio::spawn` task holding its own QUIC stream. On timeout `relay_selector.rs:631` calls `old.handle.abort()`, which ends only the session task (the accept loop); the stream tasks keep the old QUIC connection alive.
 
-**Fix (not applied):** a connector change, outside Sprint 22 (D-32: no connector change). Close the old relay's QUIC connection, or abort the tracked stream tasks, when the drain timeout fires; add a selector test with a stream that outlives the timeout. Until then the console's "up to 120 seconds" overstates the cut. Tracked as FU-11 in `Sprint22/path.md`.
+**Fix (not applied):** a connector change, outside Sprint 22 (D-32: no connector change). Close the old relay's QUIC connection, or abort the tracked stream tasks, when the drain timeout fires; add a selector test with a stream that outlives the timeout. Until then the console's "up to 120 seconds" overstates the cut. Tracked as FU-14 in `Sprint22/path.md`.
 

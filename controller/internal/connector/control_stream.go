@@ -746,6 +746,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			// End it with the authoritative revoked marker.
 			log.Printf("control stream: connector %s revoked — ConnectorRevoked delivered, closing control stream", connectorID)
 			return rejectStream(stream, rejectRevoked())
+		case <-ctx.Done():
+			// The stream is gone (connection closed, or the server stopping).
+			// The Recv goroutine may have returned without delivering its
+			// error, since both of its select cases were ready at once; waiting
+			// on recvCh alone then never ended, which held GracefulStop and
+			// deadlocked Stop until the process was killed (live E2E run
+			// 2026-10-30, O-8).
+			log.Printf("control stream: connector %s stream context ended: %v", connectorID, ctx.Err())
+			return ctx.Err()
 		case r := <-recvCh:
 			if r.err == io.EOF {
 				log.Printf("control stream: connector %s closed stream (EOF)", connectorID)

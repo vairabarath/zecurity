@@ -107,3 +107,17 @@ rebuild-on-ACL-change** (F3) regardless.
 
 ## Rough Effort / Priority
 **A: L · B: S–M**, P1. Sequencing depends on the Placement-Engine decision.
+
+## Post-Phase Fixes
+
+
+### Fix: early transport resync waited up to ~35 s after a relay revoke (2026-10-30, live E2E run F-8)
+**Issue:** after a relay revoke, connectors moved in 85 ms but relay-path clients failed for 35 s.
+
+**Root Cause:** a no-change recovery burst (2+4+8+16 s backoff) still slept 16 s after its last attempt, then the 30 s
+cooldown blocked new bursts; the revoke landed inside that window.
+
+**Fix Applied (`client/src/daemon.rs`):** `RELAY_RESYNC_COOLDOWN_SECS` 30 → 5; `RELAY_RESYNC_MAX_SECS` 16 → 8; no
+sleep after the final attempt. A burst is still at most 5 fetches.
+
+**Live:** relay revoke under a 1 s probe → 2 failed requests, client recovered 3.5 s after the revoke (was 35 s).

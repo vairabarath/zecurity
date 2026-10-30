@@ -3384,6 +3384,31 @@ serves on `127.0.0.1:9102`.
 - **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
   re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
+## 2026-10-30 — M1: live E2E — lab rebuilt after the reboot and the Phase D reset; journey 6 (workspace isolation) PASS
+- All machines had rebooted; dev DB reset for Phase D `043_`; controller from `fixed-pendings` `710ed362`; workspaces
+  `xiyo` and `e2e-other` re-seeded with a throwaway program (deleted); client rebuilt for the new platform root.
+- seechan5's shield (not ours) uninstalled at the user's request; the unknown shield on this PC left alone; nika's IP
+  is now .33.
+- Journey 6: 51 cross-workspace probes as `e2e-other`'s admin with `xiyo`'s IDs, all refused with not-found answers;
+  `xiyo`'s rows identical before and after; no leaks in lists; no controller errors.
+- **F-6** public `lookupWorkspacesByEmail` enumerates email → workspace with no limit (ADR-009 Tier 3 not built) →
+  FU-11 (user decision: follow-up).
+
+## 2026-10-30 — M1: live E2E journey 7 (provider console relays) and fixes F-8, O-8
+- AT-E4 on real hosts, AT-D1–D5, D7, AT-X refusals, X4, X5 PASS; AT-D6 drain mechanics PASS.
+- **F-8** relay revoke left relay-path clients failing 35 s → client resync timing + revoked relay closes connections
+  and stops; live 3.5 s. **O-8** controller stop deadlock (Control handler without `ctx.Done()`, random select) →
+  fixed; 6/6 stops in 10 s.
+- **F-7** sustained relay-path download torn down (direct path fine) → FU-12; duplicate outbox processor → FU-13.
+- Branch `fix/e2e-j7-findings`, local only.
+
+## 2026-10-30 — M1: F-7 (FU-12) root-caused and fixed; FU-13 fixed
+- F-7: relayed shield-tunnel flows ended without the inner TLS close_notify (Connector `relay_stream` dropped the
+  device stream on a clean end), so the Client reset the app connection and lost the tail of every relay-path
+  response. Fixed (shutdown on clean close, 120 s, cancellable); live 2/2 full 20 MB downloads, 0 errors in 55 flows.
+- FU-13: duplicate `outboxProcessor.Run` removed.
+- Diagnostics kept: relay bridge summary + full error chains, connector copy result, client relay-pool lines.
+
 ## 2026-10-30 — M2: Phase D follow-ups FU-6 and FU-7; Sprint 22 doc fixes
 - Branch `sprint22/fu6-fu7-relay-drain-residuals` (from `fixed-pendings` `11d3d3e1`). No schema, connector, relay or proto change.
 - **FU-6:** each connector Control stream records the relay list version last sent; `RunRelayListSync` (60 s) sends the current list only to streams that are behind (missed broadcast, full queue, out-of-order delivery). Not a blind re-broadcast: the connector re-probes on every push.
@@ -3393,14 +3418,14 @@ serves on `127.0.0.1:9102`.
 - Docs: D-gate status (merged in #156), Done Criteria ticked where met (TOTP, relay roles, reason + name, console write surface, no out-of-scope changes); enrolment and drain criteria wait for AT-E4/E5 and AT-D6 on the lab.
 - Pending (M1, lab): AT-D6 client data plane, AT-E4/E5, AT-X, then V4.
 
-## 2026-10-30 — M2: lab runs AT-D6 (client data plane) and AT-E4: PASS; FU-11 filed
+## 2026-10-30 — M2: lab runs AT-D6 (client data plane) and AT-E4: PASS; FU-14 filed
 - **Stack:** throwaway controller, two relays and the console on this PC, with a throwaway DB on the dev Postgres and the isolated Valkey (never `ztna_platform`). Connector, file server and the AT-E4 relay on **manojinkyank** (.53) over SSH in an Orca terminal. Real client on this PC; the operator ran every `sudo` step and the Google sign-ins. `ufw` was opened for .53 only. Torn down afterwards: DB dropped, Valkey cleared, client uninstalled, files removed from .53.
 - **AT-D6 PASS:**
   - connector migrated 17 ms after the drain;
   - new connections went to the other relay after the client's 60 s transport sync (+59 s);
   - the running 1 GiB download **completed** (+442 s);
   - the console went from `streams_open` to "Drained".
-- **FU-11 (connector):** the 120 s drain timeout only aborts the session task; detached stream tasks keep the old relay connection open, so running streams aren't cut. Not fixed: D-32 rules out connector changes this sprint.
+- **FU-14 (connector, numbered FU-11 in PR #158):** the 120 s drain timeout only aborts the session task; detached stream tasks keep the old relay connection open, so running streams aren't cut. Not fixed: D-32 rules out connector changes this sprint.
 - **AT-E4 PASS:** the console's install-as-a-service block ran unchanged on .53; the relay went pending → active; its token was used up (JTI gone). AT-E5 part: delete of a pending relay and add again works. The expired-token hint still needs a 24 h token.
 - **Setup notes for the next lab run:**
   - `CONTROLLER_HTTP_URL` must be `http://localhost:8080`: Google rejects a private-IP client callback.

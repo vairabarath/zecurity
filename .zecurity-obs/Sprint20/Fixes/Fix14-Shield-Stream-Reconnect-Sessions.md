@@ -229,3 +229,37 @@ Branch `sprint20/fix14-shield-reconnect-sessions` at `ddbef089` (Fix 14 + Fix 15
 **Observation (not Fix 14):** stopping the **connector** process mid-session (Ctrl-C) left the client's session silent until the client's QUIC idle timeout: it noticed 30 s later (`relay failure signalled — early transport resync`). That is the client↔connector liveness path (Fix 05 area), not the shield stream. The planned check "restart the connector mid-session → close within ~1 s" was the wrong layer for F44 and was replaced by check 3 (shield killed).
 
 **Observation (lab only):** after one failed renewal the shield was not asked again before expiry: the connector re-sends ReEnroll at most once per 10 min per stream (K2 throttle), and the lab renewal window is 6 min. With production lifetimes (48 h window) there are many retries.
+
+## Post-Phase Fixes
+
+
+### Fix: a relayed shield-tunnel stream ended without TLS close_notify, so the Client cut the tail (2026-10-30, live E2E run F-7)
+**Issue:** through a relay, every shield-tunnel flow ended with the Client error `peer closed connection without
+sending TLS close_notify`; the Client reset the app connection and the last buffered bytes were lost (a 20 MB download
+ended at ~19.95 MB, `curl` exit 56; small requests sometimes "connection reset" after a 200).
+
+**Root Cause:** `agent_tunnel::relay_stream` returned on the Shield's clean `TunnelClose` without shutting the device
+stream down. On the direct path the dropped QUIC stream still FINs cleanly; on the relay path the device stream is
+the inner Client↔Connector TLS stream, and dropping it sends the FIN without `close_notify`. (Found with full-chain
+relay logs: the relay forwarded everything and ended cleanly; `finished_first="connector to client"`.)
+
+**Fix Applied (`connector/src/agent_tunnel.rs`):**
+```rust
+// AFTER the Shield → Device loop:
+if clean_close {   // RelayEvent::Close with an empty error
+    tokio::select! {
+        _ = tokio::time::timeout(DEVICE_SHUTDOWN_GRACE /* 120 s */, writer.shutdown()) => {}
+        _ = self.cancel_token.cancelled() => {}
+    }
+}
+// A Shield-reported error, a lost session or a failed write still ends abruptly (the Client can tell).
+```
+A first version bounded the shutdown at 2 s; the close_notify queues behind all data still in flight, so slow readers
+still lost the end (1 of 31 flows) — hence 120 s + cancellation.
+
+**Tests:** `a_clean_close_shuts_the_device_stream_down_an_error_does_not`, `a_slow_reader_still_gets_the_clean_end`
+(paused clock; fails with a 2 s grace); connector 271 pass. Diagnostics kept: relay bridge summary with per-direction
+bytes and the full error chain; connector copy result; Client relay-pool retire/close lines and a debug flow-end line.
+
+**Live:** 20 MB at 400 KB/s through a relay, 2/2 complete with matching sha (before 0/4); 55 relay-path flows, 0
+close_notify errors.

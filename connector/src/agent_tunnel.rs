@@ -32,6 +32,11 @@ const EARLY_BYTES_LIMIT: usize = 1024 * 1024;
 /// Fix 14 handover: how long device data waits for the session's stream to
 /// be replaced after its send channel closed.
 const HANDOVER_SEND_GRACE: Duration = Duration::from_secs(15);
+/// F-7: upper bound for shutting the device stream down after a clean end
+/// (inner TLS close_notify, then FIN). The close_notify queues behind all data
+/// still in flight, so a slow reader needs as long as it takes to drain: 2 s
+/// cut every slow download's end. Cancellation ends it sooner.
+const DEVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
 // Events dispatched from Shield → relay session
@@ -609,6 +614,7 @@ impl RelaySession {
         });
 
         // Shield → Device: relay events to the device stream.
+        let mut clean_close = false;
         while let Some(event) = self.event_rx.recv().await {
             match event {
                 RelayEvent::Data(data) => {
@@ -617,7 +623,9 @@ impl RelaySession {
                     }
                 }
                 RelayEvent::Close(err) => {
-                    if !err.is_empty() {
+                    if err.is_empty() {
+                        clean_close = true;
+                    } else {
                         warn!(connection_id = %self.connection_id, error = %err, "shield closed tunnel with error");
                     }
                     break;
@@ -627,6 +635,18 @@ impl RelaySession {
         }
 
         d2s.abort();
+        if clean_close {
+            // The resource closed normally: end the device stream properly. On
+            // a relayed stream this sends the inner TLS close_notify before the
+            // FIN; dropping the stream instead looked like a truncation, so the
+            // Client reset the app connection and the tail of every response
+            // was lost (live E2E run 2026-10-30, F-7). A failed or lost session
+            // still ends abruptly, so the Client can tell it from a normal end.
+            tokio::select! {
+                _ = tokio::time::timeout(DEVICE_SHUTDOWN_GRACE, writer.shutdown()) => {}
+                _ = self.cancel_token.cancelled() => {}
+            }
+        }
         Ok(())
     }
 }
@@ -653,6 +673,183 @@ mod stream_ownership_tests {
                 }
             }
         });
+    }
+
+    /// A device stream that records whether it was shut down (as opposed to
+    /// dropped): a relayed stream needs the shutdown to send close_notify.
+    struct ShutdownProbe {
+        inner: tokio::io::DuplexStream,
+        shut: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for ShutdownProbe {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ShutdownProbe {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.shut.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// Runs one session that receives `data` and then a Close with `error`;
+    /// returns what the device read and whether its stream was shut down.
+    async fn session_end(error: &str) -> (Vec<u8>, bool) {
+        let hub = AgentTunnelHub::new();
+        let (tx, rx) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        accept_all(hub.clone(), rx);
+        let session = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
+            .await
+            .expect("opened");
+        let connection_id = session.connection_id.clone();
+        let (mut device, relay_end) = tokio::io::duplex(64 * 1024);
+        let shut = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay = tokio::spawn(session.relay_stream(ShutdownProbe {
+            inner: relay_end,
+            shut: shut.clone(),
+        }));
+        hub.dispatch_data(&connection_id, b"HTTP/1.0 200 OK\r\n\r\nbody".to_vec(), 1)
+            .await;
+        hub.dispatch_close(&connection_id, error.to_string(), 1);
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("session ends")
+            .unwrap()
+            .unwrap();
+        let mut got = Vec::new();
+        tokio::time::timeout(WAIT, device.read_to_end(&mut got))
+            .await
+            .expect("device sees the end")
+            .unwrap();
+        (got, shut.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// F-7 (live E2E run 2026-10-30): a resource that closes normally ends the
+    /// device stream with a shutdown (close_notify on a relayed stream), after
+    /// all its data; a Shield-reported error still ends it abruptly.
+    #[tokio::test]
+    async fn a_clean_close_shuts_the_device_stream_down_an_error_does_not() {
+        let (got, shut) = session_end("").await;
+        assert_eq!(got, b"HTTP/1.0 200 OK\r\n\r\nbody");
+        assert!(shut, "a clean close must shut the device stream down");
+
+        let (_, shut) = session_end("resource reset").await;
+        assert!(!shut, "an error close must not look like a clean end");
+    }
+
+    /// A device stream whose shutdown completes only once the reader has
+    /// drained it, as a relayed stream's close_notify queues behind the data
+    /// still in flight. Records whether the shutdown completed.
+    struct DrainGatedShutdown {
+        inner: tokio::io::DuplexStream,
+        drained: Arc<std::sync::atomic::AtomicBool>,
+        waker: Arc<parking_lot::Mutex<Option<std::task::Waker>>>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl tokio::io::AsyncRead for DrainGatedShutdown {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl tokio::io::AsyncWrite for DrainGatedShutdown {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if !self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+                *self.waker.lock() = Some(cx.waker().clone());
+                return std::task::Poll::Pending;
+            }
+            self.completed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// F-7: the close_notify queues behind data still in flight, so a reader
+    /// slower than the old 2 s grace must still get the clean end.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_reader_still_gets_the_clean_end() {
+        let hub = AgentTunnelHub::new();
+        let (tx, rx) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        accept_all(hub.clone(), rx);
+        let session = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
+            .await
+            .expect("opened");
+        let connection_id = session.connection_id.clone();
+        let (_device, relay_end) = tokio::io::duplex(1024);
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay = tokio::spawn(session.relay_stream(DrainGatedShutdown {
+            inner: relay_end,
+            drained: drained.clone(),
+            waker: waker.clone(),
+            completed: completed.clone(),
+        }));
+        hub.dispatch_data(&connection_id, b"body".to_vec(), 1).await;
+        hub.dispatch_close(&connection_id, String::new(), 1);
+        // The slow reader takes 10 s to drain what is in flight.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drained.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(w) = waker.lock().take() {
+            w.wake();
+        }
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("session ends")
+            .unwrap()
+            .unwrap();
+        assert!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            "the shutdown must still complete after a slow drain"
+        );
     }
 
     #[tokio::test]

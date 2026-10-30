@@ -100,3 +100,19 @@ F20 was closed in code by bug 3; this is its first live run of the original scen
 | 05:34:58 | `f20-direct` via the tunnel → 200; manoj :8000 → not captured, unreachable (000) |
 
 The controller log has 0 `compile acl` / `requires a shield` errors for the whole run. With F20, the connector would have stayed at the pre-orphan version, and `f20-after` would never have arrived.
+
+## Post-Phase Fixes
+
+
+### Fix: a revoked relay kept accepting clients (2026-10-30, live E2E run F-8)
+**Issue:** after Fix 17 a revoked relay stopped heartbeating but kept its QUIC listener open; clients kept reaching it
+and failing ("Relay Lookup failed") while their connectors had already moved.
+
+**Fix Applied:** `relay/src/heartbeat.rs` `run` returns only on the controller's revoked marker (documented);
+`relay/src/main.rs` turns that into a `stop` future for `listener::run_listener`, which then closes the endpoint with
+application close `0x524556` / `relay revoked`, waits up to 2 s for peers to receive it, and returns; the process exits
+0 (the unit's `Restart=on-failure` does not restart it — revoked stays terminal).
+
+**Tests:** `revoked_relay_closes_connections_and_stops` (peer sees `relay revoked` within 3 s; fails without the
+close); relay 119 pass. **Live:** revoked relays logged `Relay revoked: closing every connection and the listener` /
+`Relay stopped after revocation` on their next heartbeat and their units went inactive.
