@@ -3384,3 +3384,13 @@ serves on `127.0.0.1:9102`.
 - **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
   re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
+## 2026-10-30 — M1: live E2E — lab rebuilt after the reboot and the Phase D reset; journey 6 (workspace isolation) PASS
+- All machines had rebooted; dev DB reset for Phase D `043_`; controller from `fixed-pendings` `710ed362`; workspaces
+  `xiyo` and `e2e-other` re-seeded with a throwaway program (deleted); client rebuilt for the new platform root.
+- seechan5's shield (not ours) uninstalled at the user's request; the unknown shield on this PC left alone; nika's IP
+  is now .33.
+- Journey 6: 51 cross-workspace probes as `e2e-other`'s admin with `xiyo`'s IDs, all refused with not-found answers;
+  `xiyo`'s rows identical before and after; no leaks in lists; no controller errors.
+- **F-6** public `lookupWorkspacesByEmail` enumerates email → workspace with no limit (ADR-009 Tier 3 not built) →
+  FU-11 (user decision: follow-up).
+
