@@ -700,6 +700,14 @@ func main() {
 		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	}()
 
+	// FU-6: re-send the current relay list to any connector a post-commit
+	// broadcast missed (failed build, full send queue, out-of-order delivery).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		connectorRegistry.RunRelayListSync(ctx, relayStore, 60*time.Second)
+	}()
+
 	// Sprint 22 Phase D: re-set the heartbeat draining flags from Postgres.
 	wg.Add(1)
 	go func() {

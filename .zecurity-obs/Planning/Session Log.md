@@ -3344,3 +3344,13 @@ serves on `127.0.0.1:9102`.
 - Independent read-only review: ready with follow-ups. Fixed before commit: post-commit hooks (drain/resume and revoke/delete) detached from the request context; broadcast failures logged with the relay id (`relay.DrainFanout`); inactive draining relay text. Added AT-D12 and hook-ordering tests. Residuals tracked as FU-7.
 - Gates: Go 1520 pass / 0 fail / 2 expected skips; console 507 pass, lint/build clean; `cargo test relay_selector` 27 pass. Mutation checks on the row locks, the shared predicate, the warning condition and the detached hook context.
 - Pending: live AT-D on the lab fleet (M1, V3).
+
+## 2026-10-30 — M2: Phase D follow-ups FU-6 and FU-7; Sprint 22 doc fixes
+- Branch `sprint22/fu6-fu7-relay-drain-residuals` (from `fixed-pendings` `11d3d3e1`). No schema, connector, relay or proto change.
+- **FU-6:** each connector Control stream records the relay list version last sent; `RunRelayListSync` (60 s) sends the current list only to streams that are behind (missed broadcast, full queue, out-of-order delivery). Not a blind re-broadcast: the connector re-probes on every push.
+- **FU-7:** `EvictRelays` locks in id order (drain/eviction deadlock reproduced on the old statement, gone on the new); `RecordHeartbeat` keeps a newer count; `drain_started_at` from the controller clock after the locks; `GetActiveRelay` skips draining relays; `eligible.Where` never NULL; race tests for drain vs eviction, revoke and resume.
+- Mutation checks: every fix reverted once, its test failed.
+- Gate: Go 1531 pass / 0 fail / 2 expected skips; `go vet` clean.
+- Docs: D-gate status (merged in #156), Done Criteria ticked where met (TOTP, relay roles, reason + name, console write surface, no out-of-scope changes); enrolment and drain criteria wait for AT-E4/E5 and AT-D6 on the lab.
+- Pending (M1, lab): AT-D6 client data plane, AT-E4/E5, AT-X, then V4.
+

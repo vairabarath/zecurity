@@ -216,7 +216,7 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 - [x] **D4** Shared eligibility predicate; `RelaySummary.draining_since` / `drain_state`, `RelayDetail.in_relay_list` / `eligible_relay_count` (additive).
 - [x] **D5** Console: Draining badge, Drain/Resume on Relay detail, `drain_state` progress, last-relay warning on revoke/delete, Overview attention item; dialog props; API-surface pin.
 - [x] **D6** Regression: connector `relay_selector` tests run unchanged (no connector code touched).
-- [ ] **D-gate** *(Status 2026-10-29: implementation complete; PR #156 open, not merged, CI green; live control-plane cases PASS, AT-D6 client data plane pending. Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
+- [ ] **D-gate** *(Status 2026-10-30: **merged** in PR #156 (merge commit `11d3d3e1`), CI green; live control-plane cases PASS, AT-D6 client data plane pending on the lab (V3). Review residuals FU-6 and FU-7 fixed afterwards (see Post-Sprint Fixes). Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
 
 ### Phase V — M1: Acceptance
 
@@ -239,13 +239,13 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 ## Sprint 22 Done Criteria
 
-- [ ] Super-admins **cannot act** without TOTP; enrolment, verification, replay rejection, rate limit and recovery work and are audited.
-- [ ] Relay revoke/delete are **super-admin only** server-side; relay-ops can create, drain and resume.
-- [ ] Revoke/delete require a **reason and typed name**, server-checked; errors are JSON codes; repeat actions get clear 409s.
-- [ ] A relay can be **enrolled from the console** with a one-time token and a complete install command.
-- [ ] A relay can be **drained and resumed**; connectors migrate with no connector change; the last eligible relay can't be drained.
-- [ ] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test).
-- [ ] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched.
+- [x] Super-admins **cannot act** without TOTP; enrolment, verification, replay rejection, rate limit and recovery work and are audited. *(AT-T PASS 2026-10-27.)*
+- [x] Relay revoke/delete are **super-admin only** server-side; relay-ops can create, drain and resume. *(AT-A PASS 2026-10-26; drain/resume by relay-ops in `TestDrainDB_RelayOpsMayDrainAndResume` and live AT-D.)*
+- [x] Revoke/delete require a **reason and typed name**, server-checked; errors are JSON codes; repeat actions get clear 409s. *(AT-A PASS 2026-10-26.)*
+- [ ] A relay can be **enrolled from the console** with a one-time token and a complete install command. *(AT-E1…E3 PASS; E4/E5 on the lab pending.)*
+- [ ] A relay can be **drained and resumed**; connectors migrate with no connector change; the last eligible relay can't be drained. *(Control plane PASS live; AT-D6 client data plane pending.)*
+- [x] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test). *(`api-surface.test.ts` pins them; console 507 pass at the D merge.)*
+- [x] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched. *(Checked 2026-10-30: no Sprint 22 phase commit touches `connector/`, `relay/`, `proto/` or `admin/`, and none removes a workspace status predicate. Other merged work in the same window (Sprint 20 fixes, device approval) did touch them; it is not Sprint 22 scope.)*
 - [ ] All scenarios in [[Sprint22/Acceptance-Test-Plan]] pass.
 
 ## Follow-ups (tracked)
@@ -257,10 +257,29 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
-| FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | Open |
-| FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | Open |
+| FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | **Fixed** 2026-10-30 (branch `sprint22/fu6-fu7-relay-drain-residuals`, see Post-Sprint Fixes → FU-6) |
+| FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | **Fixed** 2026-10-30 (same branch, see Post-Sprint Fixes → FU-7) |
 
 ## Post-Sprint Fixes
+
+### Fix: FU-6 a missed relay list reaches the connector within a minute
+**Issue:** a failed post-commit `broadcastRelayList` (drain, revoke, eviction), a full connector send queue, or two broadcasts delivered out of order left a connected connector on an old relay list until the next pool change or a reconnect. After a drain, that connector kept using the draining relay.
+
+**Root Cause:** broadcasts were fire-and-forget; nothing recorded which list each connector had been sent.
+
+**Fix Applied (`internal/connector/control_stream.go`, `cmd/server/main.go`):** each Control stream records the version of the last relay list enqueued on it (`sendRelayList`, under a per-stream lock so the recorded version is the one the connector receives last). `ConnectorRegistry.RunRelayListSync` builds the list every 60 s and sends it only to streams whose recorded version differs (`SyncRelayList`). A blind periodic re-broadcast was rejected: the connector re-probes all relays on every push (`relay_selector::handle_list_change`), so streams already current get nothing. No connector, relay or proto change.
+
+**Tests:** `TestSyncRelayList_SendsOnlyToStreamsBehind`, `…_CorrectsOutOfOrderBroadcast`, `…_FailedSendRetriedNextSync`, `TestRunRelayListSync_DeliversMissedList`. Mutation-checked: always sending, or not recording the version, fails them.
+
+### Fix: FU-7 Phase D review residuals
+Details in the Phase D file → Post-Phase Fixes. In short:
+- `EvictRelays` locks its rows in id order (as `DrainRelay` does): the drain/eviction deadlock (reproduced by the new race test against the old statement) is gone.
+- `RecordHeartbeat` keeps a newer `connection_count` when an older heartbeat is written later.
+- `drain_started_at` is the controller's clock, read after the row locks are held, like `connection_count_at`.
+- `policy.GetActiveRelay` skips draining relays.
+- `eligible.Where` is `COALESCE(…, false)`: never NULL.
+- Race tests: drain vs eviction, revoke and resume.
+
 
 ### Fix: Phase D review — post-commit hooks detached from the request (Medium)
 Drain/resume and revoke/delete fan-out hooks ran on the request context; a disconnecting client could cancel the relay-list broadcast of a committed change. Now `fanoutContext(r)` (`context.WithoutCancel` + 10 s). Also: broadcast failures logged with the relay id (`relay.DrainFanout`), and an inactive draining relay gets its own console text. Details and accepted follow-ups (FU-7): Phase D file → Post-Phase Fixes.
