@@ -346,8 +346,11 @@ fn refuse_listed_connector(
     crl: &crl::CrlStore,
     connector_id: &str,
 ) -> std::result::Result<(), LeftConnector> {
-    match check_connector_crl(crl, connector_id) {
-        Err(LeftConnector(reason)) if reason != NO_VALID_CRL => Err(LeftConnector(reason)),
+    match connector_crl_verdict(crl, connector_id) {
+        Err(LeftConnector(reason)) if reason != NO_VALID_CRL => {
+            warn!(connector_id, reason, "leaving the connector (D21-R)");
+            Err(LeftConnector(reason))
+        }
         _ => Ok(()),
     }
 }

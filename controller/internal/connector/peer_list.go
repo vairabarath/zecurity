@@ -26,9 +26,10 @@ type PeerListSigner interface {
 // peerListIssuer builds the controller-signed peer list each shield accepts
 // as its only source of peers (D21-R a2). The shield takes a list only when
 // its issued_at is later than the last one it accepted, so mu serialises
-// "pick issued_at, read the Connectors, sign": a later issued_at is always
-// built from a read that started later, so it never carries an older
-// membership than an earlier one (single controller instance, D-02).
+// "pick issued_at, read the Connectors": a later issued_at is always built
+// from a read that started later, so it never carries an older membership
+// than an earlier one (single controller instance, D-02). Signing (a CA key
+// load and decrypt) happens after mu is released.
 type peerListIssuer struct {
 	signer PeerListSigner
 	mu     sync.Mutex
@@ -56,6 +57,20 @@ func (p *peerListIssuer) build(ctx context.Context, db *pgxpool.Pool, shieldID s
 	if p == nil || p.signer == nil {
 		return nil, nil
 	}
+	tenantID, raw, err := p.readPayload(ctx, db, shieldID)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := p.signer.SignShieldPeerList(ctx, tenantID, raw)
+	if err != nil {
+		return nil, fmt.Errorf("peer list: %w", err)
+	}
+	return &shieldpb.SignedPeerList{Payload: raw, Signature: sig}, nil
+}
+
+// readPayload picks issued_at and reads the membership under mu, and returns
+// the serialized payload and the tenant whose key signs it.
+func (p *peerListIssuer) readPayload(ctx context.Context, db *pgxpool.Pool, shieldID string) (string, []byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -72,10 +87,10 @@ func (p *peerListIssuer) build(ctx context.Context, db *pgxpool.Pool, shieldID s
 		  WHERE s.id = $1`,
 		shieldID,
 	).Scan(&tenantID, &trustDomain, &rnID); err != nil {
-		return nil, fmt.Errorf("peer list: load shield %s: %w", shieldID, err)
+		return "", nil, fmt.Errorf("peer list: load shield %s: %w", shieldID, err)
 	}
 	if trustDomain == "" {
-		return nil, fmt.Errorf("peer list: shield %s: workspace has no trust domain", shieldID)
+		return "", nil, fmt.Errorf("peer list: shield %s: workspace has no trust domain", shieldID)
 	}
 
 	rows, err := db.Query(ctx,
@@ -89,7 +104,7 @@ func (p *peerListIssuer) build(ctx context.Context, db *pgxpool.Pool, shieldID s
 		rnID, tenantID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("peer list: connectors for shield %s: %w", shieldID, err)
+		return "", nil, fmt.Errorf("peer list: connectors for shield %s: %w", shieldID, err)
 	}
 	defer rows.Close()
 	payload := &shieldpb.PeerListPayload{
@@ -101,26 +116,22 @@ func (p *peerListIssuer) build(ctx context.Context, db *pgxpool.Pool, shieldID s
 	for rows.Next() {
 		var id, lanAddr string
 		if err := rows.Scan(&id, &lanAddr); err != nil {
-			return nil, fmt.Errorf("peer list: scan connector: %w", err)
+			return "", nil, fmt.Errorf("peer list: scan connector: %w", err)
 		}
 		if addr := shieldFacingAddr(lanAddr); addr != "" {
 			payload.Peers = append(payload.Peers, &shieldpb.PeerConnector{ConnectorId: id, ConnectorAddr: addr})
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("peer list: connectors for shield %s: %w", shieldID, err)
+		return "", nil, fmt.Errorf("peer list: connectors for shield %s: %w", shieldID, err)
 	}
 
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("peer list: marshal: %w", err)
-	}
-	sig, err := p.signer.SignShieldPeerList(ctx, tenantID, raw)
-	if err != nil {
-		return nil, fmt.Errorf("peer list: %w", err)
+		return "", nil, fmt.Errorf("peer list: marshal: %w", err)
 	}
 	p.lastMS = issuedAt
-	return &shieldpb.SignedPeerList{Payload: raw, Signature: sig}, nil
+	return tenantID, raw, nil
 }
 
 // shieldFacingAddr turns a Connector's lan_addr (host or host:port) into the
@@ -134,6 +145,33 @@ func shieldFacingAddr(lanAddr string) string {
 		return ""
 	}
 	return net.JoinHostPort(host, shieldGRPCPort)
+}
+
+// peerListPushTimeout bounds a background peer-list push.
+const peerListPushTimeout = 30 * time.Second
+
+// pushPeerListsInBackground runs PushPeerListsForNetworkOf off the caller's
+// path: called from a Connector's Control recv loop, whose AuthorizationAck
+// must not wait behind snapshot builds and CA-key signatures (Phase M, D18).
+func pushPeerListsInBackground(db *pgxpool.Pool, r *ConnectorRegistry, connectorID string) {
+	if r.peerListIssuer() == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), peerListPushTimeout)
+		defer cancel()
+		PushPeerListsForNetworkOf(ctx, db, r, connectorID)
+	}()
+}
+
+// pushSnapshotInBackground is PushSnapshotForShield off the caller's path,
+// for the same reason.
+func pushSnapshotInBackground(db *pgxpool.Pool, r *ConnectorRegistry, connectorID, shieldID string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), peerListPushTimeout)
+		defer cancel()
+		PushSnapshotForShield(ctx, db, r, connectorID, shieldID)
+	}()
 }
 
 // PushPeerListsForNetworkOf re-sends the snapshot, and with it the signed peer

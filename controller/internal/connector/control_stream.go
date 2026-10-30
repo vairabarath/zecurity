@@ -972,8 +972,9 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 			}
 		}
 		// D21-R (a2): a Connector that came back or changed address changes
-		// its network's signed peer lists.
-		PushPeerListsForNetworkOf(ctx, h.Pool, h.Registry, connectorID)
+		// its network's signed peer lists. In the background: this ack must
+		// not wait for them.
+		pushPeerListsInBackground(h.Pool, h.Registry, connectorID)
 	}
 	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
 	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
@@ -1127,9 +1128,10 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 			// D21-R: the new Connector has no snapshot cached for this shield.
 			// Send one so the shield gets this Connector's generation baseline
 			// (a1) and a current signed peer list (a2) now, not on a later
-			// resource change. A LAN-IP change below pushes one anyway.
+			// resource change. A LAN-IP change below pushes one anyway. In the
+			// background, off this Control stream's recv loop.
 			if h.Registry != nil && !lanIPChanged {
-				PushSnapshotForShield(ctx, h.Pool, h.Registry, client.connectorID, s.ShieldId)
+				pushSnapshotInBackground(h.Pool, h.Registry, client.connectorID, s.ShieldId)
 			}
 		}
 		if lanIPChanged {

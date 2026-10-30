@@ -71,7 +71,7 @@ message ResourceAck {
 // this list and rebuilds the resource_protect chain — anything absent is dropped.
 message ResourceSnapshot {
   repeated ResourceInstruction resources = 1; // action is implicitly "apply"
-  uint64 generation = 2; // monotonic per Connector; shield ignores snapshots older than the last applied (D21-R a1)
+  uint64 generation = 2; // per-shield counter; the shield ignores an older one from the same Connector (D21-R a1)
   // D21-R (a2): the shield's peer Connectors, signed by the controller. The
   // shield's only source of peers; processed before, and independently of,
   // the generation check. Absent when the controller could not sign one.
@@ -148,8 +148,8 @@ message ShieldControlMessage {
     // Shield → Connector
     ResourceStateReport resource_state = 13;
     // Connector → Shield — peer-Connector list piggybacked after every
-    // ShieldHealthReport. Lets the Shield fail over to a sibling Connector
-    // on the same Remote Network when this one goes down. See ADR (TODO).
+    // ShieldHealthReport. Ignored by Shields since D21-R (a2): their peers
+    // come only from ResourceSnapshot.signed_peer_list.
     PeerConnectorList peer_connector_list = 14;
     // Connector → Shield — D21-R A′: the workspace CRL, forwarded when the
     // stream opens and whenever the Connector has a newer one.
@@ -165,10 +165,10 @@ message WorkspaceCrl {
   bytes crl_der = 1;
 }
 
-// PeerConnectorList tells the Shield which Connectors on its own Remote
-// Network are currently available. The Connector emits this every time it
-// sees a ShieldHealthReport, reading its own ACL snapshot. Empty `peers` is
-// ignored by the Shield (its current list is kept as-is).
+// PeerConnectorList: the Connectors on the Shield's Remote Network, as the
+// sending Connector sees them in its own ACL snapshot. The Connector emits
+// it every time it sees a ShieldHealthReport. D21-R (a2): Shields ignore it,
+// since a Connector could use it to strand them; see SignedPeerList.
 message PeerConnectorList {
   repeated PeerConnector peers = 1;
   // Connector-revocation Phase E (D21): connector ids the sender's ACL lists

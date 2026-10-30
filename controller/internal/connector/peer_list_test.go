@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,6 +165,67 @@ func TestBuildSignedPeerList(t *testing.T) {
 	}
 	if plain.GetResourceSnapshots().GetShieldSnapshots()[shieldID].GetSignedPeerList() != nil {
 		t.Fatal("peer list without a signer")
+	}
+}
+
+// blockingSigner blocks its first signature until release is closed.
+type blockingSigner struct {
+	*keySigner
+	first   sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSigner) SignShieldPeerList(ctx context.Context, tenantID string, payload []byte) ([]byte, error) {
+	block := false
+	s.first.Do(func() { block = true })
+	if block {
+		close(s.entered)
+		<-s.release
+	}
+	return s.keySigner.SignShieldPeerList(ctx, tenantID, payload)
+}
+
+// Signing (a CA key load and decrypt in production) runs outside the
+// issuer's mutex: a slow signature doesn't hold up other lists.
+func TestPeerListSigningIsOutsideTheLock(t *testing.T) {
+	pool, ctx := setupRevocationTestDB(t)
+	slug := fmt.Sprintf("peers-lock-%d", time.Now().UnixNano())
+	wsID, td, rnID := seedRevocationWorkspace(t, pool, ctx, slug)
+	conn := seedConnector(t, pool, ctx, wsID, rnID, td, "active", nil)
+	var shieldID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, trust_domain)
+		 VALUES ($1, $2, $3, 'shield', 'active', $4) RETURNING id::text`,
+		wsID, rnID, conn, td).Scan(&shieldID); err != nil {
+		t.Fatal(err)
+	}
+	signer := &blockingSigner{keySigner: newKeySigner(t), entered: make(chan struct{}), release: make(chan struct{})}
+	r := NewConnectorRegistry()
+	r.SetPeerListSigner(signer)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := r.peerListIssuer().build(ctx, pool, shieldID)
+		firstDone <- err
+	}()
+	<-signer.entered
+	second := make(chan error, 1)
+	go func() {
+		_, err := r.peerListIssuer().build(ctx, pool, shieldID)
+		second <- err
+	}()
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second list waited for the first one's signature")
+	}
+	close(signer.release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
