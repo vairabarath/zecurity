@@ -93,13 +93,22 @@ fn health_ack(rule: &impl AckRule, reachable: bool, verified_at: i64) -> Resourc
     }
 }
 
+/// The Connector a snapshot generation came from (D21-R (a1)).
+struct SnapshotBaseline {
+    connector_id: String,
+    generation: u64,
+}
+
 pub struct SharedResourceState {
     pub active: Mutex<Vec<ActiveResource>>,
     pub acks: Mutex<Vec<ResourceAck>>,
-    /// Generation of the last applied ResourceSnapshot (ADR-004 Phase 2).
-    /// Stale snapshots (e.g. a cached replay racing a newer live push) are
-    /// dropped so an older truth can never overwrite a newer one.
-    pub last_snapshot_generation: Mutex<u64>,
+    /// Connector and generation of the last applied ResourceSnapshot (ADR-004
+    /// Phase 2). Stale snapshots (e.g. a cached replay racing a newer live
+    /// push) from the same Connector are dropped so an older truth can never
+    /// overwrite a newer one. D21-R (a1): the generation is scoped to the
+    /// Connector that sent it, so a hostile Connector's huge generation can't
+    /// block the next Connector's snapshots.
+    snapshot_baseline: Mutex<Option<SnapshotBaseline>>,
     /// Session-local sequence, bumped on every active-set mutation (ADR-004
     /// Phase 3). Lets the controller order state reports within a session.
     pub state_seq: Mutex<u64>,
@@ -110,9 +119,28 @@ impl SharedResourceState {
         Self {
             active: Mutex::new(Vec::new()),
             acks: Mutex::new(Vec::new()),
-            last_snapshot_generation: Mutex::new(0),
+            snapshot_baseline: Mutex::new(None),
             state_seq: Mutex::new(0),
         }
+    }
+
+    /// D21-R (a1): record `generation` from `connector_id` as the new baseline
+    /// and return true, or return false (stale) when the same Connector has
+    /// already delivered this generation or a later one. A snapshot from a
+    /// different Connector than the baseline's is always admitted: the
+    /// generation is only ordered within one Connector's deliveries.
+    pub fn admit_snapshot(&self, connector_id: &str, generation: u64) -> Result<(), u64> {
+        let mut baseline = self.snapshot_baseline.lock().unwrap();
+        if let Some(b) = baseline.as_ref() {
+            if b.connector_id == connector_id && generation <= b.generation {
+                return Err(b.generation);
+            }
+        }
+        *baseline = Some(SnapshotBaseline {
+            connector_id: connector_id.to_string(),
+            generation,
+        });
+        Ok(())
     }
 
     pub fn store_ack(&self, ack: ResourceAck) {
@@ -420,22 +448,21 @@ pub async fn handle_remove(
 /// resource so the controller's protecting→protected transitions still happen
 /// when an apply was lost and the snapshot re-asserted it. Resources dropped
 /// by omission get no ack (explicit removes still arrive as instructions).
+///
+/// `connector_id` is the Connector whose stream delivered the snapshot (the
+/// one the Shield verified by SPIFFE ID); see `admit_snapshot`.
 pub async fn handle_snapshot(
     snapshot: &crate::proto::ResourceSnapshot,
+    connector_id: &str,
     state: &Arc<SharedResourceState>,
 ) -> Vec<ResourceAck> {
     // Monotonic-apply guard: never let an older truth overwrite a newer one.
-    {
-        let mut last = state.last_snapshot_generation.lock().unwrap();
-        if snapshot.generation <= *last {
-            warn!(
-                generation = snapshot.generation,
-                last_applied = *last,
-                "ignoring stale resource snapshot"
-            );
-            return Vec::new();
-        }
-        *last = snapshot.generation;
+    if let Err(last_applied) = state.admit_snapshot(connector_id, snapshot.generation) {
+        warn!(
+            generation = snapshot.generation,
+            last_applied, connector_id, "ignoring stale resource snapshot"
+        );
+        return Vec::new();
     }
 
     let now = now_unix();
@@ -620,6 +647,30 @@ fn port_drop_rule(protocol: &str, port_expr: Expression<'static>) -> Rule<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D21-R (a1): within one Connector the generation still orders
+    /// deliveries; equal or older snapshots are stale.
+    #[test]
+    fn snapshot_generation_is_ordered_within_a_connector() {
+        let state = SharedResourceState::new();
+        assert!(state.admit_snapshot("conn-a", 5).is_ok());
+        assert_eq!(state.admit_snapshot("conn-a", 5), Err(5));
+        assert_eq!(state.admit_snapshot("conn-a", 4), Err(5));
+        assert!(state.admit_snapshot("conn-a", 6).is_ok());
+    }
+
+    /// D21-R (a1): a hostile Connector's u64::MAX blocks only its own later
+    /// snapshots; the next Connector's snapshot becomes the new baseline,
+    /// and that Connector's ordering is enforced from there.
+    #[test]
+    fn a_huge_generation_does_not_outlive_its_connector() {
+        let state = SharedResourceState::new();
+        assert!(state.admit_snapshot("hostile", u64::MAX).is_ok());
+        assert_eq!(state.admit_snapshot("hostile", 7), Err(u64::MAX));
+        assert!(state.admit_snapshot("honest", 7).is_ok());
+        assert_eq!(state.admit_snapshot("honest", 6), Err(7));
+        assert!(state.admit_snapshot("honest", 8).is_ok());
+    }
 
     /// Sprint 20 Fix 18: every ack echoes the rule it is about, so the
     /// controller can ignore one for a rule that is no longer current.

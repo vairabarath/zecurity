@@ -348,6 +348,7 @@ async fn run_once(
                     Ok(Some(msg)) => {
                         match handle_connector_msg(
                             msg,
+                            &connector_id,
                             state,
                             cfg,
                             resource_state,
@@ -506,6 +507,7 @@ async fn hand_over(
                 Ok(Some(msg)) => {
                     if let Some(action) = handle_connector_msg(
                         msg,
+                        connector_id,
                         state,
                         cfg,
                         resource_state,
@@ -611,8 +613,10 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connector_msg(
     msg: ShieldControlMessage,
+    connector_id: &str,
     state: &mut ShieldState,
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
@@ -640,7 +644,7 @@ async fn handle_connector_msg(
         // ADR-004 Phase 2: authoritative desired-state snapshot — replace the
         // active set, rebuild the chain, ack every contained resource.
         Some(Body::ResourceSnapshot(snap)) => {
-            let acks = resources::handle_snapshot(&snap, resource_state).await;
+            let acks = resources::handle_snapshot(&snap, connector_id, resource_state).await;
             for ack in acks {
                 resource_state.store_ack(ack.clone());
                 if out_tx
@@ -1509,6 +1513,7 @@ mod tests {
         };
         let action = handle_connector_msg(
             msg,
+            "conn-1",
             &mut state,
             &cfg,
             &Arc::new(SharedResourceState::new()),
