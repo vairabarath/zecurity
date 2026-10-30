@@ -225,10 +225,10 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 - [x] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-30: AT-D6 client data plane **PASS** with a real client, connector on manojinkyank and two relays; connector migrated in 17 ms, new connections on the other relay after the client's 60 s sync, the running download completed; FU-14 filed. Earlier:)* *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
 
-### Next session — check on 2026-10-31 (M2)
-- [ ] **Drain console text vs FU-14.** The console says connections on a draining relay keep running "for up to 120 seconds" (`RelayDrainCard.tsx` and the drain dialog). Live AT-D6 showed they run until they end (FU-14). Decide: correct the text now ("until they end"), or leave it until FU-14 is fixed after the sprint.
-- [ ] **AT-E5 expired-token hint.** Needs a relay token that has been expiring for 24 h: create a pending relay, leave it, check the hint the next day, then delete it and add a new one.
-- [ ] **V4 final run.** Decide its scope (full re-run or the targeted regression after the last merges).
+### Remaining Sprint 22 checks (updated 2026-10-30)
+- [x] **Drain console text vs FU-14.** Decided 2026-10-30: correct it now. The card, the drain dialog and the `streams_open` line no longer promise a 120 s cut; they say open connections "keep running until they end". The `unverified` line's 120 s measurement window is the server's and stays. Branch `sprint22/drain-text-fu14`.
+- [ ] **V4 final run: 2026-10-30.** A targeted regression on the final `fixed-pendings` (after #158, #159 and the text fix): automated gates plus a live pass over T, A, E, D, X and FU-6. Results go in the Acceptance Test Plan → "Live run — V4".
+- [ ] **AT-E5 expired-token hint: 2026-10-31.** The only item left for the next day. A pending relay is created at the start of V4 and its throwaway DB is kept. Check the hint once the 24 h token has expired, then delete the relay and add a new one.
 
 ## Test gates (a phase can't be ticked without these)
 

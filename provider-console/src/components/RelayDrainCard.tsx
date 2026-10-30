@@ -26,7 +26,7 @@ function drainProgress(r: Pick<RelayDetail, 'status' | 'drain_state' | 'attached
     case 'migrating':
       return `${plural(r.attached_connectors, 'connector')} still attached. They move to other relays as soon as they get the new relay list.`
     case 'streams_open':
-      return `No connectors attached; ${plural(r.connection_count, 'connection')} still open. They end within 120 seconds of their connector moving.`
+      return `No connectors attached; ${plural(r.connection_count, 'connection')} still open. They keep running until they end, so a long transfer can keep it here; it reads as drained once they finish.`
     case 'unverified':
       // The controller sends unverified both for a missing or stale count and
       // for one measured inside the 120 s window; an inactive relay is the
@@ -129,8 +129,8 @@ export function RelayDrainCard({ relay, onDone }: { relay: RelayDetail; onDone: 
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
           <p className="max-w-xl text-sm text-subtle-foreground">
             Take it out of the relay list connectors use, before maintenance. Connectors move to other relays at once;
-            connections already on it keep running until they end, for up to 120 seconds. Fewer relays stay available
-            while it drains.
+            connections already on it keep running until they end, which for a long transfer can take a while. Fewer
+            relays stay available while it drains.
           </p>
           <Button
             variant="outline"
@@ -150,8 +150,8 @@ export function RelayDrainCard({ relay, onDone }: { relay: RelayDetail; onDone: 
           description={
             <>
               <strong className="text-foreground">{relay.name}</strong> leaves the relay list connectors use. Connectors
-              move to other relays at once; connections already on it keep running until they end, for up to 120
-              seconds. You can resume it at any time.
+              move to other relays at once; connections already on it keep running until they end, which for a long
+              transfer can take a while. You can resume it at any time.
             </>
           }
           warning="Draining reduces relay availability: until you resume it, connectors can only use the other relays."
