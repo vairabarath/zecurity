@@ -651,7 +651,7 @@ func main() {
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	workers.Go("outbox-processor-1", func() {
+	workers.Go("outbox-processor", func() {
 
 		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
 			log.Printf("outbox processor stopped: %v", err)
@@ -781,11 +781,6 @@ func main() {
 		}
 	})
 
-	workers.Go("outbox-processor-2", func() {
-		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
-			log.Printf("outbox processor stopped: %v", err)
-		}
-	})
 	<-ctx.Done()
 	log.Printf("shutdown requested")
 
