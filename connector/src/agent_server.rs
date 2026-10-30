@@ -972,8 +972,25 @@ impl ShieldService for ShieldRegistry {
         tokio::spawn(async move {
             info!(shield_id = %shield_id, "shield Control stream connected");
 
-            // ADR-004 Phase 2: replay the cached desired-state snapshot first —
-            // a rebooted shield starts empty and must be re-protected. The cache
+            // D21-R A′: the workspace CRL first (the Shield acts on nothing else
+            // without a valid one), then whenever it changes
+            // (checked on every health report). The Shield leaves a Connector
+            // that sends none for too long.
+            let mut crl_sent: Option<Arc<Vec<u8>>> = None;
+            if let Some(crl_der) = registry.workspace_crl_to_send(&mut crl_sent) {
+                use crate::shield_proto::shield_control_message::Body;
+                let _ = out_tx
+                    .send(Ok(ShieldControlMessage {
+                        body: Some(Body::WorkspaceCrl(crate::shield_proto::WorkspaceCrl {
+                            crl_der,
+                        })),
+                    }))
+                    .await;
+            }
+
+            // ADR-004 Phase 2: replay the cached desired-state snapshot right
+            // after the CRL — a rebooted shield starts empty and must be
+            // re-protected. The cache
             // is read (not consumed): it must survive for the next reconnect too.
             let cached = registry
                 .maps
@@ -1014,21 +1031,6 @@ impl ShieldService for ShieldRegistry {
                 {
                     break;
                 }
-            }
-
-            // D21-R A′: the workspace CRL right away, then whenever it changes
-            // (checked on every health report). The Shield leaves a Connector
-            // that sends none for too long.
-            let mut crl_sent: Option<Arc<Vec<u8>>> = None;
-            if let Some(crl_der) = registry.workspace_crl_to_send(&mut crl_sent) {
-                use crate::shield_proto::shield_control_message::Body;
-                let _ = out_tx
-                    .send(Ok(ShieldControlMessage {
-                        body: Some(Body::WorkspaceCrl(crate::shield_proto::WorkspaceCrl {
-                            crl_der,
-                        })),
-                    }))
-                    .await;
             }
 
             // Fix 14 (D-1 expiry rule): the stream lives no longer than the

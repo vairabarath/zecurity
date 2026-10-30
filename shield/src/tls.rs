@@ -169,7 +169,6 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
         }
         verify_connector_spiffe(end_entity.as_ref(), &self.connector_id, &self.trust_domain)
             .map_err(|e| TlsError::General(e.to_string()))?;
-        record_connector_serial(&self.connector_id, end_entity.as_ref());
         Ok(ServerCertVerified::assertion())
     }
 
@@ -197,8 +196,11 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
 }
 
 /// D21-R A′: the serial (raw DER bytes, as CRL entries store them) of the
-/// certificate each Connector last presented in a verified handshake. The
-/// Control stream checks it against the workspace CRL.
+/// certificate each Connector last presented in a completed, verified
+/// handshake (recorded in `SpiffeConnectorService::call`). The Control
+/// stream checks it against the workspace CRL. Keyed by Connector id: every
+/// unexpired certificate of a revoked Connector is in the CRL (bug 9), so
+/// which of its certificates was recorded last doesn't matter.
 static CONNECTOR_SERIALS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 > = std::sync::LazyLock::new(Default::default);
@@ -234,6 +236,7 @@ pub fn connector_serial(connector_id: &str) -> Option<Vec<u8>> {
 struct SpiffeConnectorService {
     tls: Arc<rustls::ClientConfig>,
     connector_addr: String,
+    connector_id: String,
 }
 
 impl tower_service::Service<http::Uri> for SpiffeConnectorService {
@@ -256,6 +259,7 @@ impl tower_service::Service<http::Uri> for SpiffeConnectorService {
     fn call(&mut self, _uri: http::Uri) -> Self::Future {
         let tls = self.tls.clone();
         let addr = self.connector_addr.clone();
+        let connector_id = self.connector_id.clone();
         Box::pin(async move {
             let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
             let server_name = ServerName::try_from(host)
@@ -276,6 +280,9 @@ impl tower_service::Service<http::Uri> for SpiffeConnectorService {
             {
                 Ok(s) => {
                     tracing::debug!(addr = %addr, "TLS handshake complete");
+                    if let Some(cert) = s.get_ref().1.peer_certificates().and_then(|c| c.first()) {
+                        record_connector_serial(&connector_id, cert.as_ref());
+                    }
                     s
                 }
                 Err(e) => {
@@ -325,6 +332,7 @@ pub async fn build_connector_channel(
         .connect_with_connector(SpiffeConnectorService {
             tls: Arc::new(rustls_cfg),
             connector_addr: connector_addr.to_string(),
+            connector_id: connector_id.to_string(),
         })
         .await
         .context("failed to connect to connector :9091")

@@ -58,6 +58,8 @@ const CRL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 struct LeftConnector(&'static str);
 
 const REVOKED_IN_CRL: &str = "its certificate is in the workspace CRL";
+const NO_VERIFIED_CERT: &str = "no verified connector certificate";
+const NO_VALID_CRL: &str = "no workspace CRL valid now (none received, or past its nextUpdate)";
 
 impl std::fmt::Display for LeftConnector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -289,44 +291,81 @@ fn connector_terminal(err: &anyhow::Error) -> bool {
     })
 }
 
-/// D21-R A′: whether the Shield may stay on a Connector whose certificate
-/// serial is `serial`, given the workspace CRL and how long the stream has
-/// run. Fails closed: no serial, a listed serial, or no valid CRL once the
-/// first wait is over.
+/// D21-R A′: whether the Shield may act on a Connector whose certificate
+/// serial is `serial`. Fails closed: no serial or a listed serial, at once;
+/// no CRL valid now once the Shield has been without one for CRL_FIRST_WAIT
+/// (counted across streams, so reconnecting doesn't restart it).
 fn crl_verdict(
     crl: &crl::CrlStore,
     serial: Option<&[u8]>,
-    stream_age: Duration,
     now_unix: i64,
+    now: Instant,
 ) -> std::result::Result<(), LeftConnector> {
     let Some(serial) = serial else {
-        return Err(LeftConnector("no verified connector certificate"));
+        return Err(LeftConnector(NO_VERIFIED_CERT));
     };
     match crl.check(serial, now_unix) {
         crl::RevocationStatus::NotRevoked => Ok(()),
         crl::RevocationStatus::Revoked => Err(LeftConnector(REVOKED_IN_CRL)),
-        crl::RevocationStatus::Unavailable if stream_age < CRL_FIRST_WAIT => Ok(()),
-        crl::RevocationStatus::Unavailable => Err(LeftConnector(
-            "no workspace CRL valid now (none received, or past its nextUpdate)",
-        )),
+        crl::RevocationStatus::Unavailable => match crl.without_valid_crl(now_unix, now) {
+            Some(waited) if waited >= CRL_FIRST_WAIT => Err(LeftConnector(NO_VALID_CRL)),
+            _ => Ok(()),
+        },
     }
 }
 
+fn connector_crl_verdict(
+    crl: &crl::CrlStore,
+    connector_id: &str,
+) -> std::result::Result<(), LeftConnector> {
+    crl_verdict(
+        crl,
+        tls::connector_serial(connector_id).as_deref(),
+        crl::now_unix(),
+        Instant::now(),
+    )
+}
+
+/// The verdict, logged when the Shield leaves.
 fn check_connector_crl(
     crl: &crl::CrlStore,
     connector_id: &str,
-    stream_age: Duration,
 ) -> std::result::Result<(), LeftConnector> {
-    let verdict = crl_verdict(
-        crl,
-        tls::connector_serial(connector_id).as_deref(),
-        stream_age,
-        crl::now_unix(),
-    );
+    let verdict = connector_crl_verdict(crl, connector_id);
     if let Err(e) = &verdict {
         warn!(connector_id, reason = e.0, "leaving the connector (D21-R)");
     }
     verdict
+}
+
+/// D21-R A′: refuse a Connector the stored CRL already lists (or whose
+/// certificate wasn't verified) before anything is sent to it. A missing
+/// CRL is not decided here: the Connector sends one right after the stream
+/// opens, and the periodic check handles it.
+fn refuse_listed_connector(
+    crl: &crl::CrlStore,
+    connector_id: &str,
+) -> std::result::Result<(), LeftConnector> {
+    match check_connector_crl(crl, connector_id) {
+        Err(LeftConnector(reason)) if reason != NO_VALID_CRL => Err(LeftConnector(reason)),
+        _ => Ok(()),
+    }
+}
+
+/// D21-R A′: whether to act on this Connector's instructions, snapshots and
+/// tunnels. Without a valid CRL past the first wait the Shield stays only to
+/// receive one (quarantine): a withholding Connector gets nothing done.
+fn connector_may_act(crl: &crl::CrlStore, connector_id: &str, what: &str) -> bool {
+    match connector_crl_verdict(crl, connector_id) {
+        Ok(()) => true,
+        Err(LeftConnector(reason)) => {
+            warn!(
+                connector_id,
+                reason, what, "ignored: the connector is not cleared by the workspace CRL"
+            );
+            false
+        }
+    }
 }
 
 fn connector_not_serving(err: &anyhow::Error) -> bool {
@@ -373,6 +412,8 @@ async fn run_once(
         .context("failed to open Shield Control stream")?;
     let mut inbound = response.into_inner();
     let connector_id = state.connectors[0].connector_id.clone();
+    // D21-R A′: a Connector the stored CRL lists gets nothing.
+    refuse_listed_connector(crl, &connector_id)?;
     tunnel_hub.set_upstream(Some(out_tx.clone()));
 
     info!(
@@ -406,11 +447,9 @@ async fn run_once(
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     health_ticker.tick().await;
 
-    // D21-R A′: check the Connector against the workspace CRL now and every
+    // D21-R A′: check the Connector against the workspace CRL every
     // CRL_CHECK_INTERVAL. The CRL arrives on this stream; a CRL received
     // from any Connector before is kept.
-    let stream_started = Instant::now();
-    check_connector_crl(crl, &connector_id, stream_started.elapsed())?;
     let mut crl_ticker = interval(CRL_CHECK_INTERVAL);
     crl_ticker.tick().await;
 
@@ -420,7 +459,13 @@ async fn run_once(
                 match result {
                     // Keep the Status in the chain: reconnect_loop inspects it.
                     Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
-                    Ok(None) => return Ok(()),
+                    // D21-R A′: a Connector that closes the stream while the
+                    // Shield has no valid CRL is left like one that never
+                    // sends it (else it could reconnect to stay attached).
+                    Ok(None) => {
+                        check_connector_crl(crl, &connector_id)?;
+                        return Ok(());
+                    }
                     Ok(Some(msg)) => {
                         match handle_connector_msg(
                             msg,
@@ -483,7 +528,7 @@ async fn run_once(
             }
 
             _ = crl_ticker.tick() => {
-                check_connector_crl(crl, &connector_id, stream_started.elapsed())?;
+                check_connector_crl(crl, &connector_id)?;
             }
 
             _ = health_ticker.tick() => {
@@ -707,6 +752,11 @@ async fn handle_connector_msg(
     peers: &PeerPublisher,
 ) -> Option<Result<()>> {
     match msg.body {
+        Some(Body::ResourceInstruction(_))
+            if !connector_may_act(crl, connector_id, "resource instruction") =>
+        {
+            None
+        }
         Some(Body::ResourceInstruction(instr)) => {
             if let Some(ack) = resources::handle_instruction(&instr, resource_state).await {
                 resource_state.store_ack(ack.clone());
@@ -737,6 +787,9 @@ async fn handle_connector_msg(
                         warn!(error = %e, "signed peer list not checked: no Workspace CA key")
                     }
                 }
+            }
+            if !connector_may_act(crl, connector_id, "resource snapshot") {
+                return None;
             }
             let acks = resources::handle_snapshot(&snap, connector_id, resource_state).await;
             for ack in acks {
@@ -776,6 +829,15 @@ async fn handle_connector_msg(
             None
         }
         Some(Body::TunnelOpen(open)) => {
+            if !connector_may_act(crl, connector_id, "tunnel open") {
+                tunnel::refuse_tunnel_open(
+                    &tunnel_hub,
+                    &open.connection_id,
+                    "the connector is not cleared by the workspace CRL",
+                )
+                .await;
+                return None;
+            }
             // D21-R D: only to a resource this Shield protects.
             if !resource_state.allows_tunnel(&open.destination, open.port, &open.protocol) {
                 warn!(
@@ -833,17 +895,8 @@ async fn handle_connector_msg(
                 }
                 Err(e) => warn!(error = %e, "workspace CRL not checked: no Workspace CA"),
             }
-            let serial = tls::connector_serial(connector_id);
-            match serial.map(|serial| crl.check(&serial, crl::now_unix())) {
-                Some(crl::RevocationStatus::Revoked) => {
-                    let left = LeftConnector(REVOKED_IN_CRL);
-                    warn!(
-                        connector_id,
-                        reason = left.0,
-                        "leaving the connector (D21-R)"
-                    );
-                    Some(Err(anyhow::Error::new(left)))
-                }
+            match check_connector_crl(crl, connector_id) {
+                Err(left) if left.0 == REVOKED_IN_CRL => Some(Err(anyhow::Error::new(left))),
                 _ => None,
             }
         }
@@ -1734,6 +1787,7 @@ mod tests {
         peers: &PeerPublisher,
         body: Body,
     ) {
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
         let (out_tx, _out_rx) = mpsc::channel(8);
         let action = handle_connector_msg(
             ShieldControlMessage { body: Some(body) },
@@ -1919,23 +1973,126 @@ mod tests {
         let pki = Pki::new();
         let store = crl::CrlStore::default();
         let now = crl::now_unix();
-        let young = CRL_FIRST_WAIT - Duration::from_secs(1);
-        // No CRL yet: allowed only during the first wait.
-        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), young, now).is_ok());
-        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), CRL_FIRST_WAIT, now).is_err());
+        let t0 = Instant::now();
+        // No CRL yet: allowed for CRL_FIRST_WAIT from the first check,
+        // across every stream (a reconnect doesn't restart the wait).
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t0).is_ok());
+        let almost = t0 + CRL_FIRST_WAIT - Duration::from_secs(1);
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, almost).is_ok());
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t0 + CRL_FIRST_WAIT).is_err());
+        assert!(crl_verdict(&store, Some(&[0x01]), now, t0 + CRL_FIRST_WAIT * 3).is_err());
         // No verified certificate: never.
-        assert!(crl_verdict(&store, None, Duration::ZERO, now).is_err());
-        // Listed: leave at once, even during the first wait.
+        assert!(crl_verdict(&store, None, now, t0).is_err());
+        // A valid CRL clears the wait; a listed serial is refused at once.
         let crl = pki.crl(
             &[CONNECTOR_SERIAL],
             ::time::Duration::minutes(1),
             ::time::Duration::hours(24),
         );
         store.offer(&crl, &pki.workspace_pem()).unwrap();
-        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), Duration::ZERO, now).is_err());
-        assert!(crl_verdict(&store, Some(&[0x01]), CRL_FIRST_WAIT * 10, now).is_ok());
-        // Past nextUpdate: leave.
-        assert!(crl_verdict(&store, Some(&[0x01]), CRL_FIRST_WAIT * 10, now + 24 * 3600).is_err());
+        let t1 = t0 + CRL_FIRST_WAIT * 4;
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t1).is_err());
+        assert!(crl_verdict(&store, Some(&[0x01]), now, t1).is_ok());
+        // Past its nextUpdate the wait starts again, from that moment.
+        let later = now + 24 * 3600;
+        assert!(crl_verdict(&store, Some(&[0x01]), later, t1).is_ok());
+        assert!(crl_verdict(&store, Some(&[0x01]), later, t1 + CRL_FIRST_WAIT).is_err());
+    }
+
+    /// D21-R A′ quarantine: without a valid CRL past the first wait, the
+    /// Shield ignores the Connector's snapshots and refuses its tunnels.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_valid_crl_the_connector_gets_nothing_done() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (mut state, cfg) = three_peer_state("quarantine");
+        let (peers, _live) = PeerPublisher::new(&state);
+        tls::set_connector_serial_for_test("conn-q", &[0x01]);
+        let store = crl::CrlStore::default();
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "r1".into(),
+                host: "127.0.0.1".into(),
+                protocol: "tcp".into(),
+                port_from: port,
+                port_to: port,
+            });
+        let hub = tunnel::new_hub();
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        hub.set_upstream(Some(up_tx));
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        macro_rules! send {
+            ($body:expr) => {
+                handle_connector_msg(
+                    ShieldControlMessage { body: Some($body) },
+                    "conn-q",
+                    &store,
+                    &mut state,
+                    &cfg,
+                    &resources,
+                    &out_tx,
+                    hub.clone(),
+                    &mut RenewalDebounce::default(),
+                    &peers,
+                )
+                .await
+            };
+        }
+        assert!(connector_may_act(&store, "conn-q", "start the wait"));
+        tokio::time::advance(CRL_FIRST_WAIT).await;
+
+        let snapshot = Body::ResourceSnapshot(crate::proto::ResourceSnapshot {
+            resources: vec![],
+            generation: 1,
+            signed_peer_list: None,
+        });
+        assert!(send!(snapshot).is_none());
+        assert_eq!(
+            resources.active.lock().unwrap().len(),
+            1,
+            "snapshot ignored"
+        );
+
+        let open = Body::TunnelOpen(crate::proto::TunnelOpen {
+            connection_id: "t-q".into(),
+            destination: "127.0.0.1".into(),
+            port: port.into(),
+            protocol: "tcp".into(),
+        });
+        assert!(send!(open).is_none());
+        match up_rx.recv().await.unwrap().body {
+            Some(Body::TunnelOpened(o)) => assert!(!o.ok, "tunnel refused"),
+            other => panic!("expected TunnelOpened, got {other:?}"),
+        }
+    }
+
+    /// At stream open, before anything is sent: a listed Connector (or one
+    /// without a verified certificate) is refused; a missing CRL is left to
+    /// the periodic check, so the Connector can still deliver one.
+    #[test]
+    fn a_listed_connector_is_refused_before_anything_is_sent() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        let pki = Pki::new();
+        let store = crl::CrlStore::default();
+        tls::set_connector_serial_for_test("conn-open-a", CONNECTOR_SERIAL);
+        tls::set_connector_serial_for_test("conn-open-b", &[0x01]);
+        assert!(
+            refuse_listed_connector(&store, "conn-open-a").is_ok(),
+            "no CRL yet"
+        );
+        assert!(refuse_listed_connector(&store, "conn-open-unknown").is_err());
+        let crl = pki.crl(
+            &[CONNECTOR_SERIAL],
+            ::time::Duration::minutes(1),
+            ::time::Duration::hours(24),
+        );
+        store.offer(&crl, &pki.workspace_pem()).unwrap();
+        assert!(refuse_listed_connector(&store, "conn-open-a").is_err());
+        assert!(refuse_listed_connector(&store, "conn-open-b").is_ok());
     }
 
     /// Leaving the Connector takes the terminal path: fail over to the next
@@ -2016,6 +2173,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (mut state, cfg) = three_peer_state("allowlist");
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
         let (peers, _live) = PeerPublisher::new(&state);
         let resources = Arc::new(SharedResourceState::new());
         let hub = tunnel::new_hub();

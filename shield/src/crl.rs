@@ -160,6 +160,10 @@ pub enum RevocationStatus {
 pub struct CrlStore {
     current: Mutex<Option<ValidCrl>>,
     path: Option<PathBuf>,
+    /// Since when the Shield has held no CRL valid now, across every
+    /// stream and Connector: a Connector can't restart the wait by
+    /// reconnecting.
+    no_valid_since: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl CrlStore {
@@ -169,8 +173,8 @@ impl CrlStore {
     pub fn load(state_dir: &str) -> Self {
         let path = Path::new(state_dir).join("workspace.crl");
         let store = Self {
-            current: Mutex::new(None),
             path: Some(path.clone()),
+            ..Self::default()
         };
         let saved = std::fs::read(&path).ok();
         let issuer = std::fs::read(Path::new(state_dir).join("workspace_ca.crt"))
@@ -212,10 +216,33 @@ impl CrlStore {
         Ok(true)
     }
 
+    /// How long the Shield has held no CRL valid at `now_unix`, counted
+    /// from the first time it was asked without one; None while it holds one.
+    pub fn without_valid_crl(
+        &self,
+        now_unix: i64,
+        now: tokio::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let valid = self
+            .current
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|crl| now_unix < crl.next_update);
+        let mut since = self.no_valid_since.lock().unwrap();
+        if valid {
+            *since = None;
+            return None;
+        }
+        Some(now.saturating_duration_since(*since.get_or_insert(now)))
+    }
+
     /// Fail-closed lookup of a certificate serial (raw DER serial bytes).
+    /// A valid CRL also ends any wait counted by `without_valid_crl`.
     pub fn check(&self, serial: &[u8], now: i64) -> RevocationStatus {
         match self.current.lock().unwrap().as_ref() {
             Some(crl) if now < crl.next_update => {
+                *self.no_valid_since.lock().unwrap() = None;
                 if crl.revoked.contains(serial) {
                     RevocationStatus::Revoked
                 } else {
