@@ -3394,3 +3394,11 @@ serves on `127.0.0.1:9102`.
 - **F-6** public `lookupWorkspacesByEmail` enumerates email → workspace with no limit (ADR-009 Tier 3 not built) →
   FU-11 (user decision: follow-up).
 
+## 2026-10-30 — M1: live E2E journey 7 (provider console relays) and fixes F-8, O-8
+- AT-E4 on real hosts, AT-D1–D5, D7, AT-X refusals, X4, X5 PASS; AT-D6 drain mechanics PASS.
+- **F-8** relay revoke left relay-path clients failing 35 s → client resync timing + revoked relay closes connections
+  and stops; live 3.5 s. **O-8** controller stop deadlock (Control handler without `ctx.Done()`, random select) →
+  fixed; 6/6 stops in 10 s.
+- **F-7** sustained relay-path download torn down (direct path fine) → FU-12; duplicate outbox processor → FU-13.
+- Branch `fix/e2e-j7-findings`, local only.
+

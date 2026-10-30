@@ -111,3 +111,30 @@ Classification uses the marker only; message text is never read. Any unmarked st
 - **The relay-placement UPSERT still runs after a health-UPDATE DB error** (unchanged behaviour). Only the ACL push and the ack are skipped.
 - **The design doc's Phase A row lists the client revoked list and the relay heartbeat field.** Per the Phase A instruction they stay in C/D. The design doc itself was not edited.
 - **The Workspace-CA load failure in the interceptor is still `Unauthenticated`** (unmarked, so non-terminal; optional per §4.5).
+
+## Post-Phase Fixes
+
+
+### Fix: a Control handler could outlive its stream and deadlock controller shutdown (2026-10-30, live E2E run O-8)
+**Issue:** 3 of 5 controller stops hung until systemd's SIGKILL at 90 s (`gRPC graceful shutdown timed out; forcing
+stop`, then nothing).
+
+**Root Cause (goroutine dump):** `EnrollmentHandler.Control` reads in a goroutine whose `select` sends the Recv
+result or returns on `ctx.Done()`. When the stream ends, both cases are ready and Go picks one at random; when it
+picked `ctx.Done()` no error reached `recvCh`, and the handler's main loop (`terminalSent` / `recvCh` only) waited
+forever. grpc's `GracefulStop` then held the server mutex in `handlersWG.Wait()`, so main's fallback `Stop()` blocked
+on `s.mu.Lock()`.
+
+**Fix Applied (`internal/connector/control_stream.go`, main loop):**
+```go
+// AFTER: one more case in the main loop
+case <-ctx.Done():
+	log.Printf("control stream: connector %s stream context ended: %v", connectorID, ctx.Err())
+	return ctx.Err()
+```
+Also `cmd/server/workers.go`: background workers are started by name (`workers.Go`) and shutdown waits at most 15 s,
+logging any still running (it found nothing: the hang was in `grpcServer.Stop()`, before the wait).
+
+**Tests:** `TestControlLifecycle_ReturnsWhenStreamContextEnds` (fails without the fix: "Control did not return after
+its stream context ended"), `TestWorkerSet*`. **Live:** 6/6 stops in 10 s with `all workers completed` (before: 3/6
+hung 90 s).
