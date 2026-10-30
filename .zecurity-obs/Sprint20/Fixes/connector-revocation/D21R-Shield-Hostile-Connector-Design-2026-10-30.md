@@ -130,3 +130,31 @@ Tests:
 - Every new test fails with its fix removed (mutant-checked).
 
 Gates: controller 1536 / 0 / 2 (DB-backed), connector 270, shield 79; client and relay build.
+
+## 9. Live check (2026-10-30, Sathiya's lab, manoj's host not used)
+
+Builds from `d6818a13`: controller `3ada62421e1395e2`, connector `823c5d3513d7e445`, shield `ac8209eb4ea20d98`. Each sha256 was checked on its host after install. The controller ran with the default connector cert TTL (not the 15 min of journey 7), so a revoked connector's certificate stayed in the CRL during the checks.
+
+**Setup.** The journey-7 connector certificates (15 min TTL) had expired while the lab was idle, so:
+- **Connectors:** two new ones in `e2e-net`: `e2e-conn-inkyank-d21r` on inkyank `.75` (the old install replaced, the relay's config kept) and `e2e-conn-seechan-d21r` on seechan5 `.42`. On seechan5, `/etc/zecurity/ca.crt` belonged to the revoked, stopped relay `e2e-relay-seechan2`; it was backed up to `ca.crt.bak-relay`.
+- **Shield:** the old shield's saved peers were manoj's connector (offline) and the replaced inkyank connector, so it could reach none and could never receive a signed list. That's the case where a re-enrolment is needed. The new shield `e2e-shield-nika-d21r` was enrolled on nika `.33`.
+- **Client:** logged in again (local test login).
+
+| Case | Observed |
+|---|---|
+| Baseline | Shield stream to seechan5; `workspace CRL installed revoked=0`; `peer connector list refreshed (signed) peers=4` (the two new connectors plus the disconnected old inkyank and manoj records); signed set applied at generation 1 |
+| S: protect | `e2e-d21r-web` (tcp 8815–8816 on `.33`) protected in < 1 s through the signed set (generation 2); direct from inkyank `200` → `000`; client tunnel `200` (13 ms) |
+| S: unprotect | completed in < 1 s (`unprotected`, from the removes ack); direct from inkyank `200` again |
+| S: edit | range changed to 8816–8817: the shield applied it (generation 5); direct `8815` → `200`, `8816` → `000`. Status `failed: port not listening`: the shield's health check, since nothing listens on 8816 (expected) |
+| S: delete | tombstone reaped in ≤ 1 s, the same second the shield applied the set with `resource_count=0` (reaped by the shield's ack: inferred from the code path and timing, not logged) |
+| Shield restart | before: `state.json` `resource_generation_floor: 7`, `peer_list_issued_at_ms` set, `workspace.crl` saved; after: stream at 11:36:31.200, set applied 39 ms later (`resource_count=1`); direct `000`, tunnel `200` |
+| Revoke under traffic | revoke 11:37:09.018 → shield refused by seechan5 at 09.036 → stream on inkyank 11:37:11.37; signed list `peers=3` at 11:37:12.997; probe 88/90 `200`, 2 failures (≈ 2.5 s); CRL with `revoked=1` forwarded at 11:37:41 (32 s after the revoke, the connector's CRL refresh) |
+| Controller restart | connector stream 11:39:11.757 → first `AuthorizationAck accepted` 11:39:11.772 (15 ms; the peer-list push for that change runs in the background); the shield stayed on inkyank, got a new CRL; tunnel `200`, resource `protected` |
+
+**Not run:**
+- **Refused at open (hostile connector):** the shield refusing a connector its stored CRL lists, at stream open.
+- **The clean-close path.**
+
+Both need a connector that keeps serving after revocation (the Phase A build used in the Phase E live run). Every honest revoked connector closes its shield streams itself. The unit tests cover both.
+
+**Lab left running:** the branch controller (user unit `e2e-controller`), file server `e2e-serve` (`:8081`), connector `e2e-conn-inkyank-d21r` (active), connector `e2e-conn-seechan-d21r` (revoked; process running, not serving), shield `e2e-shield-nika-d21r`, the client (tunnel up), a test web server on nika `:8815` (user process), and resource `e2e-d21r-web2` (protected). manoj's host was not touched.
