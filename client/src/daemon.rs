@@ -48,14 +48,19 @@ const RESOURCE_CMD_QUEUE_CAP: usize = 16;
 // be re-homing, so the controller's ACL may not carry the new relay yet — retry
 // with exponential backoff until the version changes, then fall back to the
 // steady poll tick. Bounded so a permanently-dead relay can't spin forever.
-// ~2+4+8+16+16 = 46s span, which covers the connector re-home floor (~5–15s).
+// ~2+4+8+8 = 22s span, which covers the connector re-home floor (~5–15s).
+// The cap is 8s, not 16s, so a change published while a burst is waiting is
+// seen within 8s (live E2E run 2026-10-30, F-8).
 const RELAY_RESYNC_BASE_SECS: u64 = 2;
-const RELAY_RESYNC_MAX_SECS: u64 = 16;
+const RELAY_RESYNC_MAX_SECS: u64 = 8;
 const RELAY_RESYNC_MAX_ATTEMPTS: u32 = 5;
 // Minimum gap between early-resync bursts. Without it, a permanently-dead relay
 // plus an app that keeps retrying connections would re-arm the signal
-// continuously and spin the burst back-to-back. The 60s tick is the backstop.
-const RELAY_RESYNC_COOLDOWN_SECS: u64 = 30;
+// continuously and spin the burst back-to-back (still at most 5 fetches per
+// burst). It was 30s: a relay revoked just after a burst left relay-path
+// clients failing for ~35s while their connectors had already moved (F-8).
+// The 60s tick is the backstop.
+const RELAY_RESYNC_COOLDOWN_SECS: u64 = 5;
 
 struct AclSyncResult {
     version: u64,
@@ -4948,7 +4953,7 @@ async fn run_transport_recovery(
 ) {
     let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
     let mut applied = false;
-    for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
+    for attempt in 1..=RELAY_RESYNC_MAX_ATTEMPTS {
         let has_identity = {
             let s = state.read().await;
             s.device.is_some() && s.session.is_some()
@@ -4977,6 +4982,10 @@ async fn run_transport_recovery(
             Err(e) => {
                 warn!(error = %e, "early transport resync failed — keeping cached snapshot");
             }
+        }
+        // No sleep after the last attempt: it only delayed the cooldown (F-8).
+        if attempt == RELAY_RESYNC_MAX_ATTEMPTS {
+            break;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));

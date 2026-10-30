@@ -97,6 +97,8 @@ impl HeartbeatTransport for GrpcHeartbeat {
     }
 }
 
+/// Runs until the controller reports this relay revoked (terminal), then
+/// returns; the caller stops serving (F-8).
 pub async fn run(cfg: RelayConfig, certs: Arc<CertManager>, state: Arc<RelayState>) {
     let transport = GrpcHeartbeat {
         controller_addr: cfg.controller_addr.clone(),
