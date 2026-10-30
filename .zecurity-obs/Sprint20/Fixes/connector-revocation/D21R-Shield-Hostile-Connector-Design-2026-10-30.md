@@ -97,6 +97,7 @@ Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings` `710ed362`), no
 | (a2) | next commit | background pushes coalesced (`pushCoalescer`): one worker per key, latest trigger wins, panic-safe, at most 4 at once (automated security review: a reconnect storm started one goroutine per trigger) |
 | A′ | `19fd600b` | proto `WorkspaceCrl` (oneof 15); connector `CrlManager::current_der`, forwarded on stream open and with health reports when newer; shield `CrlStore` (verify, newest by `thisUpdate`, `workspace.crl`), serial captured in `tls.rs`, `crl_verdict`, `LeftConnector` → terminal failover |
 | D | `c40f02d5` | `SharedResourceState::allows_tunnel`; refused `TunnelOpen` → `TunnelOpened{ok:false}` |
+| S | `c345425b` | signed resource sets (Sathiya, 2026-10-30: "snapshot-only", "shield-wide"): proto `SignedResourceSet` / `ResourceSetPayload` (desired set + pending removes); `pki.SignShieldResourceSet` (context `zecurity/shield-resource-set/v1\0`); the shield applies only verified sets, acks removes "unprotected", ignores `ResourceInstruction` (handlers removed) and the unsigned snapshot fields; shield-wide order with `resource_generation_floor` in state.json. Supersedes a1 |
 | A′ | `ef95a903` | review fixes: the CRL wait is counted across streams; quarantine past it (instructions and snapshots ignored, tunnels refused); a clean close past it is terminal; listed Connector refused before anything is sent; serial taken from the completed TLS session; the Connector sends the CRL before the snapshot replay |
 
 Changes to the design while building:
@@ -106,8 +107,8 @@ Changes to the design while building:
 - **Connector unchanged for (a2):** it forwards the snapshot as it is. It still sends `PeerConnectorList`, which the shield ignores; removing that is cleanup, not security.
 
 Residual risks (accepted):
-- **Snapshots are unsigned.** While attached, a hostile Connector can still change the active resource set. With D its pivot is limited to the shield's protected ports. A′ ends it within the `nextUpdate` of the last CRL the shield saw (≤ 24 h).
-- **(a1) cross-Connector reset.** A snapshot from a different Connector is admitted whatever its generation (Sathiya's choice), so an honest peer's slightly stale cached snapshot can apply briefly. The controller now pushes a snapshot as soon as a shield moves to a Connector, which corrects it.
+- ~~**Snapshots are unsigned.**~~ **Closed by S (`c345425b`):** the shield applies resources only from a controller-signed set and ignores instructions. While attached, a hostile Connector can now only withhold or replay sets (an older one is refused).
+- ~~**(a1) cross-Connector reset.**~~ **Closed by S:** ordering is shield-wide again on the signed generation, saved across restarts.
 - **Fail closed on a long controller outage.** When no Connector has a CRL valid now (outage longer than the 24 h CRL validity), shields leave their Connectors, the same as Connectors deny clients.
 - **Serial lookup.** The Connector's certificate serial comes from the Shield's last completed handshake with that Connector id (`tls::connector_serial`). Every unexpired certificate of a revoked Connector is in the CRL (bug 9).
 - **Not unit-tested:** the clean-close path inside `run_once`. Left to the live check.
@@ -120,6 +121,7 @@ Live-check plan (Sathiya's go-ahead first; confirm the running controller's sha)
 - **Hostile Connector:** the revocation-ignoring Connector from the Phase E live run. The shield leaves it within 5 s of a CRL that lists it.
 - **Clean close:** without a valid CRL past the wait, a Connector that closes the stream is left.
 - **D under real traffic:** a port-range resource and an `any` resource; honest traffic isn't refused.
+- **S:** protect, unprotect and delete a resource; each completes (protected, unprotected, reaped) through signed sets alone, with no instructions applied at the shield.
 
 Tests:
 - **Controller:** `TestBuildSignedPeerList`, `TestPushPeerListsForNetworkOf`, `TestPeerListSigningIsOutsideTheLock`, `TestShieldFacingAddr`, all DB-backed.
@@ -127,4 +129,4 @@ Tests:
 - **Connector:** the CRL is forwarded once per CRL per stream.
 - Every new test fails with its fix removed (mutant-checked).
 
-Gates: controller 1535 / 0 / 2 (DB-backed), connector 270, shield 73; client and relay build.
+Gates: controller 1536 / 0 / 2 (DB-backed), connector 270, shield 79; client and relay build.
