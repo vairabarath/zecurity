@@ -666,18 +666,28 @@ func (s *Store) RefreshLastHeartbeat(ctx context.Context, relayID string, seenAt
 // (still active, heartbeat still older than before) so a heartbeat DB write
 // that lands between candidate selection and eviction wins. Returns the IDs
 // actually evicted so the caller can notify affected workspaces.
+//
+// The rows are locked in id order first (FU-7): DrainRelay locks its rows in
+// the same order, so the two can't deadlock.
 func (s *Store) EvictRelays(ctx context.Context, relayIDs []string, before time.Time) ([]string, error) {
 	if len(relayIDs) == 0 {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`UPDATE relays
+		`WITH locked AS (
+		     SELECT id FROM relays
+		      WHERE id = ANY($1::uuid[])
+		        AND status = 'active'
+		        AND last_heartbeat_at < $2
+		      ORDER BY id
+		        FOR UPDATE
+		 )
+		 UPDATE relays r
 		    SET status     = 'inactive',
 		        updated_at = NOW()
-		  WHERE id = ANY($1::uuid[])
-		    AND status = 'active'
-		    AND last_heartbeat_at < $2
-		 RETURNING id::text`,
+		   FROM locked
+		  WHERE r.id = locked.id
+		 RETURNING r.id::text`,
 		relayIDs, before,
 	)
 	if err != nil {
@@ -893,9 +903,10 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        observed_port     = NULLIF($7, 0),
 		        address_scope     = NULLIF($8, ''),
 		        public_addr       = NULLIF($9, ''),
-		        connection_count  = $10,
+		        connection_count  = CASE WHEN connection_count_at IS NULL OR connection_count_at <= $12
+		                                 THEN $10 ELSE connection_count END,
 		        max_connections   = $11,
-		        connection_count_at = $12,
+		        connection_count_at = GREATEST(connection_count_at, $12),
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1

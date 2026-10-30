@@ -88,10 +88,14 @@ func (s *Store) DrainRelay(ctx context.Context, relayID string,
 		return false, errLastEligibleRelay
 	}
 
+	// FU-7: the controller's clock, read after the row locks are held. The
+	// drain window is measured against connection_count_at, which is also the
+	// controller's clock (the heartbeat's receive time); the database's NOW()
+	// is the transaction start, before any lock wait, and may be skewed.
 	var started time.Time
 	if err := tx.QueryRow(ctx,
-		`UPDATE relays SET drain_started_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING drain_started_at`,
-		relayID).Scan(&started); err != nil {
+		`UPDATE relays SET drain_started_at = $2, updated_at = NOW() WHERE id = $1 RETURNING drain_started_at`,
+		relayID, time.Now().UTC()).Scan(&started); err != nil {
 		return false, fmt.Errorf("mark relay draining: %w", err)
 	}
 	if inTx != nil {
