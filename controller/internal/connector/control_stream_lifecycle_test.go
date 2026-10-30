@@ -374,3 +374,19 @@ func TestControlLifecycle_RevokedStaysRevoked(t *testing.T) {
 		t.Fatalf("status %q after activation attempt, want revoked", got)
 	}
 }
+
+// O-8 (live E2E run 2026-10-30): when the stream's context ends (connection
+// closed, server stopping), Control returns even if the Recv goroutine never
+// delivers an error. Before, it waited on recvCh forever, which held the gRPC
+// server's GracefulStop and deadlocked Stop until SIGKILL.
+func TestControlLifecycle_ReturnsWhenStreamContextEnds(t *testing.T) {
+	f := newLifecycleFixture(t, "active")
+	r := f.open()
+	defer r.stream.close()
+	r.cancel() // Recv stays blocked: the goroutine never hands over an error
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Control did not return after its stream context ended")
+	}
+}

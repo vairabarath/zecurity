@@ -17,7 +17,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -82,7 +81,7 @@ func main() {
 	)
 
 	defer stop()
-	var wg sync.WaitGroup
+	workers := newWorkerSet()
 	var outboxStore *outbox.Outbox
 	var err error
 
@@ -584,11 +583,9 @@ func main() {
 		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("controller-rotator", func() {
 		controllerRotator.Run(ctx)
-	}()
+	})
 
 	connectorSvc := &connector.EnrollmentHandler{
 		Cfg:               connectorCfg,
@@ -654,59 +651,42 @@ func main() {
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("outbox-processor-1", func() {
 
 		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
 			log.Printf("outbox processor stopped: %v", err)
 		}
-	}()
+	})
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("connector-disconnect-watcher", func() {
 		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier, transportNotifier)
-	}()
+	})
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("shield-disconnect-watcher", func() {
 		shieldSvc.RunDisconnectWatcher(ctx)
-	}()
+	})
 
 	// Sprint 20 Fix 16 (F50): a deleted resource whose shield did not ack the
 	// rule removal within 2 s is removed anyway; the shield's snapshot drops
 	// the rule (now if connected, else on reconnect).
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("resource-tombstone-sweeper", func() {
 		resource.RunTombstoneSweeper(ctx, db.Pool, time.Second, 2*time.Second, func(t resource.ReapedTombstone) {
 			if err := policyNotifier.NotifyPolicyChange(ctx, t.TenantID); err != nil {
 				log.Printf("resource tombstone sweeper: notify policy change: %v", err)
 			}
 			connector.PushSnapshotForShield(ctx, db.Pool, connectorRegistry, t.ConnectorID, t.ShieldID)
 		})
-	}()
+	})
 
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("relay-expiry-loop", func() {
 		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
-	}()
+	})
 
 	// Sprint 22 Phase D: re-set the heartbeat draining flags from Postgres.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("relay-drain-reconcile", func() {
 		relay.ReconcileDrainFlags(ctx, relayStore, relaySvc)
 		relay.RunDrainFlagLoop(ctx, relayStore, relaySvc, 60*time.Second)
-	}()
+	})
 
 	retentionDays := envOrInt(
 		"POSTURE_RETENTION_DAYS",
@@ -724,16 +704,11 @@ func main() {
 		retentionBatchSize,
 		nil,
 	)
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
+	workers.Go("posture-retention", func() {
 		retentionWorker.Run(ctx)
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("hourly-ticker", func() {
 
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -750,16 +725,14 @@ func main() {
 				}
 			}
 		}
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	})
+	workers.Go("grpc-server", func() {
 
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
 		if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("grpc serve: %v", err)
 		}
-	}()
+	})
 
 	// Metrics on a SEPARATE internal listener — they leak operational data, so they
 	// must not sit on the public mux. Defaults to loopback; set METRICS_ADDR (e.g.
@@ -774,16 +747,14 @@ func main() {
 		Handler: metricsMux,
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("metrics-server", func() {
 
 		log.Printf("metrics listenin on %s/metrics", metricsAddr)
 
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
 		}
-	}()
+	})
 
 	// Provider console CORS (Sprint 21 H-b, D-18): only /provider/* and only
 	// the exact PROVIDER_CONSOLE_ORIGIN; unset = off (dev uses the Vite proxy).
@@ -804,21 +775,17 @@ func main() {
 	// outbox worker below previously replaced this call, so the process logged
 	// "listening on :8080", bound nothing, and every request through the SPA
 	// proxy came back 502.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("http-server", func() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http serve: %v", err)
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	workers.Go("outbox-processor-2", func() {
 		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
 			log.Printf("outbox processor stopped: %v", err)
 		}
-	}()
+	})
 	<-ctx.Done()
 	log.Printf("shutdown requested")
 
@@ -850,9 +817,14 @@ func main() {
 		grpcServer.Stop()
 	}
 
-	// Wait for all background workers to complete
-	wg.Wait()
-	log.Printf("all workers completed")
+	// Wait for the background workers, but not forever: one that ignores ctx
+	// used to hold the process until systemd's SIGKILL (live E2E run
+	// 2026-10-30, O-8). Name the stragglers so they can be fixed.
+	if stuck := workers.Wait(15 * time.Second); len(stuck) > 0 {
+		log.Printf("shutdown: workers still running after 15s, exiting anyway: %v", stuck)
+	} else {
+		log.Printf("all workers completed")
+	}
 
 	log.Printf("shutdown complete")
 }
