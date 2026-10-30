@@ -776,6 +776,23 @@ async fn handle_connector_msg(
             None
         }
         Some(Body::TunnelOpen(open)) => {
+            // D21-R D: only to a resource this Shield protects.
+            if !resource_state.allows_tunnel(&open.destination, open.port, &open.protocol) {
+                warn!(
+                    connector_id,
+                    destination = %open.destination,
+                    port = open.port,
+                    protocol = %open.protocol,
+                    "refused tunnel: not a resource this shield protects"
+                );
+                tunnel::refuse_tunnel_open(
+                    &tunnel_hub,
+                    &open.connection_id,
+                    "destination is not a resource this shield protects",
+                )
+                .await;
+                return None;
+            }
             tunnel::handle_tunnel_open(
                 tunnel_hub,
                 open.connection_id,
@@ -1988,5 +2005,80 @@ mod tests {
             Some(Err(e)) => assert!(connector_terminal(&e), "{e:#}"),
             other => panic!("expected to leave, got {other:?}"),
         }
+    }
+
+    // ── D21-R D: tunnel allowlist ───────────────────────────────────────────
+
+    /// A TunnelOpen to anything but a protected resource is refused without
+    /// connecting; one to a protected resource is opened.
+    #[tokio::test]
+    async fn tunnels_open_only_to_protected_resources() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (mut state, cfg) = three_peer_state("allowlist");
+        let (peers, _live) = PeerPublisher::new(&state);
+        let resources = Arc::new(SharedResourceState::new());
+        let hub = tunnel::new_hub();
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        hub.set_upstream(Some(up_tx));
+        let open = |id: &str, port: u16| ShieldControlMessage {
+            body: Some(Body::TunnelOpen(crate::proto::TunnelOpen {
+                connection_id: id.into(),
+                destination: "127.0.0.1".into(),
+                port: port.into(),
+                protocol: "tcp".into(),
+            })),
+        };
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let crl = crl::CrlStore::default();
+        macro_rules! send {
+            ($msg:expr) => {
+                handle_connector_msg(
+                    $msg,
+                    "conn-1",
+                    &crl,
+                    &mut state,
+                    &cfg,
+                    &resources,
+                    &out_tx,
+                    hub.clone(),
+                    &mut RenewalDebounce::default(),
+                    &peers,
+                )
+            };
+        }
+        let opened = |m: ShieldControlMessage| match m.body {
+            Some(Body::TunnelOpened(o)) => (o.connection_id, o.ok),
+            other => panic!("expected TunnelOpened, got {other:?}"),
+        };
+
+        assert!(send!(open("t-1", port)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-1".to_string(), false)
+        );
+
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "r1".into(),
+                host: "127.0.0.1".into(),
+                protocol: "tcp".into(),
+                port_from: port,
+                port_to: port,
+            });
+        assert!(send!(open("t-2", port)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-2".to_string(), true)
+        );
+        let other = if port == u16::MAX { port - 1 } else { port + 1 };
+        assert!(send!(open("t-3", other)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-3".to_string(), false)
+        );
     }
 }

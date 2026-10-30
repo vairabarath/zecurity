@@ -143,6 +143,30 @@ impl SharedResourceState {
         Ok(())
     }
 
+    /// D21-R D: whether a tunnel to `destination:port` over `protocol` is
+    /// to a resource this Shield protects. Only then does the Shield open
+    /// it, so a Connector (hostile or not) can't use the Shield to reach
+    /// anything else on its network. `destination` must be an IP equal to a
+    /// resource's host; the port within its range; the protocol covered
+    /// ("any" covers both; a tunnel that isn't "udp" is TCP, as in
+    /// `tunnel::handle_tunnel_open`).
+    pub fn allows_tunnel(&self, destination: &str, port: u32, protocol: &str) -> bool {
+        let Ok(dest) = destination.parse::<std::net::IpAddr>() else {
+            return false;
+        };
+        let Ok(port) = u16::try_from(port) else {
+            return false;
+        };
+        let tunnel_proto = if protocol == "udp" { "udp" } else { "tcp" };
+        self.active.lock().unwrap().iter().any(|r| {
+            r.host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|host| host == dest)
+                && (r.port_from..=r.port_to).contains(&port)
+                && (r.protocol == tunnel_proto || (r.protocol != "tcp" && r.protocol != "udp"))
+        })
+    }
+
     pub fn store_ack(&self, ack: ResourceAck) {
         let mut acks = self.acks.lock().unwrap();
         acks.retain(|a| a.resource_id != ack.resource_id);
@@ -647,6 +671,59 @@ fn port_drop_rule(protocol: &str, port_expr: Expression<'static>) -> Rule<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active(state: &SharedResourceState, host: &str, protocol: &str, from: u16, to: u16) {
+        state.active.lock().unwrap().push(ActiveResource {
+            resource_id: format!("{host}-{protocol}-{from}"),
+            host: host.into(),
+            protocol: protocol.into(),
+            port_from: from,
+            port_to: to,
+        });
+    }
+
+    /// D21-R D: tunnels only to the protected (ip, protocol, port range).
+    #[test]
+    fn tunnels_open_only_to_protected_resources() {
+        let state = SharedResourceState::new();
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 22, "tcp"),
+            "nothing protected"
+        );
+        active(&state, "10.0.0.5", "tcp", 8000, 8010);
+        active(&state, "10.0.0.5", "udp", 53, 53);
+        active(&state, "10.0.0.5", "any", 9000, 9000);
+        assert!(state.allows_tunnel("10.0.0.5", 8000, "tcp"));
+        assert!(state.allows_tunnel("10.0.0.5", 8010, "tcp"));
+        assert!(state.allows_tunnel("10.0.0.5", 53, "udp"));
+        assert!(state.allows_tunnel("10.0.0.5", 9000, "udp"));
+        assert!(state.allows_tunnel("10.0.0.5", 9000, "tcp"));
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 8011, "tcp"),
+            "outside the range"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 8000, "udp"),
+            "wrong protocol"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 53, "tcp"),
+            "wrong protocol"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.6", 8000, "tcp"),
+            "another host"
+        );
+        assert!(!state.allows_tunnel("127.0.0.1", 8000, "tcp"), "loopback");
+        assert!(
+            !state.allows_tunnel("localhost", 8000, "tcp"),
+            "a name, not an IP"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 65536 + 8000, "tcp"),
+            "port overflow"
+        );
+    }
 
     /// D21-R (a1): within one Connector the generation still orders
     /// deliveries; equal or older snapshots are stale.
