@@ -201,7 +201,7 @@ Branch `sprint22/phase-d-relay-drain` (`5b45c3ca`, PR #156). Throwaway database 
 | AT-D3 | PASS | 5 rounds of simultaneous drains of the last two relays (super-admin and relay-ops): each round exactly one 204 and one 409 `last_eligible_relay`; one relay always stayed listed. |
 | AT-D4 | PASS | Console resume: connector received list version `17993128744932725629`, identical to the pre-drain version; `relay.resume` audited with `drained_since`; flag cleared. |
 | AT-D5 | PASS | relay-ops: drain and resume 204; revoke and delete 403 `forbidden`. |
-| AT-D6 | **PASS** (client data plane on the lab 2026-10-30, below; finding FU-8) | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
+| AT-D6 | **PASS** (client data plane on the lab 2026-10-30, below; finding FU-11) | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
 | AT-D7 | PASS | Pending → 409 `invalid_state`; revoked → `already_revoked` (drain and resume); deleted → `already_deleted` (drain and resume); repeat drain and resume of a non-draining relay → 204 with no audit row. |
 | AT-D9 | PASS (live part) | Draining flag deleted from Valkey: restored by the reconcile loop 11 s later with a fresh TTL; state stayed `unverified` until a qualifying count. |
 | AT-D11 | PASS | Revoke and delete dialogs of the only listed relay show "No eligible relays will remain…"; a relay not in the list shows no warning. |
@@ -215,7 +215,7 @@ Connector: 2 migrations, 0 errors. Controller: 0 drain fan-out failures (post-dr
 
 *Both run on 2026-10-30 (next section).*
 
-### Live run — AT-D6 client data plane (2026-10-30, M2): PASS, finding FU-8
+### Live run — AT-D6 client data plane (2026-10-30, M2): PASS, finding FU-11
 **Setup:** throwaway controller, two relays (`d6-relay-a` :19094, `d6-relay-b` :19095) and the console on this PC (192.168.1.223); a real connector and an HTTP file server (1 GiB file, :8099) on **manojinkyank** (192.168.1.53) as user processes over SSH; the real client installed on this PC (operator ran the `sudo` install and the Google sign-in; workspace `zero` created by the operator's first admin sign-in). The connector advertised a TEST-NET LAN address (`LAN_ADDR=192.0.2.1:9091`), so the client's direct path failed and every tunnel went through a relay. Firewall (`ufw`) opened for manojinkyank only, removed afterwards.
 
 | Step | Result |
@@ -230,7 +230,7 @@ Connector: 2 migrations, 0 errors. Controller: 0 drain fan-out failures (post-dr
 
 **Verdict:** PASS against the case ("download finishes, or is cut at ~120 s"; new connection on another relay; console progression).
 
-**Finding (FU-8):** the connector's 120 s `relay_drain_timeout_secs` does not cut streams. Each relay stream is a detached `tokio::spawn` task (`connector/src/relay_handler.rs:167`); on timeout `relay_selector` only aborts the session task (`old.handle.abort()`, `relay_selector.rs:631`), so streams already running keep the old QUIC connection open until they end. A long-lived stream holds a drained relay indefinitely, and the console stays at `streams_open` until it ends. A connector change, which D-32 rules out for Sprint 22.
+**Finding (FU-11):** the connector's 120 s `relay_drain_timeout_secs` does not cut streams. Each relay stream is a detached `tokio::spawn` task (`connector/src/relay_handler.rs:167`); on timeout `relay_selector` only aborts the session task (`old.handle.abort()`, `relay_selector.rs:631`), so streams already running keep the old QUIC connection open until they end. A long-lived stream holds a drained relay indefinitely, and the console stays at `streams_open` until it ends. A connector change, which D-32 rules out for Sprint 22.
 
 **Note:** new connections move to the remaining relay only after the client's next transport sync (up to 60 s); until then they use the draining relay, which still works because its connector session is up during the drain window.
 

@@ -45,6 +45,9 @@ pub async fn run() -> Result<()> {
                 "Status:     Running as {}, cert expires in {}",
                 email, expires
             );
+            if let Some(line) = tunnel_line(resp.tunnel_up) {
+                println!("{line}");
+            }
             if let Some(cert_expires_at) = resp.cert_expires_at {
                 if seconds_until(cert_expires_at) <= CERT_EXPIRY_WARNING_SECS {
                     println!(
@@ -138,5 +141,29 @@ fn format_duration_since(ts: i64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// The tunnel line of `status`; None when the daemon didn't say (older daemon).
+fn tunnel_line(tunnel_up: Option<bool>) -> Option<String> {
+    tunnel_up.map(|up| {
+        if up {
+            "Tunnel:     up".to_string()
+        } else {
+            "Tunnel:     down — resources are not reachable; run `zecurity-client up`".to_string()
+        }
+    })
+}
+
+#[cfg(test)]
+mod tunnel_line_tests {
+    use super::tunnel_line;
+
+    #[test]
+    fn status_says_when_the_tunnel_is_down() {
+        assert_eq!(tunnel_line(Some(true)).as_deref(), Some("Tunnel:     up"));
+        assert!(tunnel_line(Some(false)).unwrap().contains("down"));
+        assert!(tunnel_line(Some(false)).unwrap().contains("zecurity-client up"));
+        assert_eq!(tunnel_line(None), None);
     }
 }

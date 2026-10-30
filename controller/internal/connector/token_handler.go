@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -136,6 +137,18 @@ func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb valkeycompat.Cmd
 			controllerAddr, controllerHTTPAddr, tokenString,
 		)
 
+		// The token itself is never audited.
+		_ = audit.Record(ctx, pool, audit.Entry{
+			TenantID:    tc.TenantID,
+			ActorUserID: tc.UserID,
+			ActorEmail:  tc.Email,
+			Action:      "connector.token.issue",
+			TargetType:  "connector",
+			TargetID:    connectorID,
+		})
+
+		// The body carries a single-use enrollment token: never cache it.
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(regenerateResponse{InstallCommand: installCmd})
 	})

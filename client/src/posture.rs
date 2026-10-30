@@ -268,9 +268,83 @@ pub(crate) async fn nft_input_default_deny(runner: &dyn CommandRunner) -> Option
     })
 }
 
-pub(crate) async fn collect_firewall(runner: Arc<dyn CommandRunner>) -> PostureCheck {
-    if let Some(c) = nft_input_default_deny(runner.as_ref()).await {
-        return c;
+/// True when `iptables --version` reports the legacy (xtables) backend. Its
+/// rules, ufw's included, are not part of the nftables ruleset. Needs no
+/// privilege, unlike listing the rules.
+pub(crate) async fn iptables_is_legacy(runner: &dyn CommandRunner) -> bool {
+    match runner.run("iptables", &["--version"]).await {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).contains("(legacy)")
+        }
+        _ => false,
+    }
+}
+
+fn read_shell_vars(path: &Path) -> Option<HashMap<String, String>> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            map.insert(
+                key.trim().to_string(),
+                value.trim().trim_matches('"').to_string(),
+            );
+        }
+    }
+    Some(map)
+}
+
+/// ufw's own configuration, for an iptables-legacy host whose rules the
+/// daemon can't read (`iptables` needs root's xtables lock, `ufw status`
+/// needs root). `ufw enable` / `ufw disable` keep `ENABLED` in step with the
+/// runtime state; a manual `iptables -P INPUT ACCEPT` is not seen. None when
+/// ufw isn't configured on the host.
+pub(crate) fn ufw_config_default_deny(root: &Path) -> Option<PostureCheck> {
+    let conf = read_shell_vars(&root.join("etc/ufw/ufw.conf"))?;
+    let enabled = conf.get("ENABLED").map(String::as_str) == Some("yes");
+    if !enabled {
+        return Some(check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Fail,
+            "ufw disabled (/etc/ufw/ufw.conf)",
+        ));
+    }
+    let policy = read_shell_vars(&root.join("etc/default/ufw"))
+        .and_then(|d| d.get("DEFAULT_INPUT_POLICY").cloned())
+        .unwrap_or_default();
+    Some(match policy.as_str() {
+        "DROP" | "REJECT" => check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Pass,
+            format!(
+                "ufw enabled per /etc/ufw/ufw.conf, default input policy {policy} \
+                 (iptables-legacy: runtime rules not readable)"
+            ),
+        ),
+        _ => check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Fail,
+            format!("ufw enabled but default input policy is {policy:?}"),
+        ),
+    })
+}
+
+pub(crate) async fn collect_firewall(runner: Arc<dyn CommandRunner>, root: &Path) -> PostureCheck {
+    let nft = nft_input_default_deny(runner.as_ref()).await;
+    if let Some(c) = &nft {
+        if c.status == CheckStatus::Pass as i32 {
+            return c.clone();
+        }
+    }
+    // With iptables-nft (or no iptables) the nftables ruleset holds every rule,
+    // so its answer stands. With iptables-legacy it doesn't: look further.
+    let legacy = iptables_is_legacy(runner.as_ref()).await;
+    if let Some(c) = nft.as_ref().filter(|_| !legacy) {
+        return c.clone();
     }
 
     let iptables = try_backend(
@@ -281,25 +355,39 @@ pub(crate) async fn collect_firewall(runner: Arc<dyn CommandRunner>) -> PostureC
         "iptables present but not default-deny",
     )
     .await;
-    if let Some(c) = iptables {
-        return c;
+    match iptables {
+        // Unreadable rules on a legacy host (not root) settle nothing.
+        Some(c) if c.status == CheckStatus::Error as i32 && legacy => {}
+        Some(c) => return c,
+        None => {}
     }
 
     match runner.run("ufw", &["status"]).await {
-        Ok(out) => {
+        Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
-            if text.contains("Status: active") {
+            return if text.contains("Status: active") {
                 check(CHECK_ID_FIREWALL, CheckStatus::Pass, "ufw active")
             } else {
                 check(CHECK_ID_FIREWALL, CheckStatus::Fail, "ufw inactive")
-            }
+            };
         }
-        Err(_) => check(
+        // Not root: `ufw status` refuses, which says nothing about the firewall.
+        Ok(_) => {}
+        Err(_) => {}
+    }
+
+    if legacy {
+        if let Some(c) = ufw_config_default_deny(root) {
+            return c;
+        }
+    }
+    nft.unwrap_or_else(|| {
+        check(
             CHECK_ID_FIREWALL,
             CheckStatus::Fail,
             "no firewall backend found (nft/iptables/ufw)",
-        ),
-    }
+        )
+    })
 }
 
 pub(crate) async fn run_check(
@@ -368,13 +456,16 @@ pub(crate) async fn collect_with(
     let root_a = root.to_path_buf();
     let root_b = root.to_path_buf();
     let root_c = root.to_path_buf();
+    let root_d = root.to_path_buf();
 
     let (os_check, luks_check, fw_check, sb_check) = tokio::join!(
         run_check(CHECK_ID_OS_VERSION, timeout, move || {
             collect_os_version_check(&root_a)
         }),
         run_check(CHECK_ID_LUKS, timeout, move || collect_luks(&root_b)),
-        run_async_check(CHECK_ID_FIREWALL, timeout, collect_firewall(runner)),
+        run_async_check(CHECK_ID_FIREWALL, timeout, async move {
+            collect_firewall(runner, &root_d).await
+        }),
         run_check(CHECK_ID_SECURE_BOOT, timeout, move || {
             collect_secure_boot(&root_c)
         }),

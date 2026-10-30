@@ -34,6 +34,7 @@ func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string,
 		return nil, fmt.Errorf("create remote network: %w", err)
 	}
 
+	r.auditAdmin(ctx, "remote_network.create", "remote_network", rn.ID, map[string]any{"name": rn.Name, "location": strings.ToLower(string(location))})
 	return rn, nil
 }
 
@@ -64,6 +65,7 @@ func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (
 		return false, fmt.Errorf("delete remote network: %w", err)
 	}
 
+	r.auditAdmin(ctx, "remote_network.delete", "remote_network", id, nil)
 	return true, nil
 }
 
@@ -103,6 +105,7 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 		return nil, fmt.Errorf("generate connector token: insert connector: %w", err)
 	}
 
+	r.auditAdmin(ctx, "connector.create", "connector", connectorID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})
 	// Token minting is lazy: the create path only reserves the pending row.
 	// The enrollment token (JWT + Redis jti + install command) is issued on
 	// demand by the REST endpoint POST /api/connectors/{id}/token when the
@@ -157,6 +160,7 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string, alsoR
 		return false, fmt.Errorf("revoke connector: %w", err)
 	}
 
+	r.auditAdmin(ctx, "connector.revoke", "connector", id, map[string]any{"also_revoke_shields": revokeShields})
 	// The UPDATE has committed: deliver the explicit terminal ConnectorRevoked
 	// on every live Control stream of this connector (including a stream
 	// superseded by a make-before-break renewal). Done before the notifies so
@@ -238,6 +242,7 @@ func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool
 		return false, fmt.Errorf("delete connector: %w", err)
 	}
 
+	r.auditAdmin(ctx, "connector.delete", "connector", id, nil)
 	return true, nil
 }
 

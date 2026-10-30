@@ -30,6 +30,7 @@ func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (
 		return nil, fmt.Errorf("create invitation: %w", err)
 	}
 
+	r.auditAdmin(ctx, "invitation.create", "invitation", inv.ID, map[string]any{"email": email})
 	var workspaceName string
 	r.Pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id = $1`, tc.TenantID).Scan(&workspaceName) //nolint:errcheck
 	if workspaceName == "" {
@@ -63,6 +64,7 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 		}
 		return false, fmt.Errorf("revoke device: %w", err)
 	}
+	r.auditAdmin(ctx, "device.revoke", "device", deviceID, nil)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("revoke device: refresh policy: %w", err)
 	}

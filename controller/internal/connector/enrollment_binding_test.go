@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,10 @@ func (f *bindingFixture) reissue(rdb valkeycompat.Cmdable) (string, int) {
 	RegenerateTokenHandler(f.pool, f.cfg, rdb).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		return "", rec.Code
+	}
+	// The body is a single-use enrollment token (live run 2026-10-29, O-1).
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		f.t.Errorf("token response Cache-Control = %q, want no-store", cc)
 	}
 	var resp regenerateResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -259,6 +264,26 @@ func TestEnrollBinding_NormalEnrollment(t *testing.T) {
 	// Retrying the winning token is refused.
 	resp, err = f.handler(f.pki).Enroll(f.ctx, f.request(token))
 	refusedEnrollment(t, resp, err, codes.PermissionDenied)
+}
+
+// Issuing a token is audited (O-2) without the token.
+func TestEnrollBinding_TokenIssueAuditedWithoutToken(t *testing.T) {
+	f := newBindingFixture(t)
+	token := f.mustReissue()
+	var n int
+	var details string
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*), coalesce(string_agg(coalesce(details::text, ''), ''), '') FROM audit_logs
+		  WHERE tenant_id = $1 AND action = 'connector.token.issue' AND target_id = $2`,
+		f.wsID, f.connID).Scan(&n, &details); err != nil {
+		t.Fatalf("audit query: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("connector.token.issue rows = %d, want 1", n)
+	}
+	if strings.Contains(details, token) || strings.Contains(details, f.jti(token)) {
+		t.Fatalf("audit details carry the token: %s", details)
+	}
 }
 
 func TestEnrollBinding_SupersededTokenRejected(t *testing.T) {

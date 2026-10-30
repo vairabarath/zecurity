@@ -115,6 +115,7 @@ func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string,
 		}
 		return nil, fmt.Errorf("createDeviceProfile: %w", err)
 	}
+	r.auditAdmin(ctx, "device_profile.create", "device_profile", profile.ID.String(), map[string]any{"name": name})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("createDeviceProfile notify: %w", err)
 	}
@@ -151,6 +152,7 @@ func (r *mutationResolver) UpdateDeviceProfileMode(ctx context.Context, id strin
 		}
 		return nil, fmt.Errorf("updateDeviceProfileMode: %w", err)
 	}
+	r.auditAdmin(ctx, "device_profile.mode", "device_profile", id, map[string]any{"mode": string(mode)})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("updateDeviceProfileMode notify: %w", err)
 	}
@@ -182,6 +184,7 @@ func (r *mutationResolver) UpdateDeviceProfileManualTrust(ctx context.Context, i
 		}
 		return nil, fmt.Errorf("updateDeviceProfileManualTrust: %w", err)
 	}
+	r.auditAdmin(ctx, "device_profile.manual_trust", "device_profile", id, map[string]any{"enabled": enabled})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("updateDeviceProfileManualTrust notify: %w", err)
 	}
@@ -227,6 +230,7 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		}
 	}
 
+	r.auditAdmin(ctx, "device_profile.requirement.add", "device_profile", profileID, map[string]any{"check_id": checkID, "allow_unsupported": allowUnsupported})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("addProfileRequirement notify: %w", err)
 	}
@@ -277,6 +281,7 @@ func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string) (
 		}
 	}
 
+	r.auditAdmin(ctx, "device_profile.delete", "device_profile", id, nil)
 	if err := r.PolicyNotifier.NotifyPolicyChange(
 		ctx,
 		tc.TenantID,
@@ -334,6 +339,7 @@ func (r *mutationResolver) RemoveProfileRequirement(ctx context.Context, profile
 		}
 	}
 
+	r.auditAdmin(ctx, "device_profile.requirement.remove", "device_profile", profileID, map[string]any{"check_id": checkID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(
 		ctx,
 		tc.TenantID,
@@ -419,6 +425,7 @@ func (r *mutationResolver) BindResourceToProfile(ctx context.Context, profileID 
 		}
 	}
 
+	r.auditAdmin(ctx, "device_profile.bind", "device_profile", profileID, map[string]any{"resource_id": resourceID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(
 		ctx,
 		tc.TenantID,
@@ -483,6 +490,7 @@ func (r *mutationResolver) UnbindResourceFromProfile(ctx context.Context, profil
 		}
 	}
 
+	r.auditAdmin(ctx, "device_profile.unbind", "device_profile", profileID, map[string]any{"resource_id": resourceID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(
 		ctx,
 		tc.TenantID,

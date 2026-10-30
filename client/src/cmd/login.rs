@@ -9,6 +9,21 @@ use crate::{
 pub async fn run() -> Result<()> {
     let conf = load()?;
 
+    // F-4 (live run 2026-10-29): a device the admin revoked leaves a state
+    // that makes every daemon start exit again; signing in registers a new
+    // device, so the dead one's state goes first.
+    if crate::state_store::clear_revoked_state(&conf.workspace)? {
+        println!("This device was revoked; signing in registers it again as a new device.");
+    }
+    // Reach the daemon before enrolling: enrolling first left an active
+    // device on the server, never saved here, on every failed attempt.
+    if ensure_daemon_and_send(&IpcRequest::Status).await.is_err() {
+        anyhow::bail!(
+            "the Zecurity client service is not running — start it with \
+             `sudo systemctl start zecurity-client`, then run `zecurity-client login` again"
+        );
+    }
+
     println!("Authenticating...");
     let result = login::run(&conf, None).await?; /* the values are = 
         workspace: WorkspaceInfo {
@@ -107,14 +122,9 @@ pub async fn run() -> Result<()> {
     println!("Logged in as {}", email);
     println!("Workspace: {}", workspace);
     println!("Device ID: {}", device_id);
-    let resp = ensure_daemon_and_send(&IpcRequest::Up).await?;
-    if resp.ok {
-        println!("Zecurity is up.");
-    } else {
-        anyhow::bail!(
-            "{}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        );
-    }
+    // A successful PostLoginState has already brought the tunnel up (or
+    // restarted it onto the new state); a second Up would only fail with
+    // "already up" and turn a good login into a non-zero exit.
+    println!("Zecurity is up.");
     Ok(())
 }

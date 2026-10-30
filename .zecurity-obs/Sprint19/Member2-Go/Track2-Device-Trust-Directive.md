@@ -195,3 +195,27 @@ green, clippy/go vet clean on every touched file.
 - No dependency on Sathiya's SCIM Phase 6 for Track 2 itself (the re-enroll event
   already flows via the outbox once his producer lands; until then the directive is
   exercised via tests + admin revoke).
+
+## Post-Phase Fixes
+
+
+### Fix: signing in again after a device revoke failed and left orphan devices (2026-10-29, live E2E run F-4)
+**Issue:** after an admin `revokeDevice`, the daemon exited as D-D requires, but `zecurity-client login` then failed
+(`daemon could not be started`), and starting the service didn't help: the daemon reloaded the revoked state, re-checked
+and exited again. Each failed `login` had already enrolled a new device on the server that the client never saved
+(active orphans). A device revoke leaves the user active, so a new sign-in is legitimate.
+
+**Root Cause:** the revoked device's state (marker `revoked`, key wiped) stays on disk, and every daemon start re-checks
+it and exits; `login` enrolled before it reached the daemon.
+
+**Fix Applied (D-D unchanged — the daemon still exits on REVOKED and `status` still says "contact your admin"):**
+```rust
+// client/src/cmd/login.rs, before the browser flow — AFTER:
+if state_store::clear_revoked_state(&conf.workspace)? { println!("This device was revoked; signing in registers it again as a new device."); }
+if ensure_daemon_and_send(&IpcRequest::Status).await.is_err() { bail!("the Zecurity client service is not running — start it with `sudo systemctl start zecurity-client`, …"); }
+// state_store::clear_revoked_state: removes the workspace state only when its marker is "revoked".
+```
+**Tests:** `revoked_state_is_cleared_for_a_new_login_other_state_kept` (fails if the marker check is broken); client 297
+pass. **Live:** revoke → daemon exits → one `login` signs in (new device, exit 0, one device row); with the daemon
+unreachable `login` stops with the start-the-service message and creates no device.
+

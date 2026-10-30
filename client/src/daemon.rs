@@ -267,11 +267,13 @@ async fn handle_request(
 ) -> IpcResponse {
     match req {
         IpcRequest::Status => {
+            let tunnel_up = tun_slot.lock().await.is_some();
             let s = state.read().await;
             IpcResponse {
                 ok: true,
                 kind: "Status".into(),
                 state: Some("running".into()),
+                tunnel_up: Some(tunnel_up),
                 email: s.user.as_ref().map(|u| u.email.clone()),
                 device_id: s.device.as_ref().map(|d| d.id.clone()),
                 spiffe_id: s.device.as_ref().map(|d| d.spiffe_id.clone()),
@@ -4910,16 +4912,42 @@ async fn report_device_posture(
     }
     Ok(())
 }
+/// What the early transport resync does after one fetch.
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryStep {
+    /// The map changed: apply it, then check again after the backoff.
+    Apply,
+    /// Nothing new yet (or the fetch failed): try again after the backoff.
+    Retry,
+    /// The map changed earlier and is now stable: done.
+    Stop,
+}
+
+/// A changed map is applied but not trusted to be final: during a connector
+/// restart the first changed map can be taken while that connector is marked
+/// disconnected, and stopping there left clients on it until the 60 s tick
+/// (live run 2026-10-29, F-3). So recovery ends only when a fetch after a
+/// change shows nothing new.
+fn recovery_step(changed: bool, applied_before: bool) -> RecoveryStep {
+    match (changed, applied_before) {
+        (true, _) => RecoveryStep::Apply,
+        (false, false) => RecoveryStep::Retry,
+        (false, true) => RecoveryStep::Stop,
+    }
+}
+
 /// Early transport re-poll after a relay failure, run as its own task so it
 /// never blocks the ACL sync tick (revocations keep polling). Retries with
-/// backoff until the transport version changes (then restarts the tunnel to
-/// adopt the new relay) or attempts are exhausted — the 60s tick is the backstop.
+/// backoff until the transport version changes and then holds (restarting the
+/// tunnel on each change to adopt the new map), or attempts are exhausted —
+/// the 60s tick is the backstop.
 async fn run_transport_recovery(
     state: &SharedState,
     conf: &config::ClientConf,
     tun_slot: &TunSlot,
 ) {
     let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
+    let mut applied = false;
     for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
         let has_identity = {
             let s = state.read().await;
@@ -4929,29 +4957,29 @@ async fn run_transport_recovery(
             break;
         }
         match fetch_and_store_transport(state, conf).await {
-            Ok(true) => {
-                info!(
-                    "early transport resync: transport version changed, evaluating tunnel configuration"
-                );
-                if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
-                    warn!(
-                        error = %e,
-                        "early transport resync: tunnel configuration apply failed"
+            Ok(changed) => match recovery_step(changed, applied) {
+                RecoveryStep::Apply => {
+                    info!(
+                        "early transport resync: transport version changed, evaluating tunnel configuration"
                     );
+                    if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                        warn!(
+                            error = %e,
+                            "early transport resync: tunnel configuration apply failed"
+                        );
+                    }
+                    applied = true;
                 }
-                break;
-            }
-            Ok(false) => {
+                RecoveryStep::Stop => break,
                 // Controller hasn't seen the connector re-home yet.
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
-            }
+                RecoveryStep::Retry => {}
+            },
             Err(e) => {
                 warn!(error = %e, "early transport resync failed — keeping cached snapshot");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
             }
         }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
     }
 }
 
@@ -5894,6 +5922,19 @@ fn now_unix() -> i64 {
 mod recovery_tests {
     use super::*;
 
+    /// F-3: a changed transport map is applied and checked again; recovery
+    /// stops only once a fetch after a change shows nothing new.
+    #[test]
+    fn transport_recovery_checks_again_after_a_change() {
+        // before any change: keep retrying (connector not re-homed yet)
+        assert_eq!(recovery_step(false, false), RecoveryStep::Retry);
+        // a change is applied, and so is a further one (map taken mid-restart)
+        assert_eq!(recovery_step(true, false), RecoveryStep::Apply);
+        assert_eq!(recovery_step(true, true), RecoveryStep::Apply);
+        // unchanged after a change: settled
+        assert_eq!(recovery_step(false, true), RecoveryStep::Stop);
+    }
+
     #[test]
     fn recovery_is_single_flight() {
         let now = tokio::time::Instant::now();
@@ -6451,6 +6492,36 @@ mod directive_tests {
         assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
         assert_eq!(s.device_state, DeviceState::Active);
     }
+    /// F-4: after a revoke, clear_revoked_state removes the dead device's
+    /// state (so a daemon start no longer exits on it and `login` can reach
+    /// it); any other state is left alone.
+    #[tokio::test]
+    async fn revoked_state_is_cleared_for_a_new_login_other_state_kept() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-f4");
+        assert!(
+            !state_store::clear_revoked_state("ws-f4").unwrap(),
+            "an active device's state must be kept"
+        );
+        assert!(state_store::load_workspace_state("ws-f4").is_ok());
+
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "revoked".into(),
+        )
+        .await
+        .unwrap();
+        assert!(state_store::clear_revoked_state("ws-f4").unwrap());
+        assert!(state_store::load_workspace_state("ws-f4").is_err());
+        assert!(!state_store::clear_revoked_state("ws-f4").unwrap());
+    }
+
 }
 
 /// Cert renewal tests (Sprint 19 Track 3 / PENDING-13, ADR-028 D1).
