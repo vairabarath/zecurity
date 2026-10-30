@@ -3384,3 +3384,8 @@ serves on `127.0.0.1:9102`.
 - **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
   re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
+
+## 2026-10-30 — M1: D21-R (hostile connector at the shield) implemented
+- Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.
+- Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings`), 6 commits (a1, a2 + watermark fix, A′ + review fix, D), not pushed. Controller 1530/0/2, connector 270, shield 73; mutant-checked.
+- Record: `.zecurity-obs/Sprint20/Fixes/connector-revocation/D21R-Shield-Hostile-Connector-Design-2026-10-30.md`. Next: live check on the lab (needs new controller, connector and shield builds), then push + PR into `fixed-pendings`.
