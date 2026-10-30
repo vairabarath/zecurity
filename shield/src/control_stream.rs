@@ -782,11 +782,22 @@ fn apply_signed_peer_list(
         current_sorted != new_sorted
     };
     state.peer_list_issued_at_ms = payload.issued_at_unix_ms;
-    state.connectors = new_list;
-    if state.connectors.is_empty() {
-        warn!("signed peer list is empty: the Shield dials no Connector until a new list arrives (state.json left as is)");
+    if new_list.is_empty() {
+        // state.json must keep a Connector to start from, so it keeps the
+        // last non-empty list, but always with the new issued_at: an older
+        // list must stay refused after a restart too.
+        state.connectors = new_list;
+        warn!("signed peer list is empty: the Shield dials no Connector until a new list arrives");
+        let saved = ShieldState::load(&cfg.state_dir).and_then(|mut on_disk| {
+            on_disk.peer_list_issued_at_ms = state.peer_list_issued_at_ms;
+            on_disk.save(&cfg.state_dir)
+        });
+        if let Err(e) = saved {
+            warn!(error = %e, "failed to persist the peer-list issued_at");
+        }
         return true;
     }
+    state.connectors = new_list;
     if let Err(e) = state.save(&cfg.state_dir) {
         warn!(error = %e, "failed to persist state.json after peer-list update");
     } else if changed {
@@ -1748,6 +1759,16 @@ mod tests {
         ));
         assert!(state.connectors.is_empty());
         assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
+        // The issued_at is saved anyway: an older list stays refused after a
+        // restart.
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        assert_eq!(reloaded.peer_list_issued_at_ms, 10);
+        assert!(!apply_signed_peer_list(
+            &mut reloaded,
+            &cfg,
+            &ca.sign(9, &["hostile"]),
+            &ca.key()
+        ));
         for f in ["workspace_ca.crt", "shield.crt", "shield.key"] {
             std::fs::write(Path::new(&cfg.state_dir).join(f), b"unused").unwrap();
         }
