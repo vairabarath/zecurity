@@ -592,7 +592,24 @@ where
                 "session cancelled — authorization revoked mid-session",
             );
         }
-        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => { result?; }
+        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => {
+            // Logged (live E2E run 2026-10-30, F-7): an error here used to
+            // return silently, dropping the stream without a clean shutdown.
+            match &result {
+                Ok((up, down)) => tracing::debug!(
+                    transport = session_transport.as_str(),
+                    bytes_up = up,
+                    bytes_down = down,
+                    "tunnel stream finished"
+                ),
+                Err(error) => tracing::warn!(
+                    transport = session_transport.as_str(),
+                    error = %error,
+                    "tunnel stream ended with error"
+                ),
+            }
+            result?;
+        }
     }
     Ok(())
 }
