@@ -171,4 +171,17 @@ Builds from `d6818a13`: controller `3ada62421e1395e2`, connector `823c5d3513d7e4
 - **Withholding the CRL:** a hostile connector that also withholds the CRL stays attached until the stored CRL's `nextUpdate` (≤ 24 h); it can't change anything meanwhile (above).
 - **QUIC listener:** the test switch didn't cover the hostile connector's own QUIC listener, which still closed its client connections on revocation. Not relevant to the shield checks.
 
-**Lab left running:** the branch controller (user unit `e2e-controller`), file server `e2e-serve` (`:8081`), connector `e2e-conn-inkyank-d21r` (active), connector `e2e-conn-seechan-d21r` (revoked; process running, not serving), shield `e2e-shield-nika-d21r`, the client (tunnel up), a test web server on nika `:8815` (user process), and resource `e2e-d21r-web2` (protected). manoj's host was not touched.
+**Lab after cleanup (2026-10-30 12:20 UTC):**
+- **Running:**
+  - the branch controller (user unit `e2e-controller`, `3ada6242`);
+  - connector `e2e-conn-inkyank-d21r` (`823c5d35`) and relay `e2e-relay-inkyank2` on inkyank;
+  - shield `e2e-shield-nika-d21r` (`ac8209eb`) on nika, attached to inkyank, with no resources (generation 10).
+- **Removed:**
+  - the hostile build and its config on seechan5; the old relay's `ca.crt` was restored from its backup;
+  - connector records `e2e-conn-seechan-d21r` and `e2e-conn-hostile`;
+  - test resources `e2e-d21r-web*` and the nika `:8815` web server;
+  - the file server `e2e-serve`, all enrolment tokens, and the hostile worktree (the patch is kept at `~/.cache/zecurity-e2e/d21r/hostile-test-only.patch`).
+- **Client:** tunnel down.
+- **Older journey-7 records, left as found:** disconnected `e2e-conn-inkyank`, `e2e-conn-manoj`, `e2e-shield-nika`, and `e2e-web` (failed).
+- **manoj's host:** not touched.
+- **Compatibility:** the D21-R connector and shield need a D21-R controller, since an older one signs nothing.
