@@ -655,7 +655,8 @@ type RelayDiscoveryRow struct {
 }
 
 // GetActiveRelay returns the most-recently-heartbeating active relay that has a
-// discoverable public address, or nil if none exists.
+// discoverable public address and is not draining (Sprint 22 Phase D, FU-7),
+// or nil if none exists.
 func (s *Store) GetActiveRelay(ctx context.Context) (*RelayDiscoveryRow, error) {
 	row := &RelayDiscoveryRow{}
 	err := s.pool.QueryRow(ctx,
@@ -665,6 +666,7 @@ func (s *Store) GetActiveRelay(ctx context.Context) (*RelayDiscoveryRow, error) 
 		        COALESCE(address_scope, '')
 		   FROM relays
 		  WHERE status = 'active'
+		    AND drain_started_at IS NULL
 		    AND (public_addr IS NOT NULL OR address_scope = 'public')
 		  ORDER BY last_heartbeat_at DESC NULLS LAST
 		  LIMIT 1`,

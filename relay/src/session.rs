@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::RuntimeLimits;
 use crate::protocol::{
@@ -176,7 +176,7 @@ pub async fn handle_connection(
                     match read_message(&mut recv, limits.message_timeout).await {
                         Ok(message) => message,
                         Err(error) => {
-                            warn!(error = %error, "invalid Relay Lookup message");
+                            warn!(error = format!("{error:#}"), "invalid Relay Lookup message");
                             continue;
                         }
                     };
@@ -230,7 +230,7 @@ fn spawn_lookup(
         let _permit = permit;
         if let Err(error) = handle_lookup_stream(send, recv, &connector_id, &identity, &state).await
         {
-            warn!(connector_id = %connector_id, error = %error, "Relay Lookup failed");
+            warn!(connector_id = %connector_id, error = format!("{error:#}"), "Relay Lookup failed");
         }
     });
 }
@@ -335,26 +335,80 @@ async fn pipe_streams(
     mut connector_send: SendStream,
     mut connector_recv: RecvStream,
 ) -> Result<()> {
+    // Per-direction byte counts and which direction finished first, logged
+    // when the bridge ends (live E2E run 2026-10-30, F-7: relayed flows ended
+    // without the inner TLS close_notify, and nothing showed which hop lost it).
+    let up = std::sync::atomic::AtomicU64::new(0);
+    let down = std::sync::atomic::AtomicU64::new(0);
+    let first_done = std::sync::Mutex::new(None::<&'static str>);
     let client_to_connector = async {
-        tokio::io::copy(&mut client_recv, &mut connector_send) //the client_recv is mean by the relay receive the clients data and connector_send means the relay is sending the message to the connector
+        counted_copy(&mut client_recv, &mut connector_send, &up)
             .await
             .context("pipe Client to Connector")?;
+        first_done
+            .lock()
+            .unwrap()
+            .get_or_insert("client to connector");
         connector_send
             .finish()
             .context("finish Connector-bound stream")
     };
     let connector_to_client = async {
-        tokio::io::copy(&mut connector_recv, &mut client_send)
+        counted_copy(&mut connector_recv, &mut client_send, &down)
             .await
             .context("pipe Connector to Client")?;
+        first_done
+            .lock()
+            .unwrap()
+            .get_or_insert("connector to client");
         client_send.finish().context("finish Client-bound stream")
     };
 
-    if let Err(error) = tokio::try_join!(client_to_connector, connector_to_client) {
-        warn!(error = %error, "Relay stream bridge ended with error");
+    let result = tokio::try_join!(client_to_connector, connector_to_client);
+    let up = up.load(std::sync::atomic::Ordering::Relaxed);
+    let down = down.load(std::sync::atomic::Ordering::Relaxed);
+    let first = first_done.lock().unwrap().unwrap_or("neither");
+    if let Err(error) = result {
+        // Full chain: the outer context alone ("pipe Connector to Client") hid
+        // which side failed and why (live E2E run 2026-10-30, F-7).
+        warn!(
+            bytes_up = up,
+            bytes_down = down,
+            finished_first = first,
+            error = format!("{error:#}"),
+            "Relay stream bridge ended with error"
+        );
         return Err(error);
     }
+    debug!(
+        bytes_up = up,
+        bytes_down = down,
+        finished_first = first,
+        "Relay stream bridge ended"
+    );
     Ok(())
+}
+
+/// `tokio::io::copy` that counts bytes as they are written.
+async fn counted_copy<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    count: &std::sync::atomic::AtomicU64,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buf[..n]).await?;
+        count.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn validate_register(identity: &ParsedSpiffe, connector_id: &str, spiffe_id: &str) -> Result<()> {

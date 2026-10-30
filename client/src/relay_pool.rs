@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
+use tracing::{info, warn};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
@@ -93,7 +94,9 @@ impl RelayFlows {
     /// no flow is open. Called under the pool lock.
     fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
-        if self.active.load(Ordering::SeqCst) == 0 {
+        let active = self.active.load(Ordering::SeqCst);
+        info!(open_flows = active, "relay connection retired");
+        if active == 0 {
             self.connection
                 .close(0u32.into(), b"relay connection retired");
         }
@@ -108,6 +111,7 @@ impl Drop for RelayFlowGuard {
         let flows = &self.0;
         if flows.active.fetch_sub(1, Ordering::SeqCst) == 1 && flows.retired.load(Ordering::SeqCst)
         {
+            info!("retired relay connection closed: its last flow ended");
             flows
                 .connection
                 .close(0u32.into(), b"relay connection retired");
@@ -383,6 +387,7 @@ fn spawn_relay_revocation_monitor(
             tokio::select! {
                 _ = ticker.tick() => {
                     if let Some(reason) = relay_rejection_reason(&manager, &serial) {
+                        warn!(reason = %String::from_utf8_lossy(reason), "closing relay connection: revocation check");
                         connection.close(0u32.into(), reason);
                         break;
                     }

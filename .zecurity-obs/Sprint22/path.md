@@ -216,14 +216,19 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 - [x] **D4** Shared eligibility predicate; `RelaySummary.draining_since` / `drain_state`, `RelayDetail.in_relay_list` / `eligible_relay_count` (additive).
 - [x] **D5** Console: Draining badge, Drain/Resume on Relay detail, `drain_state` progress, last-relay warning on revoke/delete, Overview attention item; dialog props; API-surface pin.
 - [x] **D6** Regression: connector `relay_selector` tests run unchanged (no connector code touched).
-- [ ] **D-gate** *(Status 2026-10-29: implementation complete; PR #156 open, not merged, CI green; live control-plane cases PASS, AT-D6 client data plane pending. Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
+- [x] **D-gate** *(Status 2026-10-30: **merged** in PR #156 (merge commit `11d3d3e1`), CI green; live control-plane cases PASS; **AT-D6 client data plane PASS on the lab 2026-10-30** (finding FU-14). Review residuals FU-6 and FU-7 fixed afterwards (see Post-Sprint Fixes). Code gates PASS after the independent review fixes: Go 1520 pass / 0 fail / 2 expected skips, `go vet` clean; console 507 pass, lint and build clean; `cargo test relay_selector` 27 pass. Live AT-D on the lab fleet pending (V3).)*
 
 ### Phase V — M1: Acceptance
 
 - [x] **V1** Run AT-T on the lab after T merges. *(2026-10-27, Sathiya: **PASS**, 40/40 API checks plus the console QR/verify pages. Run on an isolated local stack (throwaway DB, own Valkey, controller :18080) rather than the lab fleet: AT-T needs only the controller and the console. See Acceptance-Test-Plan → Live run — Phase T.)*
-- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4/E5 on the lab pending. AT-X pending.)*
-- [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
-- [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
+- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4 **PASS on the lab 2026-10-30** (manojinkyank); E5: delete + add again PASS live, expired-token hint still needs a 24 h token. AT-X: PASS 2026-10-28, see the Acceptance Test Plan.)*
+- [x] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-30: AT-D6 client data plane **PASS** with a real client, connector on manojinkyank and two relays; connector migrated in 17 ms, new connections on the other relay after the client's 60 s sync, the running download completed; FU-14 filed. Earlier:)* *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
+- [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry. *(2026-10-30: targeted final run **PASS**, cases 1–7 plus the AT-E5 hint; see Acceptance Test Plan → V4. Two observations, no failures. Only the AT-E5 expired-token refusal remains, on 2026-10-31.)*
+
+### Remaining Sprint 22 checks (updated 2026-10-30)
+- [x] **Drain console text vs FU-14.** Decided 2026-10-30: correct it now. The card, the drain dialog and the `streams_open` line no longer promise a 120 s cut; they say open connections "keep running until they end". The `unverified` line's 120 s measurement window is the server's and stays. Branch `sprint22/drain-text-fu14`.
+- [x] **V4 final run: 2026-10-30.** PASS: cases 1–7 and the AT-E5 hint (Acceptance Test Plan → V4).
+- [ ] **AT-E5 expired-token refusal: 2026-10-31, after 16:34:25 IST.** The hint already PASSES (V4 case 8). Remaining check: start the kept V4 controller (DB `zecurity_live_v4_*`; env, token and TOTP helper in `~/.cache/zecurity-v4-at-e5`) with the isolated Valkey. Run `zecurity-relay` with `v4-target`'s token: enrolment must be refused. Then delete `v4-target`, drop the V4 DB and remove the folder. Then tick V2, V4 and "All scenarios pass".
 
 ## Test gates (a phase can't be ticked without these)
 
@@ -239,13 +244,13 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 ## Sprint 22 Done Criteria
 
-- [ ] Super-admins **cannot act** without TOTP; enrolment, verification, replay rejection, rate limit and recovery work and are audited.
-- [ ] Relay revoke/delete are **super-admin only** server-side; relay-ops can create, drain and resume.
-- [ ] Revoke/delete require a **reason and typed name**, server-checked; errors are JSON codes; repeat actions get clear 409s.
-- [ ] A relay can be **enrolled from the console** with a one-time token and a complete install command.
-- [ ] A relay can be **drained and resumed**; connectors migrate with no connector change; the last eligible relay can't be drained.
-- [ ] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test).
-- [ ] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched.
+- [x] Super-admins **cannot act** without TOTP; enrolment, verification, replay rejection, rate limit and recovery work and are audited. *(AT-T PASS 2026-10-27.)*
+- [x] Relay revoke/delete are **super-admin only** server-side; relay-ops can create, drain and resume. *(AT-A PASS 2026-10-26; drain/resume by relay-ops in `TestDrainDB_RelayOpsMayDrainAndResume` and live AT-D.)*
+- [x] Revoke/delete require a **reason and typed name**, server-checked; errors are JSON codes; repeat actions get clear 409s. *(AT-A PASS 2026-10-26.)*
+- [x] A relay can be **enrolled from the console** with a one-time token and a complete install command. *(AT-E1…E3 PASS; AT-E4 PASS on the lab 2026-10-30.)*
+- [x] A relay can be **drained and resumed**; connectors migrate with no connector change; the last eligible relay can't be drained. *(AT-D PASS live incl. AT-D6 client data plane 2026-10-30; FU-14: running streams aren't cut at 120 s.)*
+- [x] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test). *(`api-surface.test.ts` pins them; console 507 pass at the D merge.)*
+- [x] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched. *(Checked 2026-10-30: no Sprint 22 phase commit touches `connector/`, `relay/`, `proto/` or `admin/`, and none removes a workspace status predicate. Other merged work in the same window (Sprint 20 fixes, device approval) did touch them; it is not Sprint 22 scope.)*
 - [ ] All scenarios in [[Sprint22/Acceptance-Test-Plan]] pass.
 
 ## Follow-ups (tracked)
@@ -257,13 +262,36 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-3 | **`triggerScan` / `getScanResults` are not workspace-scoped (security, likely High).** `triggerScan(connectorId, …)` pushes a scan command to any connected connector by ID (`ConnectorRegistry.PushScanCommand`), the connector scans any non-loopback, non-multicast target (up to 512 targets × 16 ports), and `getScanResults(requestId)` reads results by request ID alone, which `triggerScan` returns. A workspace admin who knows another workspace's connector ID (sent to that workspace's devices in ACL snapshots) could likely scan that workspace's internal network through its own connector. Found by code reading during the resource-network review; not reproduced (needs a connected connector). | Resource-network review, 2026-10-27 | **Fixed** (branch `security/fu3-scan-authorization`, see Post-Sprint Fixes → FU-3); result squatting moved to FU-2 |
 | FU-4 | **`promoteDiscoveredService` can't create a resource:** it never sets `remote_network_id` (the shield's network would be the natural value). Feature repair, not security. | Resource-network review, 2026-10-27 | **Fixed** 2026-10-28 (branch `fix/m1-tgate-fu4`, see Post-Sprint Fixes → FU-4) |
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
-| FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | Open |
-| FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | Open |
+| FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | **Fixed** 2026-10-30 (branch `sprint22/fu6-fu7-relay-drain-residuals`, see Post-Sprint Fixes → FU-6) |
+| FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | **Fixed** 2026-10-30 (same branch, see Post-Sprint Fixes → FU-7) |
 | FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
 | FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
 | FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
+| FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | Open (pre-GA) |
+| FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): the Connector now shuts a relayed shield-tunnel stream down on a clean end (TLS close_notify); see Post-Sprint Fixes → F-7. The probe timeouts are FU-9 |
+| FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): accidental duplicate from Sprint 17's merge fix; second start removed |
+| FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | Open |
 
 ## Post-Sprint Fixes
+
+### Fix: FU-6 a missed relay list reaches the connector within a minute
+**Issue:** a failed post-commit `broadcastRelayList` (drain, revoke, eviction), a full connector send queue, or two broadcasts delivered out of order left a connected connector on an old relay list until the next pool change or a reconnect. After a drain, that connector kept using the draining relay.
+
+**Root Cause:** broadcasts were fire-and-forget; nothing recorded which list each connector had been sent.
+
+**Fix Applied (`internal/connector/control_stream.go`, `cmd/server/main.go`):** each Control stream records the version of the last relay list enqueued on it (`sendRelayList`, under a per-stream lock so the recorded version is the one the connector receives last). `ConnectorRegistry.RunRelayListSync` builds the list every 60 s and sends it only to streams whose recorded version differs (`SyncRelayList`). A blind periodic re-broadcast was rejected: the connector re-probes all relays on every push (`relay_selector::handle_list_change`), so streams already current get nothing. No connector, relay or proto change.
+
+**Tests:** `TestSyncRelayList_SendsOnlyToStreamsBehind`, `…_CorrectsOutOfOrderBroadcast`, `…_FailedSendRetriedNextSync`, `TestRunRelayListSync_DeliversMissedList`. Mutation-checked: always sending, or not recording the version, fails them.
+
+### Fix: FU-7 Phase D review residuals
+Details in the Phase D file → Post-Phase Fixes. In short:
+- `EvictRelays` locks its rows in id order (as `DrainRelay` does): the drain/eviction deadlock (reproduced by the new race test against the old statement) is gone.
+- `RecordHeartbeat` keeps a newer `connection_count` when an older heartbeat is written later.
+- `drain_started_at` is the controller's clock, read after the row locks are held, like `connection_count_at`.
+- `policy.GetActiveRelay` skips draining relays.
+- `eligible.Where` is `COALESCE(…, false)`: never NULL.
+- Race tests: drain vs eviction, revoke and resume.
+
 
 ### Fix: Phase D review — post-commit hooks detached from the request (Medium)
 Drain/resume and revoke/delete fan-out hooks ran on the request context; a disconnecting client could cancel the relay-list broadcast of a committed change. Now `fanoutContext(r)` (`context.WithoutCancel` + 10 s). Also: broadcast failures logged with the relay id (`relay.DrainFanout`), and an inactive draining relay gets its own console text. Details and accepted follow-ups (FU-7): Phase D file → Post-Phase Fixes.
@@ -553,6 +581,24 @@ repeated promote with the raw unique-violation error; `triggerScan` accepted loo
 connector silently drops. Now `discovery.PromotedResourceName` (`<service or proto/port> on <shield name>`), a user
 error "already a resource", and `discovery.CheckScanTarget` before the request is recorded. Tests and live re-check in
 the run record (`Sprint22/Live-E2E-Run-2026-10-29.md`).
+
+### Fix: live E2E run journey 7 — relay revoke recovery (F-8) and controller shutdown deadlock (O-8)
+Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). Branch `fix/e2e-j7-findings`.
+- **F-8** after a relay revoke, relay-path clients failed for 35 s and the revoked relay kept accepting them. Client:
+  resync cooldown 30 → 5 s, max backoff 16 → 8 s, no sleep after the last attempt (PENDING-03 file). Relay: a revoked
+  relay closes every connection (`relay revoked`) and stops (Fix 17 file). Live: 3.5 s outage.
+- **O-8** controller stops hung until SIGKILL: the connector Control handler could wait forever after its stream
+  ended (random `select`), holding `GracefulStop` and deadlocking `Stop`. Fixed with a `ctx.Done()` case
+  (connector-revocation Phase A file); shutdown waits for named workers at most 15 s. Live: 6/6 stops in 10 s.
+- **F-7** investigated, not fixed → FU-12; duplicate outbox processor → FU-13.
+
+### Fix: live E2E run — relayed responses lost their end (F-7 / FU-12) and the duplicate outbox processor (FU-13)
+- **F-7** through a relay every shield-tunnel flow ended without the inner TLS `close_notify`; the Client reset the
+  app connection and the last buffered bytes were lost. `connector/src/agent_tunnel.rs` `relay_stream` now shuts the
+  device stream down on a clean Shield close (up to 120 s, cancellable); errors still end abruptly. Live: 20 MB through
+  a relay 2/2 complete, 0 close_notify errors in 55 flows. Details in `Sprint20/Fixes/Fix14-Shield-Stream-Reconnect-Sessions.md`.
+- **FU-13** `cmd/server/main.go` started `outboxProcessor.Run` twice (Sprint 17's fix for the HTTP server goroutine
+  re-added it); the duplicate is removed (claiming was already SKIP LOCKED, so only polling and reaper logs halve).
 
 ### Live check FU-2 + FU-5 (2026-10-28, M1): PASS
 **Setup:**

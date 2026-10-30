@@ -482,7 +482,9 @@ describe('Relay detail: drain card', () => {
     await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
     const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
     expect(within(dialog).getByRole('note')).toHaveTextContent(/reduces relay availability/)
-    expect(dialog).toHaveTextContent(/up to 120 seconds/)
+    // FU-14: open connections are not cut after 120 s; the console must not promise it.
+    expect(dialog).toHaveTextContent(/keep running until they end/)
+    expect(dialog).not.toHaveTextContent(/120 seconds/)
     expect(within(dialog).queryByLabelText(/to confirm/)).not.toBeInTheDocument() // no typed name
     expect(within(dialog).getByText(/Optional\. Recorded in the provider audit log\./)).toBeInTheDocument()
   })
@@ -574,7 +576,7 @@ describe('Relay detail: drain progress comes from drain_state only', () => {
   it.each([
     ['migrating', { attached_connectors: 3 }, /3 connectors still attached/],
     ['migrating', { attached_connectors: 1 }, /1 connector still attached/],
-    ['streams_open', { attached_connectors: 0, connection_count: 2 }, /2 connections still open/],
+    ['streams_open', { attached_connectors: 0, connection_count: 2 }, /2 connections still open\. They keep running until they end/],
     ['unverified', { attached_connectors: 0, connection_count: 0 }, /Not confirmed yet/],
     ['drained', { attached_connectors: 0, connection_count: 0 }, /Drained \(as of the last heartbeat\)/],
   ] as const)('%s', async (state, over, text) => {

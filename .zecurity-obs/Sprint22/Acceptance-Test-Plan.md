@@ -133,10 +133,17 @@ No provisioning token, TOTP secret or `otpauth` URI appeared in the controller l
 | AT-E1 | PASS | `POST /provider/relays` → 201, `Cache-Control: no-store`, body has `ca_fingerprint`, `controller_grpc_addr=localhost:19090`, `controller_http_addr=localhost:18080`; the fingerprint equals `curl /ca.crt \| openssl x509 -outform DER \| sha256sum`. A malformed `PROVIDER_RELAY_CONTROLLER_HTTP_ADDR=http://…` stops startup with a clear message. |
 | AT-E2 | PASS | `127.0.0.01` in IP addresses → "Enter an IP address in canonical form…", Create disabled; fixed → enabled. |
 | AT-E3 | PASS | Token dialog "Install live-e-relay1": installer + direct command + token, 24 h expiry. After **I’ve saved it, close**: token absent from the DOM, `sessionStorage`, `localStorage` and the URL; the list reloaded. A second relay left pending shows "Waiting for enrolment". Token not in the controller log; the `relay.create` audit row holds name/SANs/TTL and IP `::1`, no token. |
-| AT-E4 (local stand-in) | PASS locally; **lab run pending** | The direct command copied from the dialog was run unmodified (only `RELAY_BIND` and `RELAY_STATE_DIR` added through the outer environment) with `relay/target/debug/zecurity-relay`: "verified controller Intermediate CA fingerprint", certificate stored, relay `active` within a second. *Valkey JTI consumption not checked in this run.* |
-| AT-E5 | Not run live | Needs an expired token (24 h) and Phase X delete. The hint is shown in the token dialog and on the pending relay's detail page (tests). |
+| AT-E4 (local stand-in) | PASS locally; **lab run PASS 2026-10-30, see below** | The direct command copied from the dialog was run unmodified (only `RELAY_BIND` and `RELAY_STATE_DIR` added through the outer environment) with `relay/target/debug/zecurity-relay`: "verified controller Intermediate CA fingerprint", certificate stored, relay `active` within a second. *Valkey JTI consumption not checked in this run.* |
+| AT-E5 | Partly live (2026-10-30) | Delete of a pending relay + add again PASS live (below); the expired-token hint still needs a 24 h token. Needs an expired token (24 h) and Phase X delete. The hint is shown in the token dialog and on the pending relay's detail page (tests). |
 
 Found and fixed during the run: **Add relay** reopened with the previous relay's values (see the phase file → Post-Phase Fixes). Tooling note: in Orca, clicking **Confirm and continue** on `/mfa` and the token dialog's close button didn't fire; `requestSubmit()` / a DOM click did. The login and password forms clicked normally. Worth a glance in AT-T with a real browser and authenticator.
+
+### Live run — AT-E4 on the lab (2026-10-30, M2): PASS
+Throwaway controller on this PC (dev Postgres, throwaway DB; isolated Valkey); relay host **manojinkyank** (192.168.1.53), reached over SSH in an Orca terminal; `sudo` typed by the operator.
+- The console's **"Install as a service"** block was run unchanged in a minimal checkout (`zecurity-relay` built from this branch, `scripts/relay-local-install.sh`, `relay/systemd/`).
+- `d6-e4-relay-2`: `pending` → **`active`** (observed IP 192.168.1.53, certificate issued, heartbeating); `zecurity-relay.service` enabled and running.
+- **Token used up:** its `relay:provisioning:jti:*` key is gone from Valkey and `relays.enrollment_token_jti` is NULL.
+- **AT-E5 part (D-20 path):** the first relay's dialog was closed before the install, so its token was lost; the pending relay was deleted (reason and name, 204) and a new one added and installed. The deleted relay's JTI key stays in Valkey until its 24 h expiry; harmless, because `Provision` refuses any relay that is not `pending` (`internal/relay/provision.go:176`).
 
 ## Phase X — Revoke and delete in the console
 
@@ -194,7 +201,7 @@ Branch `sprint22/phase-d-relay-drain` (`5b45c3ca`, PR #156). Throwaway database 
 | AT-D3 | PASS | 5 rounds of simultaneous drains of the last two relays (super-admin and relay-ops): each round exactly one 204 and one 409 `last_eligible_relay`; one relay always stayed listed. |
 | AT-D4 | PASS | Console resume: connector received list version `17993128744932725629`, identical to the pre-drain version; `relay.resume` audited with `drained_since`; flag cleared. |
 | AT-D5 | PASS | relay-ops: drain and resume 204; revoke and delete 403 `forbidden`. |
-| AT-D6 | **PARTIAL** | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
+| AT-D6 | **PASS** (client data plane on the lab 2026-10-30, below; finding FU-14) | **Verified (control plane):** drain progression `migrating` → `unverified` (counts written every 30 s while draining: 23, 53, 83, 113 s after the drain) → `drained` at the first count measured ≥ 120 s after the drain (143 s); the console showed "Drained (as of the last heartbeat)" with the super-admin note; Overview item and relay-list badge shown. **Not performed (client data plane), see below.** |
 | AT-D7 | PASS | Pending → 409 `invalid_state`; revoked → `already_revoked` (drain and resume); deleted → `already_deleted` (drain and resume); repeat drain and resume of a non-draining relay → 204 with no audit row. |
 | AT-D9 | PASS (live part) | Draining flag deleted from Valkey: restored by the reconcile loop 11 s later with a fresh TTL; state stayed `unverified` until a qualifying count. |
 | AT-D11 | PASS | Revoke and delete dialogs of the only listed relay show "No eligible relays will remain…"; a relay not in the list shows no warning. |
@@ -206,9 +213,54 @@ Connector: 2 migrations, 0 errors. Controller: 0 drain fan-out failures (post-dr
 1. A download already running through the relay when it is drained either completes normally or is cut at about 120 s (the connector's `relay_drain_timeout_secs`), not earlier.
 2. A new client connection opened after the drain goes through the remaining eligible relay.
 
-AT-D6 stays PARTIAL until both are run and match the design.
+*Both run on 2026-10-30 (next section).*
+
+### Live run — AT-D6 client data plane (2026-10-30, M2): PASS, finding FU-14
+**Setup:** throwaway controller, two relays (`d6-relay-a` :19094, `d6-relay-b` :19095) and the console on this PC (192.168.1.223); a real connector and an HTTP file server (1 GiB file, :8099) on **manojinkyank** (192.168.1.53) as user processes over SSH; the real client installed on this PC (operator ran the `sudo` install and the Google sign-in; workspace `zero` created by the operator's first admin sign-in). The connector advertised a TEST-NET LAN address (`LAN_ADDR=192.0.2.1:9091`), so the client's direct path failed and every tunnel went through a relay. Firewall (`ufw`) opened for manojinkyank only, removed afterwards.
+
+| Step | Result |
+|------|--------|
+| Baseline | 1 GiB through `d6-relay-a` (client: "direct path failed; used relay fallback … 19094"; relay: "bridging Client to Connector"), HTTP 200. |
+| Long download | `curl --limit-rate 2M` of 1 GiB started 12:59:07; drain of `d6-relay-a` from the console at **13:00:17.644** (07:30:17 UTC). |
+| Connector migration | List with 1 relay received 07:30:17.640, "Active relay absent from new list; migrating immediately", registered with `d6-relay-b` 07:30:17.661 (**17 ms**). |
+| New connections | A fresh connection every 15 s: the first two (+22 s, +39 s) still used `d6-relay-a` and succeeded (its connector session stays up during the drain window); the client stored transport snapshot v3 at 07:31:16 (**+59 s**, its 60 s background sync) and **every later connection (13/13) went through `d6-relay-b`**. |
+| Running download | At **+120.0 s** the connector logged "old relay drain timed out with active streams still open", but the download **kept running through `d6-relay-a`** and **completed**: 1 GiB, HTTP 200, 511.5 s, ended 13:07:39 (+442 s). Not cut. |
+| Console | `streams_open` (connection count 1) for the whole download; **"Drained (as of the last heartbeat): no connectors attached and no open connections"** at 13:08:02, the first heartbeat after the download ended. |
+| Resume | 204; back in the list; `relay.drain` and `relay.resume` audited (provider, IP). *(The drain's reason is empty: the run's automation left the optional field blank.)* |
+
+**Verdict:** PASS against the case ("download finishes, or is cut at ~120 s"; new connection on another relay; console progression).
+
+**Finding (FU-14):** the connector's 120 s `relay_drain_timeout_secs` does not cut streams. Each relay stream is a detached `tokio::spawn` task (`connector/src/relay_handler.rs:167`); on timeout `relay_selector` only aborts the session task (`old.handle.abort()`, `relay_selector.rs:631`), so streams already running keep the old QUIC connection open until they end. A long-lived stream holds a drained relay indefinitely, and the console stays at `streams_open` until it ends. A connector change, which D-32 rules out for Sprint 22.
+
+**Note:** new connections move to the remaining relay only after the client's next transport sync (up to 60 s); until then they use the draining relay, which still works because its connector session is up during the drain window.
+
 
 ---
+
+## V4 — final sprint run (2026-10-30, M2): PASS (AT-E5 expired-token refusal pending, 2026-10-31)
+A targeted regression on the final `fixed-pendings`: #158 (FU-6/FU-7), #159 (live E2E fixes) and the drain-text fix (#160, branch `sprint22/drain-text-fu14`).
+
+**Stack:**
+- **This PC:** throwaway controller, two relays, the console and the real client. Fresh DB `zecurity_live_v4_*` on the dev Postgres, isolated Valkey; never `ztna_platform`.
+- **manojinkyank (.53):** the connector, the file server and the AT-E4 relay host, reached over SSH in an Orca terminal.
+- **Operator:** ran every `sudo` step and the Google sign-ins. Each Orca tab was named before it was used.
+
+**Automated gates**
+- Go: 1541 pass / 0 fail / 2 expected skips; build and vet clean.
+- Console: 507 pass; lint and build clean.
+- `cargo test relay_selector`: 27 pass.
+- Fresh DB: 49 migration files, 0 errors; TOTP and drain columns present.
+
+| # | Covers | Result |
+|---|--------|--------|
+| 1 | T, CORE-1 | **PASS.** After the password change, the MFA-stage token gets 403 on `/provider/relays`. A wrong code is refused ("That code isn't right"). The correct code gives a full session (200). Audit: `bootstrap_create`, `login`, `password_change`, `totp_enroll`. |
+| 2 | A, CORE-2 | **PASS.** relay-ops gets 403 `forbidden` on revoke and delete, even with a valid body, and can create relays (201). Super-admin: 400 `reason_required` (also with the reason only in the URL) and 400 `confirmation_mismatch` (wrong case). No audit row on any refusal. |
+| 3 | E (AT-E4) | **PASS.** The console's "Install as a service" block ran unchanged on .53. `v4-e4-relay`: pending → active (observed 192.168.1.53, certificate, heartbeats); token used up (Valkey JTI gone, DB field cleared). *Observation:* that host still held the 2026-10-30 AT-E4 relay's certificate state, and the relay refused to start ("Relay certificate ID … does not match configured Relay ID …"). That is safe, but the installer doesn't warn about leftover state. After the state was cleared, it provisioned at once. |
+| 4 | D | **PASS.** Drain from the console: the dialog shows the new text (no 120 s promise); the audit has the reason. The connector migrated in **42 ms**. New connections went to `v4-relay-b` from +12 s. Draining the last eligible relay → 409 `last_eligible_relay`. Resume 204; a repeat resume is a no-op and isn't audited. *Observation:* with no open streams the connector drops the old relay at once ("old relay drain completed after active streams reached zero"). One new connection at +2 s, still sent to the drained relay, failed ("Connector … is not registered"); the client's early transport resync fixed it in 18 ms. Same pattern as #159's revoke recovery. |
+| 5 | X | **PASS.** Revoke from the console: confirm disabled for the wrong-case name, enabled for the exact name. Relay `revoked`, the serial in the published `/relay.crl`, audit `{"reason": "V4 case 5", "serials_revoked": 1}`. The revoked relay process stopped 10 s later ("Relay revoked: closing every connection", "Relay stopped after revocation"; #159 F-8). Delete: `deleted`, gone from the default list, audit with the reason. |
+| 6 | FU-6 | **PASS.** The relay-list sync worker runs (`workers.Go("relay-list-sync")`). 0 catch-up sends, since no broadcast was missed; 0 broadcast or fan-out failures; 0 panics. Missed-update recovery is covered by `TestSyncRelayList_*`. |
+| 7 | CORE-3, CORE-4 | **PASS.** The console write surface is pinned by `api-surface.test.ts`. No Sprint 22 phase or follow-up commit touches `connector/`, `relay/`, `proto/` or `admin/`. The live E2E fixes (#157, #159) changed client, connector and relay code as bug fixes, outside phase scope. |
+| 8 | AT-E5 | **Hint PASS** on the pending `v4-target` ("…one-time token (valid for 24 hours). If the token has expired, delete this relay and add a new one."). Delete + add again PASS earlier today. **Pending (2026-10-31, after 16:34:25 IST):** enrolment with `v4-target`'s expired token is refused. The V4 DB is kept for this, with the run's env, token and TOTP helper in `~/.cache/zecurity-v4-at-e5`, outside the repo. |
 
 ## 6. Development workflow checks
 

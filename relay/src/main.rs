@@ -63,9 +63,32 @@ async fn main() -> Result<()> {
     );
 
     let state = state::RelayState::new();
-    tokio::spawn(heartbeat::run(cfg.clone(), certs.clone(), state.clone()));
+    // heartbeat::run returns only when the controller reports this relay
+    // revoked (terminal); the listener then closes every connection (F-8).
+    let (revoked_tx, revoked_rx) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat = heartbeat::run(cfg.clone(), certs.clone(), state.clone());
+    tokio::spawn(async move {
+        heartbeat.await;
+        let _ = revoked_tx.send(());
+    });
     renewal::spawn(certs.clone(), &cfg)?;
     let crl = crl::WorkspaceCrlManager::new(cfg.controller_http_addr.clone());
     crl.clone().spawn_refresh(60, 15);
-    listener::run_listener(cfg.bind_addr, certs, state, cfg.runtime_limits, crl).await
+    let revoked = async move {
+        // A dropped sender (the heartbeat task panicked) is not a revocation.
+        if revoked_rx.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    listener::run_listener(
+        cfg.bind_addr,
+        certs,
+        state,
+        cfg.runtime_limits,
+        crl,
+        revoked,
+    )
+    .await?;
+    info!("Relay stopped after revocation");
+    Ok(())
 }

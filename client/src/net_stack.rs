@@ -1614,6 +1614,10 @@ async fn relay_tcp_to_quic_ctl(
     // normal close (client or resource closed the stream — no resync).
     let mut quic_buf = vec![0u8; 65536];
     let mut relay_failed = false;
+    // How the flow ended and how much it carried, logged once at the end
+    // (live E2E run 2026-10-30, F-7: relay flows ended with nothing logged).
+    let mut end_reason = "unknown";
+    let mut bytes_down: u64 = 0;
     // Fix 05-A: the client closed its transmit half (CLOSE-WAIT). Propagate the
     // half-close to the connector but KEEP reading, so a client that does
     // `shutdown(SHUT_WR)` after its request still gets the whole response. The
@@ -1628,6 +1632,7 @@ async fn relay_tcp_to_quic_ctl(
                     Some(buf) => {
                         if send.write_all(&buf).await.is_err() {
                             relay_failed = true; // QUIC send failed mid-session
+                            end_reason = "quic send failed";
                             break;
                         }
                     }
@@ -1642,13 +1647,20 @@ async fn relay_tcp_to_quic_ctl(
             result = recv.read(&mut quic_buf) => {
                 match result {
                     Ok(n) if n > 0 => {
+                        bytes_down += n as u64;
                         if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() {
+                            end_reason = "client socket gone";
                             break; // client-side channel closed (socket gone) — normal
                         }
                     }
-                    Ok(_) => break, // n == 0: QUIC stream finished (normal EOF)
-                    Err(_) => {
+                    Ok(_) => {
+                        end_reason = "stream finished";
+                        break; // n == 0: QUIC stream finished (normal EOF)
+                    }
+                    Err(error) => {
                         relay_failed = true; // mid-session QUIC read error
+                        tracing::warn!(dest = %destination, port, error = %error, "tunnel read failed");
+                        end_reason = "quic read failed";
                         break;
                     }
                 }
@@ -1656,9 +1668,13 @@ async fn relay_tcp_to_quic_ctl(
             // Fix 05-A: the net_stack side dropped this flow (socket reset by
             // the client, or reaped by the back-stop). Stop instead of waiting
             // on a QUIC read that may never complete.
-            _ = quic_to_tcp_tx.closed() => break,
+            _ = quic_to_tcp_tx.closed() => {
+                end_reason = "net_stack dropped the flow";
+                break;
+            }
         }
     }
+    tracing::debug!(dest = %destination, port, reason = end_reason, bytes_down, "tunnel flow ended");
 
     let _ = send.shutdown().await;
     if relay_failed {

@@ -130,6 +130,32 @@ type connectorStreamClient struct {
 	// authenticated with (verified by StreamSPIFFEInterceptor before Control
 	// runs); nil when unavailable. Set once when the stream opens.
 	presentedCertNotAfter *time.Time
+
+	// relayListMu serialises enqueueing a LabelledRelayList with recording its
+	// version, so relayListVersion is the list this stream receives last
+	// (FU-6). relayListSent is false until a list has been enqueued.
+	relayListMu      sync.Mutex
+	relayListSent    bool
+	relayListVersion uint64
+}
+
+// sendRelayList enqueues list and records its version. With onlyIfBehind, a
+// stream whose last enqueued list already has this version is skipped
+// (sent=false, err=nil): connectors re-probe their relays on every push, so a
+// repeat would cost a probe sweep for nothing.
+func (c *connectorStreamClient) sendRelayList(list *pb.LabelledRelayList, onlyIfBehind bool) (sent bool, err error) {
+	c.relayListMu.Lock()
+	defer c.relayListMu.Unlock()
+	if onlyIfBehind && c.relayListSent && c.relayListVersion == list.GetVersion() {
+		return false, nil
+	}
+	if err := c.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	}); err != nil {
+		return false, err
+	}
+	c.relayListSent, c.relayListVersion = true, list.GetVersion()
+	return true, nil
 }
 
 // reEnrollResendInterval throttles the renewal trigger: a connector inside its
@@ -508,25 +534,68 @@ func truncateForLog(s string) string {
 
 // BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
 // connected connector. A wedged connector whose send queue is full is logged
-// and skipped — the next broadcast (or the C4 push at reconnect) will catch
-// it up. The pool change that triggered this broadcast is the source of
-// truth in the relay store; if delivery to a connector is lost it will sync
-// when its stream re-opens.
+// and skipped — SyncRelayList (FU-6) or the C4 push at reconnect will catch it
+// up. The pool change that triggered this broadcast is the source of truth in
+// the relay store.
 func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
-	msg := &pb.ConnectorControlMessage{
-		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	for _, c := range r.relayListClients() {
+		if _, err := c.sendRelayList(list, false); err != nil {
+			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
+		}
 	}
+}
+
+// SyncRelayList (FU-6) sends list only to the connected streams whose last
+// enqueued list has a different version: one that missed a broadcast (failed
+// build, full send queue) or received two broadcasts out of order. Streams
+// already on this version get nothing. Returns how many streams were sent it.
+func (r *ConnectorRegistry) SyncRelayList(list *pb.LabelledRelayList) int {
+	n := 0
+	for _, c := range r.relayListClients() {
+		sent, err := c.sendRelayList(list, true)
+		if err != nil {
+			log.Printf("control stream: sync labelled relay list to connector %s: %v", c.connectorID, err)
+			continue
+		}
+		if sent {
+			n++
+		}
+	}
+	return n
+}
+
+// RunRelayListSync calls SyncRelayList with a freshly built list every
+// interval until ctx ends, so a relay list change that a post-commit broadcast
+// failed to deliver (drain, revoke, eviction) reaches every connected
+// connector within one interval.
+func (r *ConnectorRegistry) RunRelayListSync(ctx context.Context, src LabelledRelayListSource, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			list, err := src.BuildLabelledRelayList(ctx)
+			if err != nil {
+				log.Printf("relay list sync: build list: %v", err)
+				continue
+			}
+			if n := r.SyncRelayList(list); n > 0 {
+				log.Printf("relay list sync: sent list version %d to %d connector(s) that were behind", list.GetVersion(), n)
+			}
+		}
+	}
+}
+
+func (r *ConnectorRegistry) relayListClients() []*connectorStreamClient {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	clients := make([]*connectorStreamClient, 0, len(r.clients))
 	for _, c := range r.clients {
 		clients = append(clients, c)
 	}
-	r.mu.RUnlock()
-	for _, c := range clients {
-		if err := c.send(msg); err != nil {
-			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
-		}
-	}
+	return clients
 }
 
 // Control implements ConnectorService.Control — the persistent bidirectional stream.
@@ -657,9 +726,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	if h.RelayListSrc != nil {
 		if list, err := h.RelayListSrc.BuildLabelledRelayList(ctx); err != nil {
 			log.Printf("control stream: build labelled relay list for connector %s: %v", connectorID, err)
-		} else if err := client.send(&pb.ConnectorControlMessage{
-			Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
-		}); err != nil {
+		} else if _, err := client.sendRelayList(list, false); err != nil {
 			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
 		}
 	}
@@ -707,6 +774,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			// End it with the authoritative revoked marker.
 			log.Printf("control stream: connector %s revoked — ConnectorRevoked delivered, closing control stream", connectorID)
 			return rejectStream(stream, rejectRevoked())
+		case <-ctx.Done():
+			// The stream is gone (connection closed, or the server stopping).
+			// The Recv goroutine may have returned without delivering its
+			// error, since both of its select cases were ready at once; waiting
+			// on recvCh alone then never ended, which held GracefulStop and
+			// deadlocked Stop until the process was killed (live E2E run
+			// 2026-10-30, O-8).
+			log.Printf("control stream: connector %s stream context ended: %v", connectorID, ctx.Err())
+			return ctx.Err()
 		case r := <-recvCh:
 			if r.err == io.EOF {
 				log.Printf("control stream: connector %s closed stream (EOF)", connectorID)

@@ -3384,6 +3384,72 @@ serves on `127.0.0.1:9102`.
 - **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
   re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
 
+## 2026-10-30 — M1: live E2E — lab rebuilt after the reboot and the Phase D reset; journey 6 (workspace isolation) PASS
+- All machines had rebooted; dev DB reset for Phase D `043_`; controller from `fixed-pendings` `710ed362`; workspaces
+  `xiyo` and `e2e-other` re-seeded with a throwaway program (deleted); client rebuilt for the new platform root.
+- seechan5's shield (not ours) uninstalled at the user's request; the unknown shield on this PC left alone; nika's IP
+  is now .33.
+- Journey 6: 51 cross-workspace probes as `e2e-other`'s admin with `xiyo`'s IDs, all refused with not-found answers;
+  `xiyo`'s rows identical before and after; no leaks in lists; no controller errors.
+- **F-6** public `lookupWorkspacesByEmail` enumerates email → workspace with no limit (ADR-009 Tier 3 not built) →
+  FU-11 (user decision: follow-up).
+
+## 2026-10-30 — M1: live E2E journey 7 (provider console relays) and fixes F-8, O-8
+- AT-E4 on real hosts, AT-D1–D5, D7, AT-X refusals, X4, X5 PASS; AT-D6 drain mechanics PASS.
+- **F-8** relay revoke left relay-path clients failing 35 s → client resync timing + revoked relay closes connections
+  and stops; live 3.5 s. **O-8** controller stop deadlock (Control handler without `ctx.Done()`, random select) →
+  fixed; 6/6 stops in 10 s.
+- **F-7** sustained relay-path download torn down (direct path fine) → FU-12; duplicate outbox processor → FU-13.
+- Branch `fix/e2e-j7-findings`, local only.
+
+## 2026-10-30 — M1: F-7 (FU-12) root-caused and fixed; FU-13 fixed
+- F-7: relayed shield-tunnel flows ended without the inner TLS close_notify (Connector `relay_stream` dropped the
+  device stream on a clean end), so the Client reset the app connection and lost the tail of every relay-path
+  response. Fixed (shutdown on clean close, 120 s, cancellable); live 2/2 full 20 MB downloads, 0 errors in 55 flows.
+- FU-13: duplicate `outboxProcessor.Run` removed.
+- Diagnostics kept: relay bridge summary + full error chains, connector copy result, client relay-pool lines.
+
+## 2026-10-30 — M2: Phase D follow-ups FU-6 and FU-7; Sprint 22 doc fixes
+- Branch `sprint22/fu6-fu7-relay-drain-residuals` (from `fixed-pendings` `11d3d3e1`). No schema, connector, relay or proto change.
+- **FU-6:** each connector Control stream records the relay list version last sent; `RunRelayListSync` (60 s) sends the current list only to streams that are behind (missed broadcast, full queue, out-of-order delivery). Not a blind re-broadcast: the connector re-probes on every push.
+- **FU-7:** `EvictRelays` locks in id order (drain/eviction deadlock reproduced on the old statement, gone on the new); `RecordHeartbeat` keeps a newer count; `drain_started_at` from the controller clock after the locks; `GetActiveRelay` skips draining relays; `eligible.Where` never NULL; race tests for drain vs eviction, revoke and resume.
+- Mutation checks: every fix reverted once, its test failed.
+- Gate: Go 1531 pass / 0 fail / 2 expected skips; `go vet` clean.
+- Docs: D-gate status (merged in #156), Done Criteria ticked where met (TOTP, relay roles, reason + name, console write surface, no out-of-scope changes); enrolment and drain criteria wait for AT-E4/E5 and AT-D6 on the lab.
+- Pending (M1, lab): AT-D6 client data plane, AT-E4/E5, AT-X, then V4.
+
+## 2026-10-30 — M2: lab runs AT-D6 (client data plane) and AT-E4: PASS; FU-14 filed
+- **Stack:** throwaway controller, two relays and the console on this PC, with a throwaway DB on the dev Postgres and the isolated Valkey (never `ztna_platform`). Connector, file server and the AT-E4 relay on **manojinkyank** (.53) over SSH in an Orca terminal. Real client on this PC; the operator ran every `sudo` step and the Google sign-ins. `ufw` was opened for .53 only. Torn down afterwards: DB dropped, Valkey cleared, client uninstalled, files removed from .53.
+- **AT-D6 PASS:**
+  - connector migrated 17 ms after the drain;
+  - new connections went to the other relay after the client's 60 s transport sync (+59 s);
+  - the running 1 GiB download **completed** (+442 s);
+  - the console went from `streams_open` to "Drained".
+- **FU-14 (connector, numbered FU-11 in PR #158):** the 120 s drain timeout only aborts the session task; detached stream tasks keep the old relay connection open, so running streams aren't cut. Not fixed: D-32 rules out connector changes this sprint.
+- **AT-E4 PASS:** the console's install-as-a-service block ran unchanged on .53; the relay went pending → active; its token was used up (JTI gone). AT-E5 part: delete of a pending relay and add again works. The expired-token hint still needs a 24 h token.
+- **Setup notes for the next lab run:**
+  - `CONTROLLER_HTTP_URL` must be `http://localhost:8080`: Google rejects a private-IP client callback.
+  - The CLI login doesn't send invite tokens, so the user must create the workspace through an admin sign-in.
+  - Python's `http.server` ignores `Range`.
+  - Provider console sessions expire within minutes.
+  - The install dialog's token is lost when the dialog closes.
+- Pending: AT-E5 expired-token hint (24 h), V4 final run; manojinkyank still has the AT-E4 relay service installed until the operator removes it.
+
+## 2026-10-30 — M2: #159 conflicts resolved and merged; drain text fixed (#160); V4 final run PASS
+- **#159 (Sathiya, live E2E journeys 6–7):** merged `fixed-pendings` into his branch at Barath's request.
+  - The FU-6 relay-list sync worker now starts with `workers.Go` (the combined code didn't compile without it).
+  - #158's drain-timeout finding was renumbered **FU-11 → FU-14**, because #159 uses FU-11 to FU-13.
+  - Gates: Go 1541 / 0 / 2; relay 119 and connector 275 pass. Merged as `4c5f947d`.
+- **#160:** the console's drain card, dialog and `streams_open` line no longer promise a 120 s cut (FU-14).
+- **V4 targeted final run: PASS.**
+  - Automated gates: Go 1541 / 0 / 2, console 507, `relay_selector` 27, fresh DB 49 files.
+  - Live: TOTP gate, relay-ops limits and validation codes, console install on .53 (E4), drain (connector 42 ms, last-eligible 409, resume), console revoke (CRL, audit, relay stops itself in 10 s) and delete, FU-6 worker, scope checks, AT-E5 hint.
+- **Observations, not failures:**
+  - A host with another relay's leftover certificate state refuses to start the new relay. Safe, but the installer doesn't warn.
+  - With no open streams, a drained relay is dropped at once. One new connection still sent to it fails, and the client recovers in 18 ms (early resync).
+- **Kept for 2026-10-31:** V4 DB and `~/.cache/zecurity-v4-at-e5` (env, `v4-target` token, TOTP helper). After 16:34:25 IST, check that enrolment with the expired token is refused, then tick V2, V4 and "All scenarios pass", and clean up.
+- **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
+- **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
 
 ## 2026-10-30 — M1: D21-R (hostile connector at the shield) implemented
 - Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.

@@ -9,9 +9,11 @@ package eligible
 // Where is a SQL boolean expression over the unaliased columns of one relays
 // row: active, capacity tier high or medium, not draining, and with a routable
 // address (a non-empty public_addr, or public scope with an observed IP, from
-// which the list builder derives the address).
-const Where = `(status = 'active'
+// which the list builder derives the address). It is never NULL (FU-7):
+// callers select it as a Go bool, and a NULL column (address_scope,
+// capacity_label) must read as "not eligible".
+const Where = `COALESCE((status = 'active'
 	AND capacity_label IN ('high', 'medium')
 	AND drain_started_at IS NULL
 	AND (NULLIF(public_addr, '') IS NOT NULL
-	     OR (address_scope = 'public' AND observed_ip IS NOT NULL)))`
+	     OR (address_scope = 'public' AND observed_ip IS NOT NULL))), false)`

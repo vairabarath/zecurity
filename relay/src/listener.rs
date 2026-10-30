@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::Endpoint;
@@ -71,12 +72,17 @@ pub fn spawn_server_config_updates(
     })
 }
 
+/// QUIC application close sent to every peer when the relay is revoked.
+pub const RELAY_REVOKED_CLOSE_CODE: u32 = 0x52_45_56; // "REV"
+pub const RELAY_REVOKED_REASON: &[u8] = b"relay revoked";
+
 pub async fn run_listener(
     bind_addr: SocketAddr,
     certs: Arc<CertManager>,
     state: Arc<RelayState>,
     limits: RuntimeLimits,
     crl: crate::crl::WorkspaceCrlManager,
+    stop: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let relay_id = certs.relay_id().to_owned();
     let server_config = server_config_for(&certs.current(), &relay_id, &limits)?;
@@ -98,7 +104,24 @@ pub async fn run_listener(
         "Relay QUIC listener started"
     );
 
-    while let Some(incoming) = endpoint.accept().await {
+    tokio::pin!(stop);
+    loop {
+        let incoming = tokio::select! {
+            incoming = endpoint.accept() => match incoming {
+                Some(incoming) => incoming,
+                None => break,
+            },
+            () = &mut stop => {
+                // The controller revoked this relay (live E2E run 2026-10-30,
+                // F-8). Close every connection with a clear reason instead of
+                // serving on: clients and connectors fail over at once rather
+                // than reaching a relay that can no longer bridge.
+                warn!("Relay revoked: closing every connection and the listener");
+                endpoint.close(RELAY_REVOKED_CLOSE_CODE.into(), RELAY_REVOKED_REASON);
+                let _ = timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
+                return Ok(());
+            }
+        };
         let permit = match connection_permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -466,6 +489,7 @@ mod revocation_issuer_tests {
             RelayState::new(),
             limits(),
             WorkspaceCrlManager::new(crl_http),
+            std::future::pending(),
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
         addr
@@ -586,6 +610,65 @@ mod revocation_issuer_tests {
             Outcome::Rejected("peer certificate revoked".into())
         );
         assert_eq!(s.fetched.lock().unwrap().as_slice(), [TENANT_A.to_owned()]);
+    }
+
+    /// F-8 (live E2E run 2026-10-30): when the relay is revoked the listener
+    /// closes every connection with "relay revoked" and returns, instead of
+    /// keeping peers on a relay that can no longer bridge.
+    #[tokio::test]
+    async fn revoked_relay_closes_connections_and_stops() {
+        crate::test_support::install_crypto_provider();
+        let pki = TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let crls = HashMap::from([(TENANT_A.to_owned(), ca_a.crl(&[]))]);
+        let crl_http = spawn_crl_server(crls, Fetched::default()).await;
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-f8-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let listener = tokio::spawn(run_listener(
+            addr,
+            manager,
+            RelayState::new(),
+            limits(),
+            WorkspaceCrlManager::new(crl_http),
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let (good, good_key) = ca_a.client_leaf(GOOD_SERIAL);
+        let chain = vec![good, ca_a.der()];
+        let peer = tokio::spawn(async move { connect(&pki, addr, chain, good_key).await });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        stop_tx.send(()).unwrap();
+
+        // Well inside the 5 s session timeout that would otherwise close it.
+        let outcome = tokio::time::timeout(Duration::from_secs(3), peer)
+            .await
+            .expect("peer must be closed promptly")
+            .unwrap();
+        assert_eq!(outcome, Outcome::Admitted("relay revoked".into()));
+        tokio::time::timeout(Duration::from_secs(5), listener)
+            .await
+            .expect("listener must return after the stop")
+            .unwrap()
+            .unwrap();
     }
 
     /// S1: a revoked tenant-A leaf presented as `[leaf, tenant B's CA,
