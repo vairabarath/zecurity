@@ -93,6 +93,7 @@ Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings` `710ed362`), no
 | (a1) | `25415b26` | `SharedResourceState::admit_snapshot(connector_id, generation)`; `handle_connector_msg` passes the stream's connector id |
 | (a2) | `b837a10f` | proto `SignedPeerList` / `PeerListPayload`; `pki.SignShieldPeerList`; `connector/peer_list.go` (issuer serialised, `PushPeerListsForNetworkOf`); triggers: connector revoke, connector health change, shield moved; shield `peer_list.rs`, `crl.rs` (copy of `crl_issuers`), `apply_signed_peer_list`, `peer_list_issued_at_ms` in state.json; unsigned `PeerConnectorList` ignored |
 | (a2) | `d21ac815` | an empty signed list still saves its `issued_at` (found by the automated security review) |
+| (a2) | `025ebae4` | peer-list pushes run in the background, off the Connector's `AuthorizationAck` path (D18); the issuer mutex covers only `issued_at` and the read, and signing happens after it |
 | A′ | `19fd600b` | proto `WorkspaceCrl` (oneof 15); connector `CrlManager::current_der`, forwarded on stream open and with health reports when newer; shield `CrlStore` (verify, newest by `thisUpdate`, `workspace.crl`), serial captured in `tls.rs`, `crl_verdict`, `LeftConnector` → terminal failover |
 | D | `c40f02d5` | `SharedResourceState::allows_tunnel`; refused `TunnelOpen` → `TunnelOpened{ok:false}` |
 | A′ | `ef95a903` | review fixes: the CRL wait is counted across streams; quarantine past it (instructions and snapshots ignored, tunnels refused); a clean close past it is terminal; listed Connector refused before anything is sent; serial taken from the completed TLS session; the Connector sends the CRL before the snapshot replay |
@@ -109,11 +110,20 @@ Residual risks (accepted):
 - **Fail closed on a long controller outage.** When no Connector has a CRL valid now (outage longer than the 24 h CRL validity), shields leave their Connectors, the same as Connectors deny clients.
 - **Serial lookup.** The Connector's certificate serial comes from the Shield's last completed handshake with that Connector id (`tls::connector_serial`). Every unexpired certificate of a revoked Connector is in the CRL (bug 9).
 - **Not unit-tested:** the clean-close path inside `run_once`. Left to the live check.
+- **Phase E behaviour change.** An honest Connector no longer prunes revoked peers from the shield at once. Pruning now comes from the controller: its push on a revoke, and the snapshot it pushes when a shield moves. A′ also refuses a revoked Connector the shield is attached to.
+- **Long controller outage.** Protection changes made while a shield is quarantined reach it only by the drift resync. The snapshot was ignored, and the Connector replays it only when the shield connects.
+
+Live-check plan (Sathiya's go-ahead first; confirm the running controller's sha):
+- **Deploy order:** controller, then Connectors, then Shields. A new Shield on an old Connector gets no CRL and leaves every Connector after 30 s.
+- **Revoke:** revoke a Connector under traffic; the shield fails over.
+- **Hostile Connector:** the revocation-ignoring Connector from the Phase E live run. The shield leaves it within 5 s of a CRL that lists it.
+- **Clean close:** without a valid CRL past the wait, a Connector that closes the stream is left.
+- **D under real traffic:** a port-range resource and an `any` resource; honest traffic isn't refused.
 
 Tests:
-- **Controller:** `TestBuildSignedPeerList`, `TestPushPeerListsForNetworkOf`, `TestShieldFacingAddr`, all DB-backed.
+- **Controller:** `TestBuildSignedPeerList`, `TestPushPeerListsForNetworkOf`, `TestPeerListSigningIsOutsideTheLock`, `TestShieldFacingAddr`, all DB-backed.
 - **Shield:** generation scoping; signed lists (forged, altered, other shield or workspace, rollback across a restart, unsigned ignored, empty list, publish); a Go-signed vector verifies in Rust; the CA chosen by role; the CRL store; the CRL verdict; a CRL that lists the Connector ends the stream; leaving is terminal; the tunnel allowlist, also end to end.
 - **Connector:** the CRL is forwarded once per CRL per stream.
 - Every new test fails with its fix removed (mutant-checked).
 
-Gates: controller 1530 / 0 / 2, connector 270, shield 73.
+Gates: controller 1531 / 0 / 2 (DB-backed), connector 270, shield 73; client and relay build.
