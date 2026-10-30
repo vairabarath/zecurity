@@ -94,6 +94,7 @@ Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings` `710ed362`), no
 | (a2) | `b837a10f` | proto `SignedPeerList` / `PeerListPayload`; `pki.SignShieldPeerList`; `connector/peer_list.go` (issuer serialised, `PushPeerListsForNetworkOf`); triggers: connector revoke, connector health change, shield moved; shield `peer_list.rs`, `crl.rs` (copy of `crl_issuers`), `apply_signed_peer_list`, `peer_list_issued_at_ms` in state.json; unsigned `PeerConnectorList` ignored |
 | (a2) | `d21ac815` | an empty signed list still saves its `issued_at` (found by the automated security review) |
 | (a2) | `025ebae4` | peer-list pushes run in the background, off the Connector's `AuthorizationAck` path (D18); the issuer mutex covers only `issued_at` and the read, and signing happens after it |
+| (a2) | next commit | background pushes coalesced (`pushCoalescer`): one worker per key, latest trigger wins, panic-safe, at most 4 at once (automated security review: a reconnect storm started one goroutine per trigger) |
 | A′ | `19fd600b` | proto `WorkspaceCrl` (oneof 15); connector `CrlManager::current_der`, forwarded on stream open and with health reports when newer; shield `CrlStore` (verify, newest by `thisUpdate`, `workspace.crl`), serial captured in `tls.rs`, `crl_verdict`, `LeftConnector` → terminal failover |
 | D | `c40f02d5` | `SharedResourceState::allows_tunnel`; refused `TunnelOpen` → `TunnelOpened{ok:false}` |
 | A′ | `ef95a903` | review fixes: the CRL wait is counted across streams; quarantine past it (instructions and snapshots ignored, tunnels refused); a clean close past it is terminal; listed Connector refused before anything is sent; serial taken from the completed TLS session; the Connector sends the CRL before the snapshot replay |
@@ -126,4 +127,4 @@ Tests:
 - **Connector:** the CRL is forwarded once per CRL per stream.
 - Every new test fails with its fix removed (mutant-checked).
 
-Gates: controller 1531 / 0 / 2 (DB-backed), connector 270, shield 73; client and relay build.
+Gates: controller 1535 / 0 / 2 (DB-backed), connector 270, shield 73; client and relay build.

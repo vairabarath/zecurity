@@ -441,4 +441,4 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - **A′ `19fd600b`, `ef95a903`:** the connector forwards the workspace CRL on the shield stream; the shield keeps the newest (by `thisUpdate`), refuses a connector it lists before sending anything, and leaves after 30 s without a CRL valid now, counted across streams. Past that wait it acts on nothing from the connector. A hostile connector is cut off within the CRL's `nextUpdate` (24 h), not its 7-day certificate.
   - **D `c40f02d5`:** shield tunnels only to `(ip, protocol, port range)` of its active resources.
   - Proto additive (`ResourceSnapshot.signed_peer_list = 3`, `SignedPeerList`, `PeerListPayload`, `WorkspaceCrl` oneof 15). No schema change.
-  - Gates: controller 1531 / 0 / 2 (DB-backed), connector 270, shield 73, client and relay build; every new test mutant-checked. Live check on the lab not yet done.
+  - Gates: controller 1535 / 0 / 2 (DB-backed), connector 270, shield 73, client and relay build; every new test mutant-checked. Live check on the lab not yet done.

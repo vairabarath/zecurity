@@ -67,6 +67,8 @@ type ConnectorRegistry struct {
 	// peerLists signs each shield's peer list (D21-R a2); nil until
 	// SetPeerListSigner. Set once at startup, read-only afterwards.
 	peerLists *peerListIssuer
+	// pushes runs the background peer-list and snapshot pushes (D21-R a2).
+	pushes *pushCoalescer
 
 	// live holds EVERY activated, not-yet-retired Control stream per
 	// connector — the authoritative one in clients plus any superseded stream
@@ -90,6 +92,7 @@ func NewConnectorRegistry() *ConnectorRegistry {
 	return &ConnectorRegistry{
 		clients: make(map[string]*connectorStreamClient),
 		live:    make(map[string]map[*connectorStreamClient]struct{}),
+		pushes:  newPushCoalescer(maxConcurrentPushes, peerListPushTimeout),
 	}
 }
 

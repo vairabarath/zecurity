@@ -153,25 +153,22 @@ const peerListPushTimeout = 30 * time.Second
 // pushPeerListsInBackground runs PushPeerListsForNetworkOf off the caller's
 // path: called from a Connector's Control recv loop, whose AuthorizationAck
 // must not wait behind snapshot builds and CA-key signatures (Phase M, D18).
+// Coalesced per Connector (pushCoalescer).
 func pushPeerListsInBackground(db *pgxpool.Pool, r *ConnectorRegistry, connectorID string) {
 	if r.peerListIssuer() == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), peerListPushTimeout)
-		defer cancel()
+	r.pushes.trigger("network-of:"+connectorID, func(ctx context.Context) {
 		PushPeerListsForNetworkOf(ctx, db, r, connectorID)
-	}()
+	})
 }
 
 // pushSnapshotInBackground is PushSnapshotForShield off the caller's path,
-// for the same reason.
+// for the same reason. Coalesced per shield; the latest target Connector wins.
 func pushSnapshotInBackground(db *pgxpool.Pool, r *ConnectorRegistry, connectorID, shieldID string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), peerListPushTimeout)
-		defer cancel()
+	r.pushes.trigger("shield:"+shieldID, func(ctx context.Context) {
 		PushSnapshotForShield(ctx, db, r, connectorID, shieldID)
-	}()
+	})
 }
 
 // PushPeerListsForNetworkOf re-sends the snapshot, and with it the signed peer
