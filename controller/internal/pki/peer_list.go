@@ -15,11 +15,25 @@ import (
 // other way round. The shield verifies over the same bytes.
 const ShieldPeerListContext = "zecurity/shield-peer-list/v1\x00"
 
+// ShieldResourceSetContext domain-separates a signed shield resource set
+// (D21-R S) the same way, and from a peer list.
+const ShieldResourceSetContext = "zecurity/shield-resource-set/v1\x00"
+
 // ShieldPeerListDigest is the SHA-384 digest a peer-list signature covers:
 // ShieldPeerListContext || payload.
 func ShieldPeerListDigest(payload []byte) []byte {
+	return shieldDigest(ShieldPeerListContext, payload)
+}
+
+// ShieldResourceSetDigest is the SHA-384 digest a resource-set signature
+// covers: ShieldResourceSetContext || payload.
+func ShieldResourceSetDigest(payload []byte) []byte {
+	return shieldDigest(ShieldResourceSetContext, payload)
+}
+
+func shieldDigest(context string, payload []byte) []byte {
 	h := sha512.New384()
-	h.Write([]byte(ShieldPeerListContext))
+	h.Write([]byte(context))
 	h.Write(payload)
 	return h.Sum(nil)
 }
@@ -28,6 +42,16 @@ func ShieldPeerListDigest(payload []byte) []byte {
 // Workspace CA key (ECDSA P-384 over ShieldPeerListDigest, ASN.1 DER). The key
 // is loaded and decrypted per call, as GenerateClientCRL does.
 func (s *serviceImpl) SignShieldPeerList(ctx context.Context, tenantID string, payload []byte) ([]byte, error) {
+	return s.signWithWorkspaceCA(ctx, tenantID, ShieldPeerListDigest(payload))
+}
+
+// SignShieldResourceSet signs a serialized ResourceSetPayload like
+// SignShieldPeerList, over ShieldResourceSetDigest (D21-R S).
+func (s *serviceImpl) SignShieldResourceSet(ctx context.Context, tenantID string, payload []byte) ([]byte, error) {
+	return s.signWithWorkspaceCA(ctx, tenantID, ShieldResourceSetDigest(payload))
+}
+
+func (s *serviceImpl) signWithWorkspaceCA(ctx context.Context, tenantID string, digest []byte) ([]byte, error) {
 	var encryptedKey, nonce string
 	if err := s.pool.QueryRow(ctx,
 		`SELECT encrypted_private_key, nonce
@@ -44,9 +68,9 @@ func (s *serviceImpl) SignShieldPeerList(ctx context.Context, tenantID string, p
 	}
 	defer caPrivKey.D.SetInt64(0)
 
-	sig, err := ecdsa.SignASN1(rand.Reader, caPrivKey, ShieldPeerListDigest(payload))
+	sig, err := ecdsa.SignASN1(rand.Reader, caPrivKey, digest)
 	if err != nil {
-		return nil, fmt.Errorf("sign shield peer list: %w", err)
+		return nil, fmt.Errorf("sign with workspace CA: %w", err)
 	}
 	return sig, nil
 }

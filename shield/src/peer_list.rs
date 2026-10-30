@@ -18,7 +18,7 @@ use prost::Message;
 use ring::signature::{UnparsedPublicKey, ECDSA_P384_SHA384_ASN1};
 use x509_parser::prelude::*;
 
-use crate::proto::{PeerListPayload, SignedPeerList};
+use crate::proto::{PeerListPayload, ResourceSetPayload, SignedPeerList, SignedResourceSet};
 
 /// Domain separation from everything else the Workspace CA key signs
 /// (certificates and CRLs are DER SEQUENCEs, first byte 0x30).
@@ -48,14 +48,60 @@ pub fn workspace_ca_key_from_bundle(bundle_pem: &[u8]) -> Result<Vec<u8>> {
 
 /// Checks `signature` over PEER_LIST_CONTEXT || `payload` with `ca_key`.
 pub fn verify_signature(ca_key: &[u8], payload: &[u8], signature: &[u8]) -> Result<()> {
-    let mut message = Vec::with_capacity(PEER_LIST_CONTEXT.len() + payload.len());
-    message.extend_from_slice(PEER_LIST_CONTEXT);
+    verify_in_context(ca_key, PEER_LIST_CONTEXT, payload, signature)
+        .context("peer list signature does not verify against the Workspace CA")
+}
+
+/// Checks `signature` over `context` || `payload` with `ca_key`.
+fn verify_in_context(
+    ca_key: &[u8],
+    context: &[u8],
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let mut message = Vec::with_capacity(context.len() + payload.len());
+    message.extend_from_slice(context);
     message.extend_from_slice(payload);
     UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, ca_key)
         .verify(&message, signature)
-        .map_err(|_| {
-            anyhow::anyhow!("peer list signature does not verify against the Workspace CA")
-        })
+        .map_err(|_| anyhow::anyhow!("bad signature"))
+}
+
+/// D21-R (S): the context of a signed resource set (controller
+/// pki.ShieldResourceSetContext).
+pub const RESOURCE_SET_CONTEXT: &[u8] = b"zecurity/shield-resource-set/v1\0";
+
+/// D21-R (S): verifies a signed resource set with the Workspace CA key and
+/// returns its payload when it is for this Shield. The Shield applies
+/// resources only from such a payload.
+pub fn verify_resource_set(
+    signed: &SignedResourceSet,
+    ca_key: &[u8],
+    trust_domain: &str,
+    shield_id: &str,
+) -> Result<ResourceSetPayload> {
+    verify_in_context(
+        ca_key,
+        RESOURCE_SET_CONTEXT,
+        &signed.payload,
+        &signed.signature,
+    )
+    .context("resource set signature does not verify against the Workspace CA")?;
+    let payload =
+        ResourceSetPayload::decode(signed.payload.as_slice()).context("resource set payload")?;
+    if payload.trust_domain != trust_domain {
+        bail!(
+            "resource set is for trust domain {:?}, not {trust_domain:?}",
+            payload.trust_domain
+        );
+    }
+    if payload.shield_id != shield_id {
+        bail!(
+            "resource set is for shield {:?}, not {shield_id:?}",
+            payload.shield_id
+        );
+    }
+    Ok(payload)
 }
 
 /// Verifies `signed` with the Workspace CA key and returns its payload when
@@ -107,6 +153,25 @@ mod tests {
         let mut other = payload.clone();
         other.push(b'!');
         assert!(verify_signature(&key, &other, &sig).is_err());
+    }
+
+    /// Signed by the controller's Go code over pki.ShieldResourceSetDigest:
+    /// the resource-set context matches byte for byte, and a resource-set
+    /// signature is not a peer-list one.
+    const GO_SET_PUB: &str = "0406275693015a6efc75797184ef6049f0ce2be0b3fb39782daa8cfd37e6d6c3e57ef5232d0e1c9b9c264f0b5b9ab93dee4262b7352cd1642691e4721d7a570226c9fdd952f2021f4cd8f31ece2645a2dfa39df9f66db6c708f5c3d1572e0ecf20";
+    const GO_SET_PAYLOAD: &str = "64323172207265736f757263652d73657420766563746f72";
+    const GO_SET_SIG: &str = "3066023100ea57f4477c0151c54035402776fdd07b85d7a78988a79cd182085d19df2de741605dca7b7395f4c018fc8768c694443c023100f394e3c6ebdbb47f6fa75c65424b77b48b995ca90a0412c745a82231009afbc814485138086053408b781bd485c67612";
+
+    #[test]
+    fn a_resource_set_signature_made_by_the_controller_verifies() {
+        let key = hex::decode(GO_SET_PUB).unwrap();
+        let payload = hex::decode(GO_SET_PAYLOAD).unwrap();
+        let sig = hex::decode(GO_SET_SIG).unwrap();
+        verify_in_context(&key, RESOURCE_SET_CONTEXT, &payload, &sig).expect("Go-signed vector");
+        assert!(
+            verify_signature(&key, &payload, &sig).is_err(),
+            "not a peer list"
+        );
     }
 
     fn ca_params(cn: &str, key_id: &[u8], constraint: BasicConstraints) -> CertificateParams {

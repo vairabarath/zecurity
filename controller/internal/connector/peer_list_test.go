@@ -33,6 +33,11 @@ func (s *keySigner) SignShieldPeerList(_ context.Context, tenantID string, paylo
 	return ecdsa.SignASN1(rand.Reader, s.key, pki.ShieldPeerListDigest(payload))
 }
 
+func (s *keySigner) SignShieldResourceSet(_ context.Context, tenantID string, payload []byte) ([]byte, error) {
+	s.tenants = append(s.tenants, tenantID)
+	return ecdsa.SignASN1(rand.Reader, s.key, pki.ShieldResourceSetDigest(payload))
+}
+
 func newKeySigner(t *testing.T) *keySigner {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
@@ -106,7 +111,7 @@ func TestBuildSignedPeerList(t *testing.T) {
 
 	signer := newKeySigner(t)
 	r := NewConnectorRegistry()
-	r.SetPeerListSigner(signer)
+	r.SetShieldSigner(signer)
 
 	msg, err := buildSnapshotMsg(ctx, pool, r, shieldID)
 	if err != nil {
@@ -122,8 +127,9 @@ func TestBuildSignedPeerList(t *testing.T) {
 	if ecdsa.VerifyASN1(&signer.key.PublicKey, digestWithoutContext(signed.Payload), signed.Signature) {
 		t.Fatal("signature verifies without the context prefix")
 	}
-	if len(signer.tenants) != 1 || signer.tenants[0] != wsID {
-		t.Fatalf("signed with tenants %v, want [%s]", signer.tenants, wsID)
+	// One peer list and one resource set, both with this workspace's key.
+	if len(signer.tenants) != 2 || signer.tenants[0] != wsID || signer.tenants[1] != wsID {
+		t.Fatalf("signed with tenants %v, want [%s %s]", signer.tenants, wsID, wsID)
 	}
 
 	var payload shieldpb.PeerListPayload
@@ -202,7 +208,7 @@ func TestPeerListSigningIsOutsideTheLock(t *testing.T) {
 	}
 	signer := &blockingSigner{keySigner: newKeySigner(t), entered: make(chan struct{}), release: make(chan struct{})}
 	r := NewConnectorRegistry()
-	r.SetPeerListSigner(signer)
+	r.SetShieldSigner(signer)
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -253,7 +259,7 @@ func TestPushPeerListsForNetworkOf(t *testing.T) {
 	shield(connB, "revoked")
 
 	r := NewConnectorRegistry()
-	r.SetPeerListSigner(newKeySigner(t))
+	r.SetShieldSigner(newKeySigner(t))
 	clientA := &connectorStreamClient{connectorID: connA, tenantID: wsID, outbound: make(chan *pb.ConnectorControlMessage, 8)}
 	clientB := &connectorStreamClient{connectorID: connB, tenantID: wsID, outbound: make(chan *pb.ConnectorControlMessage, 8)}
 	r.clients[connA] = clientA

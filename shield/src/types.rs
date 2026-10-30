@@ -61,6 +61,11 @@ pub struct ShieldState {
     /// list accepted. A list is accepted only when it was issued later, so a
     /// Connector can't replay an older one, across restarts too. 0 = none yet.
     pub peer_list_issued_at_ms: u64,
+
+    /// D21-R (S): the highest signed resource-set generation applied. After
+    /// a restart an older set is refused, so a Connector can't roll the
+    /// Shield's protection back. 0 = none yet.
+    pub resource_generation_floor: u64,
 }
 
 /// On-disk representation with both the new `connectors` list and the legacy
@@ -87,6 +92,8 @@ struct ShieldStateOnDisk {
     cert_not_after: i64,
     #[serde(default)]
     peer_list_issued_at_ms: u64,
+    #[serde(default)]
+    resource_generation_floor: u64,
 }
 
 impl From<ShieldStateOnDisk> for ShieldState {
@@ -112,6 +119,7 @@ impl From<ShieldStateOnDisk> for ShieldState {
             enrolled_at: v.enrolled_at,
             cert_not_after: v.cert_not_after,
             peer_list_issued_at_ms: v.peer_list_issued_at_ms,
+            resource_generation_floor: v.resource_generation_floor,
         }
     }
 }
@@ -239,6 +247,7 @@ mod tests {
             enrolled_at: "2026-07-01T00:00:00Z".into(),
             cert_not_after: 1793491200,
             peer_list_issued_at_ms: 0,
+            resource_generation_floor: 0,
         };
         original.save(dir.to_str().unwrap()).unwrap();
         let loaded = ShieldState::load(dir.to_str().unwrap()).unwrap();

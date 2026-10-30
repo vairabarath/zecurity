@@ -755,46 +755,33 @@ async fn handle_connector_msg(
     peers: &PeerPublisher,
 ) -> Option<Result<()>> {
     match msg.body {
-        Some(Body::ResourceInstruction(_))
-            if !connector_may_act(crl, connector_id, "resource instruction") =>
-        {
-            None
-        }
+        // D21-R (S): resources change only through a controller-signed set
+        // in a ResourceSnapshot. A Connector's instruction is ignored: it
+        // could remove protection.
         Some(Body::ResourceInstruction(instr)) => {
-            if let Some(ack) = resources::handle_instruction(&instr, resource_state).await {
-                resource_state.store_ack(ack.clone());
-                if out_tx
-                    .send(ShieldControlMessage {
-                        body: Some(Body::ResourceAck(ack)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return Some(Err(anyhow::anyhow!("outbound channel closed on ack")));
-                }
-            }
+            debug!(resource_id = %instr.resource_id, action = %instr.action, "ignored unsigned ResourceInstruction");
             None
         }
         // ADR-004 Phase 2: authoritative desired-state snapshot — replace the
         // active set, rebuild the chain, ack every contained resource.
         Some(Body::ResourceSnapshot(snap)) => {
+            let ca_key = match peer_list::workspace_ca_key(&cfg.state_dir) {
+                Ok(ca_key) => ca_key,
+                Err(e) => {
+                    warn!(error = %e, "snapshot not checked: no Workspace CA key");
+                    return None;
+                }
+            };
             // D21-R (a2): the signed peer list first, independent of the
             // generation check (identical resources keep their generation).
             if let Some(signed) = &snap.signed_peer_list {
-                match peer_list::workspace_ca_key(&cfg.state_dir) {
-                    Ok(ca_key) => {
-                        apply_signed_peer_list(state, cfg, signed, &ca_key);
-                        peers.publish(state);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "signed peer list not checked: no Workspace CA key")
-                    }
-                }
+                apply_signed_peer_list(state, cfg, signed, &ca_key);
+                peers.publish(state);
             }
             if !connector_may_act(crl, connector_id, "resource snapshot") {
                 return None;
             }
-            let acks = resources::handle_snapshot(&snap, connector_id, resource_state).await;
+            let acks = apply_signed_resource_set(&snap, &ca_key, state, cfg, resource_state).await;
             for ack in acks {
                 resource_state.store_ack(ack.clone());
                 if out_tx
@@ -906,6 +893,61 @@ async fn handle_connector_msg(
         other => {
             warn!(?other, "ignored unsupported Shield Control message");
             None
+        }
+    }
+}
+
+/// D21-R (S): apply a snapshot's controller-signed resource set; returns the
+/// acks to send.
+///
+///   - No signed set, or one that doesn't verify against the Workspace CA
+///     key or isn't for this Shield and trust domain: nothing changes (the
+///     unsigned fields are never used).
+///   - Older than the last applied set, or than the saved floor: ignored.
+///   - The generation already applied: not reapplied, its removes acked
+///     again.
+///   - Newer: applied (desired set, then removes acked), and the floor saved
+///     in state.json so a restart keeps older sets out.
+async fn apply_signed_resource_set(
+    snap: &crate::proto::ResourceSnapshot,
+    ca_key: &[u8],
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    resource_state: &Arc<SharedResourceState>,
+) -> Vec<crate::proto::ResourceAck> {
+    let Some(signed) = &snap.signed_resource_set else {
+        warn!("ignored a snapshot without a signed resource set");
+        return Vec::new();
+    };
+    let payload =
+        match peer_list::verify_resource_set(signed, ca_key, &state.trust_domain, &state.shield_id)
+        {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(error = %e, "rejected resource set");
+                return Vec::new();
+            }
+        };
+    match resource_state.admit_resource_set(payload.generation, state.resource_generation_floor) {
+        resources::Admission::Stale => {
+            warn!(
+                generation = payload.generation,
+                floor = state.resource_generation_floor,
+                "ignoring stale resource set"
+            );
+            Vec::new()
+        }
+        resources::Admission::Same => resources::remove_acks(&payload),
+        resources::Admission::Apply => {
+            let mut acks = resources::apply_resource_set(&payload, resource_state).await;
+            acks.extend(resources::remove_acks(&payload));
+            if payload.generation > state.resource_generation_floor {
+                state.resource_generation_floor = payload.generation;
+                if let Err(e) = state.save(&cfg.state_dir) {
+                    warn!(error = %e, "failed to save the resource generation floor");
+                }
+            }
+            acks
         }
     }
 }
@@ -1169,6 +1211,7 @@ mod tests {
             enrolled_at: "2026-10-09T00:00:00Z".into(),
             cert_not_after: 1_000,
             peer_list_issued_at_ms: 0,
+            resource_generation_floor: 0,
         }
     }
 
@@ -1611,20 +1654,107 @@ mod tests {
                     .collect(),
             };
             let payload = prost::Message::encode_to_vec(&payload);
-            let mut message = crate::peer_list::PEER_LIST_CONTEXT.to_vec();
-            message.extend_from_slice(&payload);
-            let signature = self
-                .0
-                .sign(&SystemRandom::new(), &message)
-                .unwrap()
-                .as_ref()
-                .to_vec();
+            let signature = self.sign_in(crate::peer_list::PEER_LIST_CONTEXT, &payload);
             crate::proto::SignedPeerList { payload, signature }
         }
 
         /// A list for test_state()'s shield.
         fn sign(&self, issued_at: u64, peers: &[&str]) -> crate::proto::SignedPeerList {
             self.sign_for("ws-test.zecurity.in", "shield-1", issued_at, peers)
+        }
+
+        fn sign_in(&self, context: &[u8], payload: &[u8]) -> Vec<u8> {
+            let mut message = context.to_vec();
+            message.extend_from_slice(payload);
+            self.0
+                .sign(&SystemRandom::new(), &message)
+                .unwrap()
+                .as_ref()
+                .to_vec()
+        }
+
+        /// D21-R (S): a resource set for `shield` at `generation`, desiring
+        /// `apply` and removing `remove` (resource ids, rules made up).
+        fn sign_set_for(
+            &self,
+            shield: &str,
+            generation: u64,
+            apply: &[&str],
+            remove: &[&str],
+        ) -> crate::proto::SignedResourceSet {
+            let rule = |id: &&str, action: &str| crate::proto::ResourceInstruction {
+                resource_id: id.to_string(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 8000,
+                port_to: 8000,
+                action: action.into(),
+                ..Default::default()
+            };
+            let payload = crate::proto::ResourceSetPayload {
+                trust_domain: "ws-test.zecurity.in".into(),
+                shield_id: shield.into(),
+                generation,
+                resources: apply.iter().map(|id| rule(id, "apply")).collect(),
+                removes: remove.iter().map(|id| rule(id, "remove")).collect(),
+            };
+            let payload = prost::Message::encode_to_vec(&payload);
+            let signature = self.sign_in(crate::peer_list::RESOURCE_SET_CONTEXT, &payload);
+            crate::proto::SignedResourceSet { payload, signature }
+        }
+
+        fn sign_set(
+            &self,
+            generation: u64,
+            apply: &[&str],
+            remove: &[&str],
+        ) -> crate::proto::SignedResourceSet {
+            self.sign_set_for("shield-1", generation, apply, remove)
+        }
+
+        /// Stores workspace_ca.crt with this key as the Workspace CA
+        /// (Platform Root → Intermediate → Workspace CA).
+        fn store_bundle(&self, cfg: &ShieldConfig) {
+            use rcgen::{
+                BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+                IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+            };
+            let ca_params = |cn: &str, c: BasicConstraints| {
+                let mut p = CertificateParams::default();
+                let mut dn = DistinguishedName::new();
+                dn.push(DnType::CommonName, cn);
+                p.distinguished_name = dn;
+                p.is_ca = IsCa::Ca(c);
+                p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+                p
+            };
+            let root = CertifiedIssuer::self_signed(
+                ca_params("Platform Root", BasicConstraints::Constrained(2)),
+                KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+            )
+            .unwrap();
+            let intermediate = CertifiedIssuer::signed_by(
+                ca_params("Platform Intermediate", BasicConstraints::Constrained(1)),
+                KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+                &root,
+            )
+            .unwrap();
+            let ws_key = KeyPair::from_pkcs8_der_and_sign_algo(
+                &rustls::pki_types::PrivatePkcs8KeyDer::from(self.1.clone()),
+                &rcgen::PKCS_ECDSA_P384_SHA384,
+            )
+            .unwrap();
+            let workspace = CertifiedIssuer::signed_by(
+                ca_params("workspace-ws-test", BasicConstraints::Constrained(0)),
+                ws_key,
+                &intermediate,
+            )
+            .unwrap();
+            std::fs::write(
+                Path::new(&cfg.state_dir).join("workspace_ca.crt"),
+                format!("{}{}", workspace.pem(), intermediate.pem()),
+            )
+            .unwrap();
         }
     }
 
@@ -1839,49 +1969,9 @@ mod tests {
     /// workspace_ca.crt, chosen by role.
     #[tokio::test]
     async fn a_signed_list_in_a_snapshot_is_applied_and_published() {
-        use rcgen::{
-            BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa,
-            KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
-        };
-        let ca_params = |cn: &str, c: BasicConstraints| {
-            let mut p = CertificateParams::default();
-            let mut dn = DistinguishedName::new();
-            dn.push(DnType::CommonName, cn);
-            p.distinguished_name = dn;
-            p.is_ca = IsCa::Ca(c);
-            p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-            p
-        };
-        let root = CertifiedIssuer::self_signed(
-            ca_params("Platform Root", BasicConstraints::Constrained(2)),
-            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
-        )
-        .unwrap();
-        let intermediate = CertifiedIssuer::signed_by(
-            ca_params("Platform Intermediate", BasicConstraints::Constrained(1)),
-            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
-            &root,
-        )
-        .unwrap();
         let ca = Ca::new();
-        let ws_key = KeyPair::from_pkcs8_der_and_sign_algo(
-            &rustls::pki_types::PrivatePkcs8KeyDer::from(ca.1.clone()),
-            &rcgen::PKCS_ECDSA_P384_SHA384,
-        )
-        .unwrap();
-        let workspace = CertifiedIssuer::signed_by(
-            ca_params("workspace-ws-test", BasicConstraints::Constrained(0)),
-            ws_key,
-            &intermediate,
-        )
-        .unwrap();
-
         let (mut state, cfg) = three_peer_state("f39-msg");
-        std::fs::write(
-            Path::new(&cfg.state_dir).join("workspace_ca.crt"),
-            format!("{}{}", workspace.pem(), intermediate.pem()),
-        )
-        .unwrap();
+        ca.store_bundle(&cfg);
         let (peers, live) = PeerPublisher::new(&state);
         deliver(
             &mut state,
@@ -1889,8 +1979,9 @@ mod tests {
             &peers,
             Body::ResourceSnapshot(crate::proto::ResourceSnapshot {
                 resources: vec![],
-                generation: 0, // stale for the generation check: the list still applies
+                generation: 0,
                 signed_peer_list: Some(ca.sign(10, &["conn-1", "conn-3"])),
+                signed_resource_set: None, // no resources: the list still applies
             }),
         )
         .await;
@@ -2052,6 +2143,7 @@ mod tests {
             resources: vec![],
             generation: 1,
             signed_peer_list: None,
+            signed_resource_set: None,
         });
         assert!(send!(snapshot).is_none());
         assert_eq!(
@@ -2241,5 +2333,202 @@ mod tests {
             opened(up_rx.recv().await.unwrap()),
             ("t-3".to_string(), false)
         );
+    }
+
+    // ── D21-R (S): signed resource sets ────────────────────────────────────
+
+    /// The acks a snapshot produces, as (resource id, status).
+    async fn snapshot_acks(
+        state: &mut ShieldState,
+        cfg: &ShieldConfig,
+        resources: &Arc<SharedResourceState>,
+        snap: crate::proto::ResourceSnapshot,
+    ) -> Vec<(String, String)> {
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
+        let (peers, _live) = PeerPublisher::new(state);
+        let (out_tx, mut out_rx) = mpsc::channel(32);
+        let action = handle_connector_msg(
+            ShieldControlMessage {
+                body: Some(Body::ResourceSnapshot(snap)),
+            },
+            "conn-1",
+            &crl::CrlStore::default(),
+            state,
+            cfg,
+            resources,
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            &peers,
+        )
+        .await;
+        assert!(action.is_none());
+        drop(out_tx);
+        let mut acks = Vec::new();
+        while let Some(m) = out_rx.recv().await {
+            if let Some(Body::ResourceAck(a)) = m.body {
+                acks.push((a.resource_id, a.status));
+            }
+        }
+        acks.sort();
+        acks
+    }
+
+    fn snap_with(set: Option<crate::proto::SignedResourceSet>) -> crate::proto::ResourceSnapshot {
+        crate::proto::ResourceSnapshot {
+            // What a hostile Connector would put in the unsigned fields.
+            resources: vec![],
+            generation: u64::MAX,
+            signed_peer_list: None,
+            signed_resource_set: set,
+        }
+    }
+
+    /// A verified set is applied (every desired resource acked), its
+    /// removes acked "unprotected", and its generation saved as the floor.
+    #[tokio::test]
+    async fn a_signed_resource_set_is_applied_and_its_removes_acked() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-apply");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        let acks = snapshot_acks(
+            &mut state,
+            &cfg,
+            &resources,
+            snap_with(Some(ca.sign_set(5, &["r1"], &["r2"]))),
+        )
+        .await;
+        assert_eq!(acks.len(), 2, "{acks:?}");
+        assert_eq!(acks[0].0, "r1", "desired resource acked: {acks:?}");
+        assert_eq!(acks[1], ("r2".to_string(), "unprotected".to_string()));
+        assert_eq!(
+            ShieldState::load(&cfg.state_dir)
+                .unwrap()
+                .resource_generation_floor,
+            5
+        );
+    }
+
+    /// A Connector can't change the rules on its own: an unsigned snapshot,
+    /// a forged or altered set, or one for another shield changes nothing.
+    #[tokio::test]
+    async fn an_unsigned_forged_or_foreign_resource_set_changes_nothing() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-forged");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "kept".into(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 22,
+                port_to: 22,
+            });
+        let forged = Ca::new().sign_set(9, &[], &["kept"]);
+        let mut altered = ca.sign_set(9, &["r1"], &[]);
+        let mut payload: crate::proto::ResourceSetPayload =
+            prost::Message::decode(altered.payload.as_slice()).unwrap();
+        payload.resources.clear();
+        altered.payload = prost::Message::encode_to_vec(&payload);
+        let foreign = ca.sign_set_for("shield-2", 9, &[], &["kept"]);
+        for snap in [
+            snap_with(None),
+            snap_with(Some(forged)),
+            snap_with(Some(altered)),
+            snap_with(Some(foreign)),
+        ] {
+            assert!(snapshot_acks(&mut state, &cfg, &resources, snap)
+                .await
+                .is_empty());
+        }
+        assert_eq!(resources.active.lock().unwrap().len(), 1, "rules unchanged");
+        assert_eq!(state.resource_generation_floor, 0);
+    }
+
+    /// A Connector can't roll the shield back: an older set is ignored, also
+    /// after a restart (saved floor); the same set acks its removes again.
+    #[tokio::test]
+    async fn an_older_resource_set_is_ignored_across_restarts() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-rollback");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        let newer = ca.sign_set(7, &["r1"], &["r2"]);
+        assert_eq!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(newer.clone())))
+                .await
+                .len(),
+            2
+        );
+        let older = ca.sign_set(6, &[], &["r1"]);
+        assert!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(older.clone())))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(newer))).await,
+            vec![("r2".to_string(), "unprotected".to_string())],
+            "same set: removes acked again, nothing reapplied"
+        );
+        // Restart: fresh in-memory state, the saved floor.
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        let fresh = Arc::new(SharedResourceState::new());
+        assert!(
+            snapshot_acks(&mut reloaded, &cfg, &fresh, snap_with(Some(older)))
+                .await
+                .is_empty()
+        );
+    }
+
+    /// A Connector's ResourceInstruction no longer changes the rules.
+    #[tokio::test]
+    async fn a_resource_instruction_is_ignored() {
+        let (mut state, cfg) = three_peer_state("instr");
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "kept".into(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 22,
+                port_to: 22,
+            });
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
+        let (peers, _live) = PeerPublisher::new(&state);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let action = handle_connector_msg(
+            ShieldControlMessage {
+                body: Some(Body::ResourceInstruction(
+                    crate::proto::ResourceInstruction {
+                        resource_id: "kept".into(),
+                        action: "remove".into(),
+                        ..Default::default()
+                    },
+                )),
+            },
+            "conn-1",
+            &crl::CrlStore::default(),
+            &mut state,
+            &cfg,
+            &resources,
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            &peers,
+        )
+        .await;
+        assert!(action.is_none());
+        drop(out_tx);
+        assert!(out_rx.recv().await.is_none(), "no ack");
+        assert_eq!(resources.active.lock().unwrap().len(), 1, "rule kept");
     }
 }

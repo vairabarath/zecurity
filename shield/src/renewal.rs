@@ -141,6 +141,7 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
         enrolled_at: state.enrolled_at.clone(),
         cert_not_after,
         peer_list_issued_at_ms: state.peer_list_issued_at_ms,
+        resource_generation_floor: state.resource_generation_floor,
     };
     new_state
         .save(&cfg.state_dir)

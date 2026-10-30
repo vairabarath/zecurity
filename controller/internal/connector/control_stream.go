@@ -64,8 +64,9 @@ type ConnectorRegistry struct {
 	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
 
-	// peerLists signs each shield's peer list (D21-R a2); nil until
-	// SetPeerListSigner. Set once at startup, read-only afterwards.
+	// peerLists signs each shield's peer list (D21-R a2) and resource set
+	// (D21-R S); nil until SetShieldSigner. Set once at startup, read-only
+	// afterwards.
 	peerLists *peerListIssuer
 	// pushes runs the background peer-list and snapshot pushes (D21-R a2).
 	pushes *pushCoalescer
@@ -375,12 +376,22 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, r *ConnectorRegistr
 		log.Printf("control stream: %v — snapshot for shield %s sent without a peer list", err, shieldID)
 		peers = nil
 	}
+	signedSet, err := r.peerListIssuer().signResourceSet(ctx, db, shieldID, snap.Generation, resources)
+	if err != nil {
+		log.Printf("control stream: %v — snapshot for shield %s sent unsigned: the shield won't apply it", err, shieldID)
+		signedSet = nil
+	}
 
 	return &pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
 			ResourceSnapshots: &pb.ResourceSnapshotBatch{
 				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
-					shieldID: {Resources: resources, Generation: snap.Generation, SignedPeerList: peers},
+					shieldID: {
+						Resources:         resources,
+						Generation:        snap.Generation,
+						SignedPeerList:    peers,
+						SignedResourceSet: signedSet,
+					},
 				},
 			},
 		},

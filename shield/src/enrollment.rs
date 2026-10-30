@@ -258,6 +258,7 @@ async fn bootstrap_enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         enrolled_at,
         cert_not_after,
         peer_list_issued_at_ms: 0,
+        resource_generation_floor: 0,
     };
     let state_json = serde_json::to_vec_pretty(&state).context("failed to serialize state.json")?;
     let state_dir = Path::new(&cfg.state_dir);

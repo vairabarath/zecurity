@@ -17,10 +17,12 @@ import (
 // lan_addr host plus this port is where a Shield dials it.
 const shieldGRPCPort = "9091"
 
-// PeerListSigner signs a serialized shield PeerListPayload with the tenant's
-// Workspace CA key (pki.Service.SignShieldPeerList).
-type PeerListSigner interface {
+// ShieldSigner signs a shield's PeerListPayload (D21-R a2) and
+// ResourceSetPayload (D21-R S) with the tenant's Workspace CA key
+// (pki.Service).
+type ShieldSigner interface {
 	SignShieldPeerList(ctx context.Context, tenantID string, payload []byte) ([]byte, error)
+	SignShieldResourceSet(ctx context.Context, tenantID string, payload []byte) ([]byte, error)
 }
 
 // peerListIssuer builds the controller-signed peer list each shield accepts
@@ -31,15 +33,15 @@ type PeerListSigner interface {
 // than an earlier one (single controller instance, D-02). Signing (a CA key
 // load and decrypt) happens after mu is released.
 type peerListIssuer struct {
-	signer PeerListSigner
+	signer ShieldSigner
 	mu     sync.Mutex
 	lastMS int64
 }
 
-// SetPeerListSigner enables signed peer lists in every shield snapshot. Call
-// once at startup, before any Control stream is served. Without a signer,
-// snapshots carry no peer list and shields keep the one they have.
-func (r *ConnectorRegistry) SetPeerListSigner(s PeerListSigner) {
+// SetShieldSigner enables signed peer lists and resource sets in every shield
+// snapshot. Call once at startup, before any Control stream is served.
+// Without a signer, snapshots carry neither, and shields change nothing.
+func (r *ConnectorRegistry) SetShieldSigner(s ShieldSigner) {
 	r.peerLists = &peerListIssuer{signer: s}
 }
 
