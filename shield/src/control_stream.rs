@@ -326,6 +326,16 @@ fn connector_crl_verdict(
     )
 }
 
+/// D21-R A′: the Connector closed the Control stream cleanly. Normally the
+/// Shield reconnects to it (Ok). But a Connector that closes it while the
+/// Shield has no valid CRL past the first wait, or that the CRL lists, is
+/// left like one that never sends a CRL (terminal: fail over to the next
+/// peer); else it could close and reconnect to stay attached.
+fn stream_closed_cleanly(crl: &crl::CrlStore, connector_id: &str) -> Result<()> {
+    check_connector_crl(crl, connector_id)?;
+    Ok(())
+}
+
 /// The verdict, logged when the Shield leaves.
 fn check_connector_crl(
     crl: &crl::CrlStore,
@@ -462,13 +472,7 @@ async fn run_once(
                 match result {
                     // Keep the Status in the chain: reconnect_loop inspects it.
                     Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
-                    // D21-R A′: a Connector that closes the stream while the
-                    // Shield has no valid CRL is left like one that never
-                    // sends it (else it could reconnect to stay attached).
-                    Ok(None) => {
-                        check_connector_crl(crl, &connector_id)?;
-                        return Ok(());
-                    }
+                    Ok(None) => return stream_closed_cleanly(crl, &connector_id),
                     Ok(Some(msg)) => {
                         match handle_connector_msg(
                             msg,
@@ -2530,5 +2534,49 @@ mod tests {
         drop(out_tx);
         assert!(out_rx.recv().await.is_none(), "no ack");
         assert_eq!(resources.active.lock().unwrap().len(), 1, "rule kept");
+    }
+
+    // ── D21-R A′: a clean close ────────────────────────────────────────────
+
+    /// A clean close is a normal reconnect while the Shield holds a valid
+    /// CRL (or is still in the first wait); without one past the wait, or
+    /// when the CRL lists the Connector, it is terminal: the Shield fails
+    /// over instead of reconnecting to the same Connector.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_close_without_a_valid_crl_leaves_the_connector() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        tls::set_connector_serial_for_test("conn-close-ok", &[0x01]);
+        tls::set_connector_serial_for_test("conn-close-listed", CONNECTOR_SERIAL);
+
+        // No CRL: fine during the first wait, terminal after it.
+        let store = crl::CrlStore::default();
+        assert!(
+            stream_closed_cleanly(&store, "conn-close-ok").is_ok(),
+            "first wait"
+        );
+        tokio::time::advance(CRL_FIRST_WAIT).await;
+        let err = stream_closed_cleanly(&store, "conn-close-ok").expect_err("no valid CRL");
+        assert!(connector_terminal(&err), "{err:#}");
+
+        // A valid CRL: a clean close is a normal reconnect, unless it lists
+        // the Connector.
+        let pki = Pki::new();
+        let crl = pki.crl(
+            &[CONNECTOR_SERIAL],
+            ::time::Duration::minutes(1),
+            ::time::Duration::hours(24),
+        );
+        store.offer(&crl, &pki.workspace_pem()).unwrap();
+        assert!(
+            stream_closed_cleanly(&store, "conn-close-ok").is_ok(),
+            "valid CRL"
+        );
+        let err = stream_closed_cleanly(&store, "conn-close-listed").expect_err("listed");
+        assert!(connector_terminal(&err), "{err:#}");
+
+        // No verified certificate: terminal.
+        assert!(connector_terminal(
+            &stream_closed_cleanly(&store, "conn-close-unknown").unwrap_err()
+        ));
     }
 }

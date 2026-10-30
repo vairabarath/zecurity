@@ -111,7 +111,7 @@ Residual risks (accepted):
 - ~~**(a1) cross-Connector reset.**~~ **Closed by S:** ordering is shield-wide again on the signed generation, saved across restarts.
 - **Fail closed on a long controller outage.** When no Connector has a CRL valid now (outage longer than the 24 h CRL validity), shields leave their Connectors, the same as Connectors deny clients.
 - **Serial lookup.** The Connector's certificate serial comes from the Shield's last completed handshake with that Connector id (`tls::connector_serial`). Every unexpired certificate of a revoked Connector is in the CRL (bug 9).
-- **Not unit-tested:** the clean-close path inside `run_once`. Left to the live check.
+- **Clean close:** the decision is `stream_closed_cleanly`, unit-tested (`a_clean_close_without_a_valid_crl_leaves_the_connector`, 2026-10-30). Its one-line call in `run_once` is checked by reading; not live-tested (needs a connector that keeps serving after revocation).
 - **Phase E behaviour change.** An honest Connector no longer prunes revoked peers from the shield at once. Pruning now comes from the controller: its push on a revoke, and the snapshot it pushes when a shield moves. A′ also refuses a revoked Connector the shield is attached to.
 - **Long controller outage.** Protection changes made while a shield is quarantined reach it only by the drift resync. The snapshot was ignored, and the Connector replays it only when the shield connects.
 
