@@ -169,6 +169,7 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
         }
         verify_connector_spiffe(end_entity.as_ref(), &self.connector_id, &self.trust_domain)
             .map_err(|e| TlsError::General(e.to_string()))?;
+        record_connector_serial(&self.connector_id, end_entity.as_ref());
         Ok(ServerCertVerified::assertion())
     }
 
@@ -193,6 +194,35 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
     }
+}
+
+/// D21-R A′: the serial (raw DER bytes, as CRL entries store them) of the
+/// certificate each Connector last presented in a verified handshake. The
+/// Control stream checks it against the workspace CRL.
+static CONNECTOR_SERIALS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn record_connector_serial(connector_id: &str, cert_der: &[u8]) {
+    if let Ok((_, cert)) = x509_parser::parse_x509_certificate(cert_der) {
+        CONNECTOR_SERIALS
+            .lock()
+            .unwrap()
+            .insert(connector_id.to_string(), cert.raw_serial().to_vec());
+    }
+}
+
+#[cfg(test)]
+pub fn set_connector_serial_for_test(connector_id: &str, serial: &[u8]) {
+    CONNECTOR_SERIALS
+        .lock()
+        .unwrap()
+        .insert(connector_id.to_string(), serial.to_vec());
+}
+
+/// D21-R A′: the serial of `connector_id`'s last verified certificate.
+pub fn connector_serial(connector_id: &str) -> Option<Vec<u8>> {
+    CONNECTOR_SERIALS.lock().unwrap().get(connector_id).cloned()
 }
 
 // ── Custom tower Service that wraps tokio-rustls ──────────────────────────────

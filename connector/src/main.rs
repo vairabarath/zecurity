@@ -214,6 +214,8 @@ async fn main() -> anyhow::Result<()> {
     let relay_crl_url = format!("{}/relay.crl", http_base.trim_end_matches('/'));
     let (crl_manager, relay_crl_manager) =
         crl::start_crl_managers(&cert_store.workspace_ca_pem, crl_url, relay_crl_url).await;
+    // D21-R A′: shields get the workspace CRL on their Control stream.
+    shield_registry.set_workspace_crl(crl_manager.clone());
 
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);

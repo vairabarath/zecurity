@@ -151,7 +151,18 @@ message ShieldControlMessage {
     // ShieldHealthReport. Lets the Shield fail over to a sibling Connector
     // on the same Remote Network when this one goes down. See ADR (TODO).
     PeerConnectorList peer_connector_list = 14;
+    // Connector → Shield — D21-R A′: the workspace CRL, forwarded when the
+    // stream opens and whenever the Connector has a newer one.
+    WorkspaceCrl workspace_crl = 15;
   }
+}
+
+// D21-R A′: the DER workspace CRL (/ca.crl) as the Connector fetched it,
+// signed by the Workspace CA. The Shield verifies it, keeps the newest one
+// (latest thisUpdate) and leaves a Connector whose certificate it lists, or
+// when it holds no CRL that is still before its nextUpdate.
+message WorkspaceCrl {
+  bytes crl_der = 1;
 }
 
 // PeerConnectorList tells the Shield which Connectors on its own Remote
