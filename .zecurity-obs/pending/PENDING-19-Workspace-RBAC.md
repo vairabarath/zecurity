@@ -139,7 +139,8 @@ So Viewer can read every query. A test pins this: any new read field that return
 | # | Question | Recommendation |
 |---|---|---|
 | O-1 | **Security can add itself to a group** (`addGroupMember`) and so gain network access to resources. | Server refuses `addGroupMember` / `removeGroupMember` on yourself unless you are Admin. Collusion between two people remains; the audit log covers it. |
-| O-2 | **Helpdesk and `revokeDevice`:** revoke is terminal. | Keep it in Helpdesk (it is the "device verification" job), and say "permanent" in the UI confirmation. |
+| O-2 | **Helpdesk and `revokeDevice`:** revoke is terminal. | Give Helpdesk only `approveDevice` / `unapproveDevice`, and keep `revokeDevice` for Admin. That matches Twingate, where Helpdesk can verify and unverify but not Block or Archive (§12). |
+| O-5 | **The Security role has no Twingate equivalent.** In Twingate, only Admin changes groups and policies, and DevOps sees them read-only (§12). | Undecided. Either keep Security as our own role, or drop it and make `ACCESS_WRITE` and `POSTURE_WRITE` Admin-only, which also removes O-1. |
 | O-3 | **Who can invite:** `createInvitation` is Admin-only here. | Keep it. Inviting adds a person to the workspace; that is a membership decision. |
 | O-4 | **SCIM deprovision of the last Admin** bypasses `setMemberRole`. | Check during build whether the SCIM path can disable the last active Admin; if it can, apply the same guard or file it separately. |
 
@@ -166,3 +167,52 @@ So Viewer can read every query. A test pins this: any new read field that return
 1. **R1 — backend:** migration, capability table, `@requires`, live check (GraphQL and REST), `setMemberRole`, audit, tests.
 2. **R2 — admin UI:** Manage Role dialog (radio list + required reason), tabs and buttons driven by `me.capabilities`, read-only views for Viewer.
 3. **R3 — live acceptance on the lab:** one account per role; each role tries an allowed and a refused action; a demotion mid-session applies at once; the last-Admin guard.
+
+## 12. Reference: Twingate admin console (looked at 2026-10-31)
+
+Looked at read-only in Sathiya's own Twingate tenant (Orca's built-in browser), plus Twingate's docs ([Admins](https://www.twingate.com/docs/admins), [Admin Roles changelog](https://www.twingate.com/changelog/admin-roles)). Used as a reference for what roles to offer, not to copy.
+
+**Console layout (tab → pages):**
+
+| Tab | Pages |
+|---|---|
+| Network | Overview, Resources, Remote Networks, Connectors |
+| Team | Users, Groups, Services (service accounts) |
+| Devices | Devices, Serial Numbers |
+| Policies | Resource Policies, Sign In Policy, Device Profiles |
+| Internet Security | Secure DNS, Client Configuration |
+| Settings | General (incl. Admin Console Security: re-auth interval, admin MFA), Billing, Identity Providers, Device Integrations, Certificate Authorities, Reports, API, Notification Channels, Notifications |
+
+**Roles (docs and the Manage Role dialog):**
+
+| Role | Write | Read |
+|---|---|---|
+| Admin | everything | everything |
+| Viewer (formerly Support) | nothing | everything except Secure DNS, Client Configuration, Billing |
+| DevOps | Network tab only. Groups and policies are read-only. | as Viewer |
+| Internet Security | Internet Security tab only | everything except Billing |
+| Helpdesk | reset user MFA; verify/unverify devices; add/delete/verify/unverify serial numbers | as Viewer |
+| Access Reviewer | Access Requests page only (all users and resources) | Access Requests page only |
+| Billing | Billing page only | Billing page only |
+| Member | no Admin Console access | none |
+
+**Observed in the console:**
+- **One role per user.** It is set from the user page with "Manage Role" (a radio list). The Network overview counts users per role ("2 Admin Users", "1 DevOps User", …).
+- **IdP-synced users get roles set by hand.** Users from Okta and from social login both show a console-set role, and Okta-synced users can't be edited ("Edit User" is disabled), but "Manage Role" still works. This matches R-3.
+- **A limited-role admin sees a badge,** and the console refuses blocked changes with an error (docs).
+- **User actions:** Manage Role, Delete, Add to Group, access report and access graph.
+- **Device actions:** Verify Device, Archive, Block. Helpdesk has only Verify/Unverify.
+- **Not documented by Twingate:** who may change roles, a last-admin rule, whether a role change forces a new login, and IdP/SCIM role mapping. This note decides those itself (§5, §7, R-3).
+
+**Mapping to Zecurity:**
+
+| Twingate | Zecurity |
+|---|---|
+| Network tab | DevOps / `NETWORK_WRITE` (remote networks, connectors, shields, resources, discovery) |
+| Team → Groups, Policies → Resource Policies | `ACCESS_WRITE` (see O-5) |
+| Policies → Device Profiles | `POSTURE_WRITE` (see O-5) |
+| Devices → Verify/Unverify | Helpdesk / `approveDevice`, `unapproveDevice` |
+| Devices → Block | `revokeDevice` (Admin; O-2). In Zecurity it is permanent. |
+| Helpdesk "reset MFA" | none. User MFA belongs to the customer's IdP. |
+| Settings → Identity Providers | `IDENTITY_ADMIN` (Admin) |
+| Internet Security, Billing, Access Reviewer, Serial Numbers | no Zecurity feature; not mapped |
