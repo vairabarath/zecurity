@@ -3493,3 +3493,10 @@ serves on `127.0.0.1:9102`.
 - `pipe_streams` now copies with quinn's own read/write (keeps reset and stop codes). A failed bridge aborts all four halves with the peer's code (RVKD reaches the client), or with `RLAB` for other failures. Clean ends are unchanged.
 - 4 new tests on a real QUIC bridge; the 3 abort tests failed before the fix (the client got 1.27 MB, then a clean EOF). Relay 123 pass; 3 mutants killed. Not live-tested (pairs with #162).
 
+## 2026-10-31 — M2: small fixes, S3: FU-14 the drain timeout cuts
+- Branch `fix/connector-drain-timeout-cut` (from `fixed-pendings` `a6b83625`).
+- `RelayDrainTracker` keeps the relay connection (`RelayHandler::run` attaches it). `cut()` closes it with `DRNT`. `drain_old_relay` cuts on timeout; a completed drain closes nothing.
+- 5 new tests, one through the real `RelayHandler`. Connector 277 pass; 3 mutants killed.
+- Tooling slip: my first `cargo fmt` reformatted 13 unrelated connector files. They were restored before anything was committed; only my four files are changed.
+- Open: console drain text can name 120 s again once connectors run this (decision for Barath); not live-tested.
+

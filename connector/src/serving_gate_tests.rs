@@ -264,6 +264,58 @@ async fn quic_listener_closes_client_connections_on_shutdown() {
         .unwrap();
 }
 
+/// FU-14: the handler attaches its relay connection to the drain tracker, so
+/// the drain timeout's cut() closes it, and with it every stream still open.
+#[tokio::test]
+async fn the_drain_tracker_can_cut_the_relay_connection_the_handler_serves() {
+    install_crypto_provider();
+    let pki = TestPki::new();
+    let (_dir, holder) = pki.holder(-60, 3600);
+    let authz = AckTracker::shared(H);
+    let (tx, _rx) = mpsc::channel(8);
+    let handler = Arc::new(
+        RelayHandler::new(
+            holder.clone(),
+            Arc::new(PolicyCache::new()),
+            Arc::new(SessionRegistry::new()),
+            AgentTunnelHub::new(),
+            CrlManager::new(),
+            CONNECTOR_ID.to_string(),
+            tx,
+            5,
+            16,
+            authz.lock().gate(),
+        )
+        .unwrap(),
+    );
+    // The Relay side (here: a plain QUIC peer) opens streams to the
+    // connector's end of the connection.
+    let server = quinn::Endpoint::server(
+        crate::quic_listener::quic_server_config_for(&holder.current().store).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let client = pki.quic_client();
+    let connecting = client.connect(addr, "localhost").unwrap();
+    let connector_side = server.accept().await.unwrap().await.unwrap();
+    let relay_side = connecting.await.unwrap();
+    let tracker = RelayDrainTracker::new();
+    let _run = tokio::spawn(handler.run(connector_side, tracker.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await; // the handler is serving
+
+    tracker.cut();
+
+    let reason = tokio::time::timeout(WAIT, relay_side.closed())
+        .await
+        .expect("the relay connection must be closed by cut()");
+    assert!(
+        matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+            if c.error_code == quinn::VarInt::from_u32(crate::relay_handler::DRAIN_TIMEOUT_CODE)),
+        "relay saw {reason:?}"
+    );
+}
+
 /// Relay-routed streams: reset before the inner handshake while closed.
 #[tokio::test]
 async fn relay_streams_are_reset_while_not_serving() {
