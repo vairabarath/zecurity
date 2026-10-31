@@ -14,6 +14,7 @@ import (
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/model"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/models"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -116,6 +117,10 @@ func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error
 // Public query — no JWT required. Used by signup to check slug availability.
 // Only exposes {id, name, slug} via WorkspacePublic.
 func (r *queryResolver) LookupWorkspace(ctx context.Context, slug string) (*graph.WorkspaceLookupResult, error) {
+	// FU-11: public discovery is rate limited before anything is read.
+	if err := discoverylimit.Charge(ctx, discoverylimit.OpSlugLookup, ""); err != nil {
+		return nil, err
+	}
 	var ws graph.WorkspacePublic
 	err := r.Pool.QueryRow(ctx,
 		`SELECT id, name, slug FROM workspaces
@@ -136,6 +141,11 @@ func (r *queryResolver) LookupWorkspace(ctx context.Context, slug string) (*grap
 // Used by the login page for returning users to pick a workspace.
 func (r *queryResolver) LookupWorkspacesByEmail(ctx context.Context, email string) (*graph.WorkspaceListResult, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
+
+	// FU-11: rate limited per client IP and per email identity before any read.
+	if err := discoverylimit.Charge(ctx, discoverylimit.OpEmailLookup, email); err != nil {
+		return nil, err
+	}
 
 	rows, err := r.Pool.Query(ctx,
 		`SELECT DISTINCT w.id, w.name, w.slug

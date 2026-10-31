@@ -3451,3 +3451,24 @@ serves on `127.0.0.1:9102`.
 - **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
 - **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
 
+## 2026-10-31 — M2: FU-11 workspace-discovery rate limiting (mitigation)
+- Branch `fu11/discovery-rate-limit` (from `fixed-pendings` `770193e1`). Spec approved by Barath (with a ChatGPT review); decisions A–D.
+- New package `internal/discoverylimit` (the existing `internal/discovery` is network/service discovery and was left untouched).
+- **Shared budget:** one per-IP budget (30/60 s, IPv6 /64) for `lookupWorkspacesByEmail`, `lookupWorkspace`, `lookupIdpConnections` and `GET /workspaces/{slug}/auth`.
+- **Email budget:** 5/h per HMAC'd canonical email.
+- **Enforcement and responses:** charged per resolver run; whole-response refusal; 429 + `Retry-After`, 503 fail closed; optional trusted proxies.
+- **Telemetry:** `discovery_requests_total`, `discovery:` logs without emails.
+- Found during testing: aliases let one public request run many lookups, and signed-in users had no limit either. Both are covered now.
+- Smoke test of the real binary on a throwaway DB:
+  - shared budget across GraphQL and REST → 429;
+  - Valkey down → 503 on both routes;
+  - bad proxy config refuses startup;
+  - no email in logs.
+- Docs: ADR-009 section (status kept *proposed*), `docs/workspace-discovery-rate-limit.md`, FU-11 → Mitigated.
+- **Open:**
+  - email-verified discovery decision before GA;
+  - admin login "too many attempts" message (`admin/`);
+  - `initiateAuth` limit (ADR-009 Tier 3);
+  - provider login adopting trusted proxies;
+  - `.env.example` lines, added by Barath.
+

@@ -285,6 +285,11 @@ Different limits for different operation classes:
 | Mutations (general) | 60/min per user |
 | `lookupWorkspacesByEmail` (public) | 30/min per IP — prevent enumeration |
 
+> **Implementation status (2026-10-31, FU-11):** the workspace-discovery row is
+> implemented, extended to all four discovery entry points, with a per-email
+> budget added. See [Workspace-discovery enumeration (FU-11)](#workspace-discovery-enumeration-fu-11).
+> The other rows of this table are not implemented.
+
 Implementation: parse the GraphQL `operationName` from the request body in
 middleware, look up the right bucket, allow / 429.
 
@@ -293,6 +298,89 @@ middleware, look up the right bucket, allow / 429.
 Cloudflare / AWS WAF / Nginx `limit_req_zone` configured at the
 deployment / infra layer. Handles bulk traffic before reaching the
 controller. Zero application code. Recommended for production GA.
+
+## Workspace-discovery enumeration (FU-11)
+
+*Implemented 2026-10-31 (branch `fu11/discovery-rate-limit`). Found as F-6 in the
+live E2E run of 2026-10-30: 85 unauthenticated `lookupWorkspacesByEmail` calls in a
+burst, all answered.*
+
+**What it mitigates.** Four unauthenticated entry points answer questions about
+which workspaces exist and who belongs to them:
+
+| Entry point | Reveals | Budgets |
+|---|---|---|
+| GraphQL `lookupWorkspacesByEmail(email)` | the workspaces an email belongs to | shared IP + per-email |
+| GraphQL `lookupWorkspace(slug)` | whether a slug exists | shared IP |
+| GraphQL `lookupIdpConnections(workspaceSlug)` | whether a slug exists, and its login options | shared IP |
+| REST `GET /workspaces/{slug}/auth` | the same as the line above | shared IP |
+
+**Decision.** This is a rate limit plus security telemetry. **It mitigates
+enumeration but does not eliminate the oracle.** A patient or distributed caller
+still learns the same answers, only more slowly.
+- **Shared IP budget:** one budget per client IP for all four entry points, 30 per
+  60 s (`DISCOVERY_RATE_LIMIT_IP_PER_MIN`). IPv6 clients are grouped by /64.
+  Switching endpoints gains nothing.
+- **Per-email budget:** for `lookupWorkspacesByEmail` only, 5 per hour per
+  canonical email identity (`DISCOVERY_RATE_LIMIT_EMAIL_PER_HOUR`).
+  - **Canonical form:** the application's rule, trimmed and lower-cased.
+  - **Key:** a hex HMAC-SHA256 whose key is derived with HKDF from
+    `PKI_MASTER_SECRET`, context `zecurity/discovery-ratelimit/email/v1`.
+  - **Order:** the email budget is charged only after the IP budget allowed the
+    request.
+  - **Privacy:** no raw email in Valkey keys or logs.
+- **Enforcement point: the resolvers, not request parsing.**
+  - **Why:** operation names are client-chosen, and one request can repeat a field
+    under aliases. So every discovery resolver run is charged: each alias, each
+    fragment-selected field, on the public and the authenticated route, over POST,
+    GET, multipart and websocket.
+  - **Whole-response refusal:** if any discovery field of an operation is refused,
+    a gqlgen response interceptor replaces the whole response with `data: null`
+    and one error. No partial workspace data from aliases that ran first can
+    escape.
+  - **Departs from this ADR's general Tier 2/3 plan,** which put a name-based
+    middleware after `AuthMiddleware`: that design would miss aliases and the
+    public route.
+- **Failure semantics.**
+  - **Over a budget:** HTTP 429 with `Retry-After`. GraphQL carries
+    `extensions.code: RATE_LIMITED` and `retryAfterSeconds`; REST returns
+    `{"error":"rate_limited"}`.
+  - **Limiter unavailable (Valkey down or a bad reply): fail closed.** HTTP 503
+    with `SERVICE_UNAVAILABLE` / `{"error":"service_unavailable"}`. The detail is
+    logged, never returned.
+  - **Without the middleware:** a resolver reached without it refuses too.
+  - **Websocket:** messages carry no HTTP status, so a refused operation arrives
+    as the GraphQL error with no data.
+- **Fixed windows:** Valkey `INCR` plus expiry in one Lua script, so concurrent
+  requests can't exceed the budget and a key that lost its TTL gets one again.
+  Known limitation: across a window boundary a client can get up to about **twice
+  the allowance** in a short burst.
+- **Client IP:** the connection address. `X-Forwarded-For` is honoured only when
+  the connection comes from a range in `DISCOVERY_TRUSTED_PROXY_CIDRS` (empty by
+  default). It is read from the right; the first untrusted hop is the client.
+  The proxy must append to or overwrite the header. Provider login keeps its
+  connection-address-only handling.
+- **Telemetry:** `discovery_requests_total{operation, result}`, with results
+  `allowed`, `rate_limited_ip`, `rate_limited_email` and `limiter_error`
+  (bounded labels, never IP or email). `discovery:` log lines record denials
+  (once per window per IP), repeated targeting of one email bucket (12-character
+  HMAC prefix), and limiter failures.
+- **Secret rotation:** rotating `PKI_MASTER_SECRET` changes every email bucket.
+  The counters restart, granting at most one extra window of attempts per email.
+- **Known residual risk:** anyone can deliberately use up a specific email's
+  budget. That blocks only the "find my workspace by email" picker for up to an
+  hour; slug login still works.
+
+**Long term (decision needed before GA, not implemented):**
+- **Preferred:** email-verified workspace discovery. The login page always answers
+  "if this email has workspaces, we've emailed you the links", and the list goes
+  only to the inbox. This removes the email oracle entirely.
+- **Alternative:** identity-first discovery (sign in first, then list the verified
+  identity's workspaces), if Zecurity adopts a universal identity-first login.
+- **Slug lookup:** it stays as a smaller enumeration surface (existence only,
+  no membership), protected by the shared budget.
+
+Operator documentation: `docs/workspace-discovery-rate-limit.md`.
 
 ## Alternatives Considered
 
