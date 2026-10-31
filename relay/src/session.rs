@@ -329,6 +329,44 @@ async fn write_ack(send: &mut SendStream, ok: bool, error: Option<&str>) -> Resu
         .context("write Relay acknowledgement")
 }
 
+/// QUIC application code the relay uses when it ends a bridge for a reason
+/// other than a peer's reset or stop (a lost connection, a write that failed),
+/// so neither side mistakes the end for a clean finish. "RLAB".
+const RELAY_ABORT_CODE: u32 = 0x524C_4142;
+
+/// How one direction of a bridge ended badly.
+enum PipeError {
+    /// The peer reset the stream we read from, with this code.
+    Reset(quinn::VarInt),
+    /// The peer stopped reading the stream we write to, with this code.
+    Stopped(quinn::VarInt),
+    Other(anyhow::Error),
+}
+
+impl PipeError {
+    /// The code to forward to the other side.
+    fn code(&self) -> quinn::VarInt {
+        match self {
+            PipeError::Reset(code) | PipeError::Stopped(code) => *code,
+            PipeError::Other(_) => quinn::VarInt::from_u32(RELAY_ABORT_CODE),
+        }
+    }
+
+    fn into_anyhow(self, direction: &str) -> anyhow::Error {
+        match self {
+            PipeError::Reset(code) => anyhow::anyhow!(
+                "{direction}: stream reset by peer (code {:#x})",
+                code.into_inner()
+            ),
+            PipeError::Stopped(code) => anyhow::anyhow!(
+                "{direction}: stream stopped by peer (code {:#x})",
+                code.into_inner()
+            ),
+            PipeError::Other(e) => e.context(direction.to_owned()),
+        }
+    }
+}
+
 async fn pipe_streams(
     mut client_send: SendStream,
     mut client_recv: RecvStream,
@@ -344,37 +382,57 @@ async fn pipe_streams(
     let client_to_connector = async {
         counted_copy(&mut client_recv, &mut connector_send, &up)
             .await
-            .context("pipe Client to Connector")?;
+            .map_err(|e| ("pipe Client to Connector", e))?;
         first_done
             .lock()
             .unwrap()
             .get_or_insert("client to connector");
-        connector_send
-            .finish()
-            .context("finish Connector-bound stream")
+        connector_send.finish().map_err(|e| {
+            (
+                "pipe Client to Connector",
+                PipeError::Other(anyhow::Error::new(e).context("finish Connector-bound stream")),
+            )
+        })
     };
     let connector_to_client = async {
         counted_copy(&mut connector_recv, &mut client_send, &down)
             .await
-            .context("pipe Connector to Client")?;
+            .map_err(|e| ("pipe Connector to Client", e))?;
         first_done
             .lock()
             .unwrap()
             .get_or_insert("connector to client");
-        client_send.finish().context("finish Client-bound stream")
+        client_send.finish().map_err(|e| {
+            (
+                "pipe Connector to Client",
+                PipeError::Other(anyhow::Error::new(e).context("finish Client-bound stream")),
+            )
+        })
     };
 
     let result = tokio::try_join!(client_to_connector, connector_to_client);
     let up = up.load(std::sync::atomic::Ordering::Relaxed);
     let down = down.load(std::sync::atomic::Ordering::Relaxed);
     let first = first_done.lock().unwrap().unwrap_or("neither");
-    if let Err(error) = result {
+    if let Err((direction, error)) = result {
+        // A failed bridge must not end gracefully: dropping a quinn SendStream
+        // finishes it, which would deliver everything still queued and then a
+        // clean EOF. A revoked session's tail would keep flowing to the client
+        // (FU-15 relay path). Abort all four halves instead, forwarding the
+        // peer's reset or stop code (the connector's RVKD reaches the client).
+        let code = error.code();
+        let _ = client_send.reset(code);
+        let _ = connector_send.reset(code);
+        let _ = client_recv.stop(code);
+        let _ = connector_recv.stop(code);
+        let error = error.into_anyhow(direction);
         // Full chain: the outer context alone ("pipe Connector to Client") hid
         // which side failed and why (live E2E run 2026-10-30, F-7).
         warn!(
             bytes_up = up,
             bytes_down = down,
             finished_first = first,
+            forwarded_code = format!("{:#x}", code.into_inner()),
             error = format!("{error:#}"),
             "Relay stream bridge ended with error"
         );
@@ -389,24 +447,27 @@ async fn pipe_streams(
     Ok(())
 }
 
-/// `tokio::io::copy` that counts bytes as they are written.
-async fn counted_copy<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+/// Copies reader to writer, counting bytes as they are written. Uses quinn's
+/// own read/write so a peer's reset or stop keeps its code (tokio's
+/// AsyncRead/AsyncWrite would turn it into a plain io::Error).
+async fn counted_copy(
+    reader: &mut RecvStream,
+    writer: &mut SendStream,
     count: &std::sync::atomic::AtomicU64,
-) -> std::io::Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+) -> std::result::Result<(), PipeError> {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
+        let n = match reader.read(&mut buf).await {
+            Ok(Some(n)) => n,
+            Ok(None) => return Ok(()),
+            Err(quinn::ReadError::Reset(code)) => return Err(PipeError::Reset(code)),
+            Err(e) => return Err(PipeError::Other(anyhow::Error::new(e).context("read"))),
+        };
+        match writer.write_all(&buf[..n]).await {
+            Ok(()) => {}
+            Err(quinn::WriteError::Stopped(code)) => return Err(PipeError::Stopped(code)),
+            Err(e) => return Err(PipeError::Other(anyhow::Error::new(e).context("write"))),
         }
-        writer.write_all(&buf[..n]).await?;
         count.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -683,5 +744,182 @@ mod tests {
             .expect("listed closed");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(c2.close_reason().is_none(), "unlisted connector untouched");
+    }
+
+    // ── FU-15 follow-up: the bridge forwards a reset or stop with its code ──
+
+    /// The connector's code for a revoked session ("RVKD"), as it resets the
+    /// device stream (connector/src/abort_stream.rs).
+    const RVKD: u32 = 0x5256_4B44;
+
+    struct Bridge {
+        client_send: SendStream,
+        client_recv: RecvStream,
+        connector_send: SendStream,
+        connector_recv: RecvStream,
+        pipe: tokio::task::JoinHandle<Result<()>>,
+        _conns: [Connection; 4],
+    }
+
+    /// A real client <-> relay <-> connector bridge: two QUIC pairs, one
+    /// stream on each, joined by pipe_streams.
+    async fn bridge() -> Bridge {
+        let (client, relay_client_side) = crate::test_support::quic_pair().await;
+        let (relay_connector_side, connector) = crate::test_support::quic_pair().await;
+        let (mut client_send, client_recv) = client.open_bi().await.unwrap();
+        client_send.write_all(b"hi").await.unwrap(); // a stream is announced by its first bytes
+        let (relay_client_send, mut relay_client_recv) =
+            relay_client_side.accept_bi().await.unwrap();
+        let mut hi = [0u8; 2];
+        relay_client_recv.read_exact(&mut hi).await.unwrap();
+        let (mut relay_connector_send, relay_connector_recv) =
+            relay_connector_side.open_bi().await.unwrap();
+        relay_connector_send.write_all(b"hi").await.unwrap();
+        let (connector_send, mut connector_recv) = connector.accept_bi().await.unwrap();
+        connector_recv.read_exact(&mut hi).await.unwrap();
+        let pipe = tokio::spawn(pipe_streams(
+            relay_client_send,
+            relay_client_recv,
+            relay_connector_send,
+            relay_connector_recv,
+        ));
+        Bridge {
+            client_send,
+            client_recv,
+            connector_send,
+            connector_recv,
+            pipe,
+            _conns: [client, relay_client_side, relay_connector_side, connector],
+        }
+    }
+
+    /// Reads until the stream ends; returns (bytes read, how it ended).
+    async fn drain(recv: &mut RecvStream) -> (usize, std::result::Result<(), quinn::ReadError>) {
+        let mut total = 0;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match recv.read(&mut buf).await {
+                Ok(Some(n)) => total += n,
+                Ok(None) => return (total, Ok(())),
+                Err(e) => return (total, Err(e)),
+            }
+        }
+    }
+
+    /// The connector resets a revoked session's stream while megabytes are
+    /// still queued toward a slow client. The client must get that reset, with
+    /// the connector's code, without the backlog first: before this fix the
+    /// relay finished the client-bound stream gracefully and delivered it all.
+    #[tokio::test]
+    async fn a_connector_reset_reaches_the_client_with_its_code() {
+        let mut b = bridge().await;
+        let chunk = vec![7u8; 64 * 1024];
+        let sent = 4 * 1024 * 1024;
+        let mut written = 0;
+        // Fill every buffer on the way: the client doesn't read yet.
+        while written < sent {
+            match timeout(
+                Duration::from_millis(200),
+                b.connector_send.write_all(&chunk),
+            )
+            .await
+            {
+                Ok(Ok(())) => written += chunk.len(),
+                _ => break, // flow control: buffers are full
+            }
+        }
+        assert!(written >= 1024 * 1024, "only {written} bytes in flight");
+        b.connector_send
+            .reset(quinn::VarInt::from_u32(RVKD))
+            .unwrap();
+        let _ = b.connector_recv.stop(quinn::VarInt::from_u32(RVKD));
+
+        let (got, end) = timeout(Duration::from_secs(5), drain(&mut b.client_recv))
+            .await
+            .expect("the client must learn of the reset promptly");
+        assert!(
+            matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == u64::from(RVKD)),
+            "client saw {end:?} after {got} bytes, want a reset with RVKD"
+        );
+        assert!(
+            got < written,
+            "the client received the whole backlog ({got} of {written} bytes) before the reset"
+        );
+        assert!(
+            b.pipe.await.unwrap().is_err(),
+            "the bridge ends with an error"
+        );
+    }
+
+    /// The client stops reading (its app is gone): the connector's writes fail
+    /// with the client's code instead of filling the relay.
+    #[tokio::test]
+    async fn a_client_stop_reaches_the_connector_with_its_code() {
+        let mut b = bridge().await;
+        b.client_recv.stop(quinn::VarInt::from_u32(0x4142)).unwrap();
+        let chunk = vec![1u8; 64 * 1024];
+        let err = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Err(e) = b.connector_send.write_all(&chunk).await {
+                    return e;
+                }
+            }
+        })
+        .await
+        .expect("the connector must see the stop");
+        assert!(
+            matches!(err, quinn::WriteError::Stopped(code) if code.into_inner() == 0x4142),
+            "connector saw {err:?}"
+        );
+        assert!(b.pipe.await.unwrap().is_err());
+    }
+
+    /// The client resets its upload: the connector reads the same reset.
+    #[tokio::test]
+    async fn a_client_reset_reaches_the_connector_with_its_code() {
+        let mut b = bridge().await;
+        b.client_send.write_all(b"partial upload").await.unwrap();
+        b.client_send
+            .reset(quinn::VarInt::from_u32(0x4243))
+            .unwrap();
+        let (_, end) = timeout(Duration::from_secs(5), drain(&mut b.connector_recv))
+            .await
+            .expect("the connector must learn of the reset");
+        assert!(
+            matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == 0x4243),
+            "connector saw {end:?}"
+        );
+    }
+
+    /// A normal end is unchanged: every byte arrives, then a clean finish, in
+    /// both directions, and the bridge ends without error.
+    #[tokio::test]
+    async fn a_clean_end_is_still_a_clean_finish() {
+        let mut b = bridge().await;
+        let body = vec![9u8; 3 * 1024 * 1024 + 17];
+        let mut connector_send = b.connector_send;
+        let up = tokio::spawn(async move {
+            connector_send.write_all(&body).await.unwrap();
+            connector_send.finish().unwrap();
+            connector_send
+        });
+        let (got, end) = timeout(Duration::from_secs(10), drain(&mut b.client_recv))
+            .await
+            .unwrap();
+        assert_eq!(got, 3 * 1024 * 1024 + 17, "every byte must arrive");
+        assert!(end.is_ok(), "a clean finish, got {end:?}");
+        let _keep = up.await.unwrap();
+        b.client_send.write_all(b"bye").await.unwrap();
+        b.client_send.finish().unwrap();
+        let (got, end) = timeout(Duration::from_secs(5), drain(&mut b.connector_recv))
+            .await
+            .unwrap();
+        assert_eq!(got, 3);
+        assert!(end.is_ok(), "a clean finish upstream, got {end:?}");
+        timeout(Duration::from_secs(5), b.pipe)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }
