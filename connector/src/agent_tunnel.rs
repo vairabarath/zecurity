@@ -603,7 +603,13 @@ impl RelaySession {
                                         data: buf[..n].to_vec(),
                                     })),
                                 };
-                                if !hub.send_to_shield(&conn_id_d2s, msg).await {
+                                // A send to a congested Shield must not keep
+                                // the read half from a revoked session's abort.
+                                let sent = tokio::select! {
+                                    sent = hub.send_to_shield(&conn_id_d2s, msg) => sent,
+                                    _ = d2s_token.cancelled() => return reader,
+                                };
+                                if !sent {
                                     break;
                                 }
                             }
@@ -671,6 +677,19 @@ impl RelaySession {
                     "revoked session: device stream not aborted (device→shield task did not stop)"
                 ),
             }
+            // And end the Shield's side: it closes its resource connection and
+            // answers with a Close, which removes this session from the hub.
+            let close = ShieldControlMessage {
+                body: Some(Body::TunnelClose(TunnelClose {
+                    connection_id: self.connection_id.clone(),
+                    error: "session revoked".to_string(),
+                })),
+            };
+            let _ = tokio::time::timeout(
+                crate::abort_stream::ABORT_REJOIN_GRACE,
+                self.hub.send_to_shield(&self.connection_id, close),
+            )
+            .await;
             return Ok(());
         }
 
@@ -699,7 +718,7 @@ mod stream_ownership_tests {
 
     use super::*;
     use std::time::Duration;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
     const WAIT: Duration = Duration::from_secs(5);
@@ -779,6 +798,60 @@ mod stream_ownership_tests {
         }
     }
 
+    /// FU-15 (review): a revoked session is aborted even while its
+    /// device→shield task is stuck sending to a congested Shield.
+    #[tokio::test]
+    async fn a_revoked_session_aborts_while_the_shield_is_congested() {
+        let hub = AgentTunnelHub::new();
+        // Room for one message; the Shield reads the TunnelOpen, then stops.
+        let (tx, mut rx) = mpsc::channel(1);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        let shield_hub = hub.clone();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            if let Some(ShieldControlMessage {
+                body: Some(Body::TunnelOpen(o)),
+            }) = rx.recv().await
+            {
+                shield_hub.dispatch_opened(&o.connection_id, true, String::new());
+            }
+            let _ = stop_rx.await; // keep the channel open, never read again
+            drop(rx);
+        });
+        let session = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
+            .await
+            .expect("opened");
+        let token = tokio_util::sync::CancellationToken::new();
+        let (mut device, relay_end) = tokio::io::duplex(64 * 1024);
+        let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay = tokio::spawn(session.with_cancel_token(token.clone()).relay_stream(
+            AbortProbe {
+                inner: relay_end,
+                aborted: aborted.clone(),
+                shut: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        ));
+        // Uploads the Shield won't take: separate reads, so the second send
+        // finds the Shield's channel full and the device→shield task blocks.
+        for _ in 0..4 {
+            device.write_all(&[1u8; 4096]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        token.cancel();
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("a revoked session ends")
+            .unwrap()
+            .unwrap();
+        assert!(
+            aborted.load(std::sync::atomic::Ordering::SeqCst),
+            "aborted although the device→shield send was blocked"
+        );
+        let _ = stop_tx.send(());
+    }
+
     /// FU-15: a session whose authorization is revoked aborts its device
     /// stream (so neither side's queue is delivered after the cut) instead of
     /// ending it normally, also while a write to a slow device is waiting.
@@ -786,9 +859,24 @@ mod stream_ownership_tests {
     async fn a_revoked_session_aborts_its_device_stream() {
         for slow_device in [false, true] {
             let hub = AgentTunnelHub::new();
-            let (tx, rx) = mpsc::channel(64);
+            let (tx, mut rx) = mpsc::channel(64);
             assert!(hub.register_shield(SHIELD.into(), 1, tx));
-            accept_all(hub.clone(), rx);
+            // A Shield that accepts the tunnel and reports the Close it gets.
+            let (closed_tx, mut closed_rx) = mpsc::channel::<String>(4);
+            let shield_hub = hub.clone();
+            tokio::spawn(async move {
+                while let Some(m) = rx.recv().await {
+                    match m.body {
+                        Some(Body::TunnelOpen(o)) => {
+                            shield_hub.dispatch_opened(&o.connection_id, true, String::new())
+                        }
+                        Some(Body::TunnelClose(c)) => {
+                            let _ = closed_tx.send(c.error).await;
+                        }
+                        _ => {}
+                    }
+                }
+            });
             let session = hub
                 .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
                 .await
@@ -825,6 +913,10 @@ mod stream_ownership_tests {
                 !shut.load(std::sync::atomic::Ordering::SeqCst),
                 "a revoked session must not end like a normal close"
             );
+            let closed = tokio::time::timeout(WAIT, closed_rx.recv())
+                .await
+                .expect("the Shield is told the session is over");
+            assert_eq!(closed.as_deref(), Some("session revoked"));
         }
     }
 
