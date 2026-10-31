@@ -274,6 +274,9 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 ## Post-Sprint Fixes
 
+### Fix: relay installer stops on another relay's leftover state (V4 observation)
+`scripts/relay-local-install.sh` now checks the state dir before installing. The same relay keeps its state; another relay's (or an unreadable) certificate stops the install with both IDs named, unless `RELAY_RESET_STATE=1` moves it aside (kept, never deleted). Test: `scripts/test-relay-installer-state.sh` (18 checks, 5 mutants). Details: Phase 3 (E) file → Post-Phase Fixes.
+
 ### Fix: FU-11 public workspace discovery is rate limited (mitigation, not elimination)
 **Issue:** `lookupWorkspacesByEmail` (and the slug lookups) answered any number of unauthenticated calls: 85 in a burst during the live E2E run (F-6). That makes it an enumeration oracle.
 
