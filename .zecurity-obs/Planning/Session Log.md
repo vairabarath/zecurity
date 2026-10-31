@@ -3477,6 +3477,17 @@ serves on `127.0.0.1:9102`.
   - provider login adopting trusted proxies;
   - `.env.example` lines, added by Barath.
 
+## 2026-10-31 — M2: small fixes, S4: relay installer and leftover state
+- Branch `fix/relay-installer-stale-state` (from `fixed-pendings` `a6b83625`).
+- `scripts/relay-local-install.sh` `check_existing_state` reads the existing certificate's relay ID before installing anything:
+  - same ID: kept;
+  - another or unreadable certificate: stops and names both IDs;
+  - `RELAY_RESET_STATE=1`: stops the service and moves the state to a private backup (never deletes a key).
+- Test `scripts/test-relay-installer-state.sh`: 18 checks, no root; 5 mutants killed.
+- Small-fix plan agreed with Barath:
+  - S4 (this), then S2 (relay forwards a reset) and S3 (FU-14 connector drain timeout), as post-sprint fixes;
+  - S1, S5 and S6 (D21-R follow-ups) left to Sathiya.
+
 ## 2026-10-31 — M2: small fixes, S2: the relay forwards a reset (FU-15 relay path)
 - Branch `fix/relay-forward-reset` (from `fixed-pendings` `a6b83625`). From the #162 review: the relay finished the client-bound stream gracefully after the connector's reset, so a revoked session's buffered tail still arrived.
 - `pipe_streams` now copies with quinn's own read/write (keeps reset and stop codes). A failed bridge aborts all four halves with the peer's code (RVKD reaches the client), or with `RLAB` for other failures. Clean ends are unchanged.

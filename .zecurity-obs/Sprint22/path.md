@@ -274,6 +274,9 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 ## Post-Sprint Fixes
 
+### Fix: relay installer stops on another relay's leftover state (V4 observation)
+`scripts/relay-local-install.sh` now checks the state dir before installing. The same relay keeps its state; another relay's (or an unreadable) certificate stops the install with both IDs named, unless `RELAY_RESET_STATE=1` moves it aside (kept, never deleted). Test: `scripts/test-relay-installer-state.sh` (18 checks, 5 mutants). Details: Phase 3 (E) file → Post-Phase Fixes.
+
 ### Fix: the relay forwards a reset or stop instead of finishing gracefully (FU-15 relay path)
 **Issue:** found in the review of #162 (FU-15). On the relay path, a revoked session's tail still reached the client. The connector resets its stream to the relay, but `relay/src/session.rs` `pipe_streams` then returned and dropped `client_send`. Dropping a quinn `SendStream` *finishes* it, so everything already buffered (1.27 MB in the new test) was delivered, followed by a clean EOF.
 
