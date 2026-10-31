@@ -270,9 +270,42 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | **Mitigated** 2026-10-31 (branch `fu11/discovery-rate-limit`): shared per-IP budget on all four discovery entry points + per-email budget; the oracle remains (email-verified discovery to decide before GA). See Post-Sprint Fixes → FU-11 |
 | FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): the Connector now shuts a relayed shield-tunnel stream down on a clean end (TLS close_notify); see Post-Sprint Fixes → F-7. The probe timeouts are FU-9 |
 | FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): accidental duplicate from Sprint 17's merge fix; second start removed |
-| FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | Open |
+| FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | **Fixed** 2026-10-31 (branch `fix/connector-drain-timeout-cut`): the drain timeout closes the old relay connection. See Post-Sprint Fixes → FU-14 |
 
 ## Post-Sprint Fixes
+
+### Fix: FU-14 the connector's drain timeout cuts the streams still open
+**Issue:** live AT-D6 (2026-10-30): after a drain, a 1 GiB download kept using the drained relay for 442 s. The connector logged "old relay drain timed out with active streams still open" at 120 s and cut nothing.
+
+**Root Cause:** each relay stream runs as a detached `tokio::spawn` task (`relay_handler.rs`). On timeout `relay_selector` only called `old.handle.abort()`, which ends the session's accept loop. The stream tasks kept the old QUIC connection alive.
+
+**Fix Applied (`connector/src/relay_handler.rs`, `relay_selector.rs`):**
+- **Tracker:** `RelayDrainTracker` keeps the relay connection its streams run on. `RelayHandler::run` attaches it.
+- **Cut:** `cut()` closes that connection with application code `DRNT` (0x44524E54), "relay drain timeout".
+- **Timeout path:** `migrate` now calls the new `drain_old_relay`. It waits up to `drain_timeout` for the streams to end, then cuts.
+- **Unchanged:** a drain that completes in time closes nothing early.
+
+```rust
+// AFTER (relay_selector.rs):
+async fn drain_old_relay(tracker: &RelayDrainTracker, drain_timeout: Duration, relay_id: &str) -> bool {
+    if tokio::time::timeout(drain_timeout, tracker.wait_for_idle()).await.is_ok() { return true; }
+    emit_event(SelectorEvent::DrainTimeoutFired);
+    tracker.cut(); // closes the old relay connection: every stream on it ends now
+    false
+}
+```
+- **Effect:** with the relay fix (FU-15 relay path) the client gets a reset for streams cut this way; without it, the relay ends them with its own abort code.
+
+**Tests:**
+- `cut_closes_the_attached_connection_and_its_streams`;
+- `cut_without_a_connection_is_a_no_op`;
+- `drain_timeout_cuts_the_streams_still_open`;
+- `a_completed_drain_does_not_cut`;
+- `the_drain_tracker_can_cut_the_relay_connection_the_handler_serves` (real `RelayHandler`).
+
+Connector 277 pass; 3 mutants killed (no cut at timeout, handler doesn't attach, cut doesn't close). Not live-tested.
+
+**Console text (follow-up decision):** with FU-14 deployed, open connections on a draining relay end at most `relay_drain_timeout_secs` (120 s) after their connector moves. The console text changed in #160 ("keep running until they end") can name the limit again once connectors run this fix. Older connectors still don't cut.
 
 ### Fix: FU-11 public workspace discovery is rate limited (mitigation, not elimination)
 **Issue:** `lookupWorkspacesByEmail` (and the slug lookups) answered any number of unauthenticated calls: 85 in a burst during the live E2E run (F-6). That makes it an enumeration oracle.

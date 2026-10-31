@@ -27,6 +27,10 @@ use crate::ControlMessage;
 const INNER_TUNNEL_ALPN: &[u8] = b"ztna-tunnel-v1";
 const CLIENT_ROLE: &str = "client";
 
+/// QUIC application close code when a migrated-away relay connection is cut
+/// at the drain timeout (FU-14). "DRNT".
+pub const DRAIN_TIMEOUT_CODE: u32 = 0x4452_4E54;
+
 #[derive(Clone, Debug, Default)]
 pub struct RelayDrainTracker {
     inner: Arc<RelayDrainTrackerInner>,
@@ -36,6 +40,8 @@ pub struct RelayDrainTracker {
 struct RelayDrainTrackerInner {
     active_streams: AtomicUsize,
     idle_notify: Notify,
+    /// The relay connection these streams run on, for cut().
+    connection: std::sync::Mutex<Option<Connection>>,
 }
 
 impl RelayDrainTracker {
@@ -51,6 +57,23 @@ impl RelayDrainTracker {
         self.inner.active_streams.fetch_add(1, Ordering::AcqRel);
         RelayStreamGuard {
             tracker: self.clone(),
+        }
+    }
+
+    /// Remembers the relay connection the tracked streams run on.
+    pub fn attach_connection(&self, connection: Connection) {
+        *self.inner.connection.lock().unwrap() = Some(connection);
+    }
+
+    /// Ends every stream still on the relay connection by closing it (FU-14).
+    /// Stream tasks are detached and keep the connection alive on their own, so
+    /// aborting the session task alone never cut them. No-op without one.
+    pub fn cut(&self) {
+        if let Some(connection) = self.inner.connection.lock().unwrap().take() {
+            connection.close(
+                quinn::VarInt::from_u32(DRAIN_TIMEOUT_CODE),
+                b"relay drain timeout",
+            );
         }
     }
 
@@ -137,6 +160,9 @@ impl RelayHandler {
         connection: Connection,
         drain_tracker: RelayDrainTracker,
     ) -> Result<()> {
+        // If this relay is migrated away from, the drain timeout cuts the
+        // streams still running here by closing this connection (FU-14).
+        drain_tracker.attach_connection(connection.clone());
         loop {
             let (send, recv) = connection
                 .accept_bi()
@@ -420,6 +446,43 @@ mod tests {
         validate_runtime_limits(10, 256).unwrap();
         assert!(validate_runtime_limits(0, 256).is_err());
         assert!(validate_runtime_limits(10, 0).is_err());
+    }
+
+    /// FU-14: cut() closes the old relay connection, ending every stream still
+    /// on it at once (detached stream tasks can't keep it alive).
+    #[tokio::test]
+    async fn cut_closes_the_attached_connection_and_its_streams() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side.clone());
+        let _stream = tracker.track_stream();
+        // A long-lived stream from the relay side, mid-transfer.
+        let (mut send, mut recv) = relay_side.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        let (_csend, mut crecv) = connector_side.accept_bi().await.unwrap();
+        let mut one = [0u8; 1];
+        crecv.read_exact(&mut one).await.unwrap();
+
+        tracker.cut();
+
+        let reason = tokio::time::timeout(Duration::from_secs(2), relay_side.closed())
+            .await
+            .expect("the relay must see the connection close");
+        assert!(
+            matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+                if c.error_code == quinn::VarInt::from_u32(DRAIN_TIMEOUT_CODE)),
+            "relay saw {reason:?}"
+        );
+        let mut buf = [0u8; 16];
+        assert!(
+            recv.read(&mut buf).await.is_err(),
+            "the open stream must fail, not finish"
+        );
+    }
+
+    #[test]
+    fn cut_without_a_connection_is_a_no_op() {
+        RelayDrainTracker::new().cut();
     }
 }
 
