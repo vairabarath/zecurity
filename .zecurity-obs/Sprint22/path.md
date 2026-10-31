@@ -274,6 +274,35 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 
 ## Post-Sprint Fixes
 
+### Fix: the relay forwards a reset or stop instead of finishing gracefully (FU-15 relay path)
+**Issue:** found in the review of #162 (FU-15). On the relay path, a revoked session's tail still reached the client. The connector resets its stream to the relay, but `relay/src/session.rs` `pipe_streams` then returned and dropped `client_send`. Dropping a quinn `SendStream` *finishes* it, so everything already buffered (1.27 MB in the new test) was delivered, followed by a clean EOF.
+
+**Root Cause:** the bridge copied with tokio's `AsyncRead`/`AsyncWrite`, which turns a peer's reset into a plain `io::Error`, and on any error simply dropped the streams.
+
+**Fix Applied (`relay/src/session.rs`):**
+- `counted_copy` uses quinn's own `read`/`write_all`, so `ReadError::Reset(code)` and `WriteError::Stopped(code)` keep their code.
+- When a bridge fails, the relay **resets both send halves and stops both receive halves** with the peer's code. The connector's `RVKD` (0x52564B44) reaches the client exactly as on the direct path.
+- Any other failure (lost connection) uses the relay's own code, `RLAB` (0x524C4142), never a clean finish.
+- A normal end is unchanged: every byte, then a clean finish in each direction.
+
+```rust
+// AFTER (pipe_streams, on a failed bridge):
+let code = error.code(); // the peer's reset/stop code, else RELAY_ABORT_CODE
+let _ = client_send.reset(code);
+let _ = connector_send.reset(code);
+let _ = client_recv.stop(code);
+let _ = connector_recv.stop(code);
+```
+- **Behaviour change (intended):** an abort from the client side (reset, or stop of its reading half) now reaches the connector as a reset with the client's code, not a graceful EOF.
+
+**Tests** (`relay/src/session.rs`, a real client↔relay↔connector bridge from two QUIC pairs):
+- `a_connector_reset_reaches_the_client_with_its_code`: about 1.3 MB in flight, then a reset; the client gets `Reset(RVKD)`, not the backlog.
+- `a_client_stop_reaches_the_connector_with_its_code`;
+- `a_client_reset_reaches_the_connector_with_its_code`;
+- `a_clean_end_is_still_a_clean_finish` (3 MB both ways).
+
+The first three failed before the fix. Relay suite 123 pass; 3 mutants killed (no abort, the relay's own code instead of the peer's, client side finished instead of reset). Not live-tested; it pairs with #162 on the lab.
+
 ### Fix: FU-11 public workspace discovery is rate limited (mitigation, not elimination)
 **Issue:** `lookupWorkspacesByEmail` (and the slug lookups) answered any number of unauthenticated calls: 85 in a burst during the live E2E run (F-6). That makes it an enumeration oracle.
 

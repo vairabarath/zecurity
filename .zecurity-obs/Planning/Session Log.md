@@ -3476,3 +3476,9 @@ serves on `127.0.0.1:9102`.
   - `initiateAuth` limit (ADR-009 Tier 3);
   - provider login adopting trusted proxies;
   - `.env.example` lines, added by Barath.
+
+## 2026-10-31 — M2: small fixes, S2: the relay forwards a reset (FU-15 relay path)
+- Branch `fix/relay-forward-reset` (from `fixed-pendings` `a6b83625`). From the #162 review: the relay finished the client-bound stream gracefully after the connector's reset, so a revoked session's buffered tail still arrived.
+- `pipe_streams` now copies with quinn's own read/write (keeps reset and stop codes). A failed bridge aborts all four halves with the peer's code (RVKD reaches the client), or with `RLAB` for other failures. Clean ends are unchanged.
+- 4 new tests on a real QUIC bridge; the 3 abort tests failed before the fix (the client got 1.27 MB, then a clean EOF). Relay 123 pass; 3 mutants killed. Not live-tested (pairs with #162).
+
