@@ -665,6 +665,28 @@ fn drive_relay(
         }
     }
 
+    // FU-15: a relay that failed (the connector aborted a revoked session,
+    // or the transport broke) has nothing more to deliver. Drop what is still
+    // queued for the client so the RST below goes out now, instead of after
+    // the queue drained at the app's pace: a member removal used to keep a
+    // download going for 18.6 s (5.6 MB) after the cut. The outcome is stored
+    // before the relay's sender is dropped, so nothing can arrive after this.
+    if relay.outcome.load(AtomicOrdering::Acquire) == RELAY_FAILED {
+        relay.write_buf.clear();
+        if let Some(rx) = relay.quic_to_tcp_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(_) => continue,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        relay.quic_to_tcp_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Resource → client: flush any previously buffered bytes first,
     // then pull fresh bytes from the relay channel.
     while !relay.write_buf.is_empty() && socket.can_send() {
@@ -3105,6 +3127,37 @@ mod tests {
         assert_eq!(lab.flows.stats.fin_on_relay_end, 0);
         assert_eq!(lab.relay_sockets(), 0);
         assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
+    }
+
+    /// FU-15: a relay that fails with data still queued for a slow app (a
+    /// revoked session the connector aborted) resets the app connection at
+    /// once and drops the queue, instead of delivering it at the app's pace
+    /// first.
+    #[test]
+    fn relay_failure_drops_what_is_still_queued_for_the_app() {
+        let mut lab = Lab::new(true);
+        let (h, spawn) = establish(&mut lab, 40_005);
+        let queued = 40 * 16 * 1024;
+        for _ in 0..40 {
+            spawn.quic_to_tcp_tx.try_send(vec![7u8; 16 * 1024]).unwrap();
+        }
+        // The app doesn't read: some data moves into the sockets, the rest
+        // stays queued.
+        lab.pump(3);
+        end_relay(spawn, RELAY_FAILED);
+        lab.pump(3);
+        assert_eq!(
+            lab.app(h).state(),
+            tcp::State::Closed,
+            "RST received at once"
+        );
+        assert_eq!(lab.flows.stats.rst_on_relay_failure, 1);
+        let got = lab.app_read_all(h).len();
+        assert!(
+            got < queued,
+            "the queue was delivered ({got} of {queued} bytes)"
+        );
+        assert_eq!(lab.relay_sockets(), 0);
     }
 
     /// A relay task that dies without recording an outcome (e.g. a panic)

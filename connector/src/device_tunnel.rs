@@ -173,7 +173,12 @@ pub async fn handle_stream<S>(
     gate: &AuthzGate,
 ) -> Result<()>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: tokio::io::AsyncRead
+        + tokio::io::AsyncWrite
+        + crate::abort_stream::AbortStream
+        + Unpin
+        + Send
+        + 'static,
 {
     // Connector-revocation B1 (§7 step 2): the funnel for every transport.
     // Checked first, before anything is written: a refusal sends no
@@ -380,17 +385,21 @@ where
                     quic_addr: quic_advertise_addr().map(String::from),
                 };
                 send_response(&mut stream, &response).await?;
-                 tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::info!(
-                            spiffe_id = %client_spiffe_id,
-                            resource_id = %acl_entry.resource_id,
-                            transport = session_transport.as_str(),
-                            reason = "acl_diff",
-                            "session cancelled — authorization revoked mid-session",
-                        );
-                    }
-                    result = relay.with_cancel_token(cancel_token.clone()).relay_stream(stream) => { result?; }
+                // FU-15: relay_stream watches the token itself and aborts the
+                // device stream on a cancel (dropping it here would end it
+                // normally and deliver everything still queued).
+                relay
+                    .with_cancel_token(cancel_token.clone())
+                    .relay_stream(stream)
+                    .await?;
+                if cancel_token.is_cancelled() {
+                    tracing::info!(
+                        spiffe_id = %client_spiffe_id,
+                        resource_id = %acl_entry.resource_id,
+                        transport = session_transport.as_str(),
+                        reason = "acl_diff",
+                        "session cancelled — authorization revoked mid-session",
+                    );
                 }
             }
             Err(e) => {
@@ -517,6 +526,8 @@ where
                     reason = "acl_diff",
                     "session cancelled — authorization revoked mid-session",
                 );
+                // FU-15: abort, so nothing still queued reaches the client.
+                stream.abort();
             }
             result = relay_udp(&mut stream, &req.destination, req.port) => { result?; }
         }
@@ -591,6 +602,8 @@ where
                 reason = "acl_diff",
                 "session cancelled — authorization revoked mid-session",
             );
+            // FU-15: abort, so nothing still queued reaches the client.
+            stream.abort();
         }
         result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => {
             // Logged (live E2E run 2026-10-30, F-7): an error here used to
