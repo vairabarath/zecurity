@@ -140,8 +140,8 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
         interface_addr: state.interface_addr.clone(),
         enrolled_at: state.enrolled_at.clone(),
         cert_not_after,
-        // Memory-only; handle_reenroll carries the running set over.
-        revoked_connectors: Default::default(),
+        peer_list_issued_at_ms: state.peer_list_issued_at_ms,
+        resource_generation_floor: state.resource_generation_floor,
     };
     new_state
         .save(&cfg.state_dir)

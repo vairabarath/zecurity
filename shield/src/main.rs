@@ -35,6 +35,7 @@
 
 mod appmeta;
 mod config;
+mod crl;
 mod crypto;
 mod enrollment;
 mod tls;
@@ -45,6 +46,7 @@ mod util;
 
 mod control_stream;
 mod discovery;
+mod peer_list;
 mod renewal;
 mod resources;
 mod tunnel;
