@@ -39,6 +39,12 @@
 #   RELAY_HANDSHAKE_TIMEOUT_SECS
 #   RELAY_MESSAGE_TIMEOUT_SECS
 #   RELAY_HEARTBEAT_INTERVAL_SECS
+#   RELAY_RESET_STATE=1              the state dir holds ANOTHER relay's
+#                                     certificate: move it aside (kept in
+#                                     <state dir>.replaced-<timestamp>, never
+#                                     deleted) so this relay can provision.
+#                                     Without it the installer stops: the relay
+#                                     would refuse to start on a mismatched ID.
 
 set -euo pipefail
 
@@ -74,7 +80,51 @@ Optional env vars (passed through to /etc/zecurity/relay.conf if set):
   RELAY_MAX_CONNECTIONS, RELAY_MAX_LOOKUP_BRIDGES, RELAY_MAX_BIDI_STREAMS,
   RELAY_IDLE_TIMEOUT_SECS, RELAY_HANDSHAKE_TIMEOUT_SECS,
   RELAY_MESSAGE_TIMEOUT_SECS, RELAY_HEARTBEAT_INTERVAL_SECS
+
+  RELAY_RESET_STATE=1    replace state left by a different relay (moved aside,
+                         not deleted); see check_existing_state
 EOF
+}
+
+# check_existing_state DIR — state left by ANOTHER relay (this host was a relay
+# before, under a different RELAY_ID) makes the relay refuse to start
+# ("Relay certificate ID … does not match configured Relay ID …"), and the new
+# provisioning token is never used. Detect that before installing anything:
+#   - same relay ID: a reinstall, keep the state;
+#   - another or unreadable certificate: stop, unless RELAY_RESET_STATE=1, which
+#     stops a running relay and moves the old files to DIR.replaced-<timestamp>
+#     (root-only). A relay key is never deleted here.
+check_existing_state() {
+    local dir="$1" existing="" label backup
+    [[ -e "$dir/relay.crt" ]] || return 0
+    if ! command -v openssl >/dev/null 2>&1; then
+        label="an unreadable relay certificate (openssl is not installed)"
+    else
+        existing="$(openssl x509 -in "$dir/relay.crt" -noout -ext subjectAltName 2>/dev/null \
+            | grep -oE 'spiffe://[^/,[:space:]]+/relay/[0-9a-f-]{36}' | head -n 1 | sed 's#.*/relay/##' || true)"
+        if [[ "$existing" == "$RELAY_ID" ]]; then
+            log "existing certificate for relay $RELAY_ID found in $dir; keeping it"
+            return 0
+        fi
+        if [[ -n "$existing" ]]; then
+            label="the certificate of relay $existing"
+        else
+            label="an unreadable relay certificate"
+        fi
+    fi
+    if [[ "${RELAY_RESET_STATE:-}" != "1" ]]; then
+        err "$dir holds $label, not one for relay $RELAY_ID: the relay would refuse to start.
+         To replace it, re-run with RELAY_RESET_STATE=1 (the old files are moved to
+         $dir.replaced-<timestamp>, not deleted), or move them away yourself."
+    fi
+    if systemctl is-active --quiet zecurity-relay.service 2>/dev/null; then
+        log "stopping zecurity-relay.service before replacing its state"
+        systemctl stop zecurity-relay.service
+    fi
+    backup="${dir}.replaced-$(date +%Y%m%d%H%M%S)"
+    install -d -m 0700 "$backup"
+    find "$dir" -mindepth 1 -maxdepth 1 -exec mv -t "$backup" {} +
+    warn "moved $label from $dir to $backup"
 }
 
 # ── Checks ──────────────────────────────────────────────────────────────────
@@ -102,6 +152,9 @@ if [[ ! "$RELAY_CA_FINGERPRINT" =~ ^[0-9a-fA-F]{64}$ ]]; then
 fi
 
 command -v systemctl >/dev/null || err "systemctl is required"
+
+# ── Existing relay state ────────────────────────────────────────────────────
+check_existing_state "${RELAY_STATE_DIR:-$PKI_DIR}"
 
 # ── Create system user ──────────────────────────────────────────────────────
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
