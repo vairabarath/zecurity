@@ -3455,3 +3455,24 @@ serves on `127.0.0.1:9102`.
 - Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.
 - Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings`), commits for a1; a2 (+ watermark, ack-path and coalescer fixes); A′ (+ review fix); D; S signed resource sets (supersedes a1); docs. Not pushed. Controller 1536/0/2, connector 270, shield 79; mutant-checked.
 - Record: `.zecurity-obs/Sprint20/Fixes/connector-revocation/D21R-Shield-Hostile-Connector-Design-2026-10-30.md`. Next: live check on the lab (needs new controller, connector and shield builds), then push + PR into `fixed-pendings`.
+
+## 2026-10-31 — M2: FU-11 workspace-discovery rate limiting (mitigation)
+- Branch `fu11/discovery-rate-limit` (from `fixed-pendings` `770193e1`). Spec approved by Barath (with a ChatGPT review); decisions A–D.
+- New package `internal/discoverylimit` (the existing `internal/discovery` is network/service discovery and was left untouched).
+- **Shared budget:** one per-IP budget (30/60 s, IPv6 /64) for `lookupWorkspacesByEmail`, `lookupWorkspace`, `lookupIdpConnections` and `GET /workspaces/{slug}/auth`.
+- **Email budget:** 5/h per HMAC'd canonical email.
+- **Enforcement and responses:** charged per resolver run; whole-response refusal; 429 + `Retry-After`, 503 fail closed; optional trusted proxies.
+- **Telemetry:** `discovery_requests_total`, `discovery:` logs without emails.
+- Found during testing: aliases let one public request run many lookups, and signed-in users had no limit either. Both are covered now.
+- Smoke test of the real binary on a throwaway DB:
+  - shared budget across GraphQL and REST → 429;
+  - Valkey down → 503 on both routes;
+  - bad proxy config refuses startup;
+  - no email in logs.
+- Docs: ADR-009 section (status kept *proposed*), `docs/workspace-discovery-rate-limit.md`, FU-11 → Mitigated.
+- **Open:**
+  - email-verified discovery decision before GA;
+  - admin login "too many attempts" message (`admin/`);
+  - `initiateAuth` limit (ADR-009 Tier 3);
+  - provider login adopting trusted proxies;
+  - `.env.example` lines, added by Barath.

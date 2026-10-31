@@ -44,6 +44,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
@@ -316,6 +317,25 @@ func main() {
 	}
 	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
 
+	// FU-11 (ADR-009): public workspace discovery is rate limited — one Valkey
+	// budget per client IP shared by all four entry points, plus a per-email
+	// budget for lookupWorkspacesByEmail. Bad settings stop startup.
+	discoveryProxies, err := discoverylimit.ParseTrustedProxies(os.Getenv("DISCOVERY_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("DISCOVERY_TRUSTED_PROXY_CIDRS: %v", err)
+	}
+	discoveryIPs := discoverylimit.NewIPResolver(discoveryProxies)
+	discoveryLimiter, err := discoverylimit.NewLimiter(valkeycompat.NewAdapter(connectorValkey), discoverylimit.Config{
+		IPLimit:    envOrInt("DISCOVERY_RATE_LIMIT_IP_PER_MIN", discoverylimit.DefaultIPLimit),
+		EmailLimit: envOrInt("DISCOVERY_RATE_LIMIT_EMAIL_PER_HOUR", discoverylimit.DefaultEmailLimit),
+	}, os.Getenv("PKI_MASTER_SECRET"))
+	if err != nil {
+		log.Fatalf("discovery rate limiter: %v", err)
+	}
+	if len(discoveryProxies) > 0 {
+		log.Printf("discovery rate limit: trusting X-Forwarded-For from %d proxy range(s)", len(discoveryProxies))
+	}
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -351,6 +371,8 @@ func main() {
 	// Fail-closed error masking: only apperr.UserError + gqlgen parse/validation
 	// errors reach clients; raw resolver/DB errors are logged and genericized.
 	gqlSrv.SetErrorPresenter(resolvers.ErrorPresenter)
+	// FU-11: a refused discovery field replaces the operation's whole response.
+	gqlSrv.Use(discoverylimit.Extension{})
 
 	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
 	// enables it by default via extension.Introspection{}, which exposes the
@@ -422,7 +444,8 @@ func main() {
 	mux.Handle("POST /provider/users/{id}/reset-totp", requireProvider(http.HandlerFunc(operatorHandlers.ResetTOTP)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
-	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
+	mux.Handle("GET /workspaces/{slug}/auth",
+		discoverylimit.ProtectHTTP(discoveryLimiter, discoveryIPs, discoverylimit.OpRESTAuth, authSvc.DiscoveryHandler()))
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -434,7 +457,9 @@ func main() {
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
 		middleware.WorkspaceGuard(db.Pool)(gqlSrv),
 	)
-	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
+	// The discovery middleware sits outside the public/protected routing, so both
+	// routes share one budget and a refusal becomes 429/503 on either.
+	mux.Handle("/graphql", discoverylimit.Middleware(discoveryLimiter, discoveryIPs)(routeGraphQL(protected, gqlSrv)))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))

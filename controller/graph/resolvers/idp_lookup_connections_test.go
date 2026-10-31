@@ -24,10 +24,14 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/idp"
 )
 
@@ -37,6 +41,7 @@ type lookupIdpHarness struct {
 	adminDSN string
 	dbName   string
 	idpStore *idp.Store
+	limiter  *discoverylimit.Limiter
 }
 
 func newLookupIdpHarness(t *testing.T) *lookupIdpHarness {
@@ -89,6 +94,27 @@ func newLookupIdpHarness(t *testing.T) *lookupIdpHarness {
 	return &lookupIdpHarness{
 		t: t, pool: pool, adminDSN: adminDSN, dbName: dbName, idpStore: idp.NewStore(pool, nil),
 	}
+}
+
+// discoveryCtx is a request context carrying a discovery limiter with
+// generous limits (FU-11): the public lookup resolvers refuse to run without
+// one. Rate limiting itself is covered in discovery_ratelimit_test.go.
+func (h *lookupIdpHarness) discoveryCtx() context.Context {
+	h.t.Helper()
+	if h.limiter == nil {
+		mr := miniredis.RunT(h.t)
+		vc, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{mr.Addr()}, DisableCache: true})
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		h.t.Cleanup(vc.Close)
+		h.limiter, err = discoverylimit.NewLimiter(valkeycompat.NewAdapter(vc),
+			discoverylimit.Config{IPLimit: 1000, EmailLimit: 1000}, "lookup-idp-test-master-secret")
+		if err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	return discoverylimit.WithRequest(context.Background(), h.limiter, "4:192.0.2.1")
 }
 
 func (h *lookupIdpHarness) teardown() {
@@ -188,7 +214,7 @@ func TestLookupIdpConnections_ScopedToRequestedWorkspace(t *testing.T) {
 
 	qr := h.resolver()
 
-	got, err := qr.LookupIdpConnections(context.Background(), "acme")
+	got, err := qr.LookupIdpConnections(h.discoveryCtx(), "acme")
 	if err != nil {
 		t.Fatalf("lookup acme: %v", err)
 	}
@@ -211,7 +237,7 @@ func TestLookupIdpConnections_ScopedToRequestedWorkspace(t *testing.T) {
 	}
 
 	// And symmetrically, so the test cannot pass by returning "the first row".
-	gotBeta, err := qr.LookupIdpConnections(context.Background(), "beta")
+	gotBeta, err := qr.LookupIdpConnections(h.discoveryCtx(), "beta")
 	if err != nil {
 		t.Fatalf("lookup beta: %v", err)
 	}
@@ -237,7 +263,7 @@ func TestLookupIdpConnections_ActiveOnly(t *testing.T) {
 	disabledConn := h.seedConn(ws, "entra", "Acme Entra (disabled)", "disabled")
 	deletedConn := h.seedConn(ws, "jumpcloud", "Acme JumpCloud (deleted)", "deleted")
 
-	got, err := h.resolver().LookupIdpConnections(context.Background(), "acme")
+	got, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "acme")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -262,7 +288,7 @@ func TestLookupIdpConnections_UnknownSlugIsEmptyNotError(t *testing.T) {
 	h := newLookupIdpHarness(t)
 	defer h.teardown()
 
-	got, err := h.resolver().LookupIdpConnections(context.Background(), "no-such-workspace")
+	got, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "no-such-workspace")
 	if err != nil {
 		t.Fatalf("unknown slug must not error, got: %v", err)
 	}
@@ -282,7 +308,7 @@ func TestLookupIdpConnections_WorkspaceWithNoConnections(t *testing.T) {
 	h.seedWorkspace("bare")
 	googleConn := h.platformConnID("google")
 
-	got, err := h.resolver().LookupIdpConnections(context.Background(), "bare")
+	got, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "bare")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -305,7 +331,7 @@ func TestLookupIdpConnections_IncludesPlatformTier(t *testing.T) {
 	oktaConn := h.seedConn(ws, "okta", "Acme Okta", "active")
 	googleConn := h.platformConnID("google")
 
-	got, err := h.resolver().LookupIdpConnections(context.Background(), "acme")
+	got, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "acme")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -332,7 +358,7 @@ func TestLookupIdpConnections_PlatformTierSuppressedWhenDisabled(t *testing.T) {
 	googleConn := h.platformConnID("google")
 	h.setPlatformLogin(ws, false)
 
-	got, err := h.resolver().LookupIdpConnections(context.Background(), "acme")
+	got, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "acme")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -359,7 +385,7 @@ func TestLookupIdpConnections_PlatformToggleIsPerWorkspace(t *testing.T) {
 	googleConn := h.platformConnID("google")
 	h.setPlatformLogin(acme, false)
 
-	acmeGot, err := h.resolver().LookupIdpConnections(context.Background(), "acme")
+	acmeGot, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "acme")
 	if err != nil {
 		t.Fatalf("lookup acme: %v", err)
 	}
@@ -369,7 +395,7 @@ func TestLookupIdpConnections_PlatformToggleIsPerWorkspace(t *testing.T) {
 		}
 	}
 
-	betaGot, err := h.resolver().LookupIdpConnections(context.Background(), "beta")
+	betaGot, err := h.resolver().LookupIdpConnections(h.discoveryCtx(), "beta")
 	if err != nil {
 		t.Fatalf("lookup beta: %v", err)
 	}
