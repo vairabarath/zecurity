@@ -93,13 +93,27 @@ fn health_ack(rule: &impl AckRule, reachable: bool, verified_at: i64) -> Resourc
     }
 }
 
+/// D21-R (S): what to do with a verified resource set, by its generation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Newer than anything applied: apply it.
+    Apply,
+    /// The generation already applied: don't reapply, but ack its removes
+    /// again (an ack may have been lost).
+    Same,
+    /// Older than what was applied, or than the saved floor: ignore it.
+    Stale,
+}
+
 pub struct SharedResourceState {
     pub active: Mutex<Vec<ActiveResource>>,
     pub acks: Mutex<Vec<ResourceAck>>,
-    /// Generation of the last applied ResourceSnapshot (ADR-004 Phase 2).
-    /// Stale snapshots (e.g. a cached replay racing a newer live push) are
-    /// dropped so an older truth can never overwrite a newer one.
-    pub last_snapshot_generation: Mutex<u64>,
+    /// Generation of the last applied signed resource set (ADR-004 Phase 2,
+    /// D21-R S). Stale sets (e.g. a cached replay racing a newer live push,
+    /// or a Connector replaying an old one) are dropped so an older truth can
+    /// never overwrite a newer one. Generations are signed by the controller,
+    /// so no Connector can forge a huge one; the order is shield-wide.
+    last_generation: Mutex<Option<u64>>,
     /// Session-local sequence, bumped on every active-set mutation (ADR-004
     /// Phase 3). Lets the controller order state reports within a session.
     pub state_seq: Mutex<u64>,
@@ -110,9 +124,51 @@ impl SharedResourceState {
         Self {
             active: Mutex::new(Vec::new()),
             acks: Mutex::new(Vec::new()),
-            last_snapshot_generation: Mutex::new(0),
+            last_generation: Mutex::new(None),
             state_seq: Mutex::new(0),
         }
+    }
+
+    /// D21-R (S): admit a verified resource set at `generation`. `floor` is
+    /// the highest generation applied before this process started (saved in
+    /// state.json), so a restart doesn't reopen older sets.
+    pub fn admit_resource_set(&self, generation: u64, floor: u64) -> Admission {
+        if generation < floor {
+            return Admission::Stale;
+        }
+        let mut last = self.last_generation.lock().unwrap();
+        match *last {
+            Some(l) if generation < l => Admission::Stale,
+            Some(l) if generation == l => Admission::Same,
+            _ => {
+                *last = Some(generation);
+                Admission::Apply
+            }
+        }
+    }
+
+    /// D21-R D: whether a tunnel to `destination:port` over `protocol` is
+    /// to a resource this Shield protects. Only then does the Shield open
+    /// it, so a Connector (hostile or not) can't use the Shield to reach
+    /// anything else on its network. `destination` must be an IP equal to a
+    /// resource's host; the port within its range; the protocol covered
+    /// ("any" covers both; a tunnel that isn't "udp" is TCP, as in
+    /// `tunnel::handle_tunnel_open`).
+    pub fn allows_tunnel(&self, destination: &str, port: u32, protocol: &str) -> bool {
+        let Ok(dest) = destination.parse::<std::net::IpAddr>() else {
+            return false;
+        };
+        let Ok(port) = u16::try_from(port) else {
+            return false;
+        };
+        let tunnel_proto = if protocol == "udp" { "udp" } else { "tcp" };
+        self.active.lock().unwrap().iter().any(|r| {
+            r.host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|host| host == dest)
+                && (r.port_from..=r.port_to).contains(&port)
+                && (r.protocol == tunnel_proto || (r.protocol != "tcp" && r.protocol != "udp"))
+        })
     }
 
     pub fn store_ack(&self, ack: ResourceAck) {
@@ -297,151 +353,20 @@ pub async fn run_health_check_loop(interval_secs: u64, state: Arc<SharedResource
     }
 }
 
-pub async fn handle_instruction(
-    instruction: &crate::proto::ResourceInstruction,
-    state: &Arc<SharedResourceState>,
-) -> Option<ResourceAck> {
-    match instruction.action.as_str() {
-        "apply" => Some(handle_apply(instruction, state).await),
-        "remove" => Some(handle_remove(instruction, state).await),
-        other => {
-            warn!(
-                action = other,
-                resource_id = %instruction.resource_id,
-                "unknown resource action"
-            );
-            None
-        }
-    }
-}
-
-pub async fn handle_apply(
-    instruction: &crate::proto::ResourceInstruction,
-    state: &Arc<SharedResourceState>,
-) -> ResourceAck {
-    let now = now_unix();
-
-    if !validate_host(&instruction.host) {
-        warn!(
-            resource_id = %instruction.resource_id,
-            host = %instruction.host,
-            "resource host does not match this shield's LAN IP — rejecting"
-        );
-        return make_ack(
-            instruction,
-            "failed",
-            "resource host does not match this shield's IP",
-            now,
-            false,
-        );
-    }
-
-    {
-        let mut active = state.active.lock().unwrap();
-        if let Some(existing) = active
-            .iter_mut()
-            .find(|r| r.resource_id == instruction.resource_id)
-        {
-            existing.host = instruction.host.clone();
-            existing.protocol = instruction.protocol.clone();
-            existing.port_from = instruction.port_from as u16;
-            existing.port_to = instruction.port_to as u16;
-        } else {
-            active.push(ActiveResource {
-                resource_id: instruction.resource_id.clone(),
-                host: instruction.host.clone(),
-                protocol: instruction.protocol.clone(),
-                port_from: instruction.port_from as u16,
-                port_to: instruction.port_to as u16,
-            });
-        }
-    }
-    state.bump_state_seq();
-
-    let snapshot = state.active.lock().unwrap().clone();
-    match apply_nftables(&snapshot).await {
-        Ok(()) => {
-            let reachable = check_port(&instruction.host, instruction.port_from as u16);
-            info!(
-                resource_id = %instruction.resource_id,
-                port = instruction.port_from,
-                port_reachable = reachable,
-                "resource applied — nftables chain rebuilt"
-            );
-            health_ack(instruction, reachable, now)
-        }
-        Err(e) => {
-            state
-                .active
-                .lock()
-                .unwrap()
-                .retain(|r| r.resource_id != instruction.resource_id);
-            state.bump_state_seq();
-            error!(
-                resource_id = %instruction.resource_id,
-                error = %e,
-                "nftables apply failed"
-            );
-            make_ack(instruction, "failed", e.to_string(), now, false)
-        }
-    }
-}
-
-pub async fn handle_remove(
-    instruction: &crate::proto::ResourceInstruction,
-    state: &Arc<SharedResourceState>,
-) -> ResourceAck {
-    state
-        .active
-        .lock()
-        .unwrap()
-        .retain(|r| r.resource_id != instruction.resource_id);
-    state.bump_state_seq();
-
-    let snapshot = state.active.lock().unwrap().clone();
-    if let Err(e) = apply_nftables(&snapshot).await {
-        error!(
-            resource_id = %instruction.resource_id,
-            error = %e,
-            "nftables rebuild after remove failed"
-        );
-    }
-
-    info!(
-        resource_id = %instruction.resource_id,
-        "resource removed from nftables"
-    );
-    make_ack(instruction, "unprotected", "", now_unix(), false)
-}
-
-/// Apply an authoritative desired-state snapshot (ADR-004 Phase 2):
-/// replace the active set with exactly the snapshot contents and rebuild the
-/// chain — anything absent is dropped, anything missing is added. Acks every
-/// resource so the controller's protecting→protected transitions still happen
-/// when an apply was lost and the snapshot re-asserted it. Resources dropped
-/// by omission get no ack (explicit removes still arrive as instructions).
-pub async fn handle_snapshot(
-    snapshot: &crate::proto::ResourceSnapshot,
+/// Apply an authoritative desired-state set (ADR-004 Phase 2), already
+/// verified and admitted (D21-R S): replace the active set with exactly its
+/// contents and rebuild the chain — anything absent is dropped, anything
+/// missing is added. Acks every resource so the controller's
+/// protecting→protected transitions still happen when an apply was lost and
+/// the set re-asserted it. Removes are acked by `remove_acks`.
+pub async fn apply_resource_set(
+    payload: &crate::proto::ResourceSetPayload,
     state: &Arc<SharedResourceState>,
 ) -> Vec<ResourceAck> {
-    // Monotonic-apply guard: never let an older truth overwrite a newer one.
-    {
-        let mut last = state.last_snapshot_generation.lock().unwrap();
-        if snapshot.generation <= *last {
-            warn!(
-                generation = snapshot.generation,
-                last_applied = *last,
-                "ignoring stale resource snapshot"
-            );
-            return Vec::new();
-        }
-        *last = snapshot.generation;
-    }
-
     let now = now_unix();
     let mut acks = Vec::new();
     let mut new_active = Vec::new();
-    for res in &snapshot.resources {
+    for res in &payload.resources {
         if !validate_host(&res.host) {
             warn!(
                 resource_id = %res.resource_id,
@@ -474,7 +399,7 @@ pub async fn handle_snapshot(
         Ok(()) => {
             info!(
                 resource_count = applied.len(),
-                generation = snapshot.generation,
+                generation = payload.generation,
                 "resource snapshot applied — chain rebuilt"
             );
             for r in &applied {
@@ -489,6 +414,19 @@ pub async fn handle_snapshot(
         }
     }
     acks
+}
+
+/// D21-R (S): ack every pending remove of a verified set as "unprotected".
+/// They are not in the desired set, so the apply already dropped them; the
+/// ack completes an unprotect or reaps a deletion tombstone (it replaces the
+/// remove instruction). Harmless to repeat: the controller guards each ack.
+pub fn remove_acks(payload: &crate::proto::ResourceSetPayload) -> Vec<ResourceAck> {
+    let now = now_unix();
+    payload
+        .removes
+        .iter()
+        .map(|rm| make_ack(rm, "unprotected", "", now, false))
+        .collect()
 }
 
 fn now_unix() -> i64 {
@@ -620,6 +558,107 @@ fn port_drop_rule(protocol: &str, port_expr: Expression<'static>) -> Rule<'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active(state: &SharedResourceState, host: &str, protocol: &str, from: u16, to: u16) {
+        state.active.lock().unwrap().push(ActiveResource {
+            resource_id: format!("{host}-{protocol}-{from}"),
+            host: host.into(),
+            protocol: protocol.into(),
+            port_from: from,
+            port_to: to,
+        });
+    }
+
+    /// D21-R D: tunnels only to the protected (ip, protocol, port range).
+    #[test]
+    fn tunnels_open_only_to_protected_resources() {
+        let state = SharedResourceState::new();
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 22, "tcp"),
+            "nothing protected"
+        );
+        active(&state, "10.0.0.5", "tcp", 8000, 8010);
+        active(&state, "10.0.0.5", "udp", 53, 53);
+        active(&state, "10.0.0.5", "any", 9000, 9000);
+        assert!(state.allows_tunnel("10.0.0.5", 8000, "tcp"));
+        assert!(state.allows_tunnel("10.0.0.5", 8010, "tcp"));
+        assert!(state.allows_tunnel("10.0.0.5", 53, "udp"));
+        assert!(state.allows_tunnel("10.0.0.5", 9000, "udp"));
+        assert!(state.allows_tunnel("10.0.0.5", 9000, "tcp"));
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 8011, "tcp"),
+            "outside the range"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 8000, "udp"),
+            "wrong protocol"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 53, "tcp"),
+            "wrong protocol"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.6", 8000, "tcp"),
+            "another host"
+        );
+        assert!(!state.allows_tunnel("127.0.0.1", 8000, "tcp"), "loopback");
+        assert!(
+            !state.allows_tunnel("localhost", 8000, "tcp"),
+            "a name, not an IP"
+        );
+        assert!(
+            !state.allows_tunnel("10.0.0.5", 65536 + 8000, "tcp"),
+            "port overflow"
+        );
+    }
+
+    /// D21-R (S): signed generations order shield-wide: an older set from
+    /// any Connector is stale, the same one is acked again but not reapplied.
+    #[test]
+    fn resource_sets_are_ordered_shield_wide() {
+        let state = SharedResourceState::new();
+        assert_eq!(state.admit_resource_set(5, 0), Admission::Apply);
+        assert_eq!(state.admit_resource_set(5, 0), Admission::Same);
+        assert_eq!(state.admit_resource_set(4, 0), Admission::Stale);
+        assert_eq!(state.admit_resource_set(6, 0), Admission::Apply);
+    }
+
+    /// D21-R (S): after a restart the saved floor keeps older sets out, but
+    /// the floor's own generation applies again (the chain starts empty).
+    #[test]
+    fn the_saved_floor_survives_a_restart() {
+        let state = SharedResourceState::new();
+        assert_eq!(state.admit_resource_set(6, 7), Admission::Stale);
+        assert_eq!(state.admit_resource_set(7, 7), Admission::Apply);
+        assert_eq!(state.admit_resource_set(7, 7), Admission::Same);
+    }
+
+    /// D21-R (S): removes are acked "unprotected" with their rule.
+    #[test]
+    fn removes_are_acked_unprotected() {
+        let payload = crate::proto::ResourceSetPayload {
+            removes: vec![crate::proto::ResourceInstruction {
+                resource_id: "r9".into(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 443,
+                port_to: 443,
+                action: "remove".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let acks = remove_acks(&payload);
+        assert_eq!(acks.len(), 1);
+        assert_eq!(
+            (
+                acks[0].resource_id.as_str(),
+                acks[0].status.as_str(),
+                acks[0].port_from
+            ),
+            ("r9", "unprotected", 443)
+        );
+    }
 
     /// Sprint 20 Fix 18: every ack echoes the rule it is about, so the
     /// controller can ignore one for a rule that is no longer current.

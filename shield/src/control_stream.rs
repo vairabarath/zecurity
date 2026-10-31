@@ -23,7 +23,7 @@ use crate::proto::{
 use crate::resources::SharedResourceState;
 use crate::tunnel::{self, TunnelHub};
 use crate::types::{ConnectorRef, ShieldState};
-use crate::{renewal, resources, tls, util};
+use crate::{crl, peer_list, renewal, resources, tls, util};
 
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
@@ -44,6 +44,30 @@ const CONNECTOR_NOT_SERVING_MESSAGES: [&str; 2] = [
 /// it will never serve again, so the Shield fails over instead of waiting.
 /// Must match the Connector's `CONNECTOR_TERMINAL_MESSAGE`.
 const CONNECTOR_TERMINAL_MESSAGE: &str = "connector is revoked or unknown to the controller";
+
+/// D21-R A′: how long a new Control stream may run before the Shield holds a
+/// workspace CRL that is still valid; and how often the Connector's
+/// certificate is checked against it.
+const CRL_FIRST_WAIT: Duration = Duration::from_secs(30);
+const CRL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// D21-R A′: the Shield left the Connector itself (its certificate is in the
+/// workspace CRL, or no valid CRL arrived). Handled like the Connector's own
+/// terminal refusal: fail over to the next peer.
+#[derive(Debug)]
+struct LeftConnector(&'static str);
+
+const REVOKED_IN_CRL: &str = "its certificate is in the workspace CRL";
+const NO_VERIFIED_CERT: &str = "no verified connector certificate";
+const NO_VALID_CRL: &str = "no workspace CRL valid now (none received, or past its nextUpdate)";
+
+impl std::fmt::Display for LeftConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "left the connector: {}", self.0)
+    }
+}
+
+impl std::error::Error for LeftConnector {}
 /// Sprint 20 Fix 16 (F46): once every known Connector has refused the Shield
 /// as revoked or unknown in a row, the retry interval doubles from
 /// NOT_SERVING_RETRY_SECS up to this, instead of redialling every 2 s forever
@@ -115,12 +139,14 @@ pub async fn run_control_stream(
     resource_state: Arc<SharedResourceState>,
     peers: PeerPublisher,
 ) -> Result<()> {
+    let crl = Arc::new(crl::CrlStore::load(&cfg.state_dir));
     reconnect_loop(
         state,
         LiveSession {
             cfg,
             resource_state,
             peers: peers.clone(),
+            crl,
         },
         peers,
     )
@@ -141,6 +167,7 @@ struct LiveSession {
     cfg: ShieldConfig,
     resource_state: Arc<SharedResourceState>,
     peers: PeerPublisher,
+    crl: Arc<crl::CrlStore>,
 }
 
 impl ControlSession for LiveSession {
@@ -155,6 +182,7 @@ impl ControlSession for LiveSession {
             &self.resource_state,
             debounce,
             &self.peers,
+            &self.crl,
         )
     }
 }
@@ -255,11 +283,102 @@ async fn reconnect_loop<S: ControlSession>(
 /// or ended by the Connector mid-stream.
 fn connector_terminal(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
-        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
-            status.code() == tonic::Code::Unavailable
-                && status.message() == CONNECTOR_TERMINAL_MESSAGE
-        })
+        cause.downcast_ref::<LeftConnector>().is_some()
+            || cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+                status.code() == tonic::Code::Unavailable
+                    && status.message() == CONNECTOR_TERMINAL_MESSAGE
+            })
     })
+}
+
+/// D21-R A′: whether the Shield may act on a Connector whose certificate
+/// serial is `serial`. Fails closed: no serial or a listed serial, at once;
+/// no CRL valid now once the Shield has been without one for CRL_FIRST_WAIT
+/// (counted across streams, so reconnecting doesn't restart it).
+fn crl_verdict(
+    crl: &crl::CrlStore,
+    serial: Option<&[u8]>,
+    now_unix: i64,
+    now: Instant,
+) -> std::result::Result<(), LeftConnector> {
+    let Some(serial) = serial else {
+        return Err(LeftConnector(NO_VERIFIED_CERT));
+    };
+    match crl.check(serial, now_unix) {
+        crl::RevocationStatus::NotRevoked => Ok(()),
+        crl::RevocationStatus::Revoked => Err(LeftConnector(REVOKED_IN_CRL)),
+        crl::RevocationStatus::Unavailable => match crl.without_valid_crl(now_unix, now) {
+            Some(waited) if waited >= CRL_FIRST_WAIT => Err(LeftConnector(NO_VALID_CRL)),
+            _ => Ok(()),
+        },
+    }
+}
+
+fn connector_crl_verdict(
+    crl: &crl::CrlStore,
+    connector_id: &str,
+) -> std::result::Result<(), LeftConnector> {
+    crl_verdict(
+        crl,
+        tls::connector_serial(connector_id).as_deref(),
+        crl::now_unix(),
+        Instant::now(),
+    )
+}
+
+/// D21-R A′: the Connector closed the Control stream cleanly. Normally the
+/// Shield reconnects to it (Ok). But a Connector that closes it while the
+/// Shield has no valid CRL past the first wait, or that the CRL lists, is
+/// left like one that never sends a CRL (terminal: fail over to the next
+/// peer); else it could close and reconnect to stay attached.
+fn stream_closed_cleanly(crl: &crl::CrlStore, connector_id: &str) -> Result<()> {
+    check_connector_crl(crl, connector_id)?;
+    Ok(())
+}
+
+/// The verdict, logged when the Shield leaves.
+fn check_connector_crl(
+    crl: &crl::CrlStore,
+    connector_id: &str,
+) -> std::result::Result<(), LeftConnector> {
+    let verdict = connector_crl_verdict(crl, connector_id);
+    if let Err(e) = &verdict {
+        warn!(connector_id, reason = e.0, "leaving the connector (D21-R)");
+    }
+    verdict
+}
+
+/// D21-R A′: refuse a Connector the stored CRL already lists (or whose
+/// certificate wasn't verified) before anything is sent to it. A missing
+/// CRL is not decided here: the Connector sends one right after the stream
+/// opens, and the periodic check handles it.
+fn refuse_listed_connector(
+    crl: &crl::CrlStore,
+    connector_id: &str,
+) -> std::result::Result<(), LeftConnector> {
+    match connector_crl_verdict(crl, connector_id) {
+        Err(LeftConnector(reason)) if reason != NO_VALID_CRL => {
+            warn!(connector_id, reason, "leaving the connector (D21-R)");
+            Err(LeftConnector(reason))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// D21-R A′: whether to act on this Connector's instructions, snapshots and
+/// tunnels. Without a valid CRL past the first wait the Shield stays only to
+/// receive one (quarantine): a withholding Connector gets nothing done.
+fn connector_may_act(crl: &crl::CrlStore, connector_id: &str, what: &str) -> bool {
+    match connector_crl_verdict(crl, connector_id) {
+        Ok(()) => true,
+        Err(LeftConnector(reason)) => {
+            warn!(
+                connector_id,
+                reason, what, "ignored: the connector is not cleared by the workspace CRL"
+            );
+            false
+        }
+    }
 }
 
 fn connector_not_serving(err: &anyhow::Error) -> bool {
@@ -277,6 +396,7 @@ async fn run_once(
     resource_state: &Arc<SharedResourceState>,
     debounce: &mut RenewalDebounce,
     peers: &PeerPublisher,
+    crl: &Arc<crl::CrlStore>,
 ) -> Result<()> {
     let (mut client, selected_idx) = build_client(state, cfg)
         .await
@@ -305,6 +425,8 @@ async fn run_once(
         .context("failed to open Shield Control stream")?;
     let mut inbound = response.into_inner();
     let connector_id = state.connectors[0].connector_id.clone();
+    // D21-R A′: a Connector the stored CRL lists gets nothing.
+    refuse_listed_connector(crl, &connector_id)?;
     tunnel_hub.set_upstream(Some(out_tx.clone()));
 
     info!(
@@ -338,16 +460,24 @@ async fn run_once(
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     health_ticker.tick().await;
 
+    // D21-R A′: check the Connector against the workspace CRL every
+    // CRL_CHECK_INTERVAL. The CRL arrives on this stream; a CRL received
+    // from any Connector before is kept.
+    let mut crl_ticker = interval(CRL_CHECK_INTERVAL);
+    crl_ticker.tick().await;
+
     loop {
         tokio::select! {
             result = inbound.message() => {
                 match result {
                     // Keep the Status in the chain: reconnect_loop inspects it.
                     Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
-                    Ok(None) => return Ok(()),
+                    Ok(None) => return stream_closed_cleanly(crl, &connector_id),
                     Ok(Some(msg)) => {
                         match handle_connector_msg(
                             msg,
+                            &connector_id,
+                            crl,
                             state,
                             cfg,
                             resource_state,
@@ -363,6 +493,7 @@ async fn run_once(
                                 if !hand_over(
                                     state,
                                     cfg,
+                                    crl,
                                     resource_state,
                                     debounce,
                                     &tunnel_hub,
@@ -401,6 +532,10 @@ async fn run_once(
                         }
                     }
                 }
+            }
+
+            _ = crl_ticker.tick() => {
+                check_connector_crl(crl, &connector_id)?;
             }
 
             _ = health_ticker.tick() => {
@@ -459,6 +594,7 @@ async fn run_once(
 async fn hand_over(
     state: &mut ShieldState,
     cfg: &ShieldConfig,
+    crl: &crl::CrlStore,
     resource_state: &Arc<SharedResourceState>,
     debounce: &mut RenewalDebounce,
     hub: &TunnelHub,
@@ -506,6 +642,8 @@ async fn hand_over(
                 Ok(Some(msg)) => {
                     if let Some(action) = handle_connector_msg(
                         msg,
+                        connector_id,
+                        crl,
                         state,
                         cfg,
                         resource_state,
@@ -590,12 +728,8 @@ where
     }
     info!(shield_id = %state.shield_id, "connector requested cert renewal");
     match renew(state.clone()).await {
-        Ok(mut new_state) => {
+        Ok(new_state) => {
             debounce.record_success(Instant::now());
-            // Phase E (D21): the in-memory revoked set survives the renewal.
-            new_state
-                .revoked_connectors
-                .extend(state.revoked_connectors.drain());
             info!(
                 shield_id = %new_state.shield_id,
                 new_expiry = new_state.cert_not_after,
@@ -611,8 +745,11 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connector_msg(
     msg: ShieldControlMessage,
+    connector_id: &str,
+    crl: &crl::CrlStore,
     state: &mut ShieldState,
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
@@ -622,25 +759,33 @@ async fn handle_connector_msg(
     peers: &PeerPublisher,
 ) -> Option<Result<()>> {
     match msg.body {
+        // D21-R (S): resources change only through a controller-signed set
+        // in a ResourceSnapshot. A Connector's instruction is ignored: it
+        // could remove protection.
         Some(Body::ResourceInstruction(instr)) => {
-            if let Some(ack) = resources::handle_instruction(&instr, resource_state).await {
-                resource_state.store_ack(ack.clone());
-                if out_tx
-                    .send(ShieldControlMessage {
-                        body: Some(Body::ResourceAck(ack)),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return Some(Err(anyhow::anyhow!("outbound channel closed on ack")));
-                }
-            }
+            debug!(resource_id = %instr.resource_id, action = %instr.action, "ignored unsigned ResourceInstruction");
             None
         }
         // ADR-004 Phase 2: authoritative desired-state snapshot — replace the
         // active set, rebuild the chain, ack every contained resource.
         Some(Body::ResourceSnapshot(snap)) => {
-            let acks = resources::handle_snapshot(&snap, resource_state).await;
+            let ca_key = match peer_list::workspace_ca_key(&cfg.state_dir) {
+                Ok(ca_key) => ca_key,
+                Err(e) => {
+                    warn!(error = %e, "snapshot not checked: no Workspace CA key");
+                    return None;
+                }
+            };
+            // D21-R (a2): the signed peer list first, independent of the
+            // generation check (identical resources keep their generation).
+            if let Some(signed) = &snap.signed_peer_list {
+                apply_signed_peer_list(state, cfg, signed, &ca_key);
+                peers.publish(state);
+            }
+            if !connector_may_act(crl, connector_id, "resource snapshot") {
+                return None;
+            }
+            let acks = apply_signed_resource_set(&snap, &ca_key, state, cfg, resource_state).await;
             for ack in acks {
                 resource_state.store_ack(ack.clone());
                 if out_tx
@@ -678,6 +823,32 @@ async fn handle_connector_msg(
             None
         }
         Some(Body::TunnelOpen(open)) => {
+            if !connector_may_act(crl, connector_id, "tunnel open") {
+                tunnel::refuse_tunnel_open(
+                    &tunnel_hub,
+                    &open.connection_id,
+                    "the connector is not cleared by the workspace CRL",
+                )
+                .await;
+                return None;
+            }
+            // D21-R D: only to a resource this Shield protects.
+            if !resource_state.allows_tunnel(&open.destination, open.port, &open.protocol) {
+                warn!(
+                    connector_id,
+                    destination = %open.destination,
+                    port = open.port,
+                    protocol = %open.protocol,
+                    "refused tunnel: not a resource this shield protects"
+                );
+                tunnel::refuse_tunnel_open(
+                    &tunnel_hub,
+                    &open.connection_id,
+                    "destination is not a resource this shield protects",
+                )
+                .await;
+                return None;
+            }
             tunnel::handle_tunnel_open(
                 tunnel_hub,
                 open.connection_id,
@@ -696,10 +867,32 @@ async fn handle_connector_msg(
             tunnel::handle_tunnel_close(tunnel_hub, &close.connection_id).await;
             None
         }
-        Some(Body::PeerConnectorList(list)) => {
-            apply_peer_connector_list(state, cfg, list);
-            peers.publish(state);
+        // D21-R (a2): peers come only from the controller-signed list in
+        // a ResourceSnapshot. A Connector's own list (and its revoked ids) is
+        // ignored: it could strand the Shield on a hostile Connector.
+        Some(Body::PeerConnectorList(_)) => {
+            debug!("ignored unsigned PeerConnectorList");
             None
+        }
+        // D21-R A′: a workspace CRL from the Connector. Kept only when it
+        // verifies and is newer; then the Connector is checked against it
+        // at once (it may list its own certificate).
+        Some(Body::WorkspaceCrl(c)) => {
+            let ca = std::fs::read(Path::new(&cfg.state_dir).join("workspace_ca.crt"))
+                .map_err(anyhow::Error::from)
+                .and_then(|bundle| crl::crl_issuers(&bundle));
+            match ca {
+                Ok(issuers) => {
+                    if let Err(e) = crl.offer(&c.crl_der, &issuers.workspace_ca_pem) {
+                        warn!(error = %e, "rejected workspace CRL from the connector");
+                    }
+                }
+                Err(e) => warn!(error = %e, "workspace CRL not checked: no Workspace CA"),
+            }
+            match check_connector_crl(crl, connector_id) {
+                Err(left) if left.0 == REVOKED_IN_CRL => Some(Err(anyhow::Error::new(left))),
+                _ => None,
+            }
         }
         other => {
             warn!(?other, "ignored unsupported Shield Control message");
@@ -708,62 +901,104 @@ async fn handle_connector_msg(
     }
 }
 
-/// Apply an incoming `PeerConnectorList` to the Shield's persistent state.
+/// D21-R (S): apply a snapshot's controller-signed resource set; returns the
+/// acks to send.
 ///
-///   - Revoked ids (Phase E, D21) are added to the in-memory revoked set
-///     first and pruned from the current list at once, whichever Connector
-///     sent them; a revoked Connector is never re-added while the process
-///     runs. A pruned list is saved unless it became empty (state.json must
-///     keep a Connector to start from; the in-memory list stays empty, so
-///     the Shield dials nothing).
-///   - Empty `peers` (after dropping revoked ids) is ignored — the Shield's
-///     existing list is safer than a truncated one.
-///   - Identical content (order-insensitive by connector_id) is a no-op —
-///     no rewrite of state.json.
-///   - New content replaces the list. The current head is preserved when
-///     the new list still contains it; otherwise the new head is index 0.
-fn apply_peer_connector_list(
+///   - No signed set, or one that doesn't verify against the Workspace CA
+///     key or isn't for this Shield and trust domain: nothing changes (the
+///     unsigned fields are never used).
+///   - Older than the last applied set, or than the saved floor: ignored.
+///   - The generation already applied: not reapplied, its removes acked
+///     again.
+///   - Newer: applied (desired set, then removes acked), and the floor saved
+///     in state.json so a restart keeps older sets out.
+async fn apply_signed_resource_set(
+    snap: &crate::proto::ResourceSnapshot,
+    ca_key: &[u8],
     state: &mut ShieldState,
     cfg: &ShieldConfig,
-    list: crate::proto::PeerConnectorList,
-) {
-    let carried_revoked = !list.revoked_connector_ids.is_empty();
-    prune_revoked_connectors(state, cfg, list.revoked_connector_ids);
-    let peers: Vec<crate::proto::PeerConnector> = list
-        .peers
-        .into_iter()
-        .filter(|p| !state.revoked_connectors.contains(&p.connector_id))
-        .collect();
-    if peers.is_empty() {
-        if empty_list_is_expected(carried_revoked) {
-            debug!("PeerConnectorList carried only revoked connectors");
-        } else {
-            warn!("ignored empty PeerConnectorList");
+    resource_state: &Arc<SharedResourceState>,
+) -> Vec<crate::proto::ResourceAck> {
+    let Some(signed) = &snap.signed_resource_set else {
+        warn!("ignored a snapshot without a signed resource set");
+        return Vec::new();
+    };
+    let payload =
+        match peer_list::verify_resource_set(signed, ca_key, &state.trust_domain, &state.shield_id)
+        {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(error = %e, "rejected resource set");
+                return Vec::new();
+            }
+        };
+    match resource_state.admit_resource_set(payload.generation, state.resource_generation_floor) {
+        resources::Admission::Stale => {
+            warn!(
+                generation = payload.generation,
+                floor = state.resource_generation_floor,
+                "ignoring stale resource set"
+            );
+            Vec::new()
         }
-        return;
+        resources::Admission::Same => resources::remove_acks(&payload),
+        resources::Admission::Apply => {
+            let mut acks = resources::apply_resource_set(&payload, resource_state).await;
+            acks.extend(resources::remove_acks(&payload));
+            if payload.generation > state.resource_generation_floor {
+                state.resource_generation_floor = payload.generation;
+                if let Err(e) = state.save(&cfg.state_dir) {
+                    warn!(error = %e, "failed to save the resource generation floor");
+                }
+            }
+            acks
+        }
     }
-    let mut new_list: Vec<ConnectorRef> = peers
+}
+
+/// D21-R (a2): apply a controller-signed peer list.
+///
+///   - Rejected (logged, nothing changes) unless it verifies against the
+///     Workspace CA key and names this Shield and its trust domain.
+///   - Rejected unless issued later than the last accepted list
+///     (`peer_list_issued_at_ms`, persisted): a Connector can't roll the
+///     Shield back to an older list, across restarts either.
+///   - Otherwise it replaces `connectors`. The current head is kept when the
+///     list still contains it; otherwise the new head is index 0. Revoked
+///     Connectors are simply not in the list.
+///   - An empty list empties the in-memory list (the Shield dials nothing)
+///     but is not saved: state.json must keep a Connector to start from.
+///
+/// Returns true when the list was applied.
+fn apply_signed_peer_list(
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    signed: &crate::proto::SignedPeerList,
+    ca_key: &[u8],
+) -> bool {
+    let payload = match peer_list::verify(signed, ca_key, &state.trust_domain, &state.shield_id) {
+        Ok(payload) => payload,
+        Err(e) => {
+            warn!(error = %e, "rejected signed peer list");
+            return false;
+        }
+    };
+    if payload.issued_at_unix_ms <= state.peer_list_issued_at_ms {
+        debug!(
+            issued_at = payload.issued_at_unix_ms,
+            last = state.peer_list_issued_at_ms,
+            "ignored signed peer list: not newer than the last accepted"
+        );
+        return false;
+    }
+    let mut new_list: Vec<ConnectorRef> = payload
+        .peers
         .into_iter()
         .map(|p| ConnectorRef {
             connector_id: p.connector_id,
             connector_addr: p.connector_addr,
         })
         .collect();
-
-    let mut current_sorted = state.connectors.clone();
-    current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-    let mut new_sorted = new_list.clone();
-    new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-    if current_sorted == new_sorted {
-        info!(
-            peers = new_list.len(),
-            "PeerConnectorList unchanged, no update"
-        );
-        return;
-    }
-
-    // Preserve current head if it survives in the new list. Otherwise the
-    // new list's index-0 becomes head.
     if let Some(current_head_id) = state.connectors.first().map(|c| c.connector_id.clone()) {
         if let Some(idx) = new_list
             .iter()
@@ -772,49 +1007,39 @@ fn apply_peer_connector_list(
             new_list.rotate_left(idx);
         }
     }
-
-    let peer_count = new_list.len();
+    let changed = {
+        let mut current_sorted = state.connectors.clone();
+        current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+        let mut new_sorted = new_list.clone();
+        new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+        current_sorted != new_sorted
+    };
+    state.peer_list_issued_at_ms = payload.issued_at_unix_ms;
+    if new_list.is_empty() {
+        // state.json must keep a Connector to start from, so it keeps the
+        // last non-empty list, but always with the new issued_at: an older
+        // list must stay refused after a restart too.
+        state.connectors = new_list;
+        warn!("signed peer list is empty: the Shield dials no Connector until a new list arrives");
+        let saved = ShieldState::load(&cfg.state_dir).and_then(|mut on_disk| {
+            on_disk.peer_list_issued_at_ms = state.peer_list_issued_at_ms;
+            on_disk.save(&cfg.state_dir)
+        });
+        if let Err(e) = saved {
+            warn!(error = %e, "failed to persist the peer-list issued_at");
+        }
+        return true;
+    }
     state.connectors = new_list;
     if let Err(e) = state.save(&cfg.state_dir) {
         warn!(error = %e, "failed to persist state.json after peer-list update");
-    } else {
-        info!(peers = peer_count, "peer connector list refreshed");
+    } else if changed {
+        info!(
+            peers = state.connectors.len(),
+            "peer connector list refreshed (signed)"
+        );
     }
-}
-
-/// Fix 13 (F41): a list holding only revoked ids is expected (a connector
-/// on a network without resources sends one every heartbeat while a revoked
-/// peer's certificate is valid); a list with nothing at all is not.
-fn empty_list_is_expected(carried_revoked: bool) -> bool {
-    carried_revoked
-}
-
-/// Phase E (D21): remember `revoked_ids` and drop them from the current list.
-fn prune_revoked_connectors(state: &mut ShieldState, cfg: &ShieldConfig, revoked_ids: Vec<String>) {
-    state
-        .revoked_connectors
-        .extend(revoked_ids.into_iter().filter(|id| !id.is_empty()));
-    let before = state.connectors.len();
-    let revoked = &state.revoked_connectors;
-    state
-        .connectors
-        .retain(|c| !revoked.contains(&c.connector_id));
-    let pruned = before - state.connectors.len();
-    if pruned == 0 {
-        return;
-    }
-    warn!(
-        pruned,
-        remaining = state.connectors.len(),
-        "revoked connectors pruned from the peer list"
-    );
-    if state.connectors.is_empty() {
-        warn!("every peer connector is revoked; the Shield dials none until a new list arrives (state.json left as is)");
-        return;
-    }
-    if let Err(e) = state.save(&cfg.state_dir) {
-        warn!(error = %e, "failed to persist state.json after pruning revoked connectors");
-    }
+    true
 }
 
 async fn send_health(
@@ -989,7 +1214,8 @@ mod tests {
             interface_addr: "100.64.0.5".into(),
             enrolled_at: "2026-10-09T00:00:00Z".into(),
             cert_not_after: 1_000,
-            revoked_connectors: HashSet::new(),
+            peer_list_issued_at_ms: 0,
+            resource_generation_floor: 0,
         }
     }
 
@@ -1388,19 +1614,151 @@ mod tests {
         assert_eq!(calls.get(), 2, "retry after a failure is not debounced");
     }
 
-    // ── Connector-revocation Phase E (D21) ─────────────────────────────────
+    // ── D21-R (a2): the controller-signed peer list ─────────────────────────
 
-    fn peer(id: &str) -> crate::proto::PeerConnector {
-        crate::proto::PeerConnector {
-            connector_id: id.into(),
-            connector_addr: format!("{id}.lan:9091"),
+    use ring::rand::SystemRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P384_SHA384_ASN1_SIGNING};
+
+    /// Stands in for the Workspace CA key (and keeps its PKCS#8 form).
+    struct Ca(EcdsaKeyPair, Vec<u8>);
+
+    impl Ca {
+        fn new() -> Self {
+            let rng = SystemRandom::new();
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng).unwrap();
+            Self(
+                EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+                    .unwrap(),
+                pkcs8.as_ref().to_vec(),
+            )
         }
-    }
 
-    fn list(peers: &[&str], revoked: &[&str]) -> crate::proto::PeerConnectorList {
-        crate::proto::PeerConnectorList {
-            peers: peers.iter().map(|p| peer(p)).collect(),
-            revoked_connector_ids: revoked.iter().map(|r| r.to_string()).collect(),
+        fn key(&self) -> Vec<u8> {
+            self.0.public_key().as_ref().to_vec()
+        }
+
+        fn sign_for(
+            &self,
+            td: &str,
+            shield: &str,
+            issued_at: u64,
+            peers: &[&str],
+        ) -> crate::proto::SignedPeerList {
+            let payload = crate::proto::PeerListPayload {
+                trust_domain: td.into(),
+                shield_id: shield.into(),
+                issued_at_unix_ms: issued_at,
+                peers: peers
+                    .iter()
+                    .map(|id| crate::proto::PeerConnector {
+                        connector_id: id.to_string(),
+                        connector_addr: format!("{id}.lan:9091"),
+                    })
+                    .collect(),
+            };
+            let payload = prost::Message::encode_to_vec(&payload);
+            let signature = self.sign_in(crate::peer_list::PEER_LIST_CONTEXT, &payload);
+            crate::proto::SignedPeerList { payload, signature }
+        }
+
+        /// A list for test_state()'s shield.
+        fn sign(&self, issued_at: u64, peers: &[&str]) -> crate::proto::SignedPeerList {
+            self.sign_for("ws-test.zecurity.in", "shield-1", issued_at, peers)
+        }
+
+        fn sign_in(&self, context: &[u8], payload: &[u8]) -> Vec<u8> {
+            let mut message = context.to_vec();
+            message.extend_from_slice(payload);
+            self.0
+                .sign(&SystemRandom::new(), &message)
+                .unwrap()
+                .as_ref()
+                .to_vec()
+        }
+
+        /// D21-R (S): a resource set for `shield` at `generation`, desiring
+        /// `apply` and removing `remove` (resource ids, rules made up).
+        fn sign_set_for(
+            &self,
+            shield: &str,
+            generation: u64,
+            apply: &[&str],
+            remove: &[&str],
+        ) -> crate::proto::SignedResourceSet {
+            let rule = |id: &&str, action: &str| crate::proto::ResourceInstruction {
+                resource_id: id.to_string(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 8000,
+                port_to: 8000,
+                action: action.into(),
+                ..Default::default()
+            };
+            let payload = crate::proto::ResourceSetPayload {
+                trust_domain: "ws-test.zecurity.in".into(),
+                shield_id: shield.into(),
+                generation,
+                resources: apply.iter().map(|id| rule(id, "apply")).collect(),
+                removes: remove.iter().map(|id| rule(id, "remove")).collect(),
+            };
+            let payload = prost::Message::encode_to_vec(&payload);
+            let signature = self.sign_in(crate::peer_list::RESOURCE_SET_CONTEXT, &payload);
+            crate::proto::SignedResourceSet { payload, signature }
+        }
+
+        fn sign_set(
+            &self,
+            generation: u64,
+            apply: &[&str],
+            remove: &[&str],
+        ) -> crate::proto::SignedResourceSet {
+            self.sign_set_for("shield-1", generation, apply, remove)
+        }
+
+        /// Stores workspace_ca.crt with this key as the Workspace CA
+        /// (Platform Root → Intermediate → Workspace CA).
+        fn store_bundle(&self, cfg: &ShieldConfig) {
+            use rcgen::{
+                BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+                IsCa, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+            };
+            let ca_params = |cn: &str, c: BasicConstraints| {
+                let mut p = CertificateParams::default();
+                let mut dn = DistinguishedName::new();
+                dn.push(DnType::CommonName, cn);
+                p.distinguished_name = dn;
+                p.is_ca = IsCa::Ca(c);
+                p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+                p
+            };
+            let root = CertifiedIssuer::self_signed(
+                ca_params("Platform Root", BasicConstraints::Constrained(2)),
+                KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+            )
+            .unwrap();
+            let intermediate = CertifiedIssuer::signed_by(
+                ca_params("Platform Intermediate", BasicConstraints::Constrained(1)),
+                KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+                &root,
+            )
+            .unwrap();
+            let ws_key = KeyPair::from_pkcs8_der_and_sign_algo(
+                &rustls::pki_types::PrivatePkcs8KeyDer::from(self.1.clone()),
+                &rcgen::PKCS_ECDSA_P384_SHA384,
+            )
+            .unwrap();
+            let workspace = CertifiedIssuer::signed_by(
+                ca_params("workspace-ws-test", BasicConstraints::Constrained(0)),
+                ws_key,
+                &intermediate,
+            )
+            .unwrap();
+            std::fs::write(
+                Path::new(&cfg.state_dir).join("workspace_ca.crt"),
+                format!("{}{}", workspace.pem(), intermediate.pem()),
+            )
+            .unwrap();
         }
     }
 
@@ -1451,40 +1809,106 @@ mod tests {
             .collect()
     }
 
-    /// AE-1: a revoked id prunes the current list at once and is saved,
-    /// even when the list carries no peers (sender not in any RN).
+    /// A signed list replaces the peers (head kept when still listed) and is
+    /// saved with its issued_at; revoked Connectors are simply absent.
     #[test]
-    fn revoked_id_prunes_immediately_even_without_peers() {
-        let (mut state, cfg) = three_peer_state("prune");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
-        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-3"]);
-    }
-
-    /// AE-2: never re-added while the process runs — a later list (from any
-    /// connector) that offers the revoked id as a peer and no longer lists
-    /// it as revoked still leaves it out.
-    #[test]
-    fn revoked_connector_is_never_re_added() {
-        let (mut state, cfg) = three_peer_state("readd");
-        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-3"], &["conn-2"]));
-        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-2", "conn-4"], &[]));
+    fn a_signed_list_replaces_the_peers_and_is_saved() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("signed");
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &["conn-4", "conn-1"]),
+            &ca.key()
+        ));
         assert_eq!(ids(&state), vec!["conn-1", "conn-4"]);
-        assert!(!saved_ids(&cfg).contains(&"conn-2".to_string()));
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-4"]);
+        assert_eq!(
+            ShieldState::load(&cfg.state_dir)
+                .unwrap()
+                .peer_list_issued_at_ms,
+            10
+        );
     }
 
-    /// AE-3: memory only — the revoked set is not written to state.json and
-    /// a reload starts empty.
+    /// A Connector can't forge or alter a list: another key, or a payload
+    /// changed after signing, is rejected and nothing changes.
     #[test]
-    fn revoked_set_is_memory_only() {
-        let (mut state, cfg) = three_peer_state("memory");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        let raw = std::fs::read_to_string(Path::new(&cfg.state_dir).join("state.json")).unwrap();
-        assert!(!raw.contains("revoked"), "{raw}");
-        assert!(ShieldState::load(&cfg.state_dir)
-            .unwrap()
-            .revoked_connectors
-            .is_empty());
+    fn a_forged_or_altered_list_is_rejected() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("forged");
+        let forged = Ca::new().sign(10, &["hostile"]);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &forged,
+            &ca.key()
+        ));
+        let mut altered = ca.sign(10, &["conn-1"]);
+        let mut payload: crate::proto::PeerListPayload =
+            prost::Message::decode(altered.payload.as_slice()).unwrap();
+        payload.peers[0].connector_id = "hostile".into();
+        altered.payload = prost::Message::encode_to_vec(&payload);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &altered,
+            &ca.key()
+        ));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(state.peer_list_issued_at_ms, 0);
+    }
+
+    /// A genuine list for another Shield or workspace is not this Shield's.
+    #[test]
+    fn a_list_for_another_shield_or_workspace_is_rejected() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("bound");
+        let other_shield = ca.sign_for("ws-test.zecurity.in", "shield-2", 10, &["hostile"]);
+        let other_ws = ca.sign_for("ws-other.zecurity.in", "shield-1", 10, &["hostile"]);
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &other_shield,
+            &ca.key()
+        ));
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &other_ws,
+            &ca.key()
+        ));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+    }
+
+    /// A Connector can't roll the Shield back to an older (or the same)
+    /// list, also after a restart: issued_at is persisted.
+    #[test]
+    fn an_older_list_is_rejected_across_restarts() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("rollback");
+        let old = ca.sign(10, &["conn-1", "conn-2", "conn-3", "hostile"]);
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(20, &["conn-1"]),
+            &ca.key()
+        ));
+        assert!(!apply_signed_peer_list(&mut state, &cfg, &old, &ca.key()));
+        assert!(!apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(20, &["hostile"]),
+            &ca.key()
+        ));
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        assert!(!apply_signed_peer_list(
+            &mut reloaded,
+            &cfg,
+            &old,
+            &ca.key()
+        ));
+        assert_eq!(ids(&reloaded), vec!["conn-1"]);
     }
 
     fn live_ids(live: &watch::Receiver<Vec<ConnectorRef>>) -> Vec<String> {
@@ -1494,33 +1918,79 @@ mod tests {
             .collect()
     }
 
-    /// Fix 13 (F39, AF13-4): a peer list received mid-session (here a
-    /// revoked prune) reaches the live list the goodbye reads.
-    #[tokio::test]
-    async fn a_received_peer_list_is_published() {
-        let (mut state, cfg) = three_peer_state("f39-msg");
-        let (peers, live) = PeerPublisher::new(&state);
+    async fn deliver(
+        state: &mut ShieldState,
+        cfg: &ShieldConfig,
+        peers: &PeerPublisher,
+        body: Body,
+    ) {
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
         let (out_tx, _out_rx) = mpsc::channel(8);
-        let msg = ShieldControlMessage {
-            body: Some(Body::PeerConnectorList(list(
-                &["conn-1", "conn-3"],
-                &["conn-2"],
-            ))),
-        };
         let action = handle_connector_msg(
-            msg,
-            &mut state,
-            &cfg,
+            ShieldControlMessage { body: Some(body) },
+            "conn-1",
+            &crl::CrlStore::default(),
+            state,
+            cfg,
             &Arc::new(SharedResourceState::new()),
             &out_tx,
             tunnel::new_hub(),
             &mut RenewalDebounce::default(),
-            &peers,
+            peers,
         )
         .await;
         assert!(action.is_none());
-        assert_eq!(live_ids(&live), ids(&state));
-        assert!(!live_ids(&live).contains(&"conn-2".to_string()));
+    }
+
+    /// D21-R: a Connector's own PeerConnectorList no longer changes the
+    /// peers, whatever it lists as peers or revoked (it could strand the
+    /// Shield on a hostile Connector). Rewrites Phase E AE-1..AE-3 and
+    /// Fix 13 F41, which pinned the old behaviour.
+    #[tokio::test]
+    async fn an_unsigned_peer_list_is_ignored() {
+        let (mut state, cfg) = three_peer_state("unsigned");
+        let (peers, live) = PeerPublisher::new(&state);
+        deliver(
+            &mut state,
+            &cfg,
+            &peers,
+            Body::PeerConnectorList(crate::proto::PeerConnectorList {
+                peers: vec![crate::proto::PeerConnector {
+                    connector_id: "hostile".into(),
+                    connector_addr: "hostile.lan:9091".into(),
+                }],
+                revoked_connector_ids: vec!["conn-1".into(), "conn-2".into(), "conn-3".into()],
+            }),
+        )
+        .await;
+        assert_eq!(ids(&state), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
+        assert_eq!(live_ids(&live), vec!["conn-1", "conn-2", "conn-3"]);
+    }
+
+    /// Fix 13 (F39, AF13-4): a signed list arriving in a snapshot reaches
+    /// the live list the goodbye reads. The key is read from the stored
+    /// workspace_ca.crt, chosen by role.
+    #[tokio::test]
+    async fn a_signed_list_in_a_snapshot_is_applied_and_published() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("f39-msg");
+        ca.store_bundle(&cfg);
+        let (peers, live) = PeerPublisher::new(&state);
+        deliver(
+            &mut state,
+            &cfg,
+            &peers,
+            Body::ResourceSnapshot(crate::proto::ResourceSnapshot {
+                resources: vec![],
+                generation: 0,
+                signed_peer_list: Some(ca.sign(10, &["conn-1", "conn-3"])),
+                signed_resource_set: None, // no resources: the list still applies
+            }),
+        )
+        .await;
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
+        assert_eq!(live_ids(&live), vec!["conn-1", "conn-3"]);
     }
 
     /// Fix 13 (F39, AF13-4): a failover at connect time is saved and
@@ -1536,14 +2006,20 @@ mod tests {
         assert_eq!(saved_ids(&cfg), vec!["conn-3", "conn-1", "conn-2"]);
     }
 
-    /// Fix 13 (F39, AF13-5): every peer revoked → the goodbye gets the empty
-    /// live list, never the startup one, and sends nothing.
+    /// Fix 13 (F39, AF13-5): an empty signed list → the goodbye gets the
+    /// empty live list, never the startup one, and sends nothing.
     #[tokio::test]
     async fn goodbye_uses_the_live_list_even_when_empty() {
+        let ca = Ca::new();
         let (mut state, cfg) = three_peer_state("f39-empty");
         let startup = state.clone();
         let (peers, live) = PeerPublisher::new(&state);
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &[]),
+            &ca.key()
+        ));
         peers.publish(&state);
 
         let bye = with_live_peers(&startup, &live);
@@ -1551,27 +2027,32 @@ mod tests {
         assert_eq!(bye.shield_id, startup.shield_id);
         goodbye(&bye, &cfg).await; // returns without dialling (no cert files here)
     }
-    /// Fix 13 (F41, AF13-7): only a list with nothing at all is warned
-    /// about; one holding revoked ids still prunes them.
-    #[test]
-    fn an_empty_list_warns_only_when_it_carried_nothing() {
-        assert!(empty_list_is_expected(true));
-        assert!(!empty_list_is_expected(false));
-        let (mut state, cfg) = three_peer_state("f41");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &[]));
-        assert_eq!(ids(&state), vec!["conn-1", "conn-3"], "ignored, list kept");
-    }
 
-    /// AE-4: when every peer is revoked the Shield dials none; state.json
-    /// keeps its last non-empty list so the Shield can still start.
+    /// An empty signed list (every Connector revoked): the Shield dials
+    /// none; state.json keeps its last non-empty list so the Shield can
+    /// still start.
     #[tokio::test]
-    async fn all_peers_revoked_dials_none_and_keeps_the_file_loadable() {
+    async fn an_empty_signed_list_dials_none_and_keeps_the_file_loadable() {
+        let ca = Ca::new();
         let (mut state, cfg) = three_peer_state("all");
-        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        assert!(apply_signed_peer_list(
+            &mut state,
+            &cfg,
+            &ca.sign(10, &[]),
+            &ca.key()
+        ));
         assert!(state.connectors.is_empty());
         assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
+        // The issued_at is saved anyway: an older list stays refused after a
+        // restart.
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        assert_eq!(reloaded.peer_list_issued_at_ms, 10);
+        assert!(!apply_signed_peer_list(
+            &mut reloaded,
+            &cfg,
+            &ca.sign(9, &["hostile"]),
+            &ca.key()
+        ));
         for f in ["workspace_ca.crt", "shield.crt", "shield.key"] {
             std::fs::write(Path::new(&cfg.state_dir).join(f), b"unused").unwrap();
         }
@@ -1582,23 +2063,520 @@ mod tests {
         assert!(err.to_string().contains("no peer connectors"), "{err:#}");
     }
 
-    /// AE-5: a certificate renewal keeps the in-memory revoked set.
+    // ── D21-R A′: the workspace CRL at the Shield ──────────────────────────
+
+    #[test]
+    fn the_crl_verdict_fails_closed() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        let pki = Pki::new();
+        let store = crl::CrlStore::default();
+        let now = crl::now_unix();
+        let t0 = Instant::now();
+        // No CRL yet: allowed for CRL_FIRST_WAIT from the first check,
+        // across every stream (a reconnect doesn't restart the wait).
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t0).is_ok());
+        let almost = t0 + CRL_FIRST_WAIT - Duration::from_secs(1);
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, almost).is_ok());
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t0 + CRL_FIRST_WAIT).is_err());
+        assert!(crl_verdict(&store, Some(&[0x01]), now, t0 + CRL_FIRST_WAIT * 3).is_err());
+        // No verified certificate: never.
+        assert!(crl_verdict(&store, None, now, t0).is_err());
+        // A valid CRL clears the wait; a listed serial is refused at once.
+        let crl = pki.crl(
+            &[CONNECTOR_SERIAL],
+            ::time::Duration::minutes(1),
+            ::time::Duration::hours(24),
+        );
+        store.offer(&crl, &pki.workspace_pem()).unwrap();
+        let t1 = t0 + CRL_FIRST_WAIT * 4;
+        assert!(crl_verdict(&store, Some(CONNECTOR_SERIAL), now, t1).is_err());
+        assert!(crl_verdict(&store, Some(&[0x01]), now, t1).is_ok());
+        // Past its nextUpdate the wait starts again, from that moment.
+        let later = now + 24 * 3600;
+        assert!(crl_verdict(&store, Some(&[0x01]), later, t1).is_ok());
+        assert!(crl_verdict(&store, Some(&[0x01]), later, t1 + CRL_FIRST_WAIT).is_err());
+    }
+
+    /// D21-R A′ quarantine: without a valid CRL past the first wait, the
+    /// Shield ignores the Connector's snapshots and refuses its tunnels.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_valid_crl_the_connector_gets_nothing_done() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (mut state, cfg) = three_peer_state("quarantine");
+        let (peers, _live) = PeerPublisher::new(&state);
+        tls::set_connector_serial_for_test("conn-q", &[0x01]);
+        let store = crl::CrlStore::default();
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "r1".into(),
+                host: "127.0.0.1".into(),
+                protocol: "tcp".into(),
+                port_from: port,
+                port_to: port,
+            });
+        let hub = tunnel::new_hub();
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        hub.set_upstream(Some(up_tx));
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        macro_rules! send {
+            ($body:expr) => {
+                handle_connector_msg(
+                    ShieldControlMessage { body: Some($body) },
+                    "conn-q",
+                    &store,
+                    &mut state,
+                    &cfg,
+                    &resources,
+                    &out_tx,
+                    hub.clone(),
+                    &mut RenewalDebounce::default(),
+                    &peers,
+                )
+                .await
+            };
+        }
+        assert!(connector_may_act(&store, "conn-q", "start the wait"));
+        tokio::time::advance(CRL_FIRST_WAIT).await;
+
+        let snapshot = Body::ResourceSnapshot(crate::proto::ResourceSnapshot {
+            resources: vec![],
+            generation: 1,
+            signed_peer_list: None,
+            signed_resource_set: None,
+        });
+        assert!(send!(snapshot).is_none());
+        assert_eq!(
+            resources.active.lock().unwrap().len(),
+            1,
+            "snapshot ignored"
+        );
+
+        let open = Body::TunnelOpen(crate::proto::TunnelOpen {
+            connection_id: "t-q".into(),
+            destination: "127.0.0.1".into(),
+            port: port.into(),
+            protocol: "tcp".into(),
+        });
+        assert!(send!(open).is_none());
+        match up_rx.recv().await.unwrap().body {
+            Some(Body::TunnelOpened(o)) => assert!(!o.ok, "tunnel refused"),
+            other => panic!("expected TunnelOpened, got {other:?}"),
+        }
+    }
+
+    /// At stream open, before anything is sent: a listed Connector (or one
+    /// without a verified certificate) is refused; a missing CRL is left to
+    /// the periodic check, so the Connector can still deliver one.
+    #[test]
+    fn a_listed_connector_is_refused_before_anything_is_sent() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        let pki = Pki::new();
+        let store = crl::CrlStore::default();
+        tls::set_connector_serial_for_test("conn-open-a", CONNECTOR_SERIAL);
+        tls::set_connector_serial_for_test("conn-open-b", &[0x01]);
+        assert!(
+            refuse_listed_connector(&store, "conn-open-a").is_ok(),
+            "no CRL yet"
+        );
+        assert!(refuse_listed_connector(&store, "conn-open-unknown").is_err());
+        let crl = pki.crl(
+            &[CONNECTOR_SERIAL],
+            ::time::Duration::minutes(1),
+            ::time::Duration::hours(24),
+        );
+        store.offer(&crl, &pki.workspace_pem()).unwrap();
+        assert!(refuse_listed_connector(&store, "conn-open-a").is_err());
+        assert!(refuse_listed_connector(&store, "conn-open-b").is_ok());
+    }
+
+    /// Leaving the Connector takes the terminal path: fail over to the next
+    /// peer, as for the Connector's own "revoked" refusal.
+    #[test]
+    fn leaving_the_connector_is_terminal() {
+        let err = anyhow::Error::new(LeftConnector(REVOKED_IN_CRL)).context("control stream");
+        assert!(connector_terminal(&err));
+        assert!(!connector_not_serving(&err));
+    }
+
+    async fn from(
+        store: &crl::CrlStore,
+        connector: &str,
+        state: &mut ShieldState,
+        cfg: &ShieldConfig,
+        peers: &PeerPublisher,
+        msg: ShieldControlMessage,
+    ) -> Option<Result<()>> {
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        handle_connector_msg(
+            msg,
+            connector,
+            store,
+            state,
+            cfg,
+            &Arc::new(SharedResourceState::new()),
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            peers,
+        )
+        .await
+    }
+
+    /// A CRL that lists the attached Connector ends the stream at once.
     #[tokio::test]
-    async fn renewal_keeps_the_revoked_set() {
-        let mut state = test_state();
-        state.revoked_connectors.insert("conn-9".into());
-        let mut debounce = RenewalDebounce::default();
-        let calls = std::cell::Cell::new(0);
-        let out = handle_reenroll(&mut state, &mut debounce, |s| {
-            calls.set(calls.get() + 1);
-            let mut renewed = s;
-            renewed.revoked_connectors.clear(); // renew_cert builds a fresh state
-            renewed.cert_not_after = 2_000;
-            std::future::ready(Ok(renewed))
-        })
+    async fn a_crl_listing_the_connector_ends_the_stream() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        let pki = Pki::new();
+        let (mut state, cfg) = three_peer_state("crl-msg");
+        std::fs::write(
+            Path::new(&cfg.state_dir).join("workspace_ca.crt"),
+            pki.bundle(),
+        )
+        .unwrap();
+        tls::set_connector_serial_for_test("conn-crl-a", CONNECTOR_SERIAL);
+        tls::set_connector_serial_for_test("conn-crl-b", &[0x01]);
+        let store = crl::CrlStore::load(&cfg.state_dir);
+        let (peers, _live) = PeerPublisher::new(&state);
+        let crl_msg = || ShieldControlMessage {
+            body: Some(Body::WorkspaceCrl(crate::proto::WorkspaceCrl {
+                crl_der: pki.crl(
+                    &[CONNECTOR_SERIAL],
+                    ::time::Duration::minutes(1),
+                    ::time::Duration::hours(24),
+                ),
+            })),
+        };
+        assert!(
+            from(&store, "conn-crl-b", &mut state, &cfg, &peers, crl_msg())
+                .await
+                .is_none(),
+            "not listed: stays"
+        );
+        match from(&store, "conn-crl-a", &mut state, &cfg, &peers, crl_msg()).await {
+            Some(Err(e)) => assert!(connector_terminal(&e), "{e:#}"),
+            other => panic!("expected to leave, got {other:?}"),
+        }
+    }
+
+    // ── D21-R D: tunnel allowlist ───────────────────────────────────────────
+
+    /// A TunnelOpen to anything but a protected resource is refused without
+    /// connecting; one to a protected resource is opened.
+    #[tokio::test]
+    async fn tunnels_open_only_to_protected_resources() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (mut state, cfg) = three_peer_state("allowlist");
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
+        let (peers, _live) = PeerPublisher::new(&state);
+        let resources = Arc::new(SharedResourceState::new());
+        let hub = tunnel::new_hub();
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        hub.set_upstream(Some(up_tx));
+        let open = |id: &str, port: u16| ShieldControlMessage {
+            body: Some(Body::TunnelOpen(crate::proto::TunnelOpen {
+                connection_id: id.into(),
+                destination: "127.0.0.1".into(),
+                port: port.into(),
+                protocol: "tcp".into(),
+            })),
+        };
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let crl = crl::CrlStore::default();
+        macro_rules! send {
+            ($msg:expr) => {
+                handle_connector_msg(
+                    $msg,
+                    "conn-1",
+                    &crl,
+                    &mut state,
+                    &cfg,
+                    &resources,
+                    &out_tx,
+                    hub.clone(),
+                    &mut RenewalDebounce::default(),
+                    &peers,
+                )
+            };
+        }
+        let opened = |m: ShieldControlMessage| match m.body {
+            Some(Body::TunnelOpened(o)) => (o.connection_id, o.ok),
+            other => panic!("expected TunnelOpened, got {other:?}"),
+        };
+
+        assert!(send!(open("t-1", port)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-1".to_string(), false)
+        );
+
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "r1".into(),
+                host: "127.0.0.1".into(),
+                protocol: "tcp".into(),
+                port_from: port,
+                port_to: port,
+            });
+        assert!(send!(open("t-2", port)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-2".to_string(), true)
+        );
+        let other = if port == u16::MAX { port - 1 } else { port + 1 };
+        assert!(send!(open("t-3", other)).await.is_none());
+        assert_eq!(
+            opened(up_rx.recv().await.unwrap()),
+            ("t-3".to_string(), false)
+        );
+    }
+
+    // ── D21-R (S): signed resource sets ────────────────────────────────────
+
+    /// The acks a snapshot produces, as (resource id, status).
+    async fn snapshot_acks(
+        state: &mut ShieldState,
+        cfg: &ShieldConfig,
+        resources: &Arc<SharedResourceState>,
+        snap: crate::proto::ResourceSnapshot,
+    ) -> Vec<(String, String)> {
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
+        let (peers, _live) = PeerPublisher::new(state);
+        let (out_tx, mut out_rx) = mpsc::channel(32);
+        let action = handle_connector_msg(
+            ShieldControlMessage {
+                body: Some(Body::ResourceSnapshot(snap)),
+            },
+            "conn-1",
+            &crl::CrlStore::default(),
+            state,
+            cfg,
+            resources,
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            &peers,
+        )
         .await;
-        assert!(matches!(out, Some(Ok(()))));
-        assert_eq!(state.cert_not_after, 2_000);
-        assert!(state.revoked_connectors.contains("conn-9"));
+        assert!(action.is_none());
+        drop(out_tx);
+        let mut acks = Vec::new();
+        while let Some(m) = out_rx.recv().await {
+            if let Some(Body::ResourceAck(a)) = m.body {
+                acks.push((a.resource_id, a.status));
+            }
+        }
+        acks.sort();
+        acks
+    }
+
+    fn snap_with(set: Option<crate::proto::SignedResourceSet>) -> crate::proto::ResourceSnapshot {
+        crate::proto::ResourceSnapshot {
+            // What a hostile Connector would put in the unsigned fields.
+            resources: vec![],
+            generation: u64::MAX,
+            signed_peer_list: None,
+            signed_resource_set: set,
+        }
+    }
+
+    /// A verified set is applied (every desired resource acked), its
+    /// removes acked "unprotected", and its generation saved as the floor.
+    #[tokio::test]
+    async fn a_signed_resource_set_is_applied_and_its_removes_acked() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-apply");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        let acks = snapshot_acks(
+            &mut state,
+            &cfg,
+            &resources,
+            snap_with(Some(ca.sign_set(5, &["r1"], &["r2"]))),
+        )
+        .await;
+        assert_eq!(acks.len(), 2, "{acks:?}");
+        assert_eq!(acks[0].0, "r1", "desired resource acked: {acks:?}");
+        assert_eq!(acks[1], ("r2".to_string(), "unprotected".to_string()));
+        assert_eq!(
+            ShieldState::load(&cfg.state_dir)
+                .unwrap()
+                .resource_generation_floor,
+            5
+        );
+    }
+
+    /// A Connector can't change the rules on its own: an unsigned snapshot,
+    /// a forged or altered set, or one for another shield changes nothing.
+    #[tokio::test]
+    async fn an_unsigned_forged_or_foreign_resource_set_changes_nothing() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-forged");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "kept".into(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 22,
+                port_to: 22,
+            });
+        let forged = Ca::new().sign_set(9, &[], &["kept"]);
+        let mut altered = ca.sign_set(9, &["r1"], &[]);
+        let mut payload: crate::proto::ResourceSetPayload =
+            prost::Message::decode(altered.payload.as_slice()).unwrap();
+        payload.resources.clear();
+        altered.payload = prost::Message::encode_to_vec(&payload);
+        let foreign = ca.sign_set_for("shield-2", 9, &[], &["kept"]);
+        for snap in [
+            snap_with(None),
+            snap_with(Some(forged)),
+            snap_with(Some(altered)),
+            snap_with(Some(foreign)),
+        ] {
+            assert!(snapshot_acks(&mut state, &cfg, &resources, snap)
+                .await
+                .is_empty());
+        }
+        assert_eq!(resources.active.lock().unwrap().len(), 1, "rules unchanged");
+        assert_eq!(state.resource_generation_floor, 0);
+    }
+
+    /// A Connector can't roll the shield back: an older set is ignored, also
+    /// after a restart (saved floor); the same set acks its removes again.
+    #[tokio::test]
+    async fn an_older_resource_set_is_ignored_across_restarts() {
+        let ca = Ca::new();
+        let (mut state, cfg) = three_peer_state("set-rollback");
+        ca.store_bundle(&cfg);
+        let resources = Arc::new(SharedResourceState::new());
+        let newer = ca.sign_set(7, &["r1"], &["r2"]);
+        assert_eq!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(newer.clone())))
+                .await
+                .len(),
+            2
+        );
+        let older = ca.sign_set(6, &[], &["r1"]);
+        assert!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(older.clone())))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            snapshot_acks(&mut state, &cfg, &resources, snap_with(Some(newer))).await,
+            vec![("r2".to_string(), "unprotected".to_string())],
+            "same set: removes acked again, nothing reapplied"
+        );
+        // Restart: fresh in-memory state, the saved floor.
+        let mut reloaded = ShieldState::load(&cfg.state_dir).unwrap();
+        let fresh = Arc::new(SharedResourceState::new());
+        assert!(
+            snapshot_acks(&mut reloaded, &cfg, &fresh, snap_with(Some(older)))
+                .await
+                .is_empty()
+        );
+    }
+
+    /// A Connector's ResourceInstruction no longer changes the rules.
+    #[tokio::test]
+    async fn a_resource_instruction_is_ignored() {
+        let (mut state, cfg) = three_peer_state("instr");
+        let resources = Arc::new(SharedResourceState::new());
+        resources
+            .active
+            .lock()
+            .unwrap()
+            .push(resources::ActiveResource {
+                resource_id: "kept".into(),
+                host: "10.0.0.5".into(),
+                protocol: "tcp".into(),
+                port_from: 22,
+                port_to: 22,
+            });
+        tls::set_connector_serial_for_test("conn-1", &[0x01]);
+        let (peers, _live) = PeerPublisher::new(&state);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let action = handle_connector_msg(
+            ShieldControlMessage {
+                body: Some(Body::ResourceInstruction(
+                    crate::proto::ResourceInstruction {
+                        resource_id: "kept".into(),
+                        action: "remove".into(),
+                        ..Default::default()
+                    },
+                )),
+            },
+            "conn-1",
+            &crl::CrlStore::default(),
+            &mut state,
+            &cfg,
+            &resources,
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            &peers,
+        )
+        .await;
+        assert!(action.is_none());
+        drop(out_tx);
+        assert!(out_rx.recv().await.is_none(), "no ack");
+        assert_eq!(resources.active.lock().unwrap().len(), 1, "rule kept");
+    }
+
+    // ── D21-R A′: a clean close ────────────────────────────────────────────
+
+    /// A clean close is a normal reconnect while the Shield holds a valid
+    /// CRL (or is still in the first wait); without one past the wait, or
+    /// when the CRL lists the Connector, it is terminal: the Shield fails
+    /// over instead of reconnecting to the same Connector.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_close_without_a_valid_crl_leaves_the_connector() {
+        use crate::crl::tests::{Pki, CONNECTOR_SERIAL};
+        tls::set_connector_serial_for_test("conn-close-ok", &[0x01]);
+        tls::set_connector_serial_for_test("conn-close-listed", CONNECTOR_SERIAL);
+
+        // No CRL: fine during the first wait, terminal after it.
+        let store = crl::CrlStore::default();
+        assert!(
+            stream_closed_cleanly(&store, "conn-close-ok").is_ok(),
+            "first wait"
+        );
+        tokio::time::advance(CRL_FIRST_WAIT).await;
+        let err = stream_closed_cleanly(&store, "conn-close-ok").expect_err("no valid CRL");
+        assert!(connector_terminal(&err), "{err:#}");
+
+        // A valid CRL: a clean close is a normal reconnect, unless it lists
+        // the Connector.
+        let pki = Pki::new();
+        let crl = pki.crl(
+            &[CONNECTOR_SERIAL],
+            ::time::Duration::minutes(1),
+            ::time::Duration::hours(24),
+        );
+        store.offer(&crl, &pki.workspace_pem()).unwrap();
+        assert!(
+            stream_closed_cleanly(&store, "conn-close-ok").is_ok(),
+            "valid CRL"
+        );
+        let err = stream_closed_cleanly(&store, "conn-close-listed").expect_err("listed");
+        assert!(connector_terminal(&err), "{err:#}");
+
+        // No verified certificate: terminal.
+        assert!(connector_terminal(
+            &stream_closed_cleanly(&store, "conn-close-unknown").unwrap_err()
+        ));
     }
 }

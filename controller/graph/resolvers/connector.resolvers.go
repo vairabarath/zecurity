@@ -186,6 +186,8 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string, alsoR
 			return false, fmt.Errorf("revoke connector: notify topology change: %w", err)
 		}
 	}
+	// D21-R (a2): the network's shields get a signed peer list without it.
+	connector.PushPeerListsForNetworkOf(ctx, r.Pool, r.ConnectorRegistry, id)
 
 	// F46: the connector is revoked; now the shields it stranded, each through
 	// the normal shield revocation (tombstone + propagation, bug 3).

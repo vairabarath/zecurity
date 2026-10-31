@@ -71,7 +71,49 @@ message ResourceAck {
 // this list and rebuilds the resource_protect chain — anything absent is dropped.
 message ResourceSnapshot {
   repeated ResourceInstruction resources = 1; // action is implicitly "apply"
-  uint64 generation = 2; // monotonic; shield ignores snapshots older than the last applied
+  uint64 generation = 2; // per-shield counter; the shield ignores an older one from the same Connector (D21-R a1)
+  // D21-R (a2): the shield's peer Connectors, signed by the controller. The
+  // shield's only source of peers; processed before, and independently of,
+  // the generation check. Absent when the controller could not sign one.
+  SignedPeerList signed_peer_list = 3;
+  // D21-R (S): the desired set and pending removes, signed by the controller.
+  // The shield applies resources only from this (never from fields 1-2 or a
+  // ResourceInstruction). Absent when the controller could not sign one.
+  SignedResourceSet signed_resource_set = 4;
+}
+
+// D21-R (S): `payload` is a serialized ResourceSetPayload; `signature` is
+// ECDSA P-384 / SHA-384 (ASN.1 DER) by the Workspace CA key over
+// "zecurity/shield-resource-set/v1\0" || payload.
+message SignedResourceSet {
+  bytes payload = 1;
+  bytes signature = 2;
+}
+
+message ResourceSetPayload {
+  string trust_domain = 1;
+  string shield_id = 2; // the one shield this set is for
+  uint64 generation = 3; // the controller's per-shield counter; the shield never applies an older one
+  repeated ResourceInstruction resources = 4; // the desired set (action "apply")
+  // Resources the shield must not enforce and must ack as "unprotected":
+  // being unprotected, or deleted (tombstones). Replaces remove instructions.
+  repeated ResourceInstruction removes = 5;
+}
+
+// D21-R (a2): a controller-signed peer list. `payload` is a serialized
+// PeerListPayload; `signature` is ECDSA P-384 / SHA-384 (ASN.1 DER) by the
+// Workspace CA key over "zecurity/shield-peer-list/v1\0" || payload. A
+// Connector can withhold or replay one, never forge or alter it.
+message SignedPeerList {
+  bytes payload = 1;
+  bytes signature = 2;
+}
+
+message PeerListPayload {
+  string trust_domain = 1;
+  string shield_id = 2; // the one shield this list is for
+  uint64 issued_at_unix_ms = 3; // the shield accepts only a later list than the last it accepted
+  repeated PeerConnector peers = 4; // every non-revoked Connector of the shield's Remote Network
 }
 
 // Shield → Connector: the shield's actual enforced state (ADR-004 Phase 3).
@@ -128,16 +170,27 @@ message ShieldControlMessage {
     // Shield → Connector
     ResourceStateReport resource_state = 13;
     // Connector → Shield — peer-Connector list piggybacked after every
-    // ShieldHealthReport. Lets the Shield fail over to a sibling Connector
-    // on the same Remote Network when this one goes down. See ADR (TODO).
+    // ShieldHealthReport. Ignored by Shields since D21-R (a2): their peers
+    // come only from ResourceSnapshot.signed_peer_list.
     PeerConnectorList peer_connector_list = 14;
+    // Connector → Shield — D21-R A′: the workspace CRL, forwarded when the
+    // stream opens and whenever the Connector has a newer one.
+    WorkspaceCrl workspace_crl = 15;
   }
 }
 
-// PeerConnectorList tells the Shield which Connectors on its own Remote
-// Network are currently available. The Connector emits this every time it
-// sees a ShieldHealthReport, reading its own ACL snapshot. Empty `peers` is
-// ignored by the Shield (its current list is kept as-is).
+// D21-R A′: the DER workspace CRL (/ca.crl) as the Connector fetched it,
+// signed by the Workspace CA. The Shield verifies it, keeps the newest one
+// (latest thisUpdate) and leaves a Connector whose certificate it lists, or
+// when it holds no CRL that is still before its nextUpdate.
+message WorkspaceCrl {
+  bytes crl_der = 1;
+}
+
+// PeerConnectorList: the Connectors on the Shield's Remote Network, as the
+// sending Connector sees them in its own ACL snapshot. The Connector emits
+// it every time it sees a ShieldHealthReport. D21-R (a2): Shields ignore it,
+// since a Connector could use it to strand them; see SignedPeerList.
 message PeerConnectorList {
   repeated PeerConnector peers = 1;
   // Connector-revocation Phase E (D21): connector ids the sender's ACL lists

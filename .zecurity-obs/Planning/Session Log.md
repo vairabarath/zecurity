@@ -3451,3 +3451,7 @@ serves on `127.0.0.1:9102`.
 - **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
 - **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
 
+## 2026-10-30 — M1: D21-R (hostile connector at the shield) implemented
+- Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.
+- Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings`), commits for a1; a2 (+ watermark, ack-path and coalescer fixes); A′ (+ review fix); D; S signed resource sets (supersedes a1); docs. Not pushed. Controller 1536/0/2, connector 270, shield 79; mutant-checked.
+- Record: `.zecurity-obs/Sprint20/Fixes/connector-revocation/D21R-Shield-Hostile-Connector-Design-2026-10-30.md`. Next: live check on the lab (needs new controller, connector and shield builds), then push + PR into `fixed-pendings`.
