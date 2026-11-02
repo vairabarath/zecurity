@@ -54,7 +54,15 @@ func peerAddr(ctx context.Context) (netip.Addr, bool) {
 	return ap.Addr().Unmap(), true
 }
 
-// observeLocation records the caller's country for deviceID. It reports
+// observeLocation records the caller's country for deviceID.
+//
+// PRECONDITION: the caller has already verified that deviceID belongs to the
+// authenticated user in workspaceID and is not revoked — GetACLSnapshot via
+// deviceGate (client_devices WHERE id AND user_id, workspace match, directive
+// NONE), ReportDevicePosture via verifyPostureDevice. Never call it with an
+// unverified device id: it writes the device's location, which gates access.
+//
+// It reports
 // whether the country changed. Best effort: an error is logged, never
 // returned, because a missing sighting already fails closed (stale or unknown
 // location never satisfies a country rule).
