@@ -3511,3 +3511,7 @@ serves on `127.0.0.1:9102`.
   - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
 - Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
 - O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` recreated with consent (047 applied, no init errors); lab data was wiped. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
+- R2 (admin UI) built, same branch, commit `7ff57371`:
+  - console access = `CONSOLE_READ` (one helper, three call sites); write controls hidden per capability across all pages and modal triggers; the self rules R-9, R-12 and R-13 shown in the UI; `ManageRoleDialog`;
+  - gate: `npm run codegen`, `npm run build`, `npm test` (24 files, 160 tests), lint unchanged (17 pre-existing).
+  - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.

@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. Next: R2 admin UI.
+**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. Next: R3 lab acceptance.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -174,7 +174,7 @@ O-6 and O-7 (raised by the automated security review of the R1 commit) were deci
 ## 11. Phases
 
 1. **R1 — backend:** migration, capability table, `@requires`, live check (GraphQL and REST), `setMemberRole`, audit, tests. **Built 2026-11-02** (`feat/workspace-rbac-r1`): migration `047_workspace_roles.sql`, `internal/rbac` (table, cached `Checker` with race-safe invalidation, last-Admin lock), `graph/resolvers/directives.go` (`NewRequires`), `middleware.RequireCapability` (replaces `RequireRole`, removed), `member_role.go` (`setMemberRole`, R-9), SCIM/IdP guards (R-11). The authz test now globs every `*.graphqls`: the old hand-kept list missed `idp.graphqls` and `posture.graphqls`. Known gap: `/auth/refresh` re-mints the JWT with the old claim role, so the **display** hint stays stale until re-login (no authz effect).
-2. **R2 — admin UI:** Manage Role dialog (radio list + required reason), tabs and buttons driven by `me.capabilities`, read-only views for Viewer.
+2. **R2 — admin UI:** Manage Role dialog (radio list + required reason), tabs and buttons driven by `me.capabilities`, read-only views for Viewer. **Built 2026-11-02:** `admin/src/lib/capabilities.ts` (mutation → capability map mirroring `@requires`, `canUseConsole`, `useCan`), console guard on `CONSOLE_READ` (Members → `/install`), every write control hidden per capability (pages and modal triggers; install tokens never minted without `NETWORK_WRITE`), R-9/R-12/R-13 reflected in the UI, `ManageRoleDialog` on Users. Tests: parity with `controller/graph/*.graphqls`, console guard, dialog, per-role page rendering (24 files, 160 tests). Build and typecheck pass; lint unchanged (17 pre-existing problems).
 3. **R3 — live acceptance on the lab:** one account per role; each role tries an allowed and a refused action; a demotion mid-session applies at once; the last-Admin guard.
 
 ## 12. Reference: Twingate admin console (looked at 2026-10-31)
