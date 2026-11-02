@@ -57,6 +57,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
@@ -140,6 +141,9 @@ func main() {
 
 	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
 	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	// Live workspace role check (PENDING-19 §5): @requires and RequireCapability
+	// read users.role per request through this process-local cache (D-02).
+	roleChecker := rbac.NewChecker(db.Pool)
 	idpStore := idp.NewStore(db.Pool, pkiService)
 
 	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
@@ -362,9 +366,10 @@ func main() {
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 				OIDCRedirectURI:   oidcRedirectURI,
+				Roles:             roleChecker,
 			},
 			Directives: graph.DirectiveRoot{
-				HasRole: resolvers.HasRole,
+				Requires: resolvers.NewRequires(roleChecker),
 			},
 		}),
 	)
@@ -467,7 +472,7 @@ func main() {
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 			middleware.WorkspaceGuard(db.Pool)(
 				http.HandlerFunc(inviteHandler.Create),
 			),
@@ -484,7 +489,7 @@ func main() {
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 			),
@@ -494,7 +499,7 @@ func main() {
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
 	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				shieldSvc.TokenHandler(),
 			),
@@ -508,6 +513,7 @@ func main() {
 	// derives all scope from that token — never from the request payload.
 	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
 		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimDirSvc.WithRoleInvalidator(roleChecker)
 	scimStore.WithDirectoryService(scimDirSvc)
 	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 

@@ -21,10 +21,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 )
 
 // ErrConnectionNotFound is returned when no connection matches the lookup.
 var ErrConnectionNotFound = errors.New("identity connection not found")
+
+// ErrLastAdmin refuses disabling a connection whose SCIM users include every
+// active Admin of the workspace (PENDING-19 R-11).
+var ErrLastAdmin = errors.New("disabling this connection would suspend the workspace's last active admin")
 
 // ErrWorkspaceNotFound is returned by WorkspaceIDBySlug when no workspace matches.
 var ErrWorkspaceNotFound = errors.New("workspace not found")
@@ -423,8 +428,39 @@ type execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-func suspendSCIMUsers(ctx context.Context, db execer, tenantID, connectionID string) (int, error) {
-	tag, err := db.Exec(ctx,
+func suspendSCIMUsers(ctx context.Context, tx pgx.Tx, tenantID, connectionID string) (int, error) {
+	// R-11 (PENDING-19): lock the workspace's active Admins first (same order
+	// as setMemberRole and the SCIM user paths) and refuse the whole disable if
+	// it would suspend every active Admin.
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT u.id::text FROM users u
+		   JOIN external_identities ei ON ei.user_id = u.id
+		  WHERE u.tenant_id = $1 AND u.status = 'active' AND u.provisioning_owner = 'scim'
+		    AND ei.tenant_id = $1 AND ei.connection_id = $2`, tenantID, connectionID)
+	if err != nil {
+		return 0, fmt.Errorf("list scim users: %w", err)
+	}
+	var affected []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan scim user: %w", err)
+		}
+		affected = append(affected, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("list scim users: %w", err)
+	}
+	if err := rbac.GuardLastAdminsTx(ctx, tx, tenantID, affected); err != nil {
+		if errors.Is(err, rbac.ErrLastAdmin) {
+			return 0, ErrLastAdmin
+		}
+		return 0, err
+	}
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = 'suspended', updated_at = NOW()
 		  WHERE tenant_id = $1 AND status = 'active' AND provisioning_owner = 'scim'
 		    AND id IN (
@@ -456,7 +492,19 @@ func unmanageSCIMUsers(ctx context.Context, db execer, tenantID, connectionID st
 // disabled. Scoped to (tenant, connection) and to provisioning_owner='scim' so a
 // non-SCIM-owned user is never touched. Returns the number suspended.
 func (s *Store) SuspendSCIMUsersForConnection(ctx context.Context, tenantID, connectionID string) (int, error) {
-	return suspendSCIMUsers(ctx, s.pool, tenantID, connectionID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin suspend transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	n, err := suspendSCIMUsers(ctx, tx, tenantID, connectionID)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit suspend: %w", err)
+	}
+	return n, nil
 }
 
 // SetSCIMUsersUnmanaged flips provisioning_owner from 'scim' to 'unmanaged' for

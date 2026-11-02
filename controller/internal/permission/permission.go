@@ -5,7 +5,7 @@
 // Locked rule (Phase 3): possession is ALWAYS an explicit row. The store never
 // consults a caller's role — an ADMIN without a row does NOT satisfy any
 // permission check. Wider authorization (e.g. "ADMIN may grant") lives at the
-// GraphQL layer via the @hasRole directive, not here.
+// GraphQL layer via the @requires directive, not here.
 package permission
 
 import (

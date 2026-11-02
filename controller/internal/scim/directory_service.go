@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"strings"
 	"time"
 
@@ -37,6 +39,7 @@ type DirectoryService struct {
 	revoker   *identity.Revoker       // generation bump / session kill (Phase 6)
 	audit     identity.EventPublisher // conflict approval/transition audit (Phase 8)
 	perm      *permission.Store       // explicit fine-grained permissions (Phase 8)
+	roles     rbac.Invalidator        // live role cache (PENDING-19 §5); nil-safe
 }
 
 // NewDirectoryService builds a DirectoryService. A nil publisher defaults to
@@ -75,6 +78,39 @@ func NewDirectoryService(
 func (s *DirectoryService) WithPermissionStore(p *permission.Store) *DirectoryService {
 	s.perm = p
 	return s
+}
+
+// WithRoleInvalidator wires the live role cache (PENDING-19 §5) so a suspend
+// or delete applies to the user's very next console request.
+func (s *DirectoryService) WithRoleInvalidator(inv rbac.Invalidator) *DirectoryService {
+	s.roles = inv
+	return s
+}
+
+func (s *DirectoryService) invalidateRole(workspaceID, userID string) {
+	if s.roles != nil {
+		s.roles.Invalidate(workspaceID, userID)
+	}
+}
+
+// actionLastAdminRefused is the audit_logs action written when a SCIM change
+// is refused because it would leave the workspace with no active Admin (R-11).
+const actionLastAdminRefused = "scim.user.last_admin_refused"
+
+// lastAdminRefusal records the refusal (best effort, after the rollback) and
+// returns the SCIM 409 the IdP sees. The IdP retries; an Admin must first make
+// someone else Admin in the console.
+func (s *DirectoryService) lastAdminRefusal(ctx context.Context, sc *scope, userID, op string) *SCIMError {
+	_ = audit.Record(ctx, s.pool, audit.Entry{
+		TenantID:   sc.workspaceID,
+		ActorEmail: "scim",
+		Action:     actionLastAdminRefused,
+		TargetType: "user",
+		TargetID:   userID,
+		Details:    map[string]any{"operation": op, "connection_id": sc.connectionID},
+	})
+	return newSCIMError(409, "mutability",
+		"refused: this user is the workspace's last active admin; make another user Admin first")
 }
 
 // scope is the resolved (workspace, connection) pair bound from the token.
@@ -319,7 +355,24 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 		}
 	}
 
-	if _, err := s.pool.Exec(ctx,
+	deactivate := patch.Active != nil && !*patch.Active
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, newSCIMError(500, "", "begin tx: "+err.Error())
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if deactivate {
+		// R-11: lock the workspace's active Admins before the target row (same
+		// order as setMemberRole) and refuse to suspend the last one.
+		if gerr := rbac.GuardLastAdminTx(ctx, tx, sc.workspaceID, userID); gerr != nil {
+			if errors.Is(gerr, rbac.ErrLastAdmin) {
+				_ = tx.Rollback(ctx)
+				return nil, s.lastAdminRefusal(ctx, sc, userID, "patch_active_false")
+			}
+			return nil, newSCIMError(500, "", gerr.Error())
+		}
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE users SET
 		   email = COALESCE($3::text, email),
 		   status = CASE WHEN $4::bool IS NOT NULL THEN
@@ -332,13 +385,19 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 		return nil, newSCIMError(500, "", "update user: "+err.Error())
 	}
 	if syncInst != "" {
-		if _, err := s.pool.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`UPDATE external_identities SET sync_instance_id = $3
 			 WHERE user_id = $1 AND connection_id = $2`,
 			userID, sc.connectionID, syncInst,
 		); err != nil {
 			return nil, newSCIMError(500, "", "update sync_instance: "+err.Error())
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, newSCIMError(500, "", "commit update: "+err.Error())
+	}
+	if patch.Active != nil {
+		s.invalidateRole(sc.workspaceID, userID)
 	}
 	if err := s.touchSyncInstance(ctx, sc, syncInst); err != nil {
 		return nil, newSCIMError(500, "", err.Error())
@@ -389,6 +448,20 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 	}
 	defer tx.Rollback(ctx)
 
+	// R-11: lock the workspace's active Admins before the target row (same
+	// order as setMemberRole) and refuse to disable the last one.
+	if gerr := rbac.GuardLastAdminTx(ctx, tx, sc.workspaceID, userID); gerr != nil {
+		if errors.Is(gerr, rbac.ErrLastAdmin) {
+			_ = tx.Rollback(ctx)
+			op := "deprovision_suspend"
+			if hard {
+				op = "deprovision_delete"
+			}
+			return s.lastAdminRefusal(ctx, sc, userID, op)
+		}
+		return newSCIMError(500, "", gerr.Error())
+	}
+
 	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = $3, updated_at = NOW()
 		 WHERE id = $1 AND tenant_id = $2`,
@@ -436,6 +509,7 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 	if err := tx.Commit(ctx); err != nil {
 		return newSCIMError(500, "", "commit deprovision: "+err.Error())
 	}
+	s.invalidateRole(sc.workspaceID, userID)
 	if s.revoker != nil {
 		s.revoker.AfterBump(ctx, sc.workspaceID, userID, "scim", bumpGen)
 	}

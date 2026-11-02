@@ -97,6 +97,9 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 // AddGroupMember is the resolver for the addGroupMember field.
 func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
+	if err := refuseSelfGroupChange(ctx, tc.UserID, userID); err != nil {
+		return nil, err
+	}
 
 	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
 	if err != nil {
@@ -129,6 +132,9 @@ func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, u
 // RemoveGroupMember is the resolver for the removeGroupMember field.
 func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
+	if err := refuseSelfGroupChange(ctx, tc.UserID, userID); err != nil {
+		return nil, err
+	}
 
 	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
 	if err != nil {

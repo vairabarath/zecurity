@@ -206,8 +206,14 @@ func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string
 			if errors.Is(err, idp.ErrConnectionNotFound) {
 				return nil, apperr.UserErrorf("setIdpConnectionStatus: connection not found")
 			}
+			if errors.Is(err, idp.ErrLastAdmin) {
+				r.auditIdp(ctx, tc, "idp.connection.disable_refused_last_admin", id, nil)
+				return nil, apperr.UserErrorf("setIdpConnectionStatus: disabling this connection would suspend the workspace's last active admin; make another user Admin first")
+			}
 			return nil, fmt.Errorf("setIdpConnectionStatus: %w", err)
 		}
+		// Suspended users lose console access on their next request.
+		r.Roles.InvalidateTenant(tc.TenantID)
 		if suspended > 0 || unmanaged > 0 {
 			log.Printf("idp: disable of connection %s suspended %d and unmanaged %d scim users", id, suspended, unmanaged)
 		}
