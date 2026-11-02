@@ -3578,3 +3578,10 @@ serves on `127.0.0.1:9102`.
   - No connector, relay, shield or proto change.
 - Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; 2 pre-existing skips), `scripts/resource-test-fixture.sh`, admin 210 tests.
 - Dependencies were pinned so none shared moved: `maxminddb-golang/v2` v2.0.0 (v2.9.0 would have upgraded `x/crypto`, `x/net`, `x/tools` and others); `mmdbwriter` v1.1.0 is test-only.
+- G1b built (same branch):
+  - the country rule editor in Create and Edit device profile (Edit uses the in-place update);
+  - a profile-list summary;
+  - the Devices page Country column;
+  - the DB-IP credit.
+  - Admin gate: 29 files / 217 tests, build passes, lint unchanged (17).
+- Found while building: the profile modals rendered every server-side check as the "Approved by an admin" switch, so the country check needed its own editor before G1a could ship.

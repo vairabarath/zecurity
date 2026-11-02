@@ -1,6 +1,6 @@
 # PENDING-20: Geofencing for resource access
 
-**Status:** approved 2026-11-02. **G1a (backend) built** on local branch `feat/geofencing-g1` (not pushed); gate green. Next: G1b console.
+**Status:** approved 2026-11-02. **G1a (backend) and G1b (console) built** on local branch `feat/geofencing-g1` (not pushed); gates green. Next: G1c live acceptance.
 **Date:** 2026-11-02
 **Base:** `fixed-pendings`. Builds on the device-posture pipeline (ADR-030, migrations 030 and 044). It assumes PENDING-19 (workspace roles, PR #168) is merged: profile writes need `POSTURE_WRITE`.
 **Scope:** its own epic.
@@ -141,6 +141,10 @@ None. O-1 … O-5 were decided on 2026-11-02 as G-5 … G-9 (§3).
    - `client/location.go` (peer-address observation on posture reports, and on ACL polls on change or every 2 min);
    - `main.go` (`GEOIP_DB_PATH`, `GEOIP_DEV_OVERRIDES` honoured only with `ENV=development`, hourly reload that re-evaluates workspaces, warning at 60 days);
    - GraphQL (`addProfileRequirement(countries)`, `DeviceProfileRequirement.countries`, `ClientDevice.observedCountry/observedNetwork/observedAt`).
-2. **G1b, console:** profile editor with country pickers, the Devices page column, attribution.
+2. **G1b, console:** profile editor with country pickers, the Devices page column, attribution. **Built 2026-11-02:**
+   - `admin/src/components/CountryRuleEditor.tsx`: Allow and Block pickers, with country names from `Intl.DisplayNames` and exact codes ranked first. A country can't be in both lists, saving is blocked until one country is chosen, and the DB-IP credit is shown.
+   - Create and Edit device profile: Edit adds the check, updates it in place via G-10, or removes it.
+   - The profiles list shows a summary of each country rule, and the Devices page has a Country column.
+   - Admin tests: 29 files, 217 tests.
 3. **G1c, live acceptance** on the lab (O-3 override).
 4. **G2:** a separate design note for device OS location.
