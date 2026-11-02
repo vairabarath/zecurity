@@ -103,6 +103,13 @@ extend type Mutation {
     countries: CountryRuleInput
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
+  # PENDING-20 G-10: replace the allow/deny lists of a profile's country
+  # requirement atomically (no window without a country check).
+  updateProfileRequirementCountries(
+    profileId: ID!
+    countries: CountryRuleInput!
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
+
   deleteDeviceProfile(
     id: ID!
   ): Boolean! @requires(capability: POSTURE_WRITE)

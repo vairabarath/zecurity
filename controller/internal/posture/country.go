@@ -212,3 +212,58 @@ func countryRequirementSatisfied(requirement Requirement, observation Observatio
 	}
 	return false, fmt.Sprintf("check %s: %s is not allowed", CheckNetworkCountry, country)
 }
+
+// UpdateCountryRule replaces the rule of a profile's country requirement in
+// one transaction and bumps the profile revision (G-10). There is no window
+// in which the profile has no country check, unlike remove-then-add. It
+// returns the previous rule (for the audit row), or ErrNotFound when the
+// profile has no country requirement in this workspace.
+func (s *Store) UpdateCountryRule(ctx context.Context, workspaceID, profileID uuid.UUID, rule CountryRule) (CountryRule, error) {
+	params, err := json.Marshal(rule)
+	if err != nil {
+		return CountryRule{}, fmt.Errorf("encode country rule: %w", err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CountryRule{}, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var previous []byte
+	err = tx.QueryRow(ctx,
+		`SELECT r.params
+		   FROM device_profile_requirements r
+		   JOIN device_profiles p ON p.id = r.profile_id
+		  WHERE p.workspace_id = $1 AND p.id = $2 AND r.check_id = $3
+		    FOR UPDATE OF r, p`,
+		workspaceID, profileID, CheckNetworkCountry,
+	).Scan(&previous)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CountryRule{}, ErrNotFound
+	}
+	if err != nil {
+		return CountryRule{}, fmt.Errorf("lock country requirement: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE device_profile_requirements SET params = $3
+		  WHERE profile_id = $1 AND check_id = $2`,
+		profileID, CheckNetworkCountry, params,
+	); err != nil {
+		return CountryRule{}, fmt.Errorf("update country rule: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE device_profiles SET revision = revision + 1, updated_at = NOW()
+		  WHERE workspace_id = $1 AND id = $2`,
+		workspaceID, profileID,
+	); err != nil {
+		return CountryRule{}, fmt.Errorf("update profile revision: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CountryRule{}, fmt.Errorf("commit country rule: %w", err)
+	}
+	old, err := countryRuleFromParams(previous)
+	if err != nil {
+		return CountryRule{}, nil // the update committed; the audit just lacks the old lists
+	}
+	return *old, nil
+}

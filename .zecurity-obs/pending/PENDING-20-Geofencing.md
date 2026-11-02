@@ -43,6 +43,7 @@ Admins want to allow or block access to a resource by **where the device is**. E
 | G-6 | **Store the country code plus the IP's /24 (IPv4) or /48 (IPv6) prefix**, never the full address (was O-2). |
 | G-7 | **A dev-only override for lab and testing** (was O-3): `GEOIP_DEV_OVERRIDES="10.0.0.0/8=IN,127.0.0.0/8=US"`, ignored unless `ENV=development`. Unit tests use a generated `.mmdb`. |
 | G-8 | **Deny-only rules are allowed** (was O-4): empty `allow` with a non-empty `deny`. Unknown is still denied. |
+| G-10 | **Edit a country rule in place** (2026-11-02, found while building G1a): `updateProfileRequirementCountries(profileId, countries)` replaces the lists atomically under `POSTURE_WRITE`, audited with the old and new lists. Remove-then-add would leave a window with no country check and is refused anyway for an enforce profile's last requirement. `allowUnsupported` is refused on the country check. |
 | G-9 | **No user-facing "why denied" in G1** (was O-5). The resource disappears for the device; the admin sees the device's observed country. |
 
 ## 4. Phase G1: country geofence (server-attested)
@@ -67,9 +68,8 @@ Admins want to allow or block access to a resource by **where the device is**. E
   - on `ReportDevicePosture` (every 5 min);
   - on the client's ACL poll (`GetACLSnapshot`, every 60 s), so a country change is seen within about a minute. See O-1.
 - **What is stored:** per device, `observed_country` (ISO code or `''` for unknown), `observed_at`, and the database build date. Whether the IP itself is stored is O-2.
-- **Re-evaluation:**
-  - when the observed country changes, re-evaluate that device's profiles (existing per-device path), which notifies the ACL on change;
-  - when the GeoIP database is reloaded, re-evaluate the workspace.
+- **Re-evaluation:** when the observed country changes, re-evaluate that device's profiles (existing per-device path), which notifies the ACL on change.
+  - A reloaded GeoIP database needs nothing more: each device's next poll (≤ 60 s) resolves against it, and a changed country re-evaluates the device.
 - **Freshness:** an observation older than 10 min counts as unknown, the same window as posture reports.
 
 ### 4.3 GeoIP database
@@ -77,7 +77,8 @@ Admins want to allow or block access to a resource by **where the device is**. E
 - **Updates:**
   - an operator downloads the monthly file;
   - the controller reloads it when the file's mtime changes (checked hourly) and on start;
-  - it logs and exports a metric for the database build date, and warns when the database is more than 60 days old.
+  - it exports `geoip_database_build_timestamp_seconds` (0 when none is loaded) and logs a warning when the database is more than 60 days old;
+  - setup is in `.zecurity-obs/Services/VPS-Controller-Relay-Deploy.md` §4.3a and `controller/.env.example`.
 - **Missing or broken database:** every lookup is unknown, so geofenced resources deny (G-4). The controller still starts and logs loudly.
 - **Attribution:** CC BY 4.0 requires crediting DB-IP. Add "IP geolocation by DB-IP" to the console page that edits the check.
 

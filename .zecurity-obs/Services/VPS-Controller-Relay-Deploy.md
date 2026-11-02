@@ -145,6 +145,24 @@ APP_BASE_URL=https://zecurity.in
 > cert's SAN list (`main.go:702-704`); the client does hostname verification
 > (`client/src/grpc.rs:15`) plus a SPIFFE check, so the SAN must match the dialed host.
 
+### 4.3a GeoIP country database (geofencing, PENDING-20)
+
+Country geofencing rules need a local country database. **Without one, every
+resource behind a country rule is denied** (unknown location fails closed).
+
+```bash
+sudo mkdir -p /var/lib/zecurity/geoip
+# DB-IP Lite Country, monthly, CC BY 4.0 (no account): https://db-ip.com/db/lite.php
+curl -fsSL "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
+  | gunzip | sudo tee /var/lib/zecurity/geoip/dbip-country-lite.mmdb >/dev/null
+```
+
+- Set `GEOIP_DB_PATH=/var/lib/zecurity/geoip/dbip-country-lite.mmdb` in the env file.
+- Replace the file each month (a cron job running the same command). The controller checks the file hourly and reloads it when it changes; devices are re-judged on their next poll.
+- Watch `geoip_database_build_timestamp_seconds` on the metrics endpoint. The controller also logs a warning when the database is over 60 days old. `0` means no database is loaded.
+- **Attribution** (CC BY 4.0): the console credits "IP geolocation by DB-IP" on the page that edits country rules.
+- **Never set `GEOIP_DEV_OVERRIDES` in production.** It is ignored unless `ENV=development`.
+
 ### 4.4 systemd unit
 
 `sudo tee /etc/systemd/system/zecurity-controller.service`:
@@ -326,6 +344,8 @@ sudo ufw delete allow 80/tcp;   sudo ufw delete allow 443/tcp
 | `CONTROLLER_HOST` | yes | `zecurity.in:9090` (client OAuth svc, `main.go:323`) |
 | `CONTROLLER_HTTP_URL` | yes | `https://zecurity.in` (`main.go:324`) |
 | `CONTROLLER_ADDR` | rec. | gRPC serving-cert SAN (`main.go:702`) |
+| `GEOIP_DB_PATH` | rec. | GeoIP country `.mmdb` for country geofencing (§4.3a); unset = every country rule denies |
+| `GEOIP_DEV_OVERRIDES` | no | Dev/lab only, ignored unless `ENV=development` |
 | `CONTROLLER_HTTP_ADDR` | rec. | adds host to cert SAN (`main.go:708`) |
 | `GRPC_PORT` / `PORT` | no (9090/8080) | listener ports |
 | `APP_BASE_URL` | no | admin UI origin (default `localhost:5173`) |

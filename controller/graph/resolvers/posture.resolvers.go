@@ -219,6 +219,8 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 	// PENDING-20 G1: the country check needs a rule; no other check takes one.
 	var countryRule *posture.CountryRule
 	switch {
+	case checkID == posture.CheckNetworkCountry && allowUnsupported:
+		return nil, apperr.UserErrorf("addProfileRequirement: allowUnsupported does not apply to the country check; an unknown location always denies")
 	case checkID == posture.CheckNetworkCountry && countries == nil:
 		return nil, apperr.UserErrorf("addProfileRequirement: the country check needs countries to allow or deny")
 	case checkID != posture.CheckNetworkCountry && countries != nil:
@@ -277,6 +279,51 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		return nil, fmt.Errorf("addProfileRequirement: %w", err)
 	}
 
+	return postureProfileToGQL(profile), nil
+}
+
+// UpdateProfileRequirementCountries is the resolver for the updateProfileRequirementCountries field.
+func (r *mutationResolver) UpdateProfileRequirementCountries(ctx context.Context, profileID string, countries graph.CountryRuleInput) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+	rule, err := posture.NormalizeCountryRule(posture.CountryRule{Allow: countries.Allow, Deny: countries.Deny})
+	if err != nil {
+		return nil, apperr.UserErrorf("updateProfileRequirementCountries: %v", err)
+	}
+	previous, err := r.PostureStore.UpdateCountryRule(ctx, workspaceID, profileUUID, rule)
+	if err != nil {
+		if errors.Is(err, posture.ErrNotFound) {
+			return nil, apperr.UserErrorf("updateProfileRequirementCountries: profile not found or it has no country check")
+		}
+		return nil, fmt.Errorf("updateProfileRequirementCountries: %w", err)
+	}
+	r.auditAdmin(ctx, "device_profile.requirement.countries_update", "device_profile", profileID, map[string]any{
+		"check_id":            posture.CheckNetworkCountry,
+		"allow_countries":     rule.Allow,
+		"deny_countries":      rule.Deny,
+		"old_allow_countries": previous.Allow,
+		"old_deny_countries":  previous.Deny,
+	})
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementCountries notify: %w", err)
+	}
+	if r.PostureEvaluator == nil {
+		return nil, fmt.Errorf("updateProfileRequirementCountries: posture evaluator is not configured")
+	}
+	if err := r.PostureEvaluator.ReevaluateWorkspace(ctx, workspaceID); err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementCountries re-evaluate: %w", err)
+	}
+	profile, err := r.PostureStore.GetProfile(ctx, workspaceID, profileUUID)
+	if err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementCountries: %w", err)
+	}
 	return postureProfileToGQL(profile), nil
 }
 

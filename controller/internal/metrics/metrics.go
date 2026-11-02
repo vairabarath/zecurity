@@ -12,6 +12,7 @@
 package metrics
 
 import (
+	"time"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,6 +53,11 @@ var (
 		Help: "Public workspace-discovery requests (FU-11) by operation and outcome. operation: lookup_workspaces_by_email, lookup_workspace, lookup_idp_connections, workspace_auth_discovery. result: allowed, rate_limited_ip, rate_limited_email, limiter_error. Never labelled by IP or email.",
 	}, []string{"operation", "result"})
 
+	geoipDatabaseBuild = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "geoip_database_build_timestamp_seconds",
+		Help: "Build time (Unix seconds) of the loaded GeoIP country database (PENDING-20); 0 when none is loaded, in which case every country rule denies. Alert when it is older than ~60 days (DB-IP Lite is monthly).",
+	})
+
 	reconcileTombstonesPending = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "reconcile_tombstones_pending",
 		Help: "Tombstones the reconciler is actively tracking toward reap, i.e. seen in a live report from a REPORTING shield. NOTE: a fully-disconnected shield sends no reports, so its stuck tombstone is NOT counted here — detect that break-glass (forceDeleteResource) case via a row stuck in 'deleting' plus shield status 'disconnected', not this gauge.",
@@ -67,6 +73,7 @@ func init() {
 		reconcileShieldsDrifting,
 		reconcileTombstonesPending,
 		discoveryRequests,
+		geoipDatabaseBuild,
 		// Baseline process/runtime visibility alongside the domain metrics.
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -121,6 +128,15 @@ func DiscoveryInitSeries(operation string, results ...string) {
 // Handler serves the controller's metrics in the Prometheus text exposition
 // format. Wire it onto an INTERNAL listener — the metrics leak operational data
 // and must not sit on the public mux.
+// SetGeoIPBuild records the loaded GeoIP database's build time (zero: none).
+func SetGeoIPBuild(build time.Time) {
+	if build.IsZero() {
+		geoipDatabaseBuild.Set(0)
+		return
+	}
+	geoipDatabaseBuild.Set(float64(build.Unix()))
+}
+
 func Handler() http.Handler {
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }

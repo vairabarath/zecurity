@@ -279,6 +279,14 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
 		}
 	}
+	if _, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckNetworkCountry, true,
+		&graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil || !strings.Contains(err.Error(), "allowUnsupported does not apply") {
+		t.Errorf("allowUnsupported on the country check: err = %v", err)
+	}
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil ||
+		!strings.Contains(err.Error(), "no country check") {
+		t.Errorf("update before a country check exists: err = %v", err)
+	}
 	if got := f.fires.Load(); got != 0 {
 		t.Fatalf("refused requirements fired the push hook %d times", got)
 	}
@@ -294,5 +302,17 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 	}
 	if a, d := strings.Join(reqs[0].Countries.Allow, ","), strings.Join(reqs[0].Countries.Deny, ","); a != "IN,US" || d != "CN" {
 		t.Fatalf("stored rule allow=%s deny=%s, want IN,US / CN", a, d)
+	}
+
+	// G-10: replace the lists in place.
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{}, Deny: []string{"ru"}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	reqs, _ = f.mr.DeviceProfile().Requirements(f.ctx, got)
+	if len(reqs) != 1 || len(reqs[0].Countries.Allow) != 0 || strings.Join(reqs[0].Countries.Deny, ",") != "RU" {
+		t.Fatalf("after update: %+v", reqs[0].Countries)
+	}
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{}, Deny: []string{}}); err == nil {
+		t.Fatal("update to an empty rule accepted")
 	}
 }

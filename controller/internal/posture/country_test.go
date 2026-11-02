@@ -246,6 +246,36 @@ func TestCountryGeofenceIntegration(t *testing.T) {
 		t.Fatalf("stale: %+v", got)
 	}
 
+	// G-10: replace the lists atomically; revision bumps, old rule returned.
+	before, err := store.GetProfile(ctx, ws, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRule, _ := NormalizeCountryRule(CountryRule{Deny: []string{"CN", "RU"}})
+	old, err := store.UpdateCountryRule(ctx, ws, profile.ID, newRule)
+	if err != nil || !equalRule(old, rule) {
+		t.Fatalf("update: old=%+v err=%v", old, err)
+	}
+	after, _ := store.GetProfile(ctx, ws, profile.ID)
+	if after.Revision != before.Revision+1 {
+		t.Fatalf("revision %d -> %d, want +1", before.Revision, after.Revision)
+	}
+	reqs, _ = store.ListRequirements(ctx, ws, profile.ID)
+	if len(reqs) != 1 || !equalRule(*reqs[0].Countries, newRule) {
+		t.Fatalf("after update: %+v", reqs)
+	}
+	record("GB")
+	if got := evaluate(); !got.Satisfied {
+		t.Fatalf("deny-only rule must admit GB: %+v", got)
+	}
+	plain, _ := store.CreateProfile(ctx, ws, "No country check", true)
+	if _, err := store.UpdateCountryRule(ctx, ws, plain.ID, newRule); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("profile without a country check: %v", err)
+	}
+	if _, err := store.UpdateCountryRule(ctx, otherWS, profile.ID, newRule); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-workspace update: %v", err)
+	}
+
 	// Another workspace can't write this device's observation.
 	if _, err := store.RecordNetworkObservation(ctx, otherWS, device, geoip.Lookup{Country: "IN"}, time.Now()); err == nil {
 		t.Fatal("cross-workspace observation was accepted")

@@ -9,7 +9,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"github.com/yourorg/ztna/controller/internal/geoip"
 	"io"
 	"log"
@@ -754,7 +753,7 @@ func main() {
 	})
 
 	// PENDING-20 G1: pick up a new GeoIP database file (operators replace it
-	// monthly) and re-evaluate every workspace's devices against it.
+	// monthly); devices are re-judged on their next poll.
 	workers.Go("geoip-reload", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -763,7 +762,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				reloadGeoIP(ctx, geoDB, db.Pool, postureEvaluator)
+				reloadGeoIP(geoDB)
 			}
 		}
 	})
@@ -1407,6 +1406,7 @@ func openGeoIP() *geoip.DB {
 	if err != nil {
 		log.Fatalf("geoip: %v", err)
 	}
+	metrics.SetGeoIPBuild(geoDB.Build())
 	warnStaleGeoIP(geoDB)
 	return geoDB
 }
@@ -1418,34 +1418,13 @@ func warnStaleGeoIP(geoDB *geoip.DB) {
 	}
 }
 
-// reloadGeoIP re-reads the database file if it changed and, when it did,
-// re-evaluates the devices of every workspace with posture reports.
-func reloadGeoIP(ctx context.Context, geoDB *geoip.DB, pool *pgxpool.Pool, evaluator *posture.Evaluator) {
-	changed, err := geoDB.Reload()
-	if err != nil {
+// reloadGeoIP re-reads the database file if it changed. Nothing else is
+// needed: each device's next ACL poll (≤ 60 s) or posture report resolves its
+// address against the new database, and a changed country re-evaluates it.
+func reloadGeoIP(geoDB *geoip.DB) {
+	if _, err := geoDB.Reload(); err != nil {
 		log.Printf("geoip: reload: %v", err)
-		return
 	}
+	metrics.SetGeoIPBuild(geoDB.Build())
 	warnStaleGeoIP(geoDB)
-	if !changed {
-		return
-	}
-	rows, err := pool.Query(ctx, `SELECT DISTINCT workspace_id FROM device_posture_reports`)
-	if err != nil {
-		log.Printf("geoip: list workspaces for re-evaluation: %v", err)
-		return
-	}
-	var workspaces []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err == nil {
-			workspaces = append(workspaces, id)
-		}
-	}
-	rows.Close()
-	for _, ws := range workspaces {
-		if err := evaluator.ReevaluateWorkspace(ctx, ws); err != nil {
-			log.Printf("geoip: re-evaluate workspace %s: %v", ws, err)
-		}
-	}
 }
