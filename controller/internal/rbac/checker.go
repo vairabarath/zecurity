@@ -47,11 +47,21 @@ type Checker struct {
 
 	mu    sync.Mutex
 	cache map[cacheKey]cacheEntry
+	// gen counts invalidations per key and tenantGen per workspace. A lookup
+	// records both before its DB read and stores its result only if neither
+	// moved, so a read that raced an invalidation can't put a stale role back.
+	gen       map[cacheKey]uint64
+	tenantGen map[string]uint64
+
+	afterRead func() // test hook: runs between the DB read and the cache store
 }
 
 // NewChecker builds a Checker with the default TTL.
 func NewChecker(pool *pgxpool.Pool) *Checker {
-	return &Checker{pool: pool, ttl: DefaultTTL, now: time.Now, cache: map[cacheKey]cacheEntry{}}
+	return &Checker{
+		pool: pool, ttl: DefaultTTL, now: time.Now,
+		cache: map[cacheKey]cacheEntry{}, gen: map[cacheKey]uint64{}, tenantGen: map[string]uint64{},
+	}
 }
 
 // Role returns the caller's current role. It returns ErrNoAccess when the user
@@ -67,6 +77,7 @@ func (c *Checker) Role(ctx context.Context, tenantID, userID string) (string, er
 		c.mu.Unlock()
 		return e.role, nil
 	}
+	gen, tgen := c.gen[k], c.tenantGen[tenantID]
 	c.mu.Unlock()
 
 	var role, status string
@@ -75,20 +86,33 @@ func (c *Checker) Role(ctx context.Context, tenantID, userID string) (string, er
 		userID, tenantID,
 	).Scan(&role, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		c.Invalidate(tenantID, userID)
+		c.drop(k)
 		return "", ErrNoAccess
 	}
 	if err != nil {
 		return "", fmt.Errorf("rbac: role lookup: %w", err)
 	}
 	if status != "active" || !ValidRole(role) {
-		c.Invalidate(tenantID, userID)
+		c.drop(k)
 		return "", ErrNoAccess
 	}
+	if c.afterRead != nil {
+		c.afterRead()
+	}
 	c.mu.Lock()
-	c.cache[k] = cacheEntry{role: role, expires: c.now().Add(c.ttl)}
+	if c.gen[k] == gen && c.tenantGen[tenantID] == tgen {
+		c.cache[k] = cacheEntry{role: role, expires: c.now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
+	// The role read here is still returned: it was current when read, and the
+	// next request re-reads after an invalidation.
 	return role, nil
+}
+
+func (c *Checker) drop(k cacheKey) {
+	c.mu.Lock()
+	delete(c.cache, k)
+	c.mu.Unlock()
 }
 
 // Invalidate drops one user's cached role.
@@ -96,8 +120,10 @@ func (c *Checker) Invalidate(tenantID, userID string) {
 	if c == nil {
 		return
 	}
+	k := cacheKey{tenantID, userID}
 	c.mu.Lock()
-	delete(c.cache, cacheKey{tenantID, userID})
+	delete(c.cache, k)
+	c.gen[k]++
 	c.mu.Unlock()
 }
 
@@ -113,6 +139,7 @@ func (c *Checker) InvalidateTenant(tenantID string) {
 			delete(c.cache, k)
 		}
 	}
+	c.tenantGen[tenantID]++
 	c.mu.Unlock()
 }
 
