@@ -25,6 +25,9 @@ function device(id: string, name: string, approvedAt: string | null) {
     revokedAt: null,
     approvedAt,
     approvedByEmail: approvedAt ? "admin@example.test" : null,
+    observedCountry: null,
+    observedNetwork: null,
+    observedAt: null,
   };
 }
 

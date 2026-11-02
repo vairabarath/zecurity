@@ -20,13 +20,27 @@ import { EditDeviceProfileModal } from "@/components/EditDeviceProfileModal";
 import { Capability, useCan } from "@/lib/capabilities";
 
 import { EmptyState, ErrorState, EntityIcon } from "@/lib/console";
+import { COUNTRY_CHECK_ID } from "@/lib/countries";
 
 type EditableProfile = {
   id: string;
   name: string;
   manualTrust: boolean;
-  requirements: { checkId: string }[];
+  requirements: {
+    checkId: string;
+    countries?: { allow: string[]; deny: string[] } | null;
+  }[];
 };
+
+// PENDING-20: one-line summary of a profile's country rule, or null.
+function countrySummary(requirements: EditableProfile["requirements"]): string | null {
+  const rule = requirements.find((r) => r.checkId === COUNTRY_CHECK_ID)?.countries;
+  if (!rule) return null;
+  const parts: string[] = [];
+  if (rule.allow.length > 0) parts.push(`allow ${rule.allow.join(", ")}`);
+  if (rule.deny.length > 0) parts.push(`block ${rule.deny.join(", ")}`);
+  return parts.join(" · ");
+}
 
 function DeleteDeviceProfileDialog({
   profile,
@@ -179,6 +193,11 @@ export default function DeviceProfiles() {
                         <ShieldCheck className="h-3.5 w-3.5" />
                         {profile.requirements.length}
                       </span>
+                    )}
+                    {countrySummary(profile.requirements) && (
+                      <div className="mt-1 text-[11.5px] font-normal" title="Device country (public IP)">
+                        Countries: {countrySummary(profile.requirements)}
+                      </div>
                     )}
                   </div>
                   <div className="text-[13px] font-semibold text-muted-foreground">

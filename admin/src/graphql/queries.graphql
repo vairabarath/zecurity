@@ -341,6 +341,9 @@ query GetClientDevices {
     revokedAt
     approvedAt
     approvedByEmail
+    observedCountry
+    observedNetwork
+    observedAt
   }
 }
 
@@ -353,6 +356,10 @@ query GetDeviceProfiles {
       id
       checkId
       allowUnsupported
+      countries {
+        allow
+        deny
+      }
     }
     boundResources {
       id

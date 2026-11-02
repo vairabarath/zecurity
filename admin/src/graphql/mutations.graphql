@@ -242,11 +242,13 @@ mutation AddProfileRequirement(
   $profileId: ID!
   $checkId: String!
   $allowUnsupported: Boolean!
+  $countries: CountryRuleInput
 ) {
   addProfileRequirement(
     profileId: $profileId
     checkId: $checkId
     allowUnsupported: $allowUnsupported
+    countries: $countries
   ) {
     id
     requirements {
@@ -451,5 +453,21 @@ mutation SetMemberRole($userId: ID!, $role: Role!, $reason: String!) {
     id
     role
     capabilities
+  }
+}
+
+# PENDING-20 G-10 — replace a profile's country allow/deny lists in place.
+mutation UpdateProfileRequirementCountries($profileId: ID!, $countries: CountryRuleInput!) {
+  updateProfileRequirementCountries(profileId: $profileId, countries: $countries) {
+    id
+    requirements {
+      id
+      checkId
+      allowUnsupported
+      countries {
+        allow
+        deny
+      }
+    }
   }
 }

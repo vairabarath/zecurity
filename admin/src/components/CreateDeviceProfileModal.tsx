@@ -21,6 +21,9 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { CountryRuleEditor } from '@/components/CountryRuleEditor'
+import { COUNTRY_CHECK_ID } from '@/lib/countries'
+import { EMPTY_COUNTRY_RULE, countryRuleProblem, type CountryRuleValue } from '@/lib/countryRule'
 
 interface CreateDeviceProfileModalProps {
   open: boolean
@@ -38,6 +41,8 @@ export function CreateDeviceProfileModal({
   const [os, setOs] = useState<OS | null>(null)
   const [name, setName] = useState('')
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  // PENDING-20: the country check has its own editor (allow/deny lists).
+  const [countryRule, setCountryRule] = useState<CountryRuleValue>(EMPTY_COUNTRY_RULE)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -47,10 +52,15 @@ export function CreateDeviceProfileModal({
   const linuxChecks = (checksData?.supportedPostureChecks ?? []).filter(
     (check) => check.platform === 'linux',
   )
-  // Server-side checks (ADR-030), e.g. "Approved by an admin".
+  // Server-side checks (ADR-030), e.g. "Approved by an admin". The country
+  // check (PENDING-20) is server-side too but has its own editor below.
   const serverChecks = (checksData?.supportedPostureChecks ?? []).filter(
-    (check) => check.platform === 'any',
+    (check) => check.platform === 'any' && check.id !== COUNTRY_CHECK_ID,
   )
+  const countryCheckAvailable = (checksData?.supportedPostureChecks ?? []).some(
+    (check) => check.id === COUNTRY_CHECK_ID,
+  )
+  const countryProblem = countryRuleProblem(countryRule)
 
   const [createDeviceProfile] = useMutation(CreateDeviceProfileDocument, {
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
@@ -61,6 +71,7 @@ export function CreateDeviceProfileModal({
     setOs(null)
     setName('')
     setCheckedIds(new Set())
+    setCountryRule(EMPTY_COUNTRY_RULE)
     setError(null)
   }
 
@@ -90,6 +101,10 @@ export function CreateDeviceProfileModal({
       setError('Profile name is required')
       return
     }
+    if (countryProblem) {
+      setError(countryProblem)
+      return
+    }
 
     setSubmitting(true)
     try {
@@ -104,6 +119,16 @@ export function CreateDeviceProfileModal({
           variables: { profileId, checkId, allowUnsupported: false },
         })
       }
+      if (countryRule.enabled) {
+        await addProfileRequirement({
+          variables: {
+            profileId,
+            checkId: COUNTRY_CHECK_ID,
+            allowUnsupported: false,
+            countries: { allow: countryRule.allow, deny: countryRule.deny },
+          },
+        })
+      }
 
       toast.success(`Device profile "${name.trim()}" created`)
       onSuccess?.()
@@ -115,7 +140,7 @@ export function CreateDeviceProfileModal({
     }
   }
 
-  const isValid = name.trim().length > 0
+  const isValid = name.trim().length > 0 && countryProblem === null
 
   if (!open) return null
 
@@ -240,6 +265,10 @@ export function CreateDeviceProfileModal({
                       </p>
                     </div>
                   ))}
+
+                  {countryCheckAvailable && (
+                    <CountryRuleEditor value={countryRule} onChange={setCountryRule} />
+                  )}
 
                   <button
                     type="button"

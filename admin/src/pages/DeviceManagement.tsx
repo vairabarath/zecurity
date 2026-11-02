@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { Capability, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
+import { countryLabel } from '@/lib/countries'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { BadgeCheck, Laptop, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
@@ -99,14 +100,14 @@ export default function DeviceManagement() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1380px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_140px_240px] gap-4 px-5 py-4">
-            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Status', 'Approval', 'Actions'].map((label, index) => (
+          <div className="table-head grid min-w-[1540px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_120px_140px_240px] gap-4 px-5 py-4">
+            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Country', 'Status', 'Approval', 'Actions'].map((label, index) => (
               <div key={label} className={`table-head-label ${index === 7 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[1380px] p-5 space-y-3">
+            <div className="min-w-[1540px] p-5 space-y-3">
               {Array.from({ length: 5 }).map((_, index) => (
                 <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
               ))}
@@ -118,11 +119,11 @@ export default function DeviceManagement() {
               description="Devices appear here as users enroll through the client."
             />
           ) : (
-            <div className="min-w-[1380px]">
+            <div className="min-w-[1540px]">
               {devices.map((device) => {
                 const revoked = !!device.revokedAt
                 return (
-                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_140px_240px] gap-4 px-5 py-4">
+                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_120px_140px_240px] gap-4 px-5 py-4">
                     <div className="flex min-w-0 items-center gap-3">
                       <span className="grid h-9 w-9 place-items-center rounded-xl border border-[oklch(0.78_0.09_310/0.25)] bg-[oklch(0.78_0.09_310/0.14)] text-[oklch(0.78_0.09_310)]">
                         <Laptop className="h-4 w-4" />
@@ -147,6 +148,23 @@ export default function DeviceManagement() {
 
                     <div className="font-mono text-[12.5px] text-muted-foreground/80">
                       {relativeTime(device.lastSeenAt)}
+                    </div>
+
+                    {/* PENDING-20: where the controller last saw the device
+                        (public IP → country); only the network prefix is kept. */}
+                    <div
+                      className="truncate text-sm text-muted-foreground"
+                      title={
+                        device.observedAt
+                          ? `${device.observedNetwork ?? 'unknown network'} · seen ${relativeTime(device.observedAt)}`
+                          : 'not seen yet'
+                      }
+                    >
+                      {device.observedCountry ? (
+                        countryLabel(device.observedCountry)
+                      ) : (
+                        <span className="opacity-60">{device.observedAt ? 'unknown' : '—'}</span>
+                      )}
                     </div>
 
                     <div>
