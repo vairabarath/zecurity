@@ -3500,3 +3500,10 @@ serves on `127.0.0.1:9102`.
 - Tooling slip: my first `cargo fmt` reformatted 13 unrelated connector files. They were restored before anything was committed; only my four files are changed.
 - Open: console drain text can name 120 s again once connectors run this (decision for Barath); not live-tested.
 
+
+## 2026-10-31 — M2: small fixes merged; AT-E5 PASS; Sprint 22 closed
+- Merged #164 (S4 relay installer state), #165 (S2 relay forwards reset), #166 (S3 / FU-14 connector drain-timeout cut); doc conflicts (append-only, `path.md` + Session Log) resolved on the branches, entries kept in merge order. All CI green (merged before CI had finished; checked afterwards).
+- AT-E5 expired-token refusal: 16:35:31 IST, 66 s after the token's `exp`. Kept V4 controller + `ci_valkey_6390`; the relay verified the CA fingerprint, then Provision got `PermissionDenied: invalid provisioning token`; no certificate; `v4-target` stayed `pending`. **PASS.**
+- Cleanup: V4 DB dropped (removes `v4-target`), `~/.cache/zecurity-v4-at-e5` removed, isolated Valkey stopped. Remaining DBs: `ztna_platform`, `ci_empty_admin`, `postgres`.
+- Ticked V2, V4, AT-E5 and "All scenarios pass" in `Sprint22/path.md`. Sprint 22 closed.
+- Still open: lab checks for S2 (with #162) and S3 (AT-D6 drain rerun); #162 awaits Sathiya's client fix; FU-8/9/10; FU-11 leftovers.
