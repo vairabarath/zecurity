@@ -185,6 +185,16 @@ pub struct RuntimeState {
     /// scheduler that's running late (sleep/suspend, clock drift), not the
     /// primary trigger. See daemon::run_cert_renewal_scheduler.
     pub cert_renewal_resync: Arc<tokio::sync::Notify>,
+    /// FU-10: in-memory copy of `StoredWorkspaceState::tunnel_wanted` — the
+    /// user last left the tunnel up. Read by the startup restore.
+    pub tunnel_wanted: bool,
+    /// FU-10: serializes the user's up/down (IPC Up, Down, post-login) with
+    /// the startup restore, so a `down` can't be overtaken by a restore
+    /// attempt that was already under way.
+    pub tunnel_intent_lock: Arc<tokio::sync::Mutex<()>>,
+    /// FU-10: Some while the startup restore is still trying to bring the
+    /// tunnel back; holds the last attempt's error ("" before the first).
+    pub tunnel_restore: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -255,5 +265,8 @@ pub fn new_shared() -> SharedState {
         device_state: DeviceState::Active,
         device_state_reason: String::new(),
         cert_renewal_resync: Arc::new(tokio::sync::Notify::new()),
+        tunnel_wanted: false,
+        tunnel_intent_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restore: None,
     }))
 }
