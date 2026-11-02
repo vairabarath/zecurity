@@ -80,7 +80,7 @@ func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, e
 	// policy and tells the workspace's connectors.
 	if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, id); err != nil {
 		if errors.Is(err, shield.ErrNotRevocable) {
-			return false, fmt.Errorf("revoke shield: shield not found or not in revocable status")
+			return false, apperr.UserErrorf("revoke shield: shield not found or not in revocable status")
 		}
 		return false, err
 	}
@@ -104,7 +104,7 @@ func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, e
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("delete shield: shield not found or must be revoked before deletion")
+			return false, apperr.UserErrorf("delete shield: shield not found or must be revoked before deletion")
 		}
 		return false, fmt.Errorf("delete shield: %w", err)
 	}

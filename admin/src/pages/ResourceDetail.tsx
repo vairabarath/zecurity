@@ -12,6 +12,7 @@ import {
 import { protectTargetShield, hostShield, type ShieldLike } from '@/lib/protectShield'
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { StatusPill, relativeTime } from '@/lib/console'
 import { cn } from '@/lib/utils'
@@ -77,6 +78,8 @@ export default function ResourceDetail() {
   const navigate = useNavigate()
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
+  const canAccessWrite = useCan(Capability.AccessWrite)
 
   const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
@@ -247,7 +250,7 @@ export default function ResourceDetail() {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {!isProtected && !transitional && (
+          {!isProtected && !transitional && canWrite && (
             <Button
               onClick={handleProtect}
               disabled={protecting || !canProtect}
@@ -258,7 +261,7 @@ export default function ResourceDetail() {
               Protect this resource
             </Button>
           )}
-          {isProtected && (
+          {isProtected && canWrite && (
             <Button
               onClick={handleUnprotect}
               disabled={unprotecting}
@@ -269,10 +272,13 @@ export default function ResourceDetail() {
               Unprotect
             </Button>
           )}
+          {canWrite && (
           <Button variant="ghost" size="sm" onClick={() => setEditOpen(true)} className="gap-2">
             <Pencil className="h-4 w-4" />
             Edit
           </Button>
+          )}
+          {canWrite && (
           <Button
             variant="ghost"
             size="sm"
@@ -283,10 +289,11 @@ export default function ResourceDetail() {
             {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             Delete
           </Button>
+          )}
           {/* Break-glass: only when the resource is stuck mid-operation, where the
               normal Delete is blocked. Erases the record even though it can't be
               confirmed-safe — audited server-side. */}
-          {transitional && (
+          {transitional && canWrite && (
             <Button
               variant="ghost"
               size="sm"
@@ -376,7 +383,7 @@ export default function ResourceDetail() {
                 )}
               </div>
             </div>
-            {canProtect && (
+            {canProtect && canWrite && (
               <Button onClick={handleProtect} disabled={protecting} className="shrink-0 gap-2">
                 {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                 Protect
@@ -590,10 +597,12 @@ export default function ResourceDetail() {
                         <code className="rounded bg-secondary px-1 font-mono">{resource.host}</code>. Click{' '}
                         <strong>Protect this resource</strong> to enable enforcement.
                       </p>
+                      {canWrite && (
                       <Button onClick={handleProtect} disabled={protecting} className="w-full gap-2">
                         {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                         Protect this resource
                       </Button>
+                      )}
                     </>
                   ) : (
                     <p className="mt-3 text-xs text-muted-foreground">
@@ -614,6 +623,7 @@ export default function ResourceDetail() {
             </div>
           </div>
 
+          {canAccessWrite && (
           <div className="surface-card overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
@@ -629,6 +639,7 @@ export default function ResourceDetail() {
               <p className="text-sm text-muted-foreground">Define a policy to control who can reach this resource.</p>
             </div>
           </div>
+          )}
         </div>
       </div>
 

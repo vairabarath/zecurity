@@ -60,7 +60,7 @@ func newDiscoveryEnv(t *testing.T, cfg discoverylimit.Config) *discoveryEnv {
 	}
 	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
 		Resolvers:  &Resolver{Pool: h.pool, IdpStore: h.idpStore},
-		Directives: graph.DirectiveRoot{HasRole: HasRole},
+		Directives: graph.DirectiveRoot{Requires: testRequires},
 	}))
 	srv.SetErrorPresenter(ErrorPresenter)
 	srv.Use(discoverylimit.Extension{})

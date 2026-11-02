@@ -9,6 +9,7 @@ import {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -26,6 +27,7 @@ function statusTone(status: ShieldStatus): 'ok' | 'warn' | 'danger' | 'muted' {
 
 export default function AllShields() {
   const [showAdd, setShowAdd] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
 
   const { data, loading, error, refetch } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
@@ -57,10 +59,12 @@ export default function AllShields() {
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{allShields.length}</span> total
           </span>
+          {canWrite && (
           <Button onClick={() => setShowAdd(true)} disabled={networks.length === 0} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Shield
           </Button>
+          )}
         </div>
       </div>
 
@@ -93,7 +97,7 @@ export default function AllShields() {
                   : 'Issue the first shield install command to bring a host under protection.'
               }
               action={
-                networks.length === 0 ? (
+                !canWrite ? undefined : networks.length === 0 ? (
                   <Link to="/remote-networks" className="text-sm font-semibold text-primary">Create a remote network</Link>
                 ) : (
                   <Button onClick={() => setShowAdd(true)}>Add Shield</Button>

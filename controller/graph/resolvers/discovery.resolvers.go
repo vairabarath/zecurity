@@ -78,10 +78,10 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error) {
 	tc := tenant.MustGet(ctx)
 	if len(targets) == 0 {
-		return "", fmt.Errorf("triggerScan: targets must not be empty")
+		return "", apperr.UserErrorf("triggerScan: targets must not be empty")
 	}
 	if len(ports) > 16 {
-		return "", fmt.Errorf("triggerScan: too many ports (max 16)")
+		return "", apperr.UserErrorf("triggerScan: too many ports (max 16)")
 	}
 	for _, t := range targets {
 		if err := discovery.CheckScanTarget(t); err != nil {

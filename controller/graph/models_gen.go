@@ -338,6 +338,73 @@ type WorkspacePublic struct {
 	Slug string `json:"slug"`
 }
 
+type Capability string
+
+const (
+	CapabilityConsoleRead   Capability = "CONSOLE_READ"
+	CapabilityNetworkWrite  Capability = "NETWORK_WRITE"
+	CapabilityAccessWrite   Capability = "ACCESS_WRITE"
+	CapabilityPostureWrite  Capability = "POSTURE_WRITE"
+	CapabilityDeviceWrite   Capability = "DEVICE_WRITE"
+	CapabilityDeviceAdmin   Capability = "DEVICE_ADMIN"
+	CapabilityIdentityAdmin Capability = "IDENTITY_ADMIN"
+	CapabilityMembersAdmin  Capability = "MEMBERS_ADMIN"
+)
+
+var AllCapability = []Capability{
+	CapabilityConsoleRead,
+	CapabilityNetworkWrite,
+	CapabilityAccessWrite,
+	CapabilityPostureWrite,
+	CapabilityDeviceWrite,
+	CapabilityDeviceAdmin,
+	CapabilityIdentityAdmin,
+	CapabilityMembersAdmin,
+}
+
+func (e Capability) IsValid() bool {
+	switch e {
+	case CapabilityConsoleRead, CapabilityNetworkWrite, CapabilityAccessWrite, CapabilityPostureWrite, CapabilityDeviceWrite, CapabilityDeviceAdmin, CapabilityIdentityAdmin, CapabilityMembersAdmin:
+		return true
+	}
+	return false
+}
+
+func (e Capability) String() string {
+	return string(e)
+}
+
+func (e *Capability) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = Capability(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid Capability", str)
+	}
+	return nil
+}
+
+func (e Capability) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *Capability) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e Capability) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
 type ConnectorStatus string
 
 const (
@@ -746,20 +813,26 @@ func (e RemoteNetworkStatus) MarshalJSON() ([]byte, error) {
 type Role string
 
 const (
-	RoleAdmin  Role = "ADMIN"
-	RoleMember Role = "MEMBER"
-	RoleViewer Role = "VIEWER"
+	RoleAdmin    Role = "ADMIN"
+	RoleViewer   Role = "VIEWER"
+	RoleDevops   Role = "DEVOPS"
+	RoleSecurity Role = "SECURITY"
+	RoleHelpdesk Role = "HELPDESK"
+	RoleMember   Role = "MEMBER"
 )
 
 var AllRole = []Role{
 	RoleAdmin,
-	RoleMember,
 	RoleViewer,
+	RoleDevops,
+	RoleSecurity,
+	RoleHelpdesk,
+	RoleMember,
 }
 
 func (e Role) IsValid() bool {
 	switch e {
-	case RoleAdmin, RoleMember, RoleViewer:
+	case RoleAdmin, RoleViewer, RoleDevops, RoleSecurity, RoleHelpdesk, RoleMember:
 		return true
 	}
 	return false

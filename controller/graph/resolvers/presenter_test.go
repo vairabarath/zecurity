@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/scim"
@@ -133,5 +134,32 @@ func TestErrorPresenter_ScimEnableRefusalSurfaced(t *testing.T) {
 	}
 	if got.Extensions["code"] != "SCIM_MAPPING_UNPROVEN" {
 		t.Fatalf("enable refusal must carry code=SCIM_MAPPING_UNPROVEN, got %v", got.Extensions["code"])
+	}
+}
+
+// gqlgen hands the presenter every resolver error wrapped by
+// graphql.ErrorOnPath. That wrapper must not let a raw error through
+// (it leaked "duplicate key … idx_groups_manual_name" to the console).
+func TestErrorPresenter_GqlgenWrappedInfraErrorMasked(t *testing.T) {
+	ctx := graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover)
+	raw := fmt.Errorf("createGroup: create group: %w",
+		fmt.Errorf(`ERROR: duplicate key value violates unique constraint "idx_groups_manual_name" (SQLSTATE 23505)`))
+	got := ErrorPresenter(ctx, graphql.ErrorOnPath(ctx, raw))
+	if got.Message != "an unexpected error occurred" || got.Extensions["code"] != "INTERNAL" {
+		t.Fatalf("wrapped infra error leaked: %q %v", got.Message, got.Extensions)
+	}
+}
+
+// A user error and a deliberately built gqlerror still pass through after
+// gqlgen's wrapping.
+func TestErrorPresenter_GqlgenWrappedIntendedErrorsPass(t *testing.T) {
+	ctx := graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover)
+	ue := apperr.UserErrorf("a group with this name already exists")
+	if got := ErrorPresenter(ctx, graphql.ErrorOnPath(ctx, ue)); got.Message != "a group with this name already exists" {
+		t.Fatalf("user error masked: %q", got.Message)
+	}
+	built := gqlerror.Errorf("cannot enable SCIM — mapping unproven")
+	if got := ErrorPresenter(ctx, graphql.ErrorOnPath(ctx, built)); got.Message != "cannot enable SCIM — mapping unproven" {
+		t.Fatalf("built gqlerror masked: %q", got.Message)
 	}
 }

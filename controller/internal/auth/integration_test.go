@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -259,6 +260,32 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	if workspaceCountAfter != 1 || userCountAfter != 1 || keyCountAfter != 1 {
 		t.Fatalf("expected returning login to avoid duplicate rows; got workspaces=%d users=%d keys=%d",
 			workspaceCountAfter, userCountAfter, keyCountAfter)
+	}
+
+	// PENDING-19: /auth/refresh re-stamps the CURRENT role. The claim is
+	// display-only (authorization reads users.role live), but a refreshed
+	// token must not keep showing a role the user no longer has.
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'devops' WHERE id = $1`, userID); err != nil {
+		t.Fatalf("change role: %v", err)
+	}
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(firstRefreshCookie)
+	refreshReq.Header.Set("Authorization", "Bearer "+firstToken)
+	refreshRec := httptest.NewRecorder()
+	svc.RefreshHandler().ServeHTTP(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh: status %d body %s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshed map[string]string
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshed); err != nil {
+		t.Fatalf("decode refresh: %v", err)
+	}
+	refreshedClaims, err := svc.verifyAccessToken(refreshed["access_token"])
+	if err != nil {
+		t.Fatalf("verify refreshed token: %v", err)
+	}
+	if refreshedClaims.Role != "devops" {
+		t.Fatalf("refreshed token role = %q, want devops (current users.role)", refreshedClaims.Role)
 	}
 
 	// Nothing outside this run's keys was disturbed.

@@ -16,7 +16,7 @@ const key contextKey = "tenantContext"
 type TenantContext struct {
 	TenantID string // workspace UUID
 	UserID   string // user UUID
-	Role     string // "admin" | "member" | "viewer"
+	Role     string // JWT role claim: display only, never read for authorization (live role: rbac.Checker)
 	Email    string // authenticated user's email
 }
 

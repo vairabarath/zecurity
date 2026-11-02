@@ -8,6 +8,7 @@ package resolvers
 import (
 	"context"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/audit"
@@ -159,7 +160,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 	case "protecting", "deleting":
 		// A 'deleting' tombstone without an ack is reaped within seconds by the
 		// tombstone sweeper (F50).
-		return false, fmt.Errorf("deleteResource: resource is mid-operation; wait for it to finish")
+		return false, apperr.UserErrorf("deleteResource: resource is mid-operation; wait for it to finish")
 	case "protected", "failed":
 		// May hold a shield rule → tombstone + tell the shield to remove it.
 		// The row is reaped by RecordAck once the shield acks removal.
@@ -207,7 +208,7 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 		return false, fmt.Errorf("forceDeleteResource: %w", err)
 	}
 	if !deleted {
-		return false, fmt.Errorf("forceDeleteResource: resource not found")
+		return false, apperr.UserErrorf("forceDeleteResource: resource not found")
 	}
 
 	// Durable audit trail — this bypassed the safety model, so it MUST leave a

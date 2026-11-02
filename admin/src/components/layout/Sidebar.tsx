@@ -19,6 +19,7 @@ import {
   Waypoints,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
+import { canUseConsole, roleLabel } from '@/lib/capabilities'
 import { cn } from '@/lib/utils'
 
 const mainItems = [
@@ -172,7 +173,9 @@ export function Sidebar() {
           <NavItem key={item.to} {...item} />
         ))}
         <TeamSection />
-        {user?.role === 'ADMIN' && (
+        {/* Every console role (CONSOLE_READ) reads these pages; their write
+            controls are gated per capability on the page (PENDING-19). */}
+        {canUseConsole(user) && (
           <>
             <NavItem to="/idp-connections" label="Identity Providers" icon={KeyRound} />
             <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
@@ -190,7 +193,7 @@ export function Sidebar() {
           </div>
           <div className="min-w-0">
             <div className="truncate text-[12.5px] font-semibold">{user?.email ?? 'Workspace user'}</div>
-            <div className="text-[10.5px] capitalize text-muted-foreground">{user?.role ?? 'admin'}</div>
+            <div className="text-[10.5px] text-muted-foreground">{roleLabel(user?.role)}</div>
           </div>
         </div>
       </div>

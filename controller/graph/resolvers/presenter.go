@@ -15,8 +15,15 @@ import (
 // client verbatim only if it is
 //
 //  1. an *apperr.UserError — an intentional, user-safe message; or
-//  2. a *gqlerror.Error — gqlgen's own parse/validation errors, which carry only
-//     query/schema info (no internal detail) and whose masking would wreck dev UX.
+//  2. a *gqlerror.Error that wraps no other error — gqlgen's own
+//     parse/validation errors, or one a resolver built on purpose (e.g. the SCIM
+//     enable refusal). These carry only intended text.
+//
+// gqlgen hands EVERY resolver error to the presenter wrapped in a
+// *gqlerror.Error (graphql.ErrorOnPath → gqlerror.WrapPath, with .Err set to
+// the resolver's error). Passing any *gqlerror.Error through therefore leaked
+// raw resolver errors (Postgres constraint names, driver text) to clients; only
+// a gqlerror with no wrapped error is passed through.
 //
 // Every other error — raw resolver/DB/infra failures wrapped with fmt.Errorf — is
 // logged server-side and replaced with a generic message, so internals (Postgres
@@ -63,9 +70,9 @@ func ErrorPresenter(ctx context.Context, err error) *gqlerror.Error {
 		return gerr
 	}
 
-	// Already-structured GraphQL errors (parse/validation) pass through unmasked.
-	var ge *gqlerror.Error
-	if errors.As(err, &ge) {
+	// Already-structured GraphQL errors (parse/validation, or built on purpose)
+	// pass through unmasked; gqlgen's path wrapper around a raw error does not.
+	if intendedGQLError(err) {
 		return graphql.DefaultErrorPresenter(ctx, err)
 	}
 
@@ -108,4 +115,16 @@ func scimStatusCode(status int) string {
 	default:
 		return "INTERNAL"
 	}
+}
+
+// intendedGQLError reports whether err's chain holds a *gqlerror.Error that
+// wraps nothing: its message is the whole intended text. gqlgen's path wrapper
+// (WrapPath) around a resolver error has .Err set and doesn't count.
+func intendedGQLError(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if ge, ok := e.(*gqlerror.Error); ok && ge.Err == nil {
+			return true
+		}
+	}
+	return false
 }

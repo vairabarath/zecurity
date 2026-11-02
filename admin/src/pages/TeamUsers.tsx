@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useMutation, useQuery } from '@apollo/client/react'
-import { Mail, MoreHorizontal, Plus, UserCircle2 } from 'lucide-react'
+import { Mail, Plus, UserCircle2, UserCog } from 'lucide-react'
 import {
   CreateInvitationDocument,
   GetGroupsDocument,
@@ -20,6 +21,8 @@ import {
 import { EmptyState, StatusPill } from '@/lib/console'
 import { cn } from '@/lib/utils'
 import { UserOwnershipBadge } from '@/components/users/UserOwnershipBadge'
+import { ManageRoleDialog, type ManageRoleTarget } from '@/components/users/ManageRoleDialog'
+import { Capability, roleLabel, useCan, useCurrentUserId } from '@/lib/capabilities'
 
 type User = {
   id: string
@@ -33,18 +36,12 @@ type User = {
 
 function roleTone(role: string): 'ok' | 'info' | 'warn' | 'muted' {
   switch (role.toUpperCase()) {
-    case 'ADMIN':   return 'warn'
-    case 'MEMBER':  return 'info'
-    default:        return 'muted'
-  }
-}
-
-function roleLabel(role: string): string {
-  switch (role.toUpperCase()) {
-    case 'ADMIN':  return 'admin'
-    case 'MEMBER': return 'member'
-    case 'VIEWER': return 'viewer'
-    default:       return role.toLowerCase()
+    case 'ADMIN':    return 'warn'
+    case 'DEVOPS':
+    case 'SECURITY':
+    case 'HELPDESK': return 'ok'
+    case 'MEMBER':   return 'info'
+    default:         return 'muted'
   }
 }
 
@@ -68,6 +65,7 @@ function InviteDialog({
   const [sent, setSent] = useState(false)
 
   const [createInvitation, { loading }] = useMutation(CreateInvitationDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setSent(true) },
   })
 
@@ -128,6 +126,10 @@ function InviteDialog({
 
 export default function TeamUsers() {
   const [showInvite, setShowInvite] = useState(false)
+  const [roleTarget, setRoleTarget] = useState<ManageRoleTarget | null>(null)
+  // Invites and role changes are MEMBERS_ADMIN (Admin only, R-10).
+  const canManageMembers = useCan(Capability.MembersAdmin)
+  const myId = useCurrentUserId()
 
   const { data: usersData, loading: usersLoading } = useQuery(GetUsersDocument, {
     fetchPolicy: 'cache-and-network',
@@ -167,22 +169,26 @@ export default function TeamUsers() {
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{activeCount}</span>&nbsp;active
           </span>
-          <Button variant="outline" className="gap-2" onClick={() => setShowInvite(true)}>
-            <Mail className="h-4 w-4" />
-            Invite
-          </Button>
-          <Button className="gap-2" onClick={() => setShowInvite(true)}>
-            <Plus className="h-4 w-4" />
-            Add User
-          </Button>
+          {canManageMembers && (
+            <>
+              <Button variant="outline" className="gap-2" onClick={() => setShowInvite(true)}>
+                <Mail className="h-4 w-4" />
+                Invite
+              </Button>
+              <Button className="gap-2" onClick={() => setShowInvite(true)}>
+                <Plus className="h-4 w-4" />
+                Add User
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
       {/* Table */}
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[860px] items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_60px] gap-4 px-5 py-4">
-            {['Name', 'Email', 'Role', 'Status', 'Number of Groups', 'Created', 'Activity'].map((label, i) => (
+          <div className="table-head grid min-w-[860px] items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_130px] gap-4 px-5 py-4">
+            {['Name', 'Email', 'Role', 'Status', 'Number of Groups', 'Created', ''].map((label, i) => (
               <div key={label + i} className={cn('table-head-label', i === 6 && 'text-right')}>
                 {label}
               </div>
@@ -200,7 +206,7 @@ export default function TeamUsers() {
               icon={<UserCircle2 className="h-6 w-6" />}
               title="No users yet"
               description="Invite team members to give them access to the admin console."
-              action={<Button onClick={() => setShowInvite(true)}>Invite user</Button>}
+              action={canManageMembers ? <Button onClick={() => setShowInvite(true)}>Invite user</Button> : undefined}
             />
           ) : (
             <div className="min-w-[860px]">
@@ -209,7 +215,7 @@ export default function TeamUsers() {
                 return (
                   <div
                     key={user.id}
-                    className="admin-table-row grid items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_60px] gap-4 px-5 py-4"
+                    className="admin-table-row grid items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_130px] gap-4 px-5 py-4"
                   >
                     {/* Name */}
                     <div className="flex min-w-0 items-center gap-3">
@@ -248,11 +254,23 @@ export default function TeamUsers() {
                       {user.createdAt ?? '—'}
                     </div>
 
-                    {/* Activity */}
+                    {/* Manage role (PENDING-19 §7). Shown for directory-managed
+                        users too: the role is Zecurity-owned, not synced (R-3). */}
                     <div className="flex justify-end">
-                      <button className="grid h-7 w-7 place-items-center rounded-lg text-muted-foreground transition hover:bg-secondary hover:text-foreground">
-                        <MoreHorizontal className="h-4 w-4" />
-                      </button>
+                      {canManageMembers && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={user.id === myId}
+                          title={user.id === myId ? "You can't change your own role" : undefined}
+                          onClick={() => setRoleTarget({ id: user.id, email: user.email, role: user.role })}
+                          aria-label={`Manage role for ${user.email}`}
+                        >
+                          <UserCog className="h-3.5 w-3.5" />
+                          Manage role
+                        </Button>
+                      )}
                     </div>
                   </div>
                 )
@@ -262,7 +280,8 @@ export default function TeamUsers() {
         </div>
       </div>
 
-      <InviteDialog open={showInvite} onClose={() => setShowInvite(false)} />
+      <InviteDialog open={showInvite && canManageMembers} onClose={() => setShowInvite(false)} />
+      <ManageRoleDialog target={roleTarget} onClose={() => setRoleTarget(null)} />
     </div>
   )
 }

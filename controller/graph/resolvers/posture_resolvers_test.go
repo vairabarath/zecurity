@@ -29,7 +29,7 @@ func TestPostureMutationRequiresAdmin(t *testing.T) {
 	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
 		Resolvers: &Resolver{},
 		Directives: graph.DirectiveRoot{
-			HasRole: HasRole,
+			Requires: testRequires,
 		},
 	}))
 	body := []byte(`{"query":"mutation { bindResourceToProfile(profileId: \"00000000-0000-0000-0000-000000000001\", resourceId: \"00000000-0000-0000-0000-000000000002\") { id } }"}`)
@@ -61,7 +61,7 @@ func TestCreateDeviceProfileBlankNameReturnsUserError(t *testing.T) {
 	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
 		Resolvers: &Resolver{PostureStore: posture.NewStore(nil)},
 		Directives: graph.DirectiveRoot{
-			HasRole: HasRole,
+			Requires: testRequires,
 		},
 	}))
 	srv.SetErrorPresenter(ErrorPresenter)
@@ -94,7 +94,7 @@ func TestUpdateDeviceProfileManualTrustRejectsDisable(t *testing.T) {
 	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
 		Resolvers: &Resolver{PostureStore: posture.NewStore(nil)},
 		Directives: graph.DirectiveRoot{
-			HasRole: HasRole,
+			Requires: testRequires,
 		},
 	}))
 	srv.SetErrorPresenter(ErrorPresenter)
@@ -127,7 +127,7 @@ func TestDevicePostureVisibilityRequiresAdmin(t *testing.T) {
 	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
 		Resolvers: &Resolver{PostureStore: posture.NewStore(nil)},
 		Directives: graph.DirectiveRoot{
-			HasRole: HasRole,
+			Requires: testRequires,
 		},
 	}))
 	body := []byte(`{"query":"query { devicePostureVisibility(profileId: \"00000000-0000-0000-0000-000000000001\") { deviceId } }"}`)
