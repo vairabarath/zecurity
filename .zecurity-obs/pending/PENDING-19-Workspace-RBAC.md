@@ -28,6 +28,8 @@ Teams want to give people part of the console (network operators, security staff
 | R-4 | **DevOps may create connector and shield install tokens.** |
 | R-5 | **A role change applies on the next request** (live role check, §5). It doesn't log the user out and doesn't touch their Zecurity client. |
 | R-6 | **A reason is required** for every role change and is stored in the audit log. |
+| R-7 | **Keep the Security role** (groups, access policies, device posture), although Twingate has no equivalent (was O-5). |
+| R-8 | **Helpdesk can't revoke devices.** It approves and unapproves only; `revokeDevice` (permanent) is Admin-only (was O-2). |
 
 ## 3. Roles
 
@@ -37,7 +39,7 @@ Teams want to give people part of the console (network operators, security staff
 | **Viewer** | Read-only: every console query. Reads already return no secrets (§6). |
 | **DevOps** | Viewer + write: remote networks, connectors, shields, resources, discovery/scan, connector/shield install tokens. |
 | **Security** | Viewer + write: groups, group membership, resource↔group assignment, device posture profiles. |
-| **Helpdesk** | Viewer + write: device approve / unapprove / revoke. |
+| **Helpdesk** | Viewer + write: device approve / unapprove. Revoking a device (permanent) stays with Admin (R-8). |
 | **Member** | No console access. Client app and self-service queries only (`me`, `myDevices`, …). |
 
 Splitting DevOps and Security means DevOps decides **what is reachable** (resources, protect/unprotect) and Security decides **who can reach it** (groups, assignments, posture). Neither can do the whole job alone. Admin can.
@@ -55,6 +57,7 @@ The word is "capability", not "permission", on purpose: ADR-025 already has *per
 | `ACCESS_WRITE` | ✓ | | | ✓ | | |
 | `POSTURE_WRITE` | ✓ | | | ✓ | | |
 | `DEVICE_WRITE` | ✓ | | | | ✓ | |
+| `DEVICE_ADMIN` | ✓ | | | | | |
 | `IDENTITY_ADMIN` | ✓ | | | | | |
 | `MEMBERS_ADMIN` | ✓ | | | | | |
 
@@ -85,8 +88,11 @@ The word is "capability", not "permission", on purpose: ADR-025 already has *per
 **`POSTURE_WRITE` (8 mutations)**
 - posture: `createDeviceProfile`, `updateDeviceProfileMode`, `updateDeviceProfileManualTrust`, `addProfileRequirement`, `removeProfileRequirement`, `deleteDeviceProfile`, `bindResourceToProfile`, `unbindResourceFromProfile`
 
-**`DEVICE_WRITE` (3 mutations)**
-- client: `approveDevice`, `unapproveDevice`, `revokeDevice`
+**`DEVICE_WRITE` (2 mutations)**
+- client: `approveDevice`, `unapproveDevice`
+
+**`DEVICE_ADMIN` (1 mutation)**
+- client: `revokeDevice` (permanent; R-8)
 
 **`IDENTITY_ADMIN` (15 mutations)**
 - idp: `createIdpConnection`, `updateIdpConnection`, `setIdpConnectionStatus`, `deleteIdpConnection`, `testIdpConnection`, `updateScimConfig`, `setPlatformLoginEnabled`, `mintScimToken`, `rotateScimToken`, `revokeScimToken`, `acceptScimConflict`, `rejectScimConflict`, `reopenScimConflict`, `grantPermission`, `enableScimBreakGlass`
@@ -96,7 +102,7 @@ The word is "capability", not "permission", on purpose: ADR-025 already has *per
 - client: `createInvitation`; REST `POST /api/invitations`
 - new: `setMemberRole` (§7)
 
-Total: 23 + 16 + 7 + 8 + 3 + 15 + 1 = **73**, plus 3 REST routes and the new mutation.
+Total: 23 + 16 + 7 + 8 + 2 + 1 + 15 + 1 = **73**, plus 3 REST routes and the new mutation.
 
 ### 4.2 Schema shape
 
@@ -139,8 +145,6 @@ So Viewer can read every query. A test pins this: any new read field that return
 | # | Question | Recommendation |
 |---|---|---|
 | O-1 | **Security can add itself to a group** (`addGroupMember`) and so gain network access to resources. | Server refuses `addGroupMember` / `removeGroupMember` on yourself unless you are Admin. Collusion between two people remains; the audit log covers it. |
-| O-2 | **Helpdesk and `revokeDevice`:** revoke is terminal. | Give Helpdesk only `approveDevice` / `unapproveDevice`, and keep `revokeDevice` for Admin. That matches Twingate, where Helpdesk can verify and unverify but not Block or Archive (§12). |
-| O-5 | **The Security role has no Twingate equivalent.** In Twingate, only Admin changes groups and policies, and DevOps sees them read-only (§12). | Undecided. Either keep Security as our own role, or drop it and make `ACCESS_WRITE` and `POSTURE_WRITE` Admin-only, which also removes O-1. |
 | O-3 | **Who can invite:** `createInvitation` is Admin-only here. | Keep it. Inviting adds a person to the workspace; that is a membership decision. |
 | O-4 | **SCIM deprovision of the last Admin** bypasses `setMemberRole`. | Check during build whether the SCIM path can disable the last active Admin; if it can, apply the same guard or file it separately. |
 
@@ -209,10 +213,10 @@ Looked at read-only in Sathiya's own Twingate tenant (Orca's built-in browser), 
 | Twingate | Zecurity |
 |---|---|
 | Network tab | DevOps / `NETWORK_WRITE` (remote networks, connectors, shields, resources, discovery) |
-| Team → Groups, Policies → Resource Policies | `ACCESS_WRITE` (see O-5) |
-| Policies → Device Profiles | `POSTURE_WRITE` (see O-5) |
+| Team → Groups, Policies → Resource Policies | `ACCESS_WRITE` (Security, R-7) |
+| Policies → Device Profiles | `POSTURE_WRITE` (Security, R-7) |
 | Devices → Verify/Unverify | Helpdesk / `approveDevice`, `unapproveDevice` |
-| Devices → Block | `revokeDevice` (Admin; O-2). In Zecurity it is permanent. |
+| Devices → Block | `revokeDevice` (Admin only, R-8). In Zecurity it is permanent. |
 | Helpdesk "reset MFA" | none. User MFA belongs to the customer's IdP. |
 | Settings → Identity Providers | `IDENTITY_ADMIN` (Admin) |
 | Internet Security, Billing, Access Reviewer, Serial Numbers | no Zecurity feature; not mapped |
