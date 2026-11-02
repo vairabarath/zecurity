@@ -201,6 +201,11 @@ O-6 and O-7 (raised by the automated security review of the R1 commit) were deci
 
      Fix: mount sonner's `<Toaster>` once; the Apollo error link turns a capability refusal into a toast and re-reads `me`, so the controls follow the live role without a reload. Live-checked.
    - **Correction to the first R3 note:** the first "silent refusal" observation on Remote Networks came from a click on a still-disabled Create button: the test script had filled the header search box. The re-check filled the right field, the request was sent and refused, and the toast appeared.
+   - **Further fixes found during R3 (2026-11-02), shipped in the same PR:**
+     - **Invited join:** an invited user who signs in (without the invite link's accept call) is now an active member, and the invitation is marked accepted, in the provisioning transaction. Before, both stayed `invited`/`pending`.
+     - **Silent mutation errors:** 24 mutation hooks in 11 console pages had no error handling. They now toast the server's message (`toastMutationError`). A guard test fails for any new mutation hook without `onError` unless it is listed as handled at its call site.
+     - **Error leak (security):** `ErrorPresenter` passed every `*gqlerror.Error` through, and gqlgen wraps every resolver error in one. Raw resolver and Postgres errors (for example `idx_groups_manual_name`) therefore reached clients. Now only a gqlerror wrapping nothing passes; everything else is masked as `INTERNAL`. Resolver errors written with plain `fmt.Errorf` (for example "group not found") now show the generic text; only `apperr` user errors are shown verbatim.
+     - **Group names:** blank names are refused, and a duplicate gets "a group with this name already exists".
 
 ## 12. Reference: Twingate admin console (looked at 2026-10-31)
 

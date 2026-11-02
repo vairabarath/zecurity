@@ -3528,3 +3528,9 @@ serves on `127.0.0.1:9102`.
   - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
   - Follow-up fixed: no toast container was mounted (every toast() was dropped); a capability refusal now shows a toast and re-reads `me`, so controls follow the live role without reload. Live-checked. (The first "silent" observation was partly a test-script slip: the click hit a disabled Create button.)
   - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.
+- Further fixes, same PR, each test-first and live-checked:
+  - invited join activates the membership and accepts the invitation;
+  - 24 silent mutation hooks now toast, with a guard test;
+  - **ErrorPresenter leak:** gqlgen-wrapped resolver errors were passed through, so raw DB/constraint text reached clients; now masked;
+  - group names: blank refused, duplicate gets a clear message.
+- Gate: controller full `go test` (exit 0, 2 pre-existing skips), fixture suites pass; admin 28 files / 210 tests (one run timed out under load while Go tests ran; clean when rerun alone), build passes, lint unchanged.
