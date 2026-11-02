@@ -3500,3 +3500,14 @@ serves on `127.0.0.1:9102`.
 - Tooling slip: my first `cargo fmt` reformatted 13 unrelated connector files. They were restored before anything was committed; only my four files are changed.
 - Open: console drain text can name 120 s again once connectors run this (decision for Barath); not live-tested.
 
+
+## 2026-11-02 — M1: workspace RBAC epic (PENDING-19), approval + R1 backend
+- Approved the design: O-1→R-9 (no self group change unless Admin), O-3→R-10 (invites Admin-only), O-4→R-11. The O-4 code check found SCIM could suspend or delete the last Admin through DELETE, PATCH `active=false` and connection disable, with no guard. Decision: refuse only when it would leave zero active Admins.
+- R1 built on local branch `feat/workspace-rbac-r1` (from `fixed-pendings` `b817cee8`, note commits cherry-picked). Not pushed. PR needs `[schema: reset DB]`.
+  - Migration `047_workspace_roles.sql`; `internal/rbac` (capability table, cached live `Checker`, last-Admin lock); `@requires(capability:)` on all 73 ops; `RequireCapability` on the 3 REST routes (`RequireRole` removed); `setMemberRole`; R-9; R-11 in SCIM `Deprovision`/`Update` and `DisableConnection`.
+  - `schema_authz_test.go` now globs every `*.graphqls`; the old list missed `idp.graphqls` and `posture.graphqls` (~26 ops never checked).
+- Bugs found and fixed before commit, each test-first:
+  - role cache could be repopulated with a stale role by a lookup racing an invalidation (generation counters);
+  - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
+- Open: O-6 (Security assigning a resource to a group it is in), O-7 (self device approval). Shared `ztna_platform` still has the old role CHECK until a reset. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
