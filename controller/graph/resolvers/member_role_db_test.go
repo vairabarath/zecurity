@@ -463,3 +463,30 @@ func TestRBAC_OwnDeviceApproval(t *testing.T) {
 	f.wantOK("admin", approve, map[string]any{"d": device("admin")})
 	f.wantOK("admin", approve, map[string]any{"d": own})
 }
+
+// Group names: blank refused, duplicates get a clear message, and no raw
+// database text reaches the client (presenter masks gqlgen-wrapped errors).
+func TestGroupNameErrors(t *testing.T) {
+	f := newRBACFixture(t)
+	create := `mutation($n: String!) { createGroup(name: $n) { id name } }`
+	res := f.wantOK("security", create, map[string]any{"n": "  ops  "})
+	if !strings.Contains(string(res.Data["createGroup"]), `"name":"ops"`) {
+		t.Fatalf("name not trimmed: %s", res.Data["createGroup"])
+	}
+	f.wantErr("security", create, map[string]any{"n": "   "}, "group name is required")
+	f.wantErr("security", create, map[string]any{"n": "ops"}, "a group with this name already exists")
+
+	other := f.wantOK("security", create, map[string]any{"n": "dev"})
+	var g struct{ ID string }
+	_ = json.Unmarshal(other.Data["createGroup"], &g)
+	update := `mutation($id: ID!, $n: String) { updateGroup(id: $id, name: $n) { id } }`
+	f.wantErr("security", update, map[string]any{"id": g.ID, "n": "ops"}, "a group with this name already exists")
+	f.wantErr("security", update, map[string]any{"id": g.ID, "n": " "}, "group name is required")
+
+	// An internal error (here: updateGroup on an unknown id, a plain resolver
+	// error) reaches the client masked, never as resolver/driver text.
+	r := f.do("security", update, map[string]any{"id": "00000000-0000-0000-0000-0000000000cc", "n": "x"})
+	if len(r.Errors) == 0 || r.Errors[0].Message != "an unexpected error occurred" {
+		t.Fatalf("internal error not masked: %v", r.Errors)
+	}
+}

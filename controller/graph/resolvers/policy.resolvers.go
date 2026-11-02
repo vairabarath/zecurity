@@ -20,8 +20,15 @@ import (
 func (r *mutationResolver) CreateGroup(ctx context.Context, name string, description *string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
 
+	name, err := validGroupName(name)
+	if err != nil {
+		return nil, err
+	}
 	row, err := r.PolicyStore.CreateGroup(ctx, tc.TenantID, name, description)
 	if err != nil {
+		if isDuplicateGroupName(err) {
+			return nil, errDuplicateGroupName
+		}
 		return nil, fmt.Errorf("createGroup: %w", err)
 	}
 	r.auditAdmin(ctx, "group.create", "group", row.ID, map[string]any{"name": row.Name})
@@ -49,10 +56,20 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 		return nil, apperr.UserErrorf("updateGroup: cannot edit a directory-managed (SCIM) group")
 	}
 
+	if name != nil {
+		trimmed, err := validGroupName(*name)
+		if err != nil {
+			return nil, err
+		}
+		name = &trimmed
+	}
 	row, err := r.PolicyStore.UpdateGroup(ctx, id, name, description)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			return nil, fmt.Errorf("updateGroup: group not found")
+		}
+		if isDuplicateGroupName(err) {
+			return nil, errDuplicateGroupName
 		}
 		return nil, fmt.Errorf("updateGroup: %w", err)
 	}
