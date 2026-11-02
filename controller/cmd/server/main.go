@@ -44,6 +44,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
@@ -56,6 +57,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
@@ -139,6 +141,9 @@ func main() {
 
 	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
 	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	// Live workspace role check (PENDING-19 §5): @requires and RequireCapability
+	// read users.role per request through this process-local cache (D-02).
+	roleChecker := rbac.NewChecker(db.Pool)
 	idpStore := idp.NewStore(db.Pool, pkiService)
 
 	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
@@ -248,6 +253,9 @@ func main() {
 		log.Printf("relay revocation checker: refresh failed: %v", err)
 	})
 	connectorRegistry := connector.NewConnectorRegistry()
+	// D21-R (a2, S): every shield snapshot carries a Workspace-CA-signed peer
+	// list and resource set.
+	connectorRegistry.SetShieldSigner(pkiService)
 
 	inviteStore := invitation.NewStore(db.Pool)
 	inviteEmailer := invitation.NewEmailer(
@@ -313,6 +321,25 @@ func main() {
 	}
 	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
 
+	// FU-11 (ADR-009): public workspace discovery is rate limited — one Valkey
+	// budget per client IP shared by all four entry points, plus a per-email
+	// budget for lookupWorkspacesByEmail. Bad settings stop startup.
+	discoveryProxies, err := discoverylimit.ParseTrustedProxies(os.Getenv("DISCOVERY_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("DISCOVERY_TRUSTED_PROXY_CIDRS: %v", err)
+	}
+	discoveryIPs := discoverylimit.NewIPResolver(discoveryProxies)
+	discoveryLimiter, err := discoverylimit.NewLimiter(valkeycompat.NewAdapter(connectorValkey), discoverylimit.Config{
+		IPLimit:    envOrInt("DISCOVERY_RATE_LIMIT_IP_PER_MIN", discoverylimit.DefaultIPLimit),
+		EmailLimit: envOrInt("DISCOVERY_RATE_LIMIT_EMAIL_PER_HOUR", discoverylimit.DefaultEmailLimit),
+	}, os.Getenv("PKI_MASTER_SECRET"))
+	if err != nil {
+		log.Fatalf("discovery rate limiter: %v", err)
+	}
+	if len(discoveryProxies) > 0 {
+		log.Printf("discovery rate limit: trusting X-Forwarded-For from %d proxy range(s)", len(discoveryProxies))
+	}
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -339,15 +366,18 @@ func main() {
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 				OIDCRedirectURI:   oidcRedirectURI,
+				Roles:             roleChecker,
 			},
 			Directives: graph.DirectiveRoot{
-				HasRole: resolvers.HasRole,
+				Requires: resolvers.NewRequires(roleChecker),
 			},
 		}),
 	)
 	// Fail-closed error masking: only apperr.UserError + gqlgen parse/validation
 	// errors reach clients; raw resolver/DB errors are logged and genericized.
 	gqlSrv.SetErrorPresenter(resolvers.ErrorPresenter)
+	// FU-11: a refused discovery field replaces the operation's whole response.
+	gqlSrv.Use(discoverylimit.Extension{})
 
 	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
 	// enables it by default via extension.Introspection{}, which exposes the
@@ -419,7 +449,8 @@ func main() {
 	mux.Handle("POST /provider/users/{id}/reset-totp", requireProvider(http.HandlerFunc(operatorHandlers.ResetTOTP)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
-	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
+	mux.Handle("GET /workspaces/{slug}/auth",
+		discoverylimit.ProtectHTTP(discoveryLimiter, discoveryIPs, discoverylimit.OpRESTAuth, authSvc.DiscoveryHandler()))
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -431,7 +462,9 @@ func main() {
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
 		middleware.WorkspaceGuard(db.Pool)(gqlSrv),
 	)
-	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
+	// The discovery middleware sits outside the public/protected routing, so both
+	// routes share one budget and a refusal becomes 429/503 on either.
+	mux.Handle("/graphql", discoverylimit.Middleware(discoveryLimiter, discoveryIPs)(routeGraphQL(protected, gqlSrv)))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))
@@ -439,7 +472,7 @@ func main() {
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 			middleware.WorkspaceGuard(db.Pool)(
 				http.HandlerFunc(inviteHandler.Create),
 			),
@@ -456,7 +489,7 @@ func main() {
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 			),
@@ -466,7 +499,7 @@ func main() {
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
 	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				shieldSvc.TokenHandler(),
 			),
@@ -480,6 +513,7 @@ func main() {
 	// derives all scope from that token — never from the request payload.
 	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
 		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimDirSvc.WithRoleInvalidator(roleChecker)
 	scimStore.WithDirectoryService(scimDirSvc)
 	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 

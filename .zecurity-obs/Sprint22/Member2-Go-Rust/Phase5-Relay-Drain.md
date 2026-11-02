@@ -239,3 +239,6 @@ See `Sprint22/path.md` → Post-Sprint Fixes → FU-6. Per-stream record of the 
 ```
 The `unverified` line ("a heartbeat measured at least 120 seconds after the drain started") is the server's measurement window and is unchanged. Tests: `RelayDetail.test.tsx` asserts the dialog says "keep running until they end" and doesn't mention 120 seconds, and checks the new `streams_open` line. Console 507 pass, lint and build clean. When FU-14 is fixed in the connector, the text can name the timeout again.
 
+### Fix: FU-14 drain timeout now cuts (2026-10-31, branch `fix/connector-drain-timeout-cut`)
+`RelayDrainTracker::cut()` closes the old relay connection (code `DRNT` 0x44524E54); `relay_selector::drain_old_relay` calls it when `drain_timeout` expires with streams still open. Before, only the session task was aborted, and detached stream tasks kept the connection. Details and tests: `Sprint22/path.md` → Post-Sprint Fixes → FU-14. The console's drain text (#160) can name the 120 s limit again once connectors run this fix.
+

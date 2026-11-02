@@ -221,14 +221,14 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 ### Phase V — M1: Acceptance
 
 - [x] **V1** Run AT-T on the lab after T merges. *(2026-10-27, Sathiya: **PASS**, 40/40 API checks plus the console QR/verify pages. Run on an isolated local stack (throwaway DB, own Valkey, controller :18080) rather than the lab fleet: AT-T needs only the controller and the console. See Acceptance-Test-Plan → Live run — Phase T.)*
-- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4 **PASS on the lab 2026-10-30** (manojinkyank); E5: delete + add again PASS live, expired-token hint still needs a 24 h token. AT-X: PASS 2026-10-28, see the Acceptance Test Plan.)*
+- [x] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E: live E1…E3 PASS 2026-10-27 on an isolated local stack; E4 **PASS on the lab 2026-10-30** (manojinkyank); E5: delete + add again PASS live, hint PASS, expired-token refusal **PASS 2026-10-31**. AT-X: PASS 2026-10-28, see the Acceptance Test Plan.)*
 - [x] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges. *(2026-10-30: AT-D6 client data plane **PASS** with a real client, connector on manojinkyank and two relays; connector migrated in 17 ms, new connections on the other relay after the client's 60 s sync, the running download completed; FU-14 filed. Earlier:)* *(2026-10-29, M2: live control-plane run on an isolated local stack (throwaway DB, isolated Valkey, two real relays, a real connector, console in the embedded browser; torn down after): AT-D1–D5, D7, D9, D11 PASS; **AT-D6 PARTIAL**: drain progression to "drained" verified; client data plane not performed. Remaining on the lab: (1) a running download completes or is cut at ~120 s, (2) a new client connection uses the remaining relay. See Acceptance-Test-Plan → Live run — Phase D.)*
-- [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry. *(2026-10-30: targeted final run **PASS**, cases 1–7 plus the AT-E5 hint; see Acceptance Test Plan → V4. Two observations, no failures. Only the AT-E5 expired-token refusal remains, on 2026-10-31.)*
+- [x] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry. *(2026-10-30: targeted final run **PASS**, cases 1–7 plus the AT-E5 hint; see Acceptance Test Plan → V4. Two observations, no failures. AT-E5 expired-token refusal **PASS 2026-10-31**.)*
 
 ### Remaining Sprint 22 checks (updated 2026-10-30)
 - [x] **Drain console text vs FU-14.** Decided 2026-10-30: correct it now. The card, the drain dialog and the `streams_open` line no longer promise a 120 s cut; they say open connections "keep running until they end". The `unverified` line's 120 s measurement window is the server's and stays. Branch `sprint22/drain-text-fu14`.
 - [x] **V4 final run: 2026-10-30.** PASS: cases 1–7 and the AT-E5 hint (Acceptance Test Plan → V4).
-- [ ] **AT-E5 expired-token refusal: 2026-10-31, after 16:34:25 IST.** The hint already PASSES (V4 case 8). Remaining check: start the kept V4 controller (DB `zecurity_live_v4_*`; env, token and TOTP helper in `~/.cache/zecurity-v4-at-e5`) with the isolated Valkey. Run `zecurity-relay` with `v4-target`'s token: enrolment must be refused. Then delete `v4-target`, drop the V4 DB and remove the folder. Then tick V2, V4 and "All scenarios pass".
+- [x] **AT-E5 expired-token refusal: 2026-10-31, after 16:34:25 IST.** **PASS at 16:35:31 IST** (66 s after the token's `exp`): `zecurity-relay` verified the CA fingerprint, then Provision was refused with `PermissionDenied: invalid provisioning token`; no certificate written; `v4-target` stayed `pending`. V4 DB dropped and `~/.cache/zecurity-v4-at-e5` removed (dropping the DB removed `v4-target`, so no separate API delete). The hint already PASSES (V4 case 8). Remaining check: start the kept V4 controller (DB `zecurity_live_v4_*`; env, token and TOTP helper in `~/.cache/zecurity-v4-at-e5`) with the isolated Valkey. Run `zecurity-relay` with `v4-target`'s token: enrolment must be refused. Then delete `v4-target`, drop the V4 DB and remove the folder. Then tick V2, V4 and "All scenarios pass".
 
 ## Test gates (a phase can't be ticked without these)
 
@@ -251,7 +251,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 - [x] A relay can be **drained and resumed**; connectors migrate with no connector change; the last eligible relay can't be drained. *(AT-D PASS live incl. AT-D6 client data plane 2026-10-30; FU-14: running streams aren't cut at 120 s.)*
 - [x] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test). *(`api-surface.test.ts` pins them; console 507 pass at the D merge.)*
 - [x] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched. *(Checked 2026-10-30: no Sprint 22 phase commit touches `connector/`, `relay/`, `proto/` or `admin/`, and none removes a workspace status predicate. Other merged work in the same window (Sprint 20 fixes, device approval) did touch them; it is not Sprint 22 scope.)*
-- [ ] All scenarios in [[Sprint22/Acceptance-Test-Plan]] pass.
+- [x] All scenarios in [[Sprint22/Acceptance-Test-Plan]] pass. *(2026-10-31, after AT-E5.)*
 
 ## Follow-ups (tracked)
 
@@ -266,14 +266,156 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | **Fixed** 2026-10-30 (same branch, see Post-Sprint Fixes → FU-7) |
 | FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
 | FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
-| FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
-| FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | Open (pre-GA) |
+| FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | **Fixed** 2026-11-02 (branch `fix/fu10-restore-tunnel`): option (a), the daemon remembers whether the user left the tunnel up and restores it at start. See Post-Sprint Fixes → FU-10 |
+| FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | **Mitigated** 2026-10-31 (branch `fu11/discovery-rate-limit`): shared per-IP budget on all four discovery entry points + per-email budget; the oracle remains (email-verified discovery to decide before GA). See Post-Sprint Fixes → FU-11 |
 | FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): the Connector now shuts a relayed shield-tunnel stream down on a clean end (TLS close_notify); see Post-Sprint Fixes → F-7. The probe timeouts are FU-9 |
 | FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): accidental duplicate from Sprint 17's merge fix; second start removed |
-| FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | Open |
+| FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | **Fixed** 2026-10-31 (branch `fix/connector-drain-timeout-cut`): the drain timeout closes the old relay connection. See Post-Sprint Fixes → FU-14 |
 | FU-15 | **A revoked session keeps delivering data for seconds (O-6, re-verified 2026-10-31).** With `curl --limit-rate 300K` cut mid-download by a member removal, the connector cancelled the session in 44 ms, but curl received **5.64 MB more over 18.6 s**. Cause: (1) on an authorization cancel the connector drops the device stream, which QUIC (quinn) finishes gracefully, so its already-queued data keeps flowing (the client logged `stream finished`, 4.2 s after the cancel); (2) the client then drains the ~4.4 MB it had queued for that flow at the app's pace. curl's own socket buffer held only ~86 KB. Nothing new is read from the resource after the cancel: the data was fetched before the cut, it just arrives late. Fix: the connector aborts (resets) a cancelled session's stream; the client drops an aborted flow's queued data and resets the app connection. A normal end stays a clean close (F-7). | Live E2E run O-6 (2026-10-29), re-verified 2026-10-31 | **Fixed** 2026-10-31 (branch `fix/fu15-revoked-session-tail`): the connector aborts a revoked session's stream (QUIC reset "RVKD") and tells the Shield; the client drops a failed flow's queue. Live: 18.6 s / 5.64 MB → 0.52 s / 0.18 MB; see the run record → O-6 |
 
 ## Post-Sprint Fixes
+
+### Fix: relay installer stops on another relay's leftover state (V4 observation)
+`scripts/relay-local-install.sh` now checks the state dir before installing. The same relay keeps its state; another relay's (or an unreadable) certificate stops the install with both IDs named, unless `RELAY_RESET_STATE=1` moves it aside (kept, never deleted). Test: `scripts/test-relay-installer-state.sh` (18 checks, 5 mutants). Details: Phase 3 (E) file → Post-Phase Fixes.
+
+### Fix: the relay forwards a reset or stop instead of finishing gracefully (FU-15 relay path)
+**Issue:** found in the review of #162 (FU-15). On the relay path, a revoked session's tail still reached the client. The connector resets its stream to the relay, but `relay/src/session.rs` `pipe_streams` then returned and dropped `client_send`. Dropping a quinn `SendStream` *finishes* it, so everything already buffered (1.27 MB in the new test) was delivered, followed by a clean EOF.
+
+**Root Cause:** the bridge copied with tokio's `AsyncRead`/`AsyncWrite`, which turns a peer's reset into a plain `io::Error`, and on any error simply dropped the streams.
+
+**Fix Applied (`relay/src/session.rs`):**
+- `counted_copy` uses quinn's own `read`/`write_all`, so `ReadError::Reset(code)` and `WriteError::Stopped(code)` keep their code.
+- When a bridge fails, the relay **resets both send halves and stops both receive halves** with the peer's code. The connector's `RVKD` (0x52564B44) reaches the client exactly as on the direct path.
+- Any other failure (lost connection) uses the relay's own code, `RLAB` (0x524C4142), never a clean finish.
+- A normal end is unchanged: every byte, then a clean finish in each direction.
+
+```rust
+// AFTER (pipe_streams, on a failed bridge):
+let code = error.code(); // the peer's reset/stop code, else RELAY_ABORT_CODE
+let _ = client_send.reset(code);
+let _ = connector_send.reset(code);
+let _ = client_recv.stop(code);
+let _ = connector_recv.stop(code);
+```
+- **Behaviour change (intended):** an abort from the client side (reset, or stop of its reading half) now reaches the connector as a reset with the client's code, not a graceful EOF.
+
+**Tests** (`relay/src/session.rs`, a real client↔relay↔connector bridge from two QUIC pairs):
+- `a_connector_reset_reaches_the_client_with_its_code`: about 1.3 MB in flight, then a reset; the client gets `Reset(RVKD)`, not the backlog.
+- `a_client_stop_reaches_the_connector_with_its_code`;
+- `a_client_reset_reaches_the_connector_with_its_code`;
+- `a_clean_end_is_still_a_clean_finish` (3 MB both ways).
+
+The first three failed before the fix. Relay suite 123 pass; 3 mutants killed (no abort, the relay's own code instead of the peer's, client side finished instead of reset). Not live-tested; it pairs with #162 on the lab.
+
+### Fix: FU-14 the connector's drain timeout cuts the streams still open
+**Issue:** live AT-D6 (2026-10-30): after a drain, a 1 GiB download kept using the drained relay for 442 s. The connector logged "old relay drain timed out with active streams still open" at 120 s and cut nothing.
+
+**Root Cause:** each relay stream runs as a detached `tokio::spawn` task (`relay_handler.rs`). On timeout `relay_selector` only called `old.handle.abort()`, which ends the session's accept loop. The stream tasks kept the old QUIC connection alive.
+
+**Fix Applied (`connector/src/relay_handler.rs`, `relay_selector.rs`):**
+- **Tracker:** `RelayDrainTracker` keeps the relay connection its streams run on. `RelayHandler::run` attaches it.
+- **Cut:** `cut()` closes that connection with application code `DRNT` (0x44524E54), "relay drain timeout".
+- **Timeout path:** `migrate` now calls the new `drain_old_relay`. It waits up to `drain_timeout` for the streams to end, then cuts.
+- **Unchanged:** a drain that completes in time closes nothing early.
+
+```rust
+// AFTER (relay_selector.rs):
+async fn drain_old_relay(tracker: &RelayDrainTracker, drain_timeout: Duration, relay_id: &str) -> bool {
+    if tokio::time::timeout(drain_timeout, tracker.wait_for_idle()).await.is_ok() { return true; }
+    emit_event(SelectorEvent::DrainTimeoutFired);
+    tracker.cut(); // closes the old relay connection: every stream on it ends now
+    false
+}
+```
+- **Effect:** with the relay fix (FU-15 relay path) the client gets a reset for streams cut this way; without it, the relay ends them with its own abort code.
+
+**Tests:**
+- `cut_closes_the_attached_connection_and_its_streams`;
+- `cut_without_a_connection_is_a_no_op`;
+- `drain_timeout_cuts_the_streams_still_open`;
+- `a_completed_drain_does_not_cut`;
+- `the_drain_tracker_can_cut_the_relay_connection_the_handler_serves` (real `RelayHandler`).
+
+Connector 277 pass; 3 mutants killed (no cut at timeout, handler doesn't attach, cut doesn't close). Not live-tested.
+
+**Console text (follow-up decision):** with FU-14 deployed, open connections on a draining relay end at most `relay_drain_timeout_secs` (120 s) after their connector moves. The console text changed in #160 ("keep running until they end") can name the limit again once connectors run this fix. Older connectors still don't cut.
+
+### Fix: FU-10 the client restores the tunnel after a daemon restart or reboot
+**Issue:** live E2E run 2026-10-29 (O-5): after a reboot or a daemon restart the client had no access until `zecurity-client up`. The daemon loaded its saved state, synced the ACL and refreshed tokens, but only `login` and `up` created the tunnel.
+
+**Decision (Barath, 2026-11-02):** option (a), remember the last state. The tunnel comes back only if the user left it up; a deliberate `down` survives a reboot. (Rejected: (b) always on, which ignores `down`; (c) manual only.)
+
+**Fix Applied (client only; no controller, proto or schema change):**
+- **Saved choice:** `StoredWorkspaceState.tunnel_wanted` (encrypted state file, `#[serde(default)]` false, so state saved before this starts down as before). Mirrored in `RuntimeState.tunnel_wanted`.
+  - Set by a successful `up` (IPC `Up`) and by login (`PostLoginState`, after its automatic up or restart).
+  - Cleared by `down` (IPC `Down`, always) and by a revoke or re-enroll marker (`mark_device_state`). `logout` removes the whole state file.
+  - A failed `up` leaves the choice unchanged.
+- **Restore at start:** `daemon::run` spawns `restore_tunnel` when the loaded state has `tunnel_wanted`. It uses the same `handle_up` path as `zecurity-client up` (the ACL fetch inside it refreshes an expired access token).
+  - Retries with backoff: 2 s, doubling to once a minute, while the user still wants the tunnel and the device is active.
+  - Stops when the tunnel is up (also if `up` or login got there first), after a `down`, or when the device is no longer active. A revoke seen while restoring exits the daemon, as the startup ACL fetch does.
+- **Ordering:** `RuntimeState.tunnel_intent_lock` serializes IPC `Up`, `Down`, the login up and each restore attempt, so a `down` either lands before an attempt (which then stops) or after it (and takes the tunnel down).
+- **Status:** `IpcResponse.tunnel_restoring` (the last attempt's error); `status` prints `Tunnel: restoring after restart (last attempt: …)` instead of "down — run up" meanwhile.
+
+```rust
+// AFTER (daemon::run, after the saved state is loaded):
+if stored.tunnel_wanted {
+    tokio::spawn(async move {
+        restore_tunnel(&state_clone, &conf_clone, &tun_slot_clone).await;
+    });
+}
+```
+
+**Tests** (`daemon.rs` `tunnel_restore_tests`, the "up" step injected; saved state through the real `state_store` in a tempdir):
+- `a_tunnel_left_up_is_restored`; `the_restore_retries_until_up_succeeds` (status shows the last error meanwhile);
+- `a_tunnel_left_down_is_not_restored`; `a_revoked_or_disabled_device_is_not_restored`; `a_directive_during_the_restore_stops_it`;
+- `a_down_during_the_restore_stops_it_and_is_saved` (the `down` waits for the in-flight attempt);
+- `up_and_down_save_the_users_choice` (real IPC handler); `the_saved_choice_survives_other_saves_and_not_a_directive`; `startup_reads_the_saved_choice_and_old_state_starts_down`;
+- `status.rs`: `status_says_when_the_tunnel_is_being_restored`.
+
+Client 307 pass; clippy: no new findings. 8 mutants killed (down not taking the lock, down not saved, failed up saved, restore ignoring the choice, restore ignoring the device state, directive keeping the choice, startup ignoring the saved choice, no retry). Every restore test has a 5 s bound, so a broken stop condition fails instead of hanging.
+
+**Not covered by unit tests:** the spawn in `daemon::run` and the login path (`PostLoginState`) need a real TUN device and controller; both are covered by the live run below.
+
+**Live run 2026-11-02 (M2): PASS.**
+- **Stack:**
+  - This PC: throwaway controller on a fresh DB `zecurity_live_fu10_*` with the isolated Valkey (never `ztna_platform`), and a connector on the direct path (no relay).
+  - Resource: a Valkey container at `172.17.0.3:6379`. .53 has no route to it, so it's reachable only through the tunnel.
+  - The branch-built client installed as the system service (enabled at boot) on **manojinkyank (.53)**, which was rebooted for real.
+- **Results** (nothing was typed on .53 after a restart or boot before each check):
+
+  | Check | Result |
+  |---|---|
+  | Baseline: after login | `Tunnel: up`; `PING` → `+PONG` through the tunnel; connector `access allowed` / `tunnel_opened ok` for the device |
+  | `systemctl restart` | "restoring the tunnel the user left up"; `zecurity0 up` 35 ms after start, attempt 1; `+PONG` |
+  | Real reboot while up | Daemon started 14 s after boot. Attempts 1 and 2 failed (`ACL sync failed: transport error`, network not ready yet). Attempt 3 at +6 s (backoff 2 s, 4 s): tunnel restored; `+PONG`; connector `tunnel_opened ok` |
+  | `down`, then real reboot | `Tunnel: down`, no `zecurity0`, no restore line in the boot's log, resource unreachable |
+  | Plain `up` (not login), then restart | Restored in 37 ms; resource reachable |
+- **Lab notes:**
+  - Device tunnels use connector port **9092** (TCP and UDP), not 9091 (the shield port).
+  - A client on another host needs its login callback forwarded (`127.0.0.1:<port>` is on the client host), and the redirect must arrive within the controller's 60 s `ctrl_code` window.
+- **Cleanup:** client uninstalled and its state removed on .53; DB dropped; Valkey flushed and stopped; firewall rules removed.
+
+### Fix: FU-11 public workspace discovery is rate limited (mitigation, not elimination)
+**Issue:** `lookupWorkspacesByEmail` (and the slug lookups) answered any number of unauthenticated calls: 85 in a burst during the live E2E run (F-6). That makes it an enumeration oracle.
+
+**Root Cause:** the per-operation limits planned in ADR-009 (Tier 3) were never built, and one request can repeat a field under aliases.
+
+**Fix Applied:** new package `controller/internal/discoverylimit`, plus one `Charge` call per resolver.
+- **Shared budget:** one Valkey fixed-window budget per client IP (IPv6 /64), 30/60 s, shared by `lookupWorkspacesByEmail`, `lookupWorkspace`, `lookupIdpConnections` and `GET /workspaces/{slug}/auth`.
+- **Email budget:** 5/hour per canonical email, keyed by HMAC (HKDF from `PKI_MASTER_SECRET`).
+- **Charged per resolver run,** so aliases, fragments, the authenticated route and every transport count.
+- **Whole-response refusal:** a gqlgen response interceptor blanks the whole operation when any field is refused.
+- **Status codes:** 429 + `Retry-After` / 503 fail closed.
+- **Optional trusted proxies:** `DISCOVERY_TRUSTED_PROXY_CIDRS`.
+- **Metric:** `discovery_requests_total{operation,result}`.
+
+```go
+// AFTER (each discovery resolver, before any read):
+if err := discoverylimit.Charge(ctx, discoverylimit.OpEmailLookup, email); err != nil {
+	return nil, err
+}
+```
+Details: ADR-009 → Workspace-discovery enumeration (FU-11); `docs/workspace-discovery-rate-limit.md`. Tests: `internal/discoverylimit/*_test.go`, `graph/resolvers/discovery_ratelimit_test.go`; 11 mutants killed.
 
 ### Fix: FU-6 a missed relay list reaches the connector within a minute
 **Issue:** a failed post-commit `broadcastRelayList` (drain, revoke, eviction), a full connector send queue, or two broadcasts delivered out of order left a connected connector on an old relay list until the next pool change or a reconnect. After a drain, that connector kept using the draining relay.

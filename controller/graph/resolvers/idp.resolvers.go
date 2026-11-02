@@ -18,6 +18,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/scim"
@@ -205,8 +206,14 @@ func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string
 			if errors.Is(err, idp.ErrConnectionNotFound) {
 				return nil, apperr.UserErrorf("setIdpConnectionStatus: connection not found")
 			}
+			if errors.Is(err, idp.ErrLastAdmin) {
+				r.auditIdp(ctx, tc, "idp.connection.disable_refused_last_admin", id, nil)
+				return nil, apperr.UserErrorf("setIdpConnectionStatus: disabling this connection would suspend the workspace's last active admin; make another user Admin first")
+			}
 			return nil, fmt.Errorf("setIdpConnectionStatus: %w", err)
 		}
+		// Suspended users lose console access on their next request.
+		r.Roles.InvalidateTenant(tc.TenantID)
 		if suspended > 0 || unmanaged > 0 {
 			log.Printf("idp: disable of connection %s suspended %d and unmanaged %d scim users", id, suspended, unmanaged)
 		}
@@ -873,6 +880,10 @@ func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceI
 // An unknown slug yields an empty list rather than an error, matching
 // lookupWorkspace's found:false semantics.
 func (r *queryResolver) LookupIdpConnections(ctx context.Context, workspaceSlug string) ([]*graph.PublicIdpConnection, error) {
+	// FU-11: public discovery is rate limited before anything is read.
+	if err := discoverylimit.Charge(ctx, discoverylimit.OpIdpConnections, ""); err != nil {
+		return nil, err
+	}
 	tenantID, err := r.IdpStore.WorkspaceIDBySlug(ctx, workspaceSlug)
 	if err != nil {
 		if errors.Is(err, idp.ErrWorkspaceNotFound) {

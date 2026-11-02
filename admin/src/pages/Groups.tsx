@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { Plus, Users } from 'lucide-react'
@@ -21,6 +22,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, relativeTime } from '@/lib/console'
+import { Capability, useCan } from '@/lib/capabilities'
 import { cn } from '@/lib/utils'
 import { GroupOriginLabel } from '@/components/groups/GroupOriginLabel'
 
@@ -159,6 +161,7 @@ export default function Groups() {
   const navigate = useNavigate()
 
   const [showCreate, setShowCreate] = useState(false)
+  const canWrite = useCan(Capability.AccessWrite)
   const [editTarget, setEditTarget] = useState<Group | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Group | null>(null)
 
@@ -178,14 +181,17 @@ export default function Groups() {
   )
 
   const [createGroup, { loading: creating }] = useMutation(CreateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowCreate(false); refetch() },
   })
 
   const [updateGroup, { loading: updating }] = useMutation(UpdateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setEditTarget(null); refetch() },
   })
 
   const [deleteGroup, { loading: deleting }] = useMutation(DeleteGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setDeleteTarget(null); refetch() },
   })
 
@@ -200,10 +206,12 @@ export default function Groups() {
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{groups.length}</span> total
           </span>
+          {canWrite && (
           <Button onClick={() => setShowCreate(true)} className="gap-2">
             <Plus className="h-4 w-4" />
             New Group
           </Button>
+          )}
         </div>
       </div>
 
@@ -226,7 +234,7 @@ export default function Groups() {
               icon={<Users className="h-6 w-6" />}
               title="No groups yet"
               description="Create a group, add users, and assign resources to control who can access what."
-              action={<Button onClick={() => setShowCreate(true)}>New Group</Button>}
+              action={canWrite ? <Button onClick={() => setShowCreate(true)}>New Group</Button> : undefined}
             />
           ) : (
             <div className="min-w-[860px]">
@@ -266,7 +274,7 @@ export default function Groups() {
                   </div>
 
                   <div className="flex items-center justify-end gap-3">
-                    {group.origin !== 'scim' && (
+                    {group.origin !== 'scim' && canWrite && (
                       <>
                         <button
                           onClick={() => setEditTarget(group)}

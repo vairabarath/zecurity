@@ -556,6 +556,33 @@ fn build_migration_candidates(
         .collect()
 }
 
+/// Waits up to `drain_timeout` for the streams on a migrated-away relay to
+/// end by themselves. Those still open at the timeout are cut: the old relay
+/// connection is closed (FU-14). Before, only the session task was aborted and
+/// detached stream tasks kept the connection, and the drained relay, in use
+/// until they finished. Returns true when the drain completed in time.
+async fn drain_old_relay(
+    tracker: &RelayDrainTracker,
+    drain_timeout: Duration,
+    relay_id: &str,
+) -> bool {
+    if tokio::time::timeout(drain_timeout, tracker.wait_for_idle())
+        .await
+        .is_ok()
+    {
+        info!(relay_id = %relay_id, "old relay drain completed after active streams reached zero");
+        return true;
+    }
+    emit_event(SelectorEvent::DrainTimeoutFired);
+    warn!(
+        relay_id = %relay_id,
+        active_streams = tracker.active_streams(),
+        "old relay drain timed out; cutting the streams still open"
+    );
+    tracker.cut();
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn migrate(
     cfg: &RelaySelectorConfig,
@@ -612,22 +639,7 @@ async fn migrate(
                     })
                     .await;
 
-                if tokio::time::timeout(cfg.drain_timeout, old.drain_tracker.wait_for_idle())
-                    .await
-                    .is_err()
-                {
-                    emit_event(SelectorEvent::DrainTimeoutFired);
-                    warn!(
-                        relay_id = %old.info.relay_id,
-                        active_streams = old.drain_tracker.active_streams(),
-                        "old relay drain timed out with active streams still open"
-                    );
-                } else {
-                    info!(
-                        relay_id = %old.info.relay_id,
-                        "old relay drain completed after active streams reached zero"
-                    );
-                }
+                drain_old_relay(&old.drain_tracker, cfg.drain_timeout, &old.info.relay_id).await;
 
                 old.handle.abort();
 
@@ -994,6 +1006,51 @@ fn emit_event(event: SelectorEvent) {
 mod tests {
     use super::*;
     use crate::proto::{LabelledRelayInfo, RelayCapacityLabel};
+
+    /// FU-14: streams still open when the drain timeout fires are cut: the
+    /// old relay connection is closed, so they end at ~drain_timeout instead
+    /// of running on until they finish by themselves.
+    #[tokio::test]
+    async fn drain_timeout_cuts_the_streams_still_open() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side);
+        let _long_download = tracker.track_stream();
+
+        let drained = drain_old_relay(&tracker, Duration::from_millis(100), "old-relay").await;
+
+        assert!(!drained, "a stream was still open at the timeout");
+        let reason = tokio::time::timeout(Duration::from_secs(2), relay_side.closed())
+            .await
+            .expect("the old relay connection must be closed at the timeout");
+        assert!(
+            matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+                if c.error_code == quinn::VarInt::from_u32(crate::relay_handler::DRAIN_TIMEOUT_CODE)),
+            "relay saw {reason:?}"
+        );
+    }
+
+    /// A drain that completes in time closes nothing early.
+    #[tokio::test]
+    async fn a_completed_drain_does_not_cut() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side);
+        let stream = tracker.track_stream();
+        let t = tracker.clone();
+        let drain =
+            tokio::spawn(
+                async move { drain_old_relay(&t, Duration::from_secs(5), "old-relay").await },
+            );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(stream); // the last stream ends on its own
+        assert!(drain.await.unwrap(), "the drain completed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            relay_side.close_reason().is_none(),
+            "nothing may be cut after a completed drain"
+        );
+    }
 
     fn info(id: &str, tier: RelayCapacityLabel) -> LabelledRelayInfo {
         LabelledRelayInfo {

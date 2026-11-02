@@ -20,8 +20,15 @@ import (
 func (r *mutationResolver) CreateGroup(ctx context.Context, name string, description *string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
 
+	name, err := validGroupName(name)
+	if err != nil {
+		return nil, err
+	}
 	row, err := r.PolicyStore.CreateGroup(ctx, tc.TenantID, name, description)
 	if err != nil {
+		if isDuplicateGroupName(err) {
+			return nil, errDuplicateGroupName
+		}
 		return nil, fmt.Errorf("createGroup: %w", err)
 	}
 	r.auditAdmin(ctx, "group.create", "group", row.ID, map[string]any{"name": row.Name})
@@ -38,21 +45,31 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 	existing, err := r.PolicyStore.GetGroup(ctx, id)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("updateGroup: group not found")
+			return nil, apperr.UserErrorf("updateGroup: group not found")
 		}
 		return nil, fmt.Errorf("updateGroup: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return nil, fmt.Errorf("updateGroup: group not found")
+		return nil, apperr.UserErrorf("updateGroup: group not found")
 	}
 	if existing.Origin == "scim" {
 		return nil, apperr.UserErrorf("updateGroup: cannot edit a directory-managed (SCIM) group")
 	}
 
+	if name != nil {
+		trimmed, err := validGroupName(*name)
+		if err != nil {
+			return nil, err
+		}
+		name = &trimmed
+	}
 	row, err := r.PolicyStore.UpdateGroup(ctx, id, name, description)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("updateGroup: group not found")
+			return nil, apperr.UserErrorf("updateGroup: group not found")
+		}
+		if isDuplicateGroupName(err) {
+			return nil, errDuplicateGroupName
 		}
 		return nil, fmt.Errorf("updateGroup: %w", err)
 	}
@@ -70,12 +87,12 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 	existing, err := r.PolicyStore.GetGroup(ctx, id)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return false, fmt.Errorf("deleteGroup: group not found")
+			return false, apperr.UserErrorf("deleteGroup: group not found")
 		}
 		return false, fmt.Errorf("deleteGroup: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return false, fmt.Errorf("deleteGroup: group not found")
+		return false, apperr.UserErrorf("deleteGroup: group not found")
 	}
 	if existing.Origin == "scim" {
 		return false, apperr.UserErrorf("deleteGroup: cannot delete a directory-managed (SCIM) group")
@@ -83,7 +100,7 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 
 	if err := r.PolicyStore.DeleteGroup(ctx, id); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return false, fmt.Errorf("deleteGroup: group not found")
+			return false, apperr.UserErrorf("deleteGroup: group not found")
 		}
 		return false, fmt.Errorf("deleteGroup: %w", err)
 	}
@@ -97,6 +114,9 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 // AddGroupMember is the resolver for the addGroupMember field.
 func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
+	if err := refuseSelfGroupChange(ctx, tc.UserID, userID); err != nil {
+		return nil, err
+	}
 
 	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
 	if err != nil {
@@ -129,16 +149,19 @@ func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, u
 // RemoveGroupMember is the resolver for the removeGroupMember field.
 func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
+	if err := refuseSelfGroupChange(ctx, tc.UserID, userID); err != nil {
+		return nil, err
+	}
 
 	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("removeGroupMember: group not found")
+			return nil, apperr.UserErrorf("removeGroupMember: group not found")
 		}
 		return nil, fmt.Errorf("removeGroupMember: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return nil, fmt.Errorf("removeGroupMember: group not found")
+		return nil, apperr.UserErrorf("removeGroupMember: group not found")
 	}
 	if existing.Origin == "scim" {
 		return nil, apperr.UserErrorf("removeGroupMember: cannot remove members from a directory-managed (SCIM) group; membership is managed by the identity provider")
@@ -146,7 +169,7 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 
 	if err := r.PolicyStore.RemoveGroupMember(ctx, groupID, userID); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("removeGroupMember: member not found")
+			return nil, apperr.UserErrorf("removeGroupMember: member not found")
 		}
 		return nil, fmt.Errorf("removeGroupMember: %w", err)
 	}
@@ -160,6 +183,9 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 // AssignResourceToGroup is the resolver for the assignResourceToGroup field.
 func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
+	if err := r.refuseOwnGroupAccessChange(ctx, tc.TenantID, tc.UserID, groupID); err != nil {
+		return nil, err
+	}
 
 	// The store checks the resource and the group belong to this workspace (B-1).
 	if _, err := r.PolicyStore.AssignResourceToGroup(ctx, tc.TenantID, resourceID, groupID); err != nil {
@@ -178,6 +204,9 @@ func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID
 // UnassignResourceFromGroup is the resolver for the unassignResourceFromGroup field.
 func (r *mutationResolver) UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
+	if err := r.refuseOwnGroupAccessChange(ctx, tc.TenantID, tc.UserID, groupID); err != nil {
+		return nil, err
+	}
 
 	if err := r.PolicyStore.UnassignResourceFromGroup(ctx, tc.TenantID, resourceID, groupID); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {

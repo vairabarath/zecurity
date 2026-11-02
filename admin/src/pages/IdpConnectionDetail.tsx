@@ -1,4 +1,6 @@
 import { useNavigate, useParams } from 'react-router-dom'
+import { toastMutationError } from '@/lib/mutationErrors'
+import { Capability, useCan } from '@/lib/capabilities'
 import { useState } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { ArrowLeft, KeyRound } from 'lucide-react'
@@ -25,6 +27,7 @@ type IdpConnectionDetailData = ScimConfigConnection & {
 }
 
 export default function IdpConnectionDetail() {
+  const canWrite = useCan(Capability.IdentityAdmin)
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
@@ -45,7 +48,8 @@ export default function IdpConnectionDetail() {
   })
   const [setConnectionStatus, { loading: statusPending }] = useMutation(
     SetIdpConnectionStatusDocument,
-    { refetchQueries: [{ query: GetIdpConnectionsDocument }] },
+    {
+    onError: toastMutationError, refetchQueries: [{ query: GetIdpConnectionsDocument }] },
   )
 
   const connection = (data?.idpConnections ?? []).find(
@@ -202,7 +206,7 @@ export default function IdpConnectionDetail() {
           Platform/managed connections are provider-managed and must not expose
           destructive controls.
           --------------------------------------------------------------- */}
-      {connection!.managed ? null : (
+      {connection!.managed || !canWrite ? null : (
         <div className="border-t border-border/60 pt-4">
           <h3 className="text-sm font-medium text-muted-foreground mb-3">
             Danger Zone

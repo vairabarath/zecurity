@@ -275,19 +275,33 @@ func (s *Service) runInvitedUserTransaction(
 		return nil, err
 	}
 
-	// Link the workspace_members row to the now-known user_id.
-	// The full activation (status='active', joined_at) is done by AcceptInvitation
-	// after the frontend calls /api/invitations/{token}/accept.
+	// This first login IS the join: activate the membership row created at
+	// invite time and mark the pending invitation used, in this transaction.
+	// Leaving them 'invited'/'pending' until /api/invitations/{token}/accept
+	// left every user who signed in without the invite link (e.g. straight
+	// through the workspace's IdP) shown as invited forever. A later accept of
+	// the same link finds nothing pending and returns its usual "already used";
+	// the login callback ignores that.
 	_, err = tx.Exec(ctx,
 		`UPDATE workspace_members
-		    SET user_id = $1
+		    SET user_id = $1, status = 'active', joined_at = NOW()
 		  WHERE workspace_id = $2
 		    AND email = $3
 		    AND status = 'invited'`,
 		userID, workspaceID, email,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("link invited user to workspace_members: %w", err)
+		return nil, fmt.Errorf("activate invited workspace_members: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE invitations
+		    SET status = 'accepted'
+		  WHERE workspace_id = $1
+		    AND email = $2
+		    AND status = 'pending'`,
+		workspaceID, email,
+	); err != nil {
+		return nil, fmt.Errorf("mark invitation accepted: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

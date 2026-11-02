@@ -55,54 +55,54 @@ type DevicePostureVisibility {
 
 
 extend type Query {
-  supportedPostureChecks: [PostureCheckDescriptor!]! @hasRole(roles: [ADMIN])
-  deviceProfiles: [DeviceProfile!]! @hasRole(roles: [ADMIN])
+  supportedPostureChecks: [PostureCheckDescriptor!]! @requires(capability: CONSOLE_READ)
+  deviceProfiles: [DeviceProfile!]! @requires(capability: CONSOLE_READ)
 
   devicePostureVisibility(
     profileId: ID!
-  ): [DevicePostureVisibility!]! @hasRole(roles: [ADMIN])
+  ): [DevicePostureVisibility!]! @requires(capability: CONSOLE_READ)
 }
 
 extend type Mutation {
   createDeviceProfile(
     name: String!
     manualTrust: Boolean = true
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   updateDeviceProfileMode(
     id: ID!
     mode: DeviceProfileMode!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   # Deprecated (ADR-030): manualTrust is not enforced; require
   # zecurity.device.approved instead.
   updateDeviceProfileManualTrust(
     id: ID!
     enabled: Boolean!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   addProfileRequirement(
     profileId: ID!
     checkId: String!
     allowUnsupported: Boolean!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   deleteDeviceProfile(
     id: ID!
-  ): Boolean! @hasRole(roles: [ADMIN])
+  ): Boolean! @requires(capability: POSTURE_WRITE)
 
   removeProfileRequirement(
     profileId: ID!
     checkId: String!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   bindResourceToProfile(
     profileId: ID!
     resourceId: ID!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   unbindResourceFromProfile(
     profileId: ID!
     resourceId: ID!
-  ): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 }

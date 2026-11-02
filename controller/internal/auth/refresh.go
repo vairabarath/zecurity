@@ -145,16 +145,20 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// pool is configured (unit tests exercising token mechanics in isolation).
 	currentGen := claims.IdentityGeneration
 	if s.cfg.Pool != nil {
-		var dbEmail, status string
+		var dbEmail, status, dbRole string
 		if err := s.cfg.Pool.QueryRow(ctx,
-			`SELECT email, status, identity_generation FROM users WHERE id = $1`,
+			`SELECT email, status, identity_generation, role FROM users WHERE id = $1`,
 			userID,
-		).Scan(&dbEmail, &status, &currentGen); err != nil {
+		).Scan(&dbEmail, &status, &currentGen, &dbRole); err != nil {
 			return "", "", dead("token missing claims")
 		}
 		if email == "" {
 			email = dbEmail
 		}
+		// Re-stamp the CURRENT role (PENDING-19). The claim is display-only —
+		// authorization reads users.role live — but a refreshed token should
+		// not keep showing a role the user no longer has.
+		role = dbRole
 		if err := identity.CheckLifecycle(status); err != nil {
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
 			return "", "", dead("session revoked")

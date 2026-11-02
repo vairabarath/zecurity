@@ -9,6 +9,7 @@ import {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -28,6 +29,7 @@ function connectorTone(status: ConnectorStatus): 'ok' | 'warn' | 'danger' | 'mut
 
 export default function AllConnectors() {
   const [showAdd, setShowAdd] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
 
@@ -84,10 +86,12 @@ export default function AllConnectors() {
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{allConnectors.length}</span> total
           </span>
+          {canWrite && (
           <Button onClick={() => setShowAdd(true)} disabled={networks.length === 0} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Connector
           </Button>
+          )}
         </div>
       </div>
 
@@ -139,7 +143,7 @@ export default function AllConnectors() {
             <EmptyState
               title="No connectors match the current filters"
               description={networks.length === 0 ? 'Create a remote network first.' : 'Try another filter or add a new connector.'}
-              action={networks.length > 0 ? <Button onClick={() => setShowAdd(true)}>Add Connector</Button> : <Link to="/remote-networks" className="text-sm font-semibold text-primary">Create a remote network</Link>}
+              action={!canWrite ? undefined : networks.length > 0 ? <Button onClick={() => setShowAdd(true)}>Add Connector</Button> : <Link to="/remote-networks" className="text-sm font-semibold text-primary">Create a remote network</Link>}
             />
           ) : (
             <div className="min-w-280">

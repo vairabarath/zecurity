@@ -3451,3 +3451,109 @@ serves on `127.0.0.1:9102`.
 - **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
 - **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
 
+## 2026-10-30 — M1: D21-R (hostile connector at the shield) implemented
+- Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.
+- Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings`), commits for a1; a2 (+ watermark, ack-path and coalescer fixes); A′ (+ review fix); D; S signed resource sets (supersedes a1); docs. Not pushed. Controller 1536/0/2, connector 270, shield 79; mutant-checked.
+- Record: `.zecurity-obs/Sprint20/Fixes/connector-revocation/D21R-Shield-Hostile-Connector-Design-2026-10-30.md`. Next: live check on the lab (needs new controller, connector and shield builds), then push + PR into `fixed-pendings`.
+
+## 2026-10-31 — M2: FU-11 workspace-discovery rate limiting (mitigation)
+- Branch `fu11/discovery-rate-limit` (from `fixed-pendings` `770193e1`). Spec approved by Barath (with a ChatGPT review); decisions A–D.
+- New package `internal/discoverylimit` (the existing `internal/discovery` is network/service discovery and was left untouched).
+- **Shared budget:** one per-IP budget (30/60 s, IPv6 /64) for `lookupWorkspacesByEmail`, `lookupWorkspace`, `lookupIdpConnections` and `GET /workspaces/{slug}/auth`.
+- **Email budget:** 5/h per HMAC'd canonical email.
+- **Enforcement and responses:** charged per resolver run; whole-response refusal; 429 + `Retry-After`, 503 fail closed; optional trusted proxies.
+- **Telemetry:** `discovery_requests_total`, `discovery:` logs without emails.
+- Found during testing: aliases let one public request run many lookups, and signed-in users had no limit either. Both are covered now.
+- Smoke test of the real binary on a throwaway DB:
+  - shared budget across GraphQL and REST → 429;
+  - Valkey down → 503 on both routes;
+  - bad proxy config refuses startup;
+  - no email in logs.
+- Docs: ADR-009 section (status kept *proposed*), `docs/workspace-discovery-rate-limit.md`, FU-11 → Mitigated.
+- **Open:**
+  - email-verified discovery decision before GA;
+  - admin login "too many attempts" message (`admin/`);
+  - `initiateAuth` limit (ADR-009 Tier 3);
+  - provider login adopting trusted proxies;
+  - `.env.example` lines, added by Barath.
+
+## 2026-10-31 — M2: small fixes, S4: relay installer and leftover state
+- Branch `fix/relay-installer-stale-state` (from `fixed-pendings` `a6b83625`).
+- `scripts/relay-local-install.sh` `check_existing_state` reads the existing certificate's relay ID before installing anything:
+  - same ID: kept;
+  - another or unreadable certificate: stops and names both IDs;
+  - `RELAY_RESET_STATE=1`: stops the service and moves the state to a private backup (never deletes a key).
+- Test `scripts/test-relay-installer-state.sh`: 18 checks, no root; 5 mutants killed.
+- Small-fix plan agreed with Barath:
+  - S4 (this), then S2 (relay forwards a reset) and S3 (FU-14 connector drain timeout), as post-sprint fixes;
+  - S1, S5 and S6 (D21-R follow-ups) left to Sathiya.
+
+## 2026-10-31 — M2: small fixes, S2: the relay forwards a reset (FU-15 relay path)
+- Branch `fix/relay-forward-reset` (from `fixed-pendings` `a6b83625`). From the #162 review: the relay finished the client-bound stream gracefully after the connector's reset, so a revoked session's buffered tail still arrived.
+- `pipe_streams` now copies with quinn's own read/write (keeps reset and stop codes). A failed bridge aborts all four halves with the peer's code (RVKD reaches the client), or with `RLAB` for other failures. Clean ends are unchanged.
+- 4 new tests on a real QUIC bridge; the 3 abort tests failed before the fix (the client got 1.27 MB, then a clean EOF). Relay 123 pass; 3 mutants killed. Not live-tested (pairs with #162).
+
+## 2026-10-31 — M2: small fixes, S3: FU-14 the drain timeout cuts
+- Branch `fix/connector-drain-timeout-cut` (from `fixed-pendings` `a6b83625`).
+- `RelayDrainTracker` keeps the relay connection (`RelayHandler::run` attaches it). `cut()` closes it with `DRNT`. `drain_old_relay` cuts on timeout; a completed drain closes nothing.
+- 5 new tests, one through the real `RelayHandler`. Connector 277 pass; 3 mutants killed.
+- Tooling slip: my first `cargo fmt` reformatted 13 unrelated connector files. They were restored before anything was committed; only my four files are changed.
+- Open: console drain text can name 120 s again once connectors run this (decision for Barath); not live-tested.
+
+
+## 2026-10-31 — M2: small fixes merged; AT-E5 PASS; Sprint 22 closed
+- Merged #164 (S4 relay installer state), #165 (S2 relay forwards reset), #166 (S3 / FU-14 connector drain-timeout cut); doc conflicts (append-only, `path.md` + Session Log) resolved on the branches, entries kept in merge order. All CI green (merged before CI had finished; checked afterwards).
+- AT-E5 expired-token refusal: 16:35:31 IST, 66 s after the token's `exp`. Kept V4 controller + `ci_valkey_6390`; the relay verified the CA fingerprint, then Provision got `PermissionDenied: invalid provisioning token`; no certificate; `v4-target` stayed `pending`. **PASS.**
+- Cleanup: V4 DB dropped (removes `v4-target`), `~/.cache/zecurity-v4-at-e5` removed, isolated Valkey stopped. Remaining DBs: `ztna_platform`, `ci_empty_admin`, `postgres`.
+- Ticked V2, V4, AT-E5 and "All scenarios pass" in `Sprint22/path.md`. Sprint 22 closed.
+- Still open: lab checks for S2 (with #162) and S3 (AT-D6 drain rerun); #162 awaits Sathiya's client fix; FU-8/9/10; FU-11 leftovers.
+
+## 2026-11-02 — M2: FU-10 the client restores the tunnel after a restart (not committed)
+- Branch `fix/fu10-restore-tunnel` (from `fixed-pendings` `93f1a888`). Barath chose option (a): remember the last state.
+- `tunnel_wanted` in the encrypted client state: set by a successful `up` and by login, cleared by `down` and by a revoke/re-enroll marker. At start the daemon restores the tunnel through the normal `up` path, retrying 2 s → 60 s while wanted and the device is active; `down` and restore attempts are serialized; `status` shows "restoring after restart (last attempt: …)".
+- 10 new tests; client 307 pass; clippy no new findings; 8 mutants killed (the first run hung on 3 of them, so every restore test now has a 5 s bound; one mutant first survived and the test was fixed).
+- **Live run (same day): PASS.** Client on manojinkyank (.53) as the system service; throwaway controller, connector and a Docker-network resource (only reachable through the tunnel) on this PC.
+  - `systemctl restart`: restored in 35 ms.
+  - Real reboot while up: restored on attempt 3, +6 s after start (the network wasn't ready for the first two).
+  - `down` + real reboot: stayed down, no restore attempt.
+  - Plain `up` + restart: restored.
+  - Torn down (DB, Valkey, client, firewall rules).
+
+## 2026-11-02 — M1: workspace RBAC epic (PENDING-19), approval + R1 backend
+- Approved the design: O-1→R-9 (no self group change unless Admin), O-3→R-10 (invites Admin-only), O-4→R-11. The O-4 code check found SCIM could suspend or delete the last Admin through DELETE, PATCH `active=false` and connection disable, with no guard. Decision: refuse only when it would leave zero active Admins.
+- R1 built on local branch `feat/workspace-rbac-r1` (from `fixed-pendings` `b817cee8`, note commits cherry-picked). Not pushed. PR needs `[schema: reset DB]`.
+  - Migration `047_workspace_roles.sql`; `internal/rbac` (capability table, cached live `Checker`, last-Admin lock); `@requires(capability:)` on all 73 ops; `RequireCapability` on the 3 REST routes (`RequireRole` removed); `setMemberRole`; R-9; R-11 in SCIM `Deprovision`/`Update` and `DisableConnection`.
+  - `schema_authz_test.go` now globs every `*.graphqls`; the old list missed `idp.graphqls` and `posture.graphqls` (~26 ops never checked).
+- Bugs found and fixed before commit, each test-first:
+  - role cache could be repopulated with a stale role by a lookup racing an invalidation (generation counters);
+  - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
+- O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` recreated with consent (047 applied, no init errors); lab data was wiped. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
+- R2 (admin UI) built, same branch, commit `7ff57371`:
+  - console access = `CONSOLE_READ` (one helper, three call sites); write controls hidden per capability across all pages and modal triggers; the self rules R-9, R-12 and R-13 shown in the UI; `ManageRoleDialog`;
+  - gate: `npm run codegen`, `npm run build`, `npm test` (25 files, 195 tests incl. a Viewer sweep over 18 page states, mutation-checked), lint unchanged (17 pre-existing).
+  - Known: the console reads `me.capabilities` once per load; a user demoted mid-session keeps their controls until reload (server refuses every call). R3 should expect this.
+  - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.
+- R3 live run (local stack, local test login), controller and console from this branch:
+  - API checks: 41/41 PASS (per-role allowed/refused, REST 200/403, R-8/9/10/12/13, mid-session demotion with the same token, self-change and last-Admin, 8 audit rows);
+  - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
+  - Follow-up fixed: no toast container was mounted (every toast() was dropped); a capability refusal now shows a toast and re-reads `me`, so controls follow the live role without reload. Live-checked. (The first "silent" observation was partly a test-script slip: the click hit a disabled Create button.)
+  - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.
+- Further fixes, same PR, each test-first and live-checked:
+  - invited join activates the membership and accepts the invitation;
+  - 24 silent mutation hooks now toast, with a guard test;
+  - **ErrorPresenter leak:** gqlgen-wrapped resolver errors were passed through, so raw DB/constraint text reached clients; now masked;
+  - group names: blank refused, duplicate gets a clear message.
+- Gate: controller full `go test` (exit 0, 2 pre-existing skips), fixture suites pass; admin 28 files / 210 tests (one run timed out under load while Go tests ran; clean when rerun alone), build passes, lint unchanged.
+- Small follow-ups (local branch `fix/rbac-small-followups`, on top of #168):
+  - 14 user-actionable resolver errors became user errors (the presenter fix had hidden them);
+  - role labels in GroupDetail;
+  - `/auth/refresh` stamps the current role.
+  - The Users "active" pill needed no change: `users` lists only active users. A list of invited-not-joined people would be a feature.
+  - Gates green; live-checked.
+- Live round 2 (no SCIM), all PASS:
+  - 22 role × endpoint checks (posture, identity, shield-token REST, invitation REST);
+  - the 30 s cache backstop for a role changed in SQL;
+  - demotion to Member with a page open redirects to `/install`;
+  - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
+  - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Capability, useCan } from '@/lib/capabilities'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { AlertTriangle, Check, Copy, KeyRound, RefreshCw, Ticket, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -190,6 +191,7 @@ function tokenState(token: ScimToken): { label: string; tone: 'ok' | 'warn' | 'd
 }
 
 export function ScimTokenPanel({ connectionId }: { connectionId: string }) {
+  const canWrite = useCan(Capability.IdentityAdmin)
   const [showMint, setShowMint] = useState(false)
   const [showRotate, setShowRotate] = useState(false)
   const [revokeTarget, setRevokeTarget] = useState<ScimToken | null>(null)
@@ -274,14 +276,18 @@ export function ScimTokenPanel({ connectionId }: { connectionId: string }) {
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {canWrite && (
             <Button variant="outline" onClick={() => setShowRotate(true)} disabled={tokens.length === 0}>
               <RefreshCw className="mr-2 h-4 w-4" />
               Rotate
             </Button>
+            )}
+            {canWrite && (
             <Button onClick={() => setShowMint(true)}>
               <KeyRound className="mr-2 h-4 w-4" />
               Mint token
             </Button>
+            )}
           </div>
         </div>
       </CardHeader>
@@ -303,7 +309,7 @@ export function ScimTokenPanel({ connectionId }: { connectionId: string }) {
             icon={<KeyRound className="h-6 w-6" />}
             title="No SCIM tokens"
             description="Mint a token and paste it into your identity provider together with the SCIM base URL."
-            action={<Button onClick={() => setShowMint(true)}>Mint token</Button>}
+            action={canWrite ? <Button onClick={() => setShowMint(true)}>Mint token</Button> : undefined}
           />
         ) : (
           <div className="divide-y divide-border/40">
@@ -322,7 +328,7 @@ export function ScimTokenPanel({ connectionId }: { connectionId: string }) {
                     </div>
                   </div>
                   <StatusPill label={state.label} tone={state.tone} />
-                  {token.revokedAt ? null : (
+                  {token.revokedAt || !canWrite ? null : (
                     <Button
                       variant="outline"
                       onClick={() => setRevokeTarget(token)}

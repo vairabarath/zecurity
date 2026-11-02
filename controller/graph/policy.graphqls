@@ -23,18 +23,18 @@ extend type Resource {
 }
 
 extend type Query {
-  groups: [Group!]! @hasRole(roles: [ADMIN])
-  group(id: ID!): Group @hasRole(roles: [ADMIN])
+  groups: [Group!]! @requires(capability: CONSOLE_READ)
+  group(id: ID!): Group @requires(capability: CONSOLE_READ)
 }
 
 extend type Mutation {
-  createGroup(name: String!, description: String): Group! @hasRole(roles: [ADMIN])
-  updateGroup(id: ID!, name: String, description: String): Group! @hasRole(roles: [ADMIN])
-  deleteGroup(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  createGroup(name: String!, description: String): Group! @requires(capability: ACCESS_WRITE)
+  updateGroup(id: ID!, name: String, description: String): Group! @requires(capability: ACCESS_WRITE)
+  deleteGroup(id: ID!): Boolean! @requires(capability: ACCESS_WRITE)
 
-  addGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
-  removeGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
+  addGroupMember(groupId: ID!, userId: ID!): Group! @requires(capability: ACCESS_WRITE)
+  removeGroupMember(groupId: ID!, userId: ID!): Group! @requires(capability: ACCESS_WRITE)
 
-  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
-  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
+  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource! @requires(capability: ACCESS_WRITE)
+  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource! @requires(capability: ACCESS_WRITE)
 }

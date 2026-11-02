@@ -1,3 +1,5 @@
+import { Capability, useCan } from '@/lib/capabilities'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@apollo/client/react'
@@ -136,13 +138,16 @@ export default function ShieldDetail() {
   }
 
   const pending = shield?.status === ShieldStatus.Pending
+  // Install tokens are NETWORK_WRITE (Admin, DevOps; R-4): don't mint one for
+  // a role that may not, and don't show the install command.
+  const canWrite = useCan(Capability.NetworkWrite)
 
   useEffect(() => {
-    if (shield && pending && !didFetch.current) {
+    if (shield && pending && canWrite && !didFetch.current) {
       didFetch.current = true
       void fetchInstallCommand()
     }
-  }, [shield, pending])
+  }, [shield, pending, canWrite])
 
   function handleCopy() {
     if (!installCommand) return
@@ -152,10 +157,12 @@ export default function ShieldDetail() {
   }
 
   const [revokeShield, { loading: revoking }] = useMutation(RevokeShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetShieldDocument, variables: { id: shieldId } }],
   })
 
   const [deleteShield, { loading: deleting }] = useMutation(DeleteShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
     onCompleted: () => navigate('/shields'),
   })
@@ -246,13 +253,13 @@ export default function ShieldDetail() {
         </div>
 
         <div className="flex items-center gap-3">
-          {canRevoke && (
+          {canRevoke && canWrite && (
             <Button variant="outline" size="sm" onClick={handleRevoke} disabled={revoking} className="gap-2 text-destructive/80 hover:bg-destructive/5 hover:text-destructive">
               {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
               Revoke
             </Button>
           )}
-          {canDelete && (
+          {canDelete && canWrite && (
             <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleting} className="gap-2">
               {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
               Delete Shield
@@ -287,7 +294,7 @@ export default function ShieldDetail() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.95fr)]">
         <div className="space-y-4">
-          {pending ? (
+          {pending && canWrite ? (
             <div className="surface-card overflow-hidden">
               <div className="flex items-center justify-between border-b border-border px-5 py-4">
                 <div className="text-sm font-semibold uppercase tracking-[0.08em] text-muted-foreground">Install Command</div>

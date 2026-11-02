@@ -142,6 +142,12 @@ impl TunnelHub {
     }
 }
 
+/// D21-R D: answer a TunnelOpen that the Shield won't open.
+pub async fn refuse_tunnel_open(hub: &TunnelHub, connection_id: &str, reason: &str) {
+    hub.send_upstream(tunnel_opened_msg(connection_id, false, reason))
+        .await;
+}
+
 /// Dispatch to TCP or UDP handler based on protocol field.
 pub async fn handle_tunnel_open(
     hub: TunnelHub,

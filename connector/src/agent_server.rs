@@ -131,6 +131,9 @@ pub struct ShieldRegistry {
     /// open shield Control stream with `Unavailable` (the connector stopped
     /// serving), as distinct from a shield revocation (`PermissionDenied`).
     close_all: Arc<tokio::sync::watch::Sender<u64>>,
+    /// D21-R A′: the workspace CRL manager, forwarded to every Shield so it
+    /// can refuse a revoked Connector itself. Set once at startup.
+    workspace_crl: Arc<std::sync::OnceLock<crate::crl::CrlManager>>,
 }
 
 impl ShieldRegistry {
@@ -166,7 +169,24 @@ impl ShieldRegistry {
             next_stream_id: Arc::new(AtomicU64::new(0)),
             serving_gate,
             close_all: Arc::new(tokio::sync::watch::Sender::new(0)),
+            workspace_crl: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// D21-R A′: forward this workspace CRL to the Shields.
+    pub fn set_workspace_crl(&self, crl: crate::crl::CrlManager) {
+        let _ = self.workspace_crl.set(crl);
+    }
+
+    /// D21-R A′: the current workspace CRL DER, unless `last_sent` (this
+    /// stream's previous send) is already it.
+    fn workspace_crl_to_send(&self, last_sent: &mut Option<Arc<Vec<u8>>>) -> Option<Vec<u8>> {
+        let der = self.workspace_crl.get()?.current_der()?;
+        if der.is_empty() || last_sent.as_ref().is_some_and(|s| Arc::ptr_eq(s, &der)) {
+            return None;
+        }
+        *last_sent = Some(der.clone());
+        Some(der.as_ref().clone())
     }
 
     /// Refusal for a shield while this connector is not serving. A terminal
@@ -952,8 +972,25 @@ impl ShieldService for ShieldRegistry {
         tokio::spawn(async move {
             info!(shield_id = %shield_id, "shield Control stream connected");
 
-            // ADR-004 Phase 2: replay the cached desired-state snapshot first —
-            // a rebooted shield starts empty and must be re-protected. The cache
+            // D21-R A′: the workspace CRL first (the Shield acts on nothing else
+            // without a valid one), then whenever it changes
+            // (checked on every health report). The Shield leaves a Connector
+            // that sends none for too long.
+            let mut crl_sent: Option<Arc<Vec<u8>>> = None;
+            if let Some(crl_der) = registry.workspace_crl_to_send(&mut crl_sent) {
+                use crate::shield_proto::shield_control_message::Body;
+                let _ = out_tx
+                    .send(Ok(ShieldControlMessage {
+                        body: Some(Body::WorkspaceCrl(crate::shield_proto::WorkspaceCrl {
+                            crl_der,
+                        })),
+                    }))
+                    .await;
+            }
+
+            // ADR-004 Phase 2: replay the cached desired-state snapshot right
+            // after the CRL — a rebooted shield starts empty and must be
+            // re-protected. The cache
             // is read (not consumed): it must survive for the next reconnect too.
             let cached = registry
                 .maps
@@ -1043,6 +1080,13 @@ impl ShieldService for ShieldRegistry {
                                             let _ = out_tx
                                                 .send(Ok(ShieldControlMessage {
                                                     body: Some(Body::PeerConnectorList(list)),
+                                                }))
+                                                .await;
+                                        }
+                                        if let Some(crl_der) = registry.workspace_crl_to_send(&mut crl_sent) {
+                                            let _ = out_tx
+                                                .send(Ok(ShieldControlMessage {
+                                                    body: Some(Body::WorkspaceCrl(crate::shield_proto::WorkspaceCrl { crl_der })),
                                                 }))
                                                 .await;
                                         }
@@ -1264,6 +1308,43 @@ mod tests {
             policy_cache,
             crate::authorization::AuthzGate::open_for_tests(),
         )
+    }
+
+    /// D21-R A′: each Shield stream gets the workspace CRL once per new CRL,
+    /// nothing before the manager is set or while it has no valid CRL.
+    #[tokio::test]
+    async fn the_workspace_crl_is_forwarded_once_per_crl() {
+        let registry = test_registry();
+        let mut sent = None;
+        assert!(
+            registry.workspace_crl_to_send(&mut sent).is_none(),
+            "no manager yet"
+        );
+        let crl = crate::crl::CrlManager::new();
+        registry.set_workspace_crl(crl.clone());
+        assert!(
+            registry.workspace_crl_to_send(&mut sent).is_none(),
+            "no CRL yet"
+        );
+        crl.install_test_der(b"crl-1");
+        assert_eq!(
+            registry.workspace_crl_to_send(&mut sent).as_deref(),
+            Some(&b"crl-1"[..])
+        );
+        assert!(
+            registry.workspace_crl_to_send(&mut sent).is_none(),
+            "already sent"
+        );
+        let mut other_stream = None;
+        assert!(
+            registry.workspace_crl_to_send(&mut other_stream).is_some(),
+            "per stream"
+        );
+        crl.install_test_der(b"crl-2");
+        assert_eq!(
+            registry.workspace_crl_to_send(&mut sent).as_deref(),
+            Some(&b"crl-2"[..])
+        );
     }
 
     fn instr(id: &str) -> ResourceInstruction {

@@ -115,6 +115,24 @@ Go gate and console gate from [[Sprint22/path]].
 
 ## Post-Phase Fixes
 
+### Fix: the relay installer stops on another relay's leftover state (2026-10-31, branch `fix/relay-installer-stale-state`)
+**Issue:** in V4 case 3 (2026-10-30) the console's install block ran on a host that still held the earlier AT-E4 relay's certificate in `/var/lib/zecurity-relay/pki`. The service had only been disabled, not uninstalled. The new relay then refused to start: "Relay certificate ID … does not match configured Relay ID …". The installer gave no warning, and the new token went unused until the state was cleared by hand.
+
+**Root Cause:** `scripts/relay-local-install.sh` created the state dir but never looked at what was already in it. The relay itself is right to refuse a mismatched identity.
+
+**Fix Applied (`scripts/relay-local-install.sh`, new `check_existing_state`, run before anything is installed):**
+- **Reads the existing certificate's relay ID** from its SPIFFE URI SAN (`spiffe://…/relay/<id>`) with openssl.
+- **Same ID:** a reinstall; the state is kept.
+- **Another relay's certificate, an unreadable one, or no openssl:** the installer stops, naming both IDs and how to proceed.
+- **With `RELAY_RESET_STATE=1`:** a running relay is stopped and the old files are moved to `<state dir>.replaced-<timestamp>` (mode 0700). A key is never deleted.
+- `scripts/relay-uninstall.sh` (which removes the state unless `--keep-state`) is still the clean way to retire a relay.
+- The legacy `relay-local-install-omitid.sh` (local tests, self-generated ID) is unchanged.
+
+**Tests:** `scripts/test-relay-installer-state.sh`, which runs without root: real openssl certificates, a fake systemctl, 18 checks.
+- **Cases:** no state, same relay, another relay (refuse, files untouched), reset (stop, move, private backup), `RELAY_RESET_STATE=yes` still refuses, unreadable certificate, no openssl.
+- **Mutation checks:** 5 mutants killed (never refuse, any certificate accepted, delete instead of move, world-readable backup, service not stopped).
+
+
 ### Fix: Add relay reopened with the previous relay's values
 **Issue:** after a successful create, opening **Add relay** again showed the last name and SANs (found in the live run).
 

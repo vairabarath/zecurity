@@ -28,7 +28,7 @@ extend type Query {
   myDevices: [ClientDevice!]!
 
   # Admin only — returns all enrolled client devices in the workspace
-  clientDevices: [ClientDevice!]! @hasRole(roles: [ADMIN])
+  clientDevices: [ClientDevice!]! @requires(capability: CONSOLE_READ)
 
   # Returns invitation details by token (public — no auth required)
   invitation(token: String!): Invitation
@@ -36,15 +36,15 @@ extend type Query {
 
 extend type Mutation {
   # Admin only — creates an invitation and sends email to the given address
-  createInvitation(email: String!): Invitation! @hasRole(roles: [ADMIN])
+  createInvitation(email: String!): Invitation! @requires(capability: MEMBERS_ADMIN)
 
   # Admin only — revokes a client device cert. Connector picks up revocation
   # on its next 5-min CRL refresh cycle.
-  revokeDevice(deviceId: ID!): Boolean! @hasRole(roles: [ADMIN])
+  revokeDevice(deviceId: ID!): Boolean! @requires(capability: DEVICE_ADMIN)
 
   # Admin only (ADR-030) — marks a device as approved by an admin, or removes
   # the approval. Audited; access is re-evaluated at once. A revoked device
   # can't be approved. Both are no-ops when the device is already in that state.
-  approveDevice(deviceId: ID!): ClientDevice! @hasRole(roles: [ADMIN])
-  unapproveDevice(deviceId: ID!): ClientDevice! @hasRole(roles: [ADMIN])
+  approveDevice(deviceId: ID!): ClientDevice! @requires(capability: DEVICE_WRITE)
+  unapproveDevice(deviceId: ID!): ClientDevice! @requires(capability: DEVICE_WRITE)
 }

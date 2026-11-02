@@ -15,6 +15,8 @@ use x509_parser::prelude::*;
 struct ValidCrl {
     revoked: HashSet<Vec<u8>>,
     next_update: i64,
+    /// The verified DER, forwarded to Shields as is (D21-R A′).
+    der: Arc<Vec<u8>>,
 }
 /// Result of a revocation lookup. `Unavailable` is a distinct state so callers
 /// cannot mistake "no valid CRL" for "not revoked" (fail-closed by construction).
@@ -84,7 +86,8 @@ impl CrlManager {
         if !remaining.is_empty() {
             anyhow::bail!("trailing data after crl");
         }
-        let validated = validate_crl(&crl, issuer_ca_pem)?;
+        let mut validated = validate_crl(&crl, issuer_ca_pem)?;
+        validated.der = Arc::new(crl_der.to_vec());
         *self.cache.write() = Some(validated);
         Ok(())
     }
@@ -119,6 +122,17 @@ impl CrlManager {
         });
     }
 
+    /// D21-R A′: the DER of the cached CRL while it is still valid, for
+    /// forwarding to Shields. The same `Arc` until a new CRL is installed.
+    pub fn current_der(&self) -> Option<Arc<Vec<u8>>> {
+        let now = ASN1Time::now().timestamp();
+        self.cache
+            .read()
+            .as_ref()
+            .filter(|cache| now < cache.next_update)
+            .map(|cache| cache.der.clone())
+    }
+
     pub fn has_valid_cache(&self) -> bool {
         let now = ASN1Time::now().timestamp();
 
@@ -128,11 +142,22 @@ impl CrlManager {
             .is_some_and(|cache| now < cache.next_update)
     }
 
+    /// D21-R A′ tests: a valid cache whose DER is `der`.
+    #[cfg(test)]
+    pub(crate) fn install_test_der(&self, der: &[u8]) {
+        *self.cache.write() = Some(ValidCrl {
+            revoked: HashSet::new(),
+            next_update: ASN1Time::now().timestamp() + 60,
+            der: Arc::new(der.to_vec()),
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn install_test_cache(&self, serials: Vec<Vec<u8>>) {
         *self.cache.write() = Some(ValidCrl {
             revoked: serials.into_iter().collect(),
             next_update: ASN1Time::now().timestamp() + 60,
+            der: Arc::default(),
         });
     }
 }
@@ -363,6 +388,7 @@ fn validate_crl(
     Ok(ValidCrl {
         revoked,
         next_update,
+        der: Arc::default(),
     })
 }
 
@@ -451,6 +477,7 @@ mod tests {
         *manager.cache.write() = Some(ValidCrl {
             revoked,
             next_update: ASN1Time::now().timestamp() - 1,
+            der: Arc::default(),
         });
 
         assert!(!manager.has_valid_cache());

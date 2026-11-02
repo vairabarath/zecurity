@@ -12,6 +12,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -63,7 +64,7 @@ func newIsoFixture(t *testing.T) *isoFixture {
 		if _, err := pool.Exec(ctx, `INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, w.group, w.user); err != nil {
 			t.Fatalf("seed %s member: %v", tag, err)
 		}
-		w.ctx = tenant.Set(ctx, tenant.TenantContext{TenantID: w.id, UserID: w.user, Role: "admin", Email: "admin-" + tag + "@iso.test"})
+		w.ctx = rbac.WithRole(tenant.Set(ctx, tenant.TenantContext{TenantID: w.id, UserID: w.user, Role: "admin", Email: "admin-" + tag + "@iso.test"}), rbac.RoleAdmin) // live role, as @requires sets it
 		return w
 	}
 	n := policy.NewNotifier(policy.NewSnapshotCache())

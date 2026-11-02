@@ -45,7 +45,7 @@ pub async fn run() -> Result<()> {
                 "Status:     Running as {}, cert expires in {}",
                 email, expires
             );
-            if let Some(line) = tunnel_line(resp.tunnel_up) {
+            if let Some(line) = tunnel_line(resp.tunnel_up, resp.tunnel_restoring.as_deref()) {
                 println!("{line}");
             }
             if let Some(cert_expires_at) = resp.cert_expires_at {
@@ -145,10 +145,18 @@ fn format_duration_since(ts: i64) -> String {
 }
 
 /// The tunnel line of `status`; None when the daemon didn't say (older daemon).
-fn tunnel_line(tunnel_up: Option<bool>) -> Option<String> {
+/// `restoring` is set while the daemon brings the tunnel back after a restart
+/// (FU-10), with the last attempt's error.
+fn tunnel_line(tunnel_up: Option<bool>, restoring: Option<&str>) -> Option<String> {
     tunnel_up.map(|up| {
         if up {
             "Tunnel:     up".to_string()
+        } else if let Some(error) = restoring {
+            if error.is_empty() {
+                "Tunnel:     restoring after restart".to_string()
+            } else {
+                format!("Tunnel:     restoring after restart (last attempt: {error})")
+            }
         } else {
             "Tunnel:     down — resources are not reachable; run `zecurity-client up`".to_string()
         }
@@ -161,9 +169,29 @@ mod tunnel_line_tests {
 
     #[test]
     fn status_says_when_the_tunnel_is_down() {
-        assert_eq!(tunnel_line(Some(true)).as_deref(), Some("Tunnel:     up"));
-        assert!(tunnel_line(Some(false)).unwrap().contains("down"));
-        assert!(tunnel_line(Some(false)).unwrap().contains("zecurity-client up"));
-        assert_eq!(tunnel_line(None), None);
+        assert_eq!(
+            tunnel_line(Some(true), None).as_deref(),
+            Some("Tunnel:     up")
+        );
+        assert!(tunnel_line(Some(false), None).unwrap().contains("down"));
+        assert!(tunnel_line(Some(false), None)
+            .unwrap()
+            .contains("zecurity-client up"));
+        assert_eq!(tunnel_line(None, None), None);
+    }
+
+    #[test]
+    fn status_says_when_the_tunnel_is_being_restored() {
+        assert_eq!(
+            tunnel_line(Some(false), Some("")).as_deref(),
+            Some("Tunnel:     restoring after restart")
+        );
+        let line = tunnel_line(Some(false), Some("ACL sync failed: unreachable")).unwrap();
+        assert!(line.contains("restoring after restart"), "{line}");
+        assert!(line.contains("ACL sync failed: unreachable"), "{line}");
+        assert_eq!(
+            tunnel_line(Some(true), Some("")).as_deref(),
+            Some("Tunnel:     up")
+        );
     }
 }

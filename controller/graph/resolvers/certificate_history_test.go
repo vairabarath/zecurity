@@ -16,6 +16,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -97,7 +98,7 @@ func newCertHistoryFixture(t *testing.T) *certHistoryFixture {
 		Pool:           pool,
 		PolicyNotifier: policy.NewNotifier(policy.NewSnapshotCache()),
 	}}
-	f.ctx = tenant.Set(ctx, tenant.TenantContext{TenantID: f.ws, UserID: f.user, Role: "admin", Email: "admin@certhist.test"})
+	f.ctx = rbac.WithRole(tenant.Set(ctx, tenant.TenantContext{TenantID: f.ws, UserID: f.user, Role: "admin", Email: "admin@certhist.test"}), rbac.RoleAdmin) // live role, as @requires sets it
 	return f
 }
 

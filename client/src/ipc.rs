@@ -95,10 +95,13 @@ pub struct IpcResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_reason: Option<String>,
     /// Status: whether the tunnel is up. "Running" only means the daemon runs
-    /// with a session; after a daemon restart the tunnel stays down until
-    /// `up` (live run 2026-10-29, O-5).
+    /// with a session (live run 2026-10-29, O-5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_up: Option<bool>,
+    /// Status (FU-10): present while the daemon is bringing the tunnel back
+    /// after a restart; the last attempt's error, "" before the first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_restoring: Option<String>,
 }
 
 // ── Socket path ──────────────────────────────────────────────────────────────

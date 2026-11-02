@@ -36,18 +36,18 @@ input UpdateResourceInput {
 }
 
 extend type Query {
-  resources(remoteNetworkId: String!): [Resource!]! @hasRole(roles: [ADMIN])
-  allResources: [Resource!]! @hasRole(roles: [ADMIN])
+  resources(remoteNetworkId: String!): [Resource!]! @requires(capability: CONSOLE_READ)
+  allResources: [Resource!]! @requires(capability: CONSOLE_READ)
 }
 
 extend type Mutation {
-  createResource(input: CreateResourceInput!): Resource! @hasRole(roles: [ADMIN])
-  updateResource(id: ID!, input: UpdateResourceInput!): Resource! @hasRole(roles: [ADMIN])
-  protectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
-  unprotectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
-  deleteResource(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  createResource(input: CreateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
+  updateResource(id: ID!, input: UpdateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
+  protectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
+  unprotectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
+  deleteResource(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
   # Break-glass (ADR-004 Phase 4): hard-delete a resource in ANY state, bypassing
   # the confirmation-gated tombstone path. For resources permanently stuck because
   # their shield is gone and will never ack removal. Admin-only and audit-logged.
-  forceDeleteResource(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  forceDeleteResource(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
 }
