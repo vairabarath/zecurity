@@ -3534,3 +3534,9 @@ serves on `127.0.0.1:9102`.
   - **ErrorPresenter leak:** gqlgen-wrapped resolver errors were passed through, so raw DB/constraint text reached clients; now masked;
   - group names: blank refused, duplicate gets a clear message.
 - Gate: controller full `go test` (exit 0, 2 pre-existing skips), fixture suites pass; admin 28 files / 210 tests (one run timed out under load while Go tests ran; clean when rerun alone), build passes, lint unchanged.
+- Small follow-ups (local branch `fix/rbac-small-followups`, on top of #168):
+  - 14 user-actionable resolver errors became user errors (the presenter fix had hidden them);
+  - role labels in GroupDetail;
+  - `/auth/refresh` stamps the current role.
+  - The Users "active" pill needed no change: `users` lists only active users. A list of invited-not-joined people would be a feature.
+  - Gates green; live-checked.
