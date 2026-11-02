@@ -3513,5 +3513,6 @@ serves on `127.0.0.1:9102`.
 - O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` recreated with consent (047 applied, no init errors); lab data was wiped. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
 - R2 (admin UI) built, same branch, commit `7ff57371`:
   - console access = `CONSOLE_READ` (one helper, three call sites); write controls hidden per capability across all pages and modal triggers; the self rules R-9, R-12 and R-13 shown in the UI; `ManageRoleDialog`;
-  - gate: `npm run codegen`, `npm run build`, `npm test` (24 files, 160 tests), lint unchanged (17 pre-existing).
+  - gate: `npm run codegen`, `npm run build`, `npm test` (25 files, 195 tests incl. a Viewer sweep over 18 page states, mutation-checked), lint unchanged (17 pre-existing).
+  - Known: the console reads `me.capabilities` once per load; a user demoted mid-session keeps their controls until reload (server refuses every call). R3 should expect this.
   - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.
