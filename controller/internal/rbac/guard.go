@@ -43,11 +43,15 @@ func LockActiveAdmins(ctx context.Context, tx pgx.Tx, tenantID string) ([]string
 // It refuses only that case: a target that is not an active Admin passes, even
 // in a workspace that has no Admin at all.
 func GuardLastAdminTx(ctx context.Context, tx pgx.Tx, tenantID, userID string) error {
+	id, ok := CanonicalID(userID)
+	if !ok {
+		return fmt.Errorf("rbac: invalid user id")
+	}
 	admins, err := LockActiveAdmins(ctx, tx, tenantID)
 	if err != nil {
 		return err
 	}
-	return lastAdminCheck(admins, map[string]bool{userID: true})
+	return lastAdminCheck(admins, map[string]bool{id: true})
 }
 
 // GuardLastAdminsTx is GuardLastAdminTx for a set of users changed together
@@ -58,7 +62,11 @@ func GuardLastAdminsTx(ctx context.Context, tx pgx.Tx, tenantID string, userIDs 
 		return err
 	}
 	set := make(map[string]bool, len(userIDs))
-	for _, id := range userIDs {
+	for _, raw := range userIDs {
+		id, ok := CanonicalID(raw)
+		if !ok {
+			return fmt.Errorf("rbac: invalid user id")
+		}
 		set[id] = true
 	}
 	return lastAdminCheck(admins, set)

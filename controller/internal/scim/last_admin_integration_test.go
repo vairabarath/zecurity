@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -253,4 +254,17 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+func TestSCIMLastAdmin_NonCanonicalID(t *testing.T) {
+	e := newLastAdminEnv(t, "nc")
+	admin := e.scimUser(t, "ada@nc.example.com", "admin")
+	sc := scopeFor(t, e.ctx, e.ds, e.ws, e.conn)
+	wantLastAdmin409(t, e.ds.Deprovision(e.ctx, sc, strings.ToUpper(admin), false, ""))
+	f := false
+	_, serr := e.ds.Update(e.ctx, sc, strings.ToUpper(admin), &userPatch{Active: &f}, "")
+	wantLastAdmin409(t, serr)
+	if e.status(t, admin) != "active" {
+		t.Fatal("last admin suspended via non-canonical id")
+	}
 }

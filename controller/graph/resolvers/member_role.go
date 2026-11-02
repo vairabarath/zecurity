@@ -44,7 +44,13 @@ func (r *Resolver) setMemberRole(ctx context.Context, userID string, role graph.
 	if utf8.RuneCountInString(reason) > maxRoleReasonLen {
 		return nil, apperr.UserErrorf("reason is too long (max %d characters)", maxRoleReasonLen)
 	}
-	if userID == tc.UserID {
+	// Compare canonical ids: Postgres accepts any uuid spelling, so a raw
+	// string compare would let a re-spelled own id past the self check.
+	userID, ok := rbac.CanonicalID(userID)
+	if !ok {
+		return nil, apperr.UserErrorf("user not found")
+	}
+	if self, _ := rbac.CanonicalID(tc.UserID); userID == self {
 		return nil, apperr.UserErrorf("you can't change your own role")
 	}
 
@@ -165,7 +171,11 @@ func (r *Resolver) loadMember(ctx context.Context, tenantID, userID string) (*mo
 // reads the live role that @requires put in the context, never the JWT claim,
 // and fails closed if none is there.
 func refuseSelfGroupChange(ctx context.Context, callerID, targetUserID string) error {
-	if callerID != targetUserID {
+	target, ok := rbac.CanonicalID(targetUserID)
+	if !ok {
+		return errGroupOrUserNotFound
+	}
+	if self, _ := rbac.CanonicalID(callerID); self != target {
 		return nil
 	}
 	if role, ok := rbac.RoleFrom(ctx); ok && role == rbac.RoleAdmin {

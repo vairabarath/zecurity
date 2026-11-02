@@ -460,13 +460,13 @@ func suspendSCIMUsers(ctx context.Context, tx pgx.Tx, tenantID, connectionID str
 		return 0, err
 	}
 
+	if len(affected) == 0 {
+		return 0, nil
+	}
+	// Suspend exactly the set the guard checked.
 	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = 'suspended', updated_at = NOW()
-		  WHERE tenant_id = $1 AND status = 'active' AND provisioning_owner = 'scim'
-		    AND id IN (
-		      SELECT DISTINCT ei.user_id FROM external_identities ei
-		      WHERE ei.tenant_id = $1 AND ei.connection_id = $2
-		    )`, tenantID, connectionID)
+		  WHERE tenant_id = $1 AND id = ANY($2::uuid[])`, tenantID, affected)
 	if err != nil {
 		return 0, fmt.Errorf("suspend scim users: %w", err)
 	}

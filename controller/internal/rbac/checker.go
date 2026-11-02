@@ -30,6 +30,18 @@ type Invalidator interface {
 
 type cacheKey struct{ tenant, user string }
 
+// canonicalKey keys the cache by canonical ids, so Invalidate hits the entry
+// Role stored whatever spelling the caller passes.
+func canonicalKey(tenantID, userID string) cacheKey {
+	if t, ok := CanonicalID(tenantID); ok {
+		tenantID = t
+	}
+	if u, ok := CanonicalID(userID); ok {
+		userID = u
+	}
+	return cacheKey{tenantID, userID}
+}
+
 type cacheEntry struct {
 	role    string
 	expires time.Time
@@ -68,7 +80,9 @@ func NewChecker(pool *pgxpool.Pool) *Checker {
 // row is missing or not active, and a wrapped error when the lookup fails;
 // either way the caller must deny.
 func (c *Checker) Role(ctx context.Context, tenantID, userID string) (string, error) {
-	if tenantID == "" || userID == "" {
+	tenantID, tok := CanonicalID(tenantID)
+	userID, uok := CanonicalID(userID)
+	if !tok || !uok {
 		return "", ErrNoAccess
 	}
 	k := cacheKey{tenantID, userID}
@@ -120,7 +134,7 @@ func (c *Checker) Invalidate(tenantID, userID string) {
 	if c == nil {
 		return
 	}
-	k := cacheKey{tenantID, userID}
+	k := canonicalKey(tenantID, userID)
 	c.mu.Lock()
 	delete(c.cache, k)
 	c.gen[k]++
@@ -132,6 +146,9 @@ func (c *Checker) Invalidate(tenantID, userID string) {
 func (c *Checker) InvalidateTenant(tenantID string) {
 	if c == nil {
 		return
+	}
+	if t, ok := CanonicalID(tenantID); ok {
+		tenantID = t
 	}
 	c.mu.Lock()
 	for k := range c.cache {

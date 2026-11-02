@@ -337,6 +337,13 @@ func (s *DirectoryService) Filter(ctx context.Context, sc *scope, filter string)
 // an unsupported/unowned attribute is rejected with 400 so the directory never
 // silently wins a tug-of-war it shouldn't (ADR-025 §4).
 func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string, patch *userPatch, syncInst string) (*User, *SCIMError) {
+	// Canonical id: the last-Admin guard and the role cache compare ids as
+	// strings, and Postgres accepts any uuid spelling.
+	if id, ok := rbac.CanonicalID(userID); ok {
+		userID = id
+	} else {
+		return nil, newSCIMError(404, "", "user not found")
+	}
 	owner, linked, err := s.scopedProvisioningOwner(ctx, sc, userID)
 	if err != nil {
 		return nil, newSCIMError(404, "", "user not found")
@@ -426,6 +433,13 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 // revocation is asynchronous via the durable outbox and PENDING-13. A downstream
 // failure must never roll back this committed identity mutation.
 func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID string, hard bool, syncInst string) *SCIMError {
+	// Canonical id: the last-Admin guard and the role cache compare ids as
+	// strings, and Postgres accepts any uuid spelling.
+	if id, ok := rbac.CanonicalID(userID); ok {
+		userID = id
+	} else {
+		return newSCIMError(404, "", "user not found")
+	}
 	owner, linked, err := s.scopedProvisioningOwner(ctx, sc, userID)
 	if err != nil {
 		return newSCIMError(404, "", "user not found")

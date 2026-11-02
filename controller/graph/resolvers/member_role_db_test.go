@@ -375,3 +375,32 @@ type failingRoles struct{}
 func (failingRoles) Role(context.Context, string, string) (string, error) {
 	return "", errors.New("db down")
 }
+
+// IDs reach the guards as client strings, but Postgres matches uuid input in
+// any case (and {…} form). A non-canonical spelling of your own id must not
+// slip past the self-change, last-Admin or R-9 checks.
+func TestRBAC_NonCanonicalIDsCannotBypassGuards(t *testing.T) {
+	f := newRBACFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE users SET role = 'viewer' WHERE id = $1`, f.users["admin2"]); err != nil {
+		t.Fatal(err)
+	}
+	upper := strings.ToUpper(f.users["admin"])
+	braced := "{" + f.users["admin"] + "}"
+	for _, id := range []string{upper, braced} {
+		res := f.do("admin", mSetRole, map[string]any{"u": id, "r": "MEMBER", "why": "x"})
+		if len(res.Errors) == 0 {
+			t.Fatalf("sole admin demoted themselves via %q", id)
+		}
+	}
+	if f.role("admin") != "admin" {
+		t.Fatal("sole admin lost the role")
+	}
+
+	var group string
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO groups (workspace_id, name) VALUES ($1, 'g') RETURNING id::text`, f.ws).Scan(&group); err != nil {
+		t.Fatal(err)
+	}
+	add := `mutation($g: ID!, $u: ID!) { addGroupMember(groupId: $g, userId: $u) { id } }`
+	f.wantErr("security", add, map[string]any{"g": group, "u": strings.ToUpper(f.users["security"])}, "only an Admin")
+}

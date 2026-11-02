@@ -11,7 +11,11 @@
 // per-user grants, and no role implies one, Admin included.
 package rbac
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/google/uuid"
+)
 
 // Workspace roles, as stored in users.role and workspace_members.role
 // (CHECK widened in migration 047).
@@ -76,4 +80,17 @@ func CapabilitiesFor(role string) []Capability {
 // Allows reports whether role holds capability c. Unknown roles hold nothing.
 func Allows(role string, c Capability) bool {
 	return slices.Contains(table[role], c)
+}
+
+// CanonicalID returns the canonical (lower-case, hyphenated) form of a user or
+// workspace UUID. Postgres matches uuid input in any case and in {…}/urn
+// forms, so every guard that compares ids as strings must compare canonical
+// forms, or a re-spelled own id would pass a self check. ok is false for a
+// string that is not a UUID.
+func CanonicalID(id string) (string, bool) {
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return "", false
+	}
+	return u.String(), true
 }
