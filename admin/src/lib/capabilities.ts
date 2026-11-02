@@ -111,13 +111,6 @@ export function useCan(cap: Capability): boolean {
   return hasCapability(user, cap)
 }
 
-// useCanRun: may the current user run this mutation document?
-export function useCanRun(doc: DocumentNode): boolean {
-  const user = useAuthStore((s) => s.user)
-  const cap = capabilityFor(doc)
-  return cap !== undefined && hasCapability(user, cap)
-}
-
 // useIsAdmin: the full Admin role, for rules where only Admin is exempt
 // (R-9 self group membership, R-12 own group's resources, R-13 own device).
 export function useIsAdmin(): boolean {
