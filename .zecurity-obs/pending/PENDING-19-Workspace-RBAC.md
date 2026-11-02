@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** design note, approved 2026-11-02 (all open items decided). Nothing is built; next is R1.
+**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. Two new open items from the R1 security review (O-6, O-7, §8). Next: R2 admin UI.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -145,7 +145,14 @@ So Viewer can read every query. A test pins this: any new read field that return
 
 ## 8. Decisions still open
 
-None. O-1, O-3 and O-4 were decided on 2026-11-02 as R-9, R-10 and R-11 (§2). The O-4 code check found that SCIM could disable the last Admin through three paths with no guard; R-11 closes them.
+O-1, O-3 and O-4 were decided on 2026-11-02 as R-9, R-10 and R-11 (§2). The O-4 code check found that SCIM could disable the last Admin through three paths with no guard; R-11 closes them.
+
+Raised by the automated security review of the R1 commit (2026-11-02). Both widen an approved decision, so they wait for a decision:
+
+| # | Question | Recommendation |
+|---|---|---|
+| O-6 | **Security can assign a resource to a group it is in** (`assignResourceToGroup`). That grants Security network access to the resource as surely as adding itself to a group, which R-9 refuses. | Refuse `assignResourceToGroup` / `unassignResourceFromGroup` when the caller is a member of that group, unless Admin. Same rule and message as R-9. |
+| O-7 | **Helpdesk can approve its own device** (`approveDevice`). Today an Admin can too; nothing checks the device owner. | Refuse `approveDevice` / `unapproveDevice` on your own device unless Admin. |
 
 ## 9. Database
 
@@ -169,7 +176,7 @@ None. O-1, O-3 and O-4 were decided on 2026-11-02 as R-9, R-10 and R-11 (§2). T
 
 ## 11. Phases
 
-1. **R1 — backend:** migration, capability table, `@requires`, live check (GraphQL and REST), `setMemberRole`, audit, tests.
+1. **R1 — backend:** migration, capability table, `@requires`, live check (GraphQL and REST), `setMemberRole`, audit, tests. **Built 2026-11-02** (`feat/workspace-rbac-r1`): migration `047_workspace_roles.sql`, `internal/rbac` (table, cached `Checker` with race-safe invalidation, last-Admin lock), `graph/resolvers/directives.go` (`NewRequires`), `middleware.RequireCapability` (replaces `RequireRole`, removed), `member_role.go` (`setMemberRole`, R-9), SCIM/IdP guards (R-11). The authz test now globs every `*.graphqls`: the old hand-kept list missed `idp.graphqls` and `posture.graphqls`. Known gap: `/auth/refresh` re-mints the JWT with the old claim role, so the **display** hint stays stale until re-login (no authz effect).
 2. **R2 — admin UI:** Manage Role dialog (radio list + required reason), tabs and buttons driven by `me.capabilities`, read-only views for Viewer.
 3. **R3 — live acceptance on the lab:** one account per role; each role tries an allowed and a refused action; a demotion mid-session applies at once; the last-Admin guard.
 
