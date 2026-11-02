@@ -37,6 +37,12 @@ pub struct StoredWorkspaceState {
     pub resources: Vec<StoredResource>,
     #[serde(default)]
     pub last_sync_at: i64,
+    /// FU-10: whether the user last left the tunnel up (`up` or `login`) rather
+    /// than down (`down`). A daemon restart or reboot brings the tunnel back
+    /// only when this is set. Defaults to false, so state written before this
+    /// field existed starts down, as it always did.
+    #[serde(default)]
+    pub tunnel_wanted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +183,8 @@ impl StoredWorkspaceState {
             },
             resources: Vec::new(),
             last_sync_at: now_unix(),
+            // Set once the tunnel actually comes up after login.
+            tunnel_wanted: false,
         }
     }
 }
@@ -326,6 +334,15 @@ pub fn save_renewed_cert(
     Ok(())
 }
 
+/// Records whether the user wants the tunnel up (FU-10). Load -> mutate ->
+/// save, same idiom as save_rotated_tokens.
+pub fn save_tunnel_wanted(workspace_slug: &str, wanted: bool) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.tunnel_wanted = wanted;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
 /// Sets the device_state marker (Sprint 19 Track 2 / PENDING-13) and wipes the
 /// on-disk cert + key material — both REVOKED and RE_ENROLL_REQUIRED mean the
 /// cert is dead server-side, so there is nothing to gain by keeping it on disk
@@ -346,6 +363,11 @@ pub fn mark_device_state(workspace_slug: &str, device_state: &str) -> Result<()>
     // key handle around either.
     state.device.tpm_key_material = None;
     state.device.cert_expires_at = 0;
+    // A revoked or disabled device must not bring a tunnel back after a
+    // restart (FU-10); the next login sets this again.
+    if !device_state.is_empty() {
+        state.tunnel_wanted = false;
+    }
     save_workspace_state(workspace_slug, &state)?;
     Ok(())
 }
