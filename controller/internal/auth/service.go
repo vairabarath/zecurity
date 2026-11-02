@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/yourorg/ztna/controller/graph/model"
 )
@@ -94,4 +95,8 @@ type AccessTokenClaims struct {
 	// the current value before issuing device certificates (certificate audit
 	// bugs 4/5), as /auth/refresh does.
 	Generation int
+	// ExpiresAt is the token's exp claim (zero if absent). Long-lived calls
+	// (the WatchChanges hint stream, FU-8) end when it passes, so a stream is
+	// never authorized beyond its token.
+	ExpiresAt time.Time
 }

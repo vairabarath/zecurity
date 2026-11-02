@@ -70,6 +70,10 @@ type Service struct {
 	transportCompiler        *transport.Compiler
 	postureStore             *posture.Store
 	postureEvaluator         *posture.Evaluator
+
+	// hints is the FU-8 wake-up hint stream (WatchChanges); nil until
+	// EnableChangeHints, in which case WatchChanges answers Unimplemented.
+	hints *changeHints
 }
 
 // NewService wires the ClientService with the dependencies it needs.

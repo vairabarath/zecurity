@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -1287,6 +1288,14 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
+		// ClientService streams (WatchChanges, FU-8) authenticate like its
+		// unary calls: a JWT plus device_id inside the request, checked by the
+		// handler. The device has no SPIFFE certificate on this connection.
+		// Mirrors UnarySPIFFEInterceptor's ClientService skip.
+		if strings.HasPrefix(info.FullMethod, "/client.v1.ClientService/") {
+			return handler(srv, ss)
+		}
+
 		ctx := ss.Context()
 
 		p, err := peerFromContext(ctx)

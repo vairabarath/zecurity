@@ -40,6 +40,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/changehint"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
@@ -647,6 +648,14 @@ func main() {
 	// the cache; the client's next poll picks it up. Connectors do not consume
 	// the transport snapshot, so nothing is pushed to them.
 
+	// FU-8 (ADR-018 amendment 2026-11-02): client wake-up hints. Both notifiers
+	// wake the clients' WatchChanges streams after a change, so a client polls
+	// at once instead of on its next 60 s tick. A separate listener after the
+	// connector push hook, non-blocking; the poll stays authoritative.
+	hintHub := changehint.New()
+	policyNotifier.AddChangeListener(hintHub.Notify)
+	transportNotifier.AddChangeListener(hintHub.Notify)
+
 	clientSvc := clientsvc.NewService(
 		db.Pool,
 		authSvc,
@@ -663,6 +672,8 @@ func main() {
 		postureStore,
 		postureEvaluator,
 	)
+	// Open hint streams end on shutdown so they don't hold GracefulStop (O-8).
+	clientSvc.EnableChangeHints(hintHub, transportNotifier, ctx.Done())
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 
 	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM

@@ -172,6 +172,8 @@ Drain is idle-based with a hard cap, not a fixed timer. The connector tracks the
 
 `RELAY_DRAIN_TIMEOUT_SECS` is operator-configured independently. New client requests route to the new relay only after their next ACL/transport poll, which runs on a 60s TTL (`ACL_REFRESH_TTL_SECS`; see ADR-017). ADR-017 puts the worst-case client convergence window at 120s (2 × the 60s poll interval), so the default 120s cap matches that window: in the common case a client has re-polled onto the new relay before the cap fires. Because the cap force-closes any streams still open when it elapses, a legitimately long-lived flow (SSH, RDP, large transfer) that outlives the cap is still severed. Operators expecting sessions longer than 120s should raise `RELAY_DRAIN_TIMEOUT_SECS` above their expected session length. The connector has no visibility into the client poll interval — this is a documentation recommendation only, not a derived value. If the client poll interval changes, the operator must update `RELAY_DRAIN_TIMEOUT_SECS` accordingly.
 
+**Amendment 2026-11-02 (FU-8):** clients with a live `WatchChanges` hint stream (ADR-018 amendment) usually re-poll within about a second of the connector's placement change, so new requests normally leave the old relay almost at once. The worst case still applies whenever the stream is down: one missed 60 s tick plus the next is 120 s. The default 120 s cap is therefore **not** lowered; it still matches the worst-case client convergence.
+
 Controller handling of `ConnectorRelayState` remains:
 
 1. `UpsertPlacement(ctx, connectorID, relayID)` into `connector_relay_placement`.

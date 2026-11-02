@@ -10,6 +10,9 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock tests (tokio::test(start_paused = true)) for the FU-8 hint
+# stream's reconnect backoff and idle limit. Test builds only.
+tokio = { version = "1", features = ["test-util"] }
 # Independent signature verification in the TPM tests: proves a TPM-produced
 # signature validates against the TPM's public key under the exact algorithm
 # rustls uses (ECDSA P-256 / SHA-256, ASN.1 DER signature). Already in the

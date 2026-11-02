@@ -1,5 +1,6 @@
 mod appmeta;
 mod auth;
+mod change_watch;
 mod config;
 mod crl;
 mod daemon;
