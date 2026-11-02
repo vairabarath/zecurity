@@ -3,6 +3,7 @@ import { ErrorLink } from '@apollo/client/link/error'
 import { ServerError } from '@apollo/client/errors'
 import type { ApolloLink } from '@apollo/client/core'
 import { useAuthStore } from '@/store/auth'
+import { handleCapabilityRefusal, isCapabilityRefusal } from './refusal'
 
 // refreshAccessToken calls POST /auth/refresh.
 // The browser automatically sends the httpOnly cookie (same-origin).
@@ -69,21 +70,28 @@ async function refreshAccessToken(): Promise<string | null> {
 // is NEVER a CombinedGraphQLErrors), and ServerError exposes `.statusCode`. So a
 // 401 ServerError is the single, reliable refresh trigger.
 //
-// Note: authorization failures from the @hasRole directive come back as HTTP 200
-// GraphQL errors ("forbidden") — those must NOT trigger a refresh, since
-// refreshing the token can't grant a missing role. Keying on 401 only is correct.
+// Note: authorization failures from the @requires directive come back as HTTP 200
+// GraphQL errors ("forbidden: requires capability …") — those must NOT trigger a
+// refresh, since refreshing the token can't grant a missing capability. Keying
+// on 401 only is correct; refusals are handled below.
 function isUnauthorizedError(error: unknown): boolean {
   return ServerError.is(error) && error.statusCode === 401
 }
 
 // ErrorLink intercepts GraphQL errors.
 // On UNAUTHORIZED error → attempt token refresh → retry the original operation.
+// On a capability refusal → tell the user and re-read `me` (the error still
+// passes through to the caller).
 // On any other error → pass through.
 export const errorLink = new ErrorLink(({ error, operation, forward }: {
   error: unknown
   operation: ApolloLink.Operation
   forward: ApolloLink.ForwardFunction
 }) => {
+  if (isCapabilityRefusal(error)) {
+    void handleCapabilityRefusal()
+    return
+  }
   if (!isUnauthorizedError(error)) return
 
   // Return an Observable that performs the refresh and retries the operation.

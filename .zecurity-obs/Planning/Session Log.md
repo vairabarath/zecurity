@@ -3519,7 +3519,46 @@ serves on `127.0.0.1:9102`.
   - Plain `up` + restart: restored.
   - Torn down (DB, Valkey, client, firewall rules).
 
-## 2026-11-02 — M2: FU-8 client wake-up hints (not committed)
+## 2026-11-02 — M1: workspace RBAC epic (PENDING-19), approval + R1 backend
+- Approved the design: O-1→R-9 (no self group change unless Admin), O-3→R-10 (invites Admin-only), O-4→R-11. The O-4 code check found SCIM could suspend or delete the last Admin through DELETE, PATCH `active=false` and connection disable, with no guard. Decision: refuse only when it would leave zero active Admins.
+- R1 built on local branch `feat/workspace-rbac-r1` (from `fixed-pendings` `b817cee8`, note commits cherry-picked). Not pushed. PR needs `[schema: reset DB]`.
+  - Migration `047_workspace_roles.sql`; `internal/rbac` (capability table, cached live `Checker`, last-Admin lock); `@requires(capability:)` on all 73 ops; `RequireCapability` on the 3 REST routes (`RequireRole` removed); `setMemberRole`; R-9; R-11 in SCIM `Deprovision`/`Update` and `DisableConnection`.
+  - `schema_authz_test.go` now globs every `*.graphqls`; the old list missed `idp.graphqls` and `posture.graphqls` (~26 ops never checked).
+- Bugs found and fixed before commit, each test-first:
+  - role cache could be repopulated with a stale role by a lookup racing an invalidation (generation counters);
+  - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
+- O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` recreated with consent (047 applied, no init errors); lab data was wiped. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
+- R2 (admin UI) built, same branch, commit `7ff57371`:
+  - console access = `CONSOLE_READ` (one helper, three call sites); write controls hidden per capability across all pages and modal triggers; the self rules R-9, R-12 and R-13 shown in the UI; `ManageRoleDialog`;
+  - gate: `npm run codegen`, `npm run build`, `npm test` (25 files, 195 tests incl. a Viewer sweep over 18 page states, mutation-checked), lint unchanged (17 pre-existing).
+  - Known: the console reads `me.capabilities` once per load; a user demoted mid-session keeps their controls until reload (server refuses every call). R3 should expect this.
+  - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.
+- R3 live run (local stack, local test login), controller and console from this branch:
+  - API checks: 41/41 PASS (per-role allowed/refused, REST 200/403, R-8/9/10/12/13, mid-session demotion with the same token, self-change and last-Admin, 8 audit rows);
+  - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
+  - Follow-up fixed: no toast container was mounted (every toast() was dropped); a capability refusal now shows a toast and re-reads `me`, so controls follow the live role without reload. Live-checked. (The first "silent" observation was partly a test-script slip: the click hit a disabled Create button.)
+  - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.
+- Further fixes, same PR, each test-first and live-checked:
+  - invited join activates the membership and accepts the invitation;
+  - 24 silent mutation hooks now toast, with a guard test;
+  - **ErrorPresenter leak:** gqlgen-wrapped resolver errors were passed through, so raw DB/constraint text reached clients; now masked;
+  - group names: blank refused, duplicate gets a clear message.
+- Gate: controller full `go test` (exit 0, 2 pre-existing skips), fixture suites pass; admin 28 files / 210 tests (one run timed out under load while Go tests ran; clean when rerun alone), build passes, lint unchanged.
+- Small follow-ups (local branch `fix/rbac-small-followups`, on top of #168):
+  - 14 user-actionable resolver errors became user errors (the presenter fix had hidden them);
+  - role labels in GroupDetail;
+  - `/auth/refresh` stamps the current role.
+  - The Users "active" pill needed no change: `users` lists only active users. A list of invited-not-joined people would be a feature.
+  - Gates green; live-checked.
+- Live round 2 (no SCIM), all PASS:
+  - 22 role × endpoint checks (posture, identity, shield-token REST, invitation REST);
+  - the 30 s cache backstop for a role changed in SQL;
+  - demotion to Member with a page open redirects to `/install`;
+  - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
+  - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.
+
+## 2026-11-02 — M2: FU-8 client wake-up hints (PR #170)
 - Branch `fix/fu8-client-wake-hints` (from `fixed-pendings` `11e2ed94`, after #169). Barath chose option B: an advisory `WatchChanges` stream; the snapshot RPCs and the 60 s poll stay authoritative.
 - Verified first:
   - device approval already bumps the ACL version, only on a posture transition, so no approval change was needed;
@@ -3545,4 +3584,4 @@ serves on `127.0.0.1:9102`.
   - restart: counter reset handled; with no hint stream (base controller) the 60 s poll converged in 55 s;
   - revoke: connector refused in 85 ms and the stream closed at once;
   - the 10 s shutdown is the existing O-8 issue (the base controller takes the same).
-- Lab torn down: DB dropped, Valkey db7 flushed, relays, connector and client removed, `fu8-live` ufw rules deleted.
+- Lab torn down: DB dropped, Valkey db7 flushed, relays, controller and the .53 connector/file server stopped and removed, lab secrets deleted. Pending at commit time (sudo not entered): uninstalling the local client service and deleting the two `fu8-live` ufw rules.

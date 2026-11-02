@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"time"
 
 	pgx "github.com/jackc/pgx/v5"
@@ -60,7 +61,7 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("revoke device: device not found or already revoked")
+			return false, apperr.UserErrorf("revoke device: device not found or already revoked")
 		}
 		return false, fmt.Errorf("revoke device: %w", err)
 	}

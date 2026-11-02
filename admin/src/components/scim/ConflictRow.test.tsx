@@ -38,10 +38,24 @@ vi.mock("@apollo/client/react", () => ({
 }));
 
 // GrantBreakGlassButton reads the current user from the auth store.
-vi.mock("@/store/auth", () => ({
-  useAuthStore: (selector: (s: { user: { id: string } | null }) => unknown) =>
-    selector({ user: { id: "admin-1" } }),
-}));
+// The user is an Admin: every capability (PENDING-19), so the row offers its
+// IDENTITY_ADMIN actions.
+vi.mock("@/store/auth", () => {
+  const state = {
+    user: {
+      id: "admin-1",
+      role: "ADMIN",
+      capabilities: [
+        "CONSOLE_READ", "NETWORK_WRITE", "ACCESS_WRITE", "POSTURE_WRITE",
+        "DEVICE_WRITE", "DEVICE_ADMIN", "IDENTITY_ADMIN", "MEMBERS_ADMIN",
+      ],
+    },
+    setUser: () => {},
+  };
+  const useAuthStore = (selector: (s: typeof state) => unknown) => selector(state);
+  useAuthStore.getState = () => state;
+  return { useAuthStore };
+});
 
 // Minimal ScimConflict factory. Status drives the actions available.
 function conflict(

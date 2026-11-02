@@ -13,6 +13,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
@@ -43,6 +44,11 @@ type Resolver struct {
 	PostureStore      *posture.Store
 	PostureEvaluator  *posture.Evaluator
 	TransportNotifier *transport.Notifier
+
+	// Roles is the live workspace role check (PENDING-19 §5). setMemberRole
+	// and the SCIM/IdP disable paths drop its cache entries after commit.
+	// Nil-safe for invalidation.
+	Roles *rbac.Checker
 
 	// IdpStore backs the identity-provider admin API (PENDING-04 Phase 6).
 	IdpStore *idp.Store

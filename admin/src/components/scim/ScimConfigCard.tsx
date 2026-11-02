@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Capability, useCan } from '@/lib/capabilities'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { AlertTriangle, ChevronDown, KeyRound, ShieldAlert } from 'lucide-react'
 import { toast } from 'sonner'
@@ -145,7 +146,9 @@ export function ScimConfigCard({
   const [updateScimConfig, { loading: saving }] = useMutation(UpdateScimConfigDocument)
   const [enableBreakGlass, { loading: overriding }] = useMutation(EnableScimBreakGlassDocument)
 
-  const readOnly = connection.managed
+  const canWrite = useCan(Capability.IdentityAdmin)
+  // Provider-managed connections and roles without IDENTITY_ADMIN see it read-only.
+  const readOnly = connection.managed || !canWrite
   const mappingDirty =
     subjectClaim !== connection.subjectClaim || scimIdentifier !== connection.scimIdentifier
   const mappingValid =
@@ -251,7 +254,7 @@ export function ScimConfigCard({
       </CardHeader>
 
       <CardContent className="space-y-5">
-        {readOnly ? (
+        {connection.managed ? (
           <Alert>
             <AlertTriangle className="h-4 w-4" />
             <AlertDescription>

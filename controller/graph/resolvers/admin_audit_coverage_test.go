@@ -19,6 +19,7 @@ var mutationsAuditedElsewhere = map[string]string{
 	"AcceptScimConflict": "audited in scim.DirectoryService.AcceptLink",
 	"RejectScimConflict": "audited in scim.DirectoryService.Reject",
 	"ReopenScimConflict": "audited in scim.DirectoryService.Reopen",
+	"SetMemberRole":      "audited in-transaction by setMemberRole (audit.RecordTx)",
 }
 
 // Every admin change leaves an audit row (live run 2026-10-29, O-2): each

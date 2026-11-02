@@ -10,6 +10,7 @@ import {
 } from "@/generated/graphql";
 import { Button } from "@/components/ui/button";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
+import { Capability, useCan } from "@/lib/capabilities";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GroupOriginLabel } from "@/components/groups/GroupOriginLabel";
 import {
@@ -55,6 +56,7 @@ function formatPort(from: number, to: number) {
 export default function Resources() {
   const navigate = useNavigate();
   const location = useLocation();
+  const canWrite = useCan(Capability.NetworkWrite);
   // Lazy initializers read location.state at mount — avoids calling setState
   // inside an effect body (which causes cascading renders).
   const [showAdd, setShowAdd] = useState<boolean>(() => {
@@ -129,6 +131,7 @@ export default function Resources() {
             </span>{" "}
             total
           </span>
+          {canWrite && (
           <Button
             onClick={() => setShowAdd(true)}
             disabled={networks.length === 0}
@@ -137,6 +140,7 @@ export default function Resources() {
             <Plus className="h-4 w-4" />
             Add Resource
           </Button>
+          )}
         </div>
       </div>
 
@@ -187,7 +191,7 @@ export default function Resources() {
                   : "Add the first resource and start protection from the console."
               }
               action={
-                networks.length > 0 ? (
+                networks.length > 0 && canWrite ? (
                   <Button onClick={() => setShowAdd(true)}>Add Resource</Button>
                 ) : undefined
               }
@@ -307,7 +311,7 @@ export default function Resources() {
 
       <CreateResourceModal
         key={showAdd ? (prefill ? JSON.stringify(prefill) : 'open') : 'closed'}
-        open={showAdd}
+        open={showAdd && canWrite}
         onOpenChange={(open) => {
           setShowAdd(open);
           if (!open) setPrefill(null);

@@ -16,12 +16,18 @@ import (
 	"github.com/yourorg/ztna/controller/graph/model"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/models"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // InitiateAuth is the resolver for the initiateAuth field.
 func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string, connectionID *string) (*model.AuthInitPayload, error) {
 	return r.AuthService.InitiateAuth(ctx, provider, workspaceName, connectionID)
+}
+
+// SetMemberRole is the resolver for the setMemberRole field.
+func (r *mutationResolver) SetMemberRole(ctx context.Context, userID string, role graph.Role, reason string) (*models.User, error) {
+	return r.setMemberRole(ctx, userID, role, reason)
 }
 
 // Me is the resolver for the me field.
@@ -189,6 +195,16 @@ func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, 
 // CreatedAt is the resolver for the createdAt field.
 func (r *userResolver) CreatedAt(ctx context.Context, obj *models.User) (string, error) {
 	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
+}
+
+// Capabilities is the resolver for the capabilities field.
+func (r *userResolver) Capabilities(ctx context.Context, obj *models.User) ([]graph.Capability, error) {
+	caps := rbac.CapabilitiesFor(obj.Role)
+	out := make([]graph.Capability, 0, len(caps))
+	for _, c := range caps {
+		out = append(out, graph.Capability(c))
+	}
+	return out, nil
 }
 
 // Status is the resolver for the status field.

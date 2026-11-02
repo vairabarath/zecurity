@@ -38,6 +38,7 @@ query Me {
     role
     provider
     createdAt
+    capabilities
   }
 }
 

@@ -9,6 +9,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { relativeTime } from '@/lib/console'
 import { PromoteServiceModal } from '@/components/PromoteServiceModal'
+import { Capability, useCan } from '@/lib/capabilities'
 
 // ── Port helpers ──────────────────────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ interface PromoteTarget {
 }
 
 export function DiscoveredServicesPanel({ shieldId }: { shieldId: string }) {
+  const canWrite = useCan(Capability.NetworkWrite)
   const { data, loading, error, refetch } = useQuery(GetDiscoveredServicesDocument, {
     variables: { shieldId },
     pollInterval: 30000,
@@ -245,7 +247,7 @@ export function DiscoveredServicesPanel({ shieldId }: { shieldId: string }) {
               >
                 {/* Checkbox — only for non-managed rows */}
                 <div className="flex items-center">
-                  {!managed ? (
+                  {!managed && canWrite ? (
                     <button
                       onClick={() => toggleSelect(key)}
                       className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border transition ${
@@ -291,7 +293,7 @@ export function DiscoveredServicesPanel({ shieldId }: { shieldId: string }) {
 
                 {/* Action */}
                 <div className="flex justify-end">
-                  {managed ? (
+                  {managed || !canWrite ? (managed &&
                     <span className="inline-flex h-[26px] items-center gap-1.5 text-xs font-semibold text-emerald-500">
                       <CheckCircle className="h-3.5 w-3.5 shrink-0" />
                       Managed
@@ -321,7 +323,7 @@ export function DiscoveredServicesPanel({ shieldId }: { shieldId: string }) {
       )}
 
       {/* Floating bulk-action bar */}
-      {selected.size > 0 && (
+      {selected.size > 0 && canWrite && (
         <div className="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-2xl border border-border bg-background px-4 py-2.5 shadow-2xl">
           <span className="flex items-center gap-2 text-sm font-bold">
             <span className="rounded-full bg-primary px-2.5 py-0.5 text-xs font-bold text-primary-foreground">

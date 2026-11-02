@@ -27,12 +27,12 @@ type ShieldToken {
 }
 
 extend type Mutation {
-  generateShieldToken(remoteNetworkId: ID!, shieldName: String!): ShieldToken! @hasRole(roles: [ADMIN])
-  revokeShield(id: ID!): Boolean! @hasRole(roles: [ADMIN])
-  deleteShield(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  generateShieldToken(remoteNetworkId: ID!, shieldName: String!): ShieldToken! @requires(capability: NETWORK_WRITE)
+  revokeShield(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
+  deleteShield(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
 }
 
 extend type Query {
-  shields(remoteNetworkId: ID!): [Shield!]! @hasRole(roles: [ADMIN])
-  shield(id: ID!): Shield @hasRole(roles: [ADMIN])
+  shields(remoteNetworkId: ID!): [Shield!]! @requires(capability: CONSOLE_READ)
+  shield(id: ID!): Shield @requires(capability: CONSOLE_READ)
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -83,10 +84,11 @@ func newPolicyResolverFixture(t *testing.T) *policyResolverFixture {
 		t.Fatalf("insert workspace: %v", err)
 	}
 
-	tctx := tenant.Set(ctx, tenant.TenantContext{
+	// Live Admin role, as @requires sets it; this fixture has no caller user.
+	tctx := rbac.WithRole(tenant.Set(ctx, tenant.TenantContext{
 		TenantID: wsID.String(),
 		Role:     "ADMIN",
-	})
+	}), rbac.RoleAdmin)
 
 	notifier := policy.NewNotifier(policy.NewSnapshotCache())
 	notifier.RegisterPushHook(func(string) {})

@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { Capability, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { BadgeCheck, Laptop, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
@@ -27,6 +28,12 @@ function formatExpiry(notAfter: string | null | undefined): string {
 }
 
 export default function DeviceManagement() {
+  // R-13: approve/unapprove is DEVICE_WRITE (Admin, Helpdesk) but never on
+  // your own device unless Admin. Revoke is DEVICE_ADMIN, Admin only (R-8).
+  const canApprove = useCan(Capability.DeviceWrite)
+  const canRevoke = useCan(Capability.DeviceAdmin)
+  const isAdmin = useIsAdmin()
+  const myId = useCurrentUserId()
   const { data, loading } = useQuery(GetClientDevicesDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
@@ -164,6 +171,7 @@ export default function DeviceManagement() {
                         <span className="text-[12.5px] text-muted-foreground/60">—</span>
                       ) : (
                         <>
+                          {(canApprove && (isAdmin || device.userId !== myId)) && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -174,6 +182,8 @@ export default function DeviceManagement() {
                             <BadgeCheck className="h-3.5 w-3.5" />
                             {device.approvedAt ? 'Remove approval' : 'Approve'}
                           </Button>
+                          )}
+                          {canRevoke && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -184,6 +194,7 @@ export default function DeviceManagement() {
                             <ShieldOff className="h-3.5 w-3.5" />
                             Revoke
                           </Button>
+                          )}
                         </>
                       )}
                     </div>

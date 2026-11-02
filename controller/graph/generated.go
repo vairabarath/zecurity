@@ -39,7 +39,7 @@ type ResolverRoot interface {
 }
 
 type DirectiveRoot struct {
-	HasRole func(ctx context.Context, obj any, next graphql.Resolver, roles []Role) (res any, err error)
+	Requires func(ctx context.Context, obj any, next graphql.Resolver, capability Capability) (res any, err error)
 }
 
 type ComplexityRoot struct {
@@ -203,6 +203,7 @@ type ComplexityRoot struct {
 		RevokeShield                   func(childComplexity int, id string) int
 		RotateScimToken                func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
 		SetIdpConnectionStatus         func(childComplexity int, id string, status string) int
+		SetMemberRole                  func(childComplexity int, userID string, role Role, reason string) int
 		SetPlatformLoginEnabled        func(childComplexity int, enabled bool) int
 		TestIdpConnection              func(childComplexity int, id string) int
 		TriggerScan                    func(childComplexity int, connectorID string, targets []string, ports []int) int
@@ -369,6 +370,7 @@ type ComplexityRoot struct {
 	}
 
 	User struct {
+		Capabilities      func(childComplexity int) int
 		CreatedAt         func(childComplexity int) int
 		Email             func(childComplexity int) int
 		ID                func(childComplexity int) int
@@ -434,6 +436,7 @@ type DeviceProfileResolver interface {
 }
 type MutationResolver interface {
 	InitiateAuth(ctx context.Context, provider string, workspaceName *string, connectionID *string) (*model.AuthInitPayload, error)
+	SetMemberRole(ctx context.Context, userID string, role Role, reason string) (*models.User, error)
 	CreateRemoteNetwork(ctx context.Context, name string, location NetworkLocation) (*RemoteNetwork, error)
 	DeleteRemoteNetwork(ctx context.Context, id string) (bool, error)
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
@@ -521,6 +524,8 @@ type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
 
 	CreatedAt(ctx context.Context, obj *models.User) (string, error)
+
+	Capabilities(ctx context.Context, obj *models.User) ([]Capability, error)
 }
 type WorkspaceResolver interface {
 	Status(ctx context.Context, obj *models.Workspace) (WorkspaceStatus, error)
@@ -1464,6 +1469,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.SetIdpConnectionStatus(childComplexity, args["id"].(string), args["status"].(string)), true
+	case "Mutation.setMemberRole":
+		if e.ComplexityRoot.Mutation.SetMemberRole == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setMemberRole_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetMemberRole(childComplexity, args["userId"].(string), args["role"].(Role), args["reason"].(string)), true
 	case "Mutation.setPlatformLoginEnabled":
 		if e.ComplexityRoot.Mutation.SetPlatformLoginEnabled == nil {
 			break
@@ -2390,6 +2406,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.ShieldToken.ShieldID(childComplexity), true
 
+	case "User.capabilities":
+		if e.ComplexityRoot.User.Capabilities == nil {
+			break
+		}
+
+		return e.ComplexityRoot.User.Capabilities(childComplexity), true
 	case "User.createdAt":
 		if e.ComplexityRoot.User.CreatedAt == nil {
 			break
@@ -3233,6 +3255,8 @@ func (ec *executionContext) childFields_User(ctx context.Context, field graphql.
 		return ec.fieldContext_User_provisionedBy(ctx, field)
 	case "provisioningOwner":
 		return ec.fieldContext_User_provisioningOwner(ctx, field)
+	case "capabilities":
+		return ec.fieldContext_User_capabilities(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type User", field.Name)
 }
@@ -3451,17 +3475,17 @@ func (ec *executionContext) childFields___Type(ctx context.Context, field graphq
 
 // region    ***************************** args.gotpl *****************************
 
-func (ec *executionContext) dir_hasRole_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+func (ec *executionContext) dir_requires_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "roles",
-		func(ctx context.Context, v any) ([]Role, error) {
-			return ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, v)
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "capability",
+		func(ctx context.Context, v any) (Capability, error) {
+			return ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, v)
 		})
 	if err != nil {
 		return nil, err
 	}
-	args["roles"] = arg0
+	args["capability"] = arg0
 	return args, nil
 }
 
@@ -4250,6 +4274,36 @@ func (ec *executionContext) field_Mutation_setIdpConnectionStatus_args(ctx conte
 		return nil, err
 	}
 	args["status"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_setMemberRole_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "userId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "role",
+		func(ctx context.Context, v any) (Role, error) {
+			return ec.unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["role"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "reason",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["reason"] = arg2
 	return args, nil
 }
 
@@ -6814,6 +6868,68 @@ func (ec *executionContext) fieldContext_Mutation_initiateAuth(ctx context.Conte
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_setMemberRole(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setMemberRole(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetMemberRole(ctx, fc.Args["userId"].(string), fc.Args["role"].(Role), fc.Args["reason"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "MEMBERS_ADMIN")
+				if err != nil {
+					var zeroVal *models.User
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *models.User
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *models.User) graphql.Marshaler {
+			return ec.marshalNUser2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUser(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setMemberRole(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_User(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setMemberRole_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_createRemoteNetwork(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -6830,16 +6946,16 @@ func (ec *executionContext) _Mutation_createRemoteNetwork(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *RemoteNetwork
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *RemoteNetwork
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -6892,16 +7008,16 @@ func (ec *executionContext) _Mutation_deleteRemoteNetwork(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -6954,16 +7070,16 @@ func (ec *executionContext) _Mutation_generateConnectorToken(ctx context.Context
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *ConnectorToken
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ConnectorToken
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7016,16 +7132,16 @@ func (ec *executionContext) _Mutation_revokeConnector(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7078,16 +7194,16 @@ func (ec *executionContext) _Mutation_deleteConnector(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7140,16 +7256,16 @@ func (ec *executionContext) _Mutation_generateShieldToken(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *ShieldToken
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ShieldToken
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7202,16 +7318,16 @@ func (ec *executionContext) _Mutation_revokeShield(ctx context.Context, field gr
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7264,16 +7380,16 @@ func (ec *executionContext) _Mutation_deleteShield(ctx context.Context, field gr
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7326,16 +7442,16 @@ func (ec *executionContext) _Mutation_createResource(ctx context.Context, field 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7388,16 +7504,16 @@ func (ec *executionContext) _Mutation_updateResource(ctx context.Context, field 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7450,16 +7566,16 @@ func (ec *executionContext) _Mutation_protectResource(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7512,16 +7628,16 @@ func (ec *executionContext) _Mutation_unprotectResource(ctx context.Context, fie
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7574,16 +7690,16 @@ func (ec *executionContext) _Mutation_deleteResource(ctx context.Context, field 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7636,16 +7752,16 @@ func (ec *executionContext) _Mutation_forceDeleteResource(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7698,16 +7814,16 @@ func (ec *executionContext) _Mutation_promoteDiscoveredService(ctx context.Conte
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7760,16 +7876,16 @@ func (ec *executionContext) _Mutation_triggerScan(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "NETWORK_WRITE")
 				if err != nil {
 					var zeroVal string
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal string
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7822,16 +7938,16 @@ func (ec *executionContext) _Mutation_createInvitation(ctx context.Context, fiel
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "MEMBERS_ADMIN")
 				if err != nil {
 					var zeroVal *Invitation
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Invitation
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7884,16 +8000,16 @@ func (ec *executionContext) _Mutation_revokeDevice(ctx context.Context, field gr
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "DEVICE_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -7946,16 +8062,16 @@ func (ec *executionContext) _Mutation_approveDevice(ctx context.Context, field g
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "DEVICE_WRITE")
 				if err != nil {
 					var zeroVal *ClientDevice
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ClientDevice
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8008,16 +8124,16 @@ func (ec *executionContext) _Mutation_unapproveDevice(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "DEVICE_WRITE")
 				if err != nil {
 					var zeroVal *ClientDevice
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ClientDevice
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8070,16 +8186,16 @@ func (ec *executionContext) _Mutation_createGroup(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8132,16 +8248,16 @@ func (ec *executionContext) _Mutation_updateGroup(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8194,16 +8310,16 @@ func (ec *executionContext) _Mutation_deleteGroup(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8256,16 +8372,16 @@ func (ec *executionContext) _Mutation_addGroupMember(ctx context.Context, field 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8318,16 +8434,16 @@ func (ec *executionContext) _Mutation_removeGroupMember(ctx context.Context, fie
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8380,16 +8496,16 @@ func (ec *executionContext) _Mutation_assignResourceToGroup(ctx context.Context,
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8442,16 +8558,16 @@ func (ec *executionContext) _Mutation_unassignResourceFromGroup(ctx context.Cont
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "ACCESS_WRITE")
 				if err != nil {
 					var zeroVal *Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8504,16 +8620,16 @@ func (ec *executionContext) _Mutation_createDeviceProfile(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8566,16 +8682,16 @@ func (ec *executionContext) _Mutation_updateDeviceProfileMode(ctx context.Contex
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8628,16 +8744,16 @@ func (ec *executionContext) _Mutation_updateDeviceProfileManualTrust(ctx context
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8690,16 +8806,16 @@ func (ec *executionContext) _Mutation_addProfileRequirement(ctx context.Context,
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8752,16 +8868,16 @@ func (ec *executionContext) _Mutation_deleteDeviceProfile(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8814,16 +8930,16 @@ func (ec *executionContext) _Mutation_removeProfileRequirement(ctx context.Conte
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8876,16 +8992,16 @@ func (ec *executionContext) _Mutation_bindResourceToProfile(ctx context.Context,
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -8938,16 +9054,16 @@ func (ec *executionContext) _Mutation_unbindResourceFromProfile(ctx context.Cont
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
 					var zeroVal *DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9000,16 +9116,16 @@ func (ec *executionContext) _Mutation_createIdpConnection(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *WorkspaceIdpConnection
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *WorkspaceIdpConnection
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9062,16 +9178,16 @@ func (ec *executionContext) _Mutation_updateIdpConnection(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *WorkspaceIdpConnection
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *WorkspaceIdpConnection
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9124,16 +9240,16 @@ func (ec *executionContext) _Mutation_setIdpConnectionStatus(ctx context.Context
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *WorkspaceIdpConnection
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *WorkspaceIdpConnection
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9186,16 +9302,16 @@ func (ec *executionContext) _Mutation_deleteIdpConnection(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9248,16 +9364,16 @@ func (ec *executionContext) _Mutation_testIdpConnection(ctx context.Context, fie
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *IdpTestResult
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *IdpTestResult
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9310,16 +9426,16 @@ func (ec *executionContext) _Mutation_updateScimConfig(ctx context.Context, fiel
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *WorkspaceIdpConnection
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *WorkspaceIdpConnection
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9372,16 +9488,16 @@ func (ec *executionContext) _Mutation_setPlatformLoginEnabled(ctx context.Contex
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9434,16 +9550,16 @@ func (ec *executionContext) _Mutation_mintScimToken(ctx context.Context, field g
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *ScimTokenMintResult
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ScimTokenMintResult
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9496,16 +9612,16 @@ func (ec *executionContext) _Mutation_rotateScimToken(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *ScimTokenMintResult
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *ScimTokenMintResult
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9558,16 +9674,16 @@ func (ec *executionContext) _Mutation_revokeScimToken(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9620,16 +9736,16 @@ func (ec *executionContext) _Mutation_grantPermission(ctx context.Context, field
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal *WorkspacePermission
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *WorkspacePermission
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9682,16 +9798,16 @@ func (ec *executionContext) _Mutation_enableScimBreakGlass(ctx context.Context, 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9744,16 +9860,16 @@ func (ec *executionContext) _Mutation_acceptScimConflict(ctx context.Context, fi
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9806,16 +9922,16 @@ func (ec *executionContext) _Mutation_rejectScimConflict(ctx context.Context, fi
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -9868,16 +9984,16 @@ func (ec *executionContext) _Mutation_reopenScimConflict(ctx context.Context, fi
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10145,16 +10261,16 @@ func (ec *executionContext) _Query_users(ctx context.Context, field graphql.Coll
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*models.User
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*models.User
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10315,16 +10431,16 @@ func (ec *executionContext) _Query_remoteNetworks(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*RemoteNetwork
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*RemoteNetwork
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10366,16 +10482,16 @@ func (ec *executionContext) _Query_remoteNetwork(ctx context.Context, field grap
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal *RemoteNetwork
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *RemoteNetwork
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10428,16 +10544,16 @@ func (ec *executionContext) _Query_connectors(ctx context.Context, field graphql
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*Connector
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*Connector
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10490,16 +10606,16 @@ func (ec *executionContext) _Query_connector(ctx context.Context, field graphql.
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal *Connector
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Connector
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10552,16 +10668,16 @@ func (ec *executionContext) _Query_shields(ctx context.Context, field graphql.Co
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*Shield
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*Shield
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10614,16 +10730,16 @@ func (ec *executionContext) _Query_shield(ctx context.Context, field graphql.Col
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal *Shield
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Shield
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10676,16 +10792,16 @@ func (ec *executionContext) _Query_resources(ctx context.Context, field graphql.
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10737,16 +10853,16 @@ func (ec *executionContext) _Query_allResources(ctx context.Context, field graph
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*Resource
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*Resource
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10788,16 +10904,16 @@ func (ec *executionContext) _Query_getDiscoveredServices(ctx context.Context, fi
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*DiscoveredService
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*DiscoveredService
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10850,16 +10966,16 @@ func (ec *executionContext) _Query_getScanResults(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ScanResult
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ScanResult
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -10943,16 +11059,16 @@ func (ec *executionContext) _Query_clientDevices(ctx context.Context, field grap
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ClientDevice
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ClientDevice
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11037,16 +11153,16 @@ func (ec *executionContext) _Query_groups(ctx context.Context, field graphql.Col
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11088,16 +11204,16 @@ func (ec *executionContext) _Query_group(ctx context.Context, field graphql.Coll
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal *Group
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal *Group
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11150,16 +11266,16 @@ func (ec *executionContext) _Query_connectorLogs(ctx context.Context, field grap
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ConnectorLog
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ConnectorLog
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11211,16 +11327,16 @@ func (ec *executionContext) _Query_supportedPostureChecks(ctx context.Context, f
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*PostureCheckDescriptor
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*PostureCheckDescriptor
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11261,16 +11377,16 @@ func (ec *executionContext) _Query_deviceProfiles(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*DeviceProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*DeviceProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11312,16 +11428,16 @@ func (ec *executionContext) _Query_devicePostureVisibility(ctx context.Context, 
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*DevicePostureVisibility
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*DevicePostureVisibility
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11373,16 +11489,16 @@ func (ec *executionContext) _Query_idpConnections(ctx context.Context, field gra
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*WorkspaceIdpConnection
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*WorkspaceIdpConnection
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11467,16 +11583,16 @@ func (ec *executionContext) _Query_platformLoginEnabled(ctx context.Context, fie
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal bool
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal bool
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11509,16 +11625,16 @@ func (ec *executionContext) _Query_scimTokens(ctx context.Context, field graphql
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ScimToken
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ScimToken
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11571,16 +11687,16 @@ func (ec *executionContext) _Query_scimConflicts(ctx context.Context, field grap
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ScimConflict
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ScimConflict
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -11632,16 +11748,16 @@ func (ec *executionContext) _Query_scimProviderProfiles(ctx context.Context, fie
 			directive0 := next
 
 			directive1 := func(ctx context.Context) (any, error) {
-				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
 				if err != nil {
 					var zeroVal []*ScimProviderProfile
 					return zeroVal, err
 				}
-				if ec.Directives.HasRole == nil {
+				if ec.Directives.Requires == nil {
 					var zeroVal []*ScimProviderProfile
-					return zeroVal, errors.New("directive hasRole is not implemented")
+					return zeroVal, errors.New("directive requires is not implemented")
 				}
-				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
 			}
 
 			next = directive1
@@ -13704,6 +13820,29 @@ func (ec *executionContext) _User_provisioningOwner(ctx context.Context, field g
 }
 func (ec *executionContext) fieldContext_User_provisioningOwner(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("User", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _User_capabilities(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_User_capabilities(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.User().Capabilities(ctx, obj)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []Capability) graphql.Marshaler {
+			return ec.marshalNCapability2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapabilityᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_User_capabilities(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("User", field, true, true, errors.New("field of type Capability does not have child fields"))
 }
 
 func (ec *executionContext) _Workspace_id(ctx context.Context, field graphql.CollectedField, obj *models.Workspace) (ret graphql.Marshaler) {
@@ -16710,6 +16849,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "setMemberRole":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setMemberRole(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "createRemoteNetwork":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createRemoteNetwork(ctx, field)
@@ -18617,6 +18763,42 @@ func (ec *executionContext) _User(ctx context.Context, sel ast.SelectionSet, obj
 			if out.Values[i] == graphql.Null {
 				atomic.AddUint32(&out.Invalids, 1)
 			}
+		case "capabilities":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._User_capabilities(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -19408,6 +19590,47 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
+func (ec *executionContext) unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx context.Context, v any) (Capability, error) {
+	var res Capability
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx context.Context, sel ast.SelectionSet, v Capability) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) unmarshalNCapability2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapabilityᚄ(ctx context.Context, v any) ([]Capability, error) {
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]Capability, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNCapability2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapabilityᚄ(ctx context.Context, sel ast.SelectionSet, v []Capability) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
 func (ec *executionContext) marshalNClientDevice2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx context.Context, sel ast.SelectionSet, v ClientDevice) graphql.Marshaler {
 	return ec._ClientDevice(ctx, sel, &v)
 }
@@ -19958,37 +20181,6 @@ func (ec *executionContext) unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontr
 
 func (ec *executionContext) marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx context.Context, sel ast.SelectionSet, v Role) graphql.Marshaler {
 	return v
-}
-
-func (ec *executionContext) unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx context.Context, v any) ([]Role, error) {
-	var vSlice []any
-	vSlice = graphql.CoerceList(v)
-	var err error
-	res := make([]Role, len(vSlice))
-	for i := range vSlice {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
-		res[i], err = ec.unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx, vSlice[i])
-		if err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
-
-func (ec *executionContext) marshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx context.Context, sel ast.SelectionSet, v []Role) graphql.Marshaler {
-	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
-		fc := graphql.GetFieldContext(ctx)
-		fc.Result = &v[i]
-		return ec.marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx, sel, v[i])
-	})
-
-	for _, e := range ret {
-		if e == graphql.Null {
-			return graphql.Null
-		}
-	}
-
-	return ret
 }
 
 func (ec *executionContext) marshalNScanResult2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResultᚄ(ctx context.Context, sel ast.SelectionSet, v []*ScanResult) graphql.Marshaler {
