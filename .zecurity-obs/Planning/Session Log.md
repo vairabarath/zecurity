@@ -3508,6 +3508,17 @@ serves on `127.0.0.1:9102`.
 - Ticked V2, V4, AT-E5 and "All scenarios pass" in `Sprint22/path.md`. Sprint 22 closed.
 - Still open: lab checks for S2 (with #162) and S3 (AT-D6 drain rerun); #162 awaits Sathiya's client fix; FU-8/9/10; FU-11 leftovers.
 
+## 2026-11-02 — M2: FU-10 the client restores the tunnel after a restart (not committed)
+- Branch `fix/fu10-restore-tunnel` (from `fixed-pendings` `93f1a888`). Barath chose option (a): remember the last state.
+- `tunnel_wanted` in the encrypted client state: set by a successful `up` and by login, cleared by `down` and by a revoke/re-enroll marker. At start the daemon restores the tunnel through the normal `up` path, retrying 2 s → 60 s while wanted and the device is active; `down` and restore attempts are serialized; `status` shows "restoring after restart (last attempt: …)".
+- 10 new tests; client 307 pass; clippy no new findings; 8 mutants killed (the first run hung on 3 of them, so every restore test now has a 5 s bound; one mutant first survived and the test was fixed).
+- **Live run (same day): PASS.** Client on manojinkyank (.53) as the system service; throwaway controller, connector and a Docker-network resource (only reachable through the tunnel) on this PC.
+  - `systemctl restart`: restored in 35 ms.
+  - Real reboot while up: restored on attempt 3, +6 s after start (the network wasn't ready for the first two).
+  - `down` + real reboot: stayed down, no restore attempt.
+  - Plain `up` + restart: restored.
+  - Torn down (DB, Valkey, client, firewall rules).
+
 ## 2026-11-02 — M1: workspace RBAC epic (PENDING-19), approval + R1 backend
 - Approved the design: O-1→R-9 (no self group change unless Admin), O-3→R-10 (invites Admin-only), O-4→R-11. The O-4 code check found SCIM could suspend or delete the last Admin through DELETE, PATCH `active=false` and connection disable, with no guard. Decision: refuse only when it would leave zero active Admins.
 - R1 built on local branch `feat/workspace-rbac-r1` (from `fixed-pendings` `b817cee8`, note commits cherry-picked). Not pushed. PR needs `[schema: reset DB]`.

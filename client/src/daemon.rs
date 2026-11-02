@@ -123,6 +123,16 @@ pub async fn run() -> Result<()> {
             }
         });
 
+        // FU-10: the user last left the tunnel up — bring it back after this
+        // restart or reboot instead of waiting for `zecurity-client up`.
+        if stored.tunnel_wanted {
+            let state_clone = Arc::clone(&state);
+            let conf_clone = conf.clone();
+            let tun_slot_clone = Arc::clone(&tun_slot);
+            tokio::spawn(async move {
+                restore_tunnel(&state_clone, &conf_clone, &tun_slot_clone).await;
+            });
+        }
     }
 
     // Proactive session-refresh loop. Runs for the daemon's lifetime, sleeps
@@ -279,6 +289,11 @@ async fn handle_request(
                 kind: "Status".into(),
                 state: Some("running".into()),
                 tunnel_up: Some(tunnel_up),
+                tunnel_restoring: if tunnel_up {
+                    None
+                } else {
+                    s.tunnel_restore.clone()
+                },
                 email: s.user.as_ref().map(|u| u.email.clone()),
                 device_id: s.device.as_ref().map(|d| d.id.clone()),
                 spiffe_id: s.device.as_ref().map(|d| d.spiffe_id.clone()),
@@ -521,6 +536,8 @@ async fn handle_request(
                         "ACL syncronized after login"
                     );
 
+                    let intent_lock = state.read().await.tunnel_intent_lock.clone();
+                    let _intent = intent_lock.lock().await;
                     let running = tun_slot.lock().await.is_some();
                     if !running {
                         // Automatically connect after login.
@@ -555,6 +572,7 @@ async fn handle_request(
                             );
                         }
                     }
+                    set_tunnel_wanted(state, conf, true).await;
 
                     IpcResponse {
                         ok: true,
@@ -571,9 +589,22 @@ async fn handle_request(
             }
         }
 
-        IpcRequest::Up => handle_up(state, conf, tun_slot).await,
+        IpcRequest::Up => {
+            let intent_lock = state.read().await.tunnel_intent_lock.clone();
+            let _intent = intent_lock.lock().await;
+            let resp = handle_up(state, conf, tun_slot).await;
+            if resp.ok {
+                set_tunnel_wanted(state, conf, true).await;
+            }
+            resp
+        }
 
-        IpcRequest::Down => handle_down(state, tun_slot).await,
+        IpcRequest::Down => {
+            let intent_lock = state.read().await.tunnel_intent_lock.clone();
+            let _intent = intent_lock.lock().await;
+            set_tunnel_wanted(state, conf, false).await;
+            handle_down(state, tun_slot).await
+        }
     }
 }
 
@@ -801,6 +832,114 @@ fn log_no_resources_assigned(acl_entries: usize, allowed: usize) {
             allowed,
             "no routable (TCP) resources currently assigned to this device; tunnel up, waiting for resource assignment"
         );
+    }
+}
+
+/// FU-10 restore backoff: the first retry after 2 s, doubling up to once a
+/// minute (the ACL poll's own cadence), for as long as the user wants the
+/// tunnel and the device stays active.
+const TUNNEL_RESTORE_FIRST_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+const TUNNEL_RESTORE_MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Records the user's up/down choice (FU-10) in memory and in the saved state,
+/// so the next daemon start knows whether to bring the tunnel back. A failed
+/// save is logged, not returned: the tunnel itself already did what was asked.
+async fn set_tunnel_wanted(state: &SharedState, conf: &config::ClientConf, wanted: bool) {
+    {
+        let mut s = state.write().await;
+        s.tunnel_wanted = wanted;
+        if !wanted {
+            s.tunnel_restore = None;
+        }
+    }
+    if let Err(e) = state_store::save_tunnel_wanted(&conf.workspace, wanted) {
+        warn!(
+            error = %format!("{e:#}"),
+            wanted,
+            "could not save the tunnel up/down choice; a daemon restart may not follow it"
+        );
+    }
+}
+
+/// FU-10 (live run 2026-10-29, O-5): brings the tunnel back after a daemon
+/// restart or reboot when the user last left it up. Uses the same path as
+/// `zecurity-client up`; a revoke seen while restoring exits like the startup
+/// ACL fetch does.
+async fn restore_tunnel(state: &SharedState, conf: &config::ClientConf, tun_slot: &TunSlot) {
+    restore_tunnel_with(
+        state,
+        tun_slot,
+        TUNNEL_RESTORE_FIRST_RETRY,
+        TUNNEL_RESTORE_MAX_RETRY,
+        || handle_up(state, conf, tun_slot),
+    )
+    .await;
+    if state.read().await.device_state == DeviceState::Revoked {
+        info!("device revoked — exiting");
+        std::process::exit(0);
+    }
+}
+
+/// The restore loop, with the "bring it up" step injected so tests can drive
+/// it without a TUN device. Each attempt holds the tunnel-intent lock, so a
+/// `down` either lands before an attempt (which then stops) or after it (and
+/// takes the tunnel down again). Stops when the tunnel is up, when the user
+/// no longer wants it, or when the device is no longer active. Returns
+/// whether the tunnel was restored.
+async fn restore_tunnel_with<F, Fut>(
+    state: &SharedState,
+    tun_slot: &TunSlot,
+    first_retry: std::time::Duration,
+    max_retry: std::time::Duration,
+    mut up: F,
+) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = IpcResponse>,
+{
+    info!("restoring the tunnel the user left up before this restart");
+    state.write().await.tunnel_restore = Some(String::new());
+    let mut delay = first_retry;
+    let mut attempt = 0u32;
+    loop {
+        let intent_lock = state.read().await.tunnel_intent_lock.clone();
+        let done = {
+            let _intent = intent_lock.lock().await;
+            let (wanted, active) = {
+                let s = state.read().await;
+                (s.tunnel_wanted, s.device_state == DeviceState::Active)
+            };
+            if !wanted || !active {
+                info!(wanted, active, "tunnel restore stopped");
+                Some(false)
+            } else if tun_slot.lock().await.is_some() {
+                // Already up: `up` or `login` got there first.
+                Some(true)
+            } else {
+                attempt += 1;
+                let resp = up().await;
+                if resp.ok {
+                    info!(attempt, "tunnel restored after restart");
+                    Some(true)
+                } else {
+                    let error = resp.error.unwrap_or_default();
+                    warn!(
+                        attempt,
+                        error = %error,
+                        retry_in_secs = delay.as_secs(),
+                        "tunnel restore failed; retrying"
+                    );
+                    state.write().await.tunnel_restore = Some(error);
+                    None
+                }
+            }
+        };
+        if let Some(restored) = done {
+            state.write().await.tunnel_restore = None;
+            return restored;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(max_retry);
     }
 }
 
@@ -3774,6 +3913,7 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     // — unlike REVOKED — does not exit the process, so a restart mid-disable
     // shouldn't be the common case, but must still recover correctly).
     s.device_state = DeviceState::from_marker(&stored.device.device_state);
+    s.tunnel_wanted = stored.tunnel_wanted;
 }
 
 fn sd_notify_ready() {
@@ -7563,5 +7703,312 @@ mod renewal_tests {
                 .certificate_pem,
             OLD_CERT
         );
+    }
+}
+
+/// FU-10: the tunnel comes back after a daemon restart only when the user left
+/// it up. The restore loop is driven with an injected "up" step (a real one
+/// needs a TUN device); the saved choice goes through the real state_store,
+/// redirected to a tempdir under STATE_DIR_GUARD.
+#[cfg(test)]
+mod tunnel_restore_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    const FAST: Duration = Duration::from_millis(5);
+
+    fn up_ok() -> IpcResponse {
+        IpcResponse {
+            ok: true,
+            kind: "Up".into(),
+            ..Default::default()
+        }
+    }
+
+    fn up_failed(error: &str) -> IpcResponse {
+        IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some(error.into()),
+            ..Default::default()
+        }
+    }
+
+    async fn runtime_with(wanted: bool, device_state: DeviceState) -> SharedState {
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.tunnel_wanted = wanted;
+            s.device_state = device_state;
+        }
+        state
+    }
+
+    /// A broken stop condition would otherwise make the restore loop (and the
+    /// test) run forever.
+    async fn bounded(restore: impl std::future::Future<Output = bool>) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), restore)
+            .await
+            .expect("the restore loop did not stop")
+    }
+
+    fn empty_slot() -> TunSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    /// Points state_store at `dir` and saves a state file whose saved choice
+    /// is `wanted`.
+    fn seed_saved_choice(dir: &TempDir, workspace: &str, wanted: bool) -> config::ClientConf {
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let stored = StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: "device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                ..Default::default()
+            },
+            tunnel_wanted: wanted,
+            ..Default::default()
+        };
+        state_store::save_workspace_state(workspace, &stored).expect("seed state file");
+        config::ClientConf {
+            workspace: workspace.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn saved_choice(workspace: &str) -> bool {
+        state_store::load_workspace_state(workspace)
+            .expect("load state")
+            .tunnel_wanted
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_left_up_is_restored() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { up_ok() }
+            },
+        ))
+        .await;
+        assert!(restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    /// Right after boot the controller is often unreachable: keep trying, and
+    /// let `status` show the last attempt's error meanwhile.
+    #[tokio::test]
+    async fn the_restore_retries_until_up_succeeds() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let state = state.clone();
+                let seen = &seen;
+                async move {
+                    let restore = state.read().await.tunnel_restore.clone();
+                    seen.lock().unwrap().push(restore);
+                    if n < 3 {
+                        up_failed("ACL sync failed: controller unreachable")
+                    } else {
+                        up_ok()
+                    }
+                }
+            },
+        ))
+        .await;
+        assert!(restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let unreachable = Some("ACL sync failed: controller unreachable".to_string());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(String::new()), unreachable.clone(), unreachable]
+        );
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_left_down_is_not_restored() {
+        let state = runtime_with(false, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { up_ok() }
+            },
+        ))
+        .await;
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_or_disabled_device_is_not_restored() {
+        for device_state in [DeviceState::ReEnrollRequired, DeviceState::Revoked] {
+            let state = runtime_with(true, device_state).await;
+            let calls = AtomicUsize::new(0);
+            let restored = bounded(restore_tunnel_with(
+                &state,
+                &empty_slot(),
+                FAST,
+                FAST,
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async { up_ok() }
+                },
+            ))
+            .await;
+            assert!(!restored, "{device_state:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "{device_state:?}");
+        }
+    }
+
+    /// A directive seen during an attempt (the attempt's ACL sync) ends the
+    /// restore instead of retrying forever.
+    #[tokio::test]
+    async fn a_directive_during_the_restore_stops_it() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let state = state.clone();
+                async move {
+                    state.write().await.device_state = DeviceState::ReEnrollRequired;
+                    up_failed("no device identity")
+                }
+            },
+        ))
+        .await;
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    /// The user runs `down` while a restore attempt is in flight: the `down`
+    /// waits for that attempt, is saved, and the restore stops.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn a_down_during_the_restore_stops_it_and_is_saved() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_saved_choice(&dir, "fu10-down", true);
+        let state = runtime_with(true, DeviceState::Active).await;
+        let slot = empty_slot();
+        let calls = AtomicUsize::new(0);
+        let down_task = std::sync::Mutex::new(None);
+
+        let restored = bounded(restore_tunnel_with(&state, &slot, FAST, FAST, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (state, conf, slot) = (state.clone(), conf.clone(), slot.clone());
+            let down_task = &down_task;
+            async move {
+                let task = tokio::spawn(async move {
+                    handle_request(IpcRequest::Down, &state, &conf, &slot).await
+                });
+                // Give the `down` time to reach the intent lock this attempt
+                // holds: it must still be waiting when the attempt ends.
+                tokio::time::sleep(FAST * 4).await;
+                assert!(!task.is_finished(), "the down overtook the attempt");
+                *down_task.lock().unwrap() = Some(task);
+                up_failed("ACL sync failed: controller unreachable")
+            }
+        }))
+        .await;
+
+        let task = down_task.lock().unwrap().take().expect("down was sent");
+        assert!(task.await.unwrap().ok, "down succeeds");
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no attempt after the down");
+        assert!(!state.read().await.tunnel_wanted);
+        assert!(!saved_choice("fu10-down"), "the down is saved");
+    }
+
+    /// `up` saves the choice only when the tunnel came up; `down` always does.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn up_and_down_save_the_users_choice() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_saved_choice(&dir, "fu10-ipc", false);
+        let state = runtime_with(false, DeviceState::Active).await;
+        let slot = empty_slot();
+
+        // No device in memory: `up` fails and the saved choice stays "down".
+        let up = handle_request(IpcRequest::Up, &state, &conf, &slot).await;
+        assert!(!up.ok);
+        assert!(!saved_choice("fu10-ipc"));
+        assert!(!state.read().await.tunnel_wanted);
+
+        // What a successful `up` or login records.
+        set_tunnel_wanted(&state, &conf, true).await;
+        assert!(saved_choice("fu10-ipc"));
+        assert!(state.read().await.tunnel_wanted);
+
+        let down = handle_request(IpcRequest::Down, &state, &conf, &slot).await;
+        assert!(down.ok);
+        assert!(!saved_choice("fu10-ipc"));
+        assert!(!state.read().await.tunnel_wanted);
+    }
+
+    /// Other saves keep the choice; a revoke or re-enroll marker clears it.
+    #[test]
+    fn the_saved_choice_survives_other_saves_and_not_a_directive() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        seed_saved_choice(&dir, "fu10-store", false);
+
+        state_store::save_tunnel_wanted("fu10-store", true).unwrap();
+        state_store::save_rotated_tokens("fu10-store", "a".into(), "r".into(), 1).unwrap();
+        state_store::save_renewed_cert("fu10-store", "C".into(), "CA".into(), 1).unwrap();
+        assert!(saved_choice("fu10-store"));
+
+        state_store::mark_device_state("fu10-store", DeviceState::ReEnrollRequired.as_marker())
+            .unwrap();
+        assert!(!saved_choice("fu10-store"));
+    }
+
+    #[test]
+    fn startup_reads_the_saved_choice_and_old_state_starts_down() {
+        let mut s = crate::runtime::RuntimeState::default();
+        populate_runtime(
+            &mut s,
+            &StoredWorkspaceState {
+                tunnel_wanted: true,
+                ..Default::default()
+            },
+        );
+        assert!(s.tunnel_wanted);
+
+        // State saved before FU-10 has no such field: the tunnel stays down.
+        let old: StoredWorkspaceState = serde_json::from_value(serde_json::json!({
+            "workspace": {}, "user": {}, "device": {}, "session": {}
+        }))
+        .unwrap();
+        assert!(!old.tunnel_wanted);
     }
 }

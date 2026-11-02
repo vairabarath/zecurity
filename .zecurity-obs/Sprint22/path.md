@@ -266,7 +266,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | **Fixed** 2026-10-30 (same branch, see Post-Sprint Fixes → FU-7) |
 | FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
 | FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
-| FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | Open |
+| FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | **Fixed** 2026-11-02 (branch `fix/fu10-restore-tunnel`): option (a), the daemon remembers whether the user left the tunnel up and restores it at start. See Post-Sprint Fixes → FU-10 |
 | FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | **Mitigated** 2026-10-31 (branch `fu11/discovery-rate-limit`): shared per-IP budget on all four discovery entry points + per-email budget; the oracle remains (email-verified discovery to decide before GA). See Post-Sprint Fixes → FU-11 |
 | FU-12 | **A sustained download through a relay is torn down (F-7, live E2E run 2026-10-30).** A 20 MB download at 400 KB/s through a relay was cut ~35–45 s in (19.9 of 20 MB) in 3/3 runs, drain or not, with every session on that client↔relay path ended at once (connector `session unregistered` ×4, relay `bridge ended with error … pipe Connector to Client`); the same download over the direct path completes. Cause not yet identified: the relay logs only the outer error context. Next: log the full error chain (`{:#}`) in `relay/src/session.rs` and rerun. Separately, on both paths new connections to the same shield time out (5 s) while a download runs — the shared shield stream (FU-9). | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): the Connector now shuts a relayed shield-tunnel stream down on a clean end (TLS close_notify); see Post-Sprint Fixes → F-7. The probe timeouts are FU-9 |
 | FU-13 | **The outbox processor is started twice** (`cmd/server/main.go`, workers `outbox-processor-1` and `-2`, same instance; the second came with Sprint 17 `2d14f333`). Not the shutdown hang (O-8); check whether concurrent `Run` on one processor is intended. | Live E2E run, 2026-10-30 | **Fixed** 2026-10-30 (branch `fix/e2e-j7-findings`): accidental duplicate from Sprint 17's merge fix; second start removed |
@@ -338,6 +338,61 @@ async fn drain_old_relay(tracker: &RelayDrainTracker, drain_timeout: Duration, r
 Connector 277 pass; 3 mutants killed (no cut at timeout, handler doesn't attach, cut doesn't close). Not live-tested.
 
 **Console text (follow-up decision):** with FU-14 deployed, open connections on a draining relay end at most `relay_drain_timeout_secs` (120 s) after their connector moves. The console text changed in #160 ("keep running until they end") can name the limit again once connectors run this fix. Older connectors still don't cut.
+
+### Fix: FU-10 the client restores the tunnel after a daemon restart or reboot
+**Issue:** live E2E run 2026-10-29 (O-5): after a reboot or a daemon restart the client had no access until `zecurity-client up`. The daemon loaded its saved state, synced the ACL and refreshed tokens, but only `login` and `up` created the tunnel.
+
+**Decision (Barath, 2026-11-02):** option (a), remember the last state. The tunnel comes back only if the user left it up; a deliberate `down` survives a reboot. (Rejected: (b) always on, which ignores `down`; (c) manual only.)
+
+**Fix Applied (client only; no controller, proto or schema change):**
+- **Saved choice:** `StoredWorkspaceState.tunnel_wanted` (encrypted state file, `#[serde(default)]` false, so state saved before this starts down as before). Mirrored in `RuntimeState.tunnel_wanted`.
+  - Set by a successful `up` (IPC `Up`) and by login (`PostLoginState`, after its automatic up or restart).
+  - Cleared by `down` (IPC `Down`, always) and by a revoke or re-enroll marker (`mark_device_state`). `logout` removes the whole state file.
+  - A failed `up` leaves the choice unchanged.
+- **Restore at start:** `daemon::run` spawns `restore_tunnel` when the loaded state has `tunnel_wanted`. It uses the same `handle_up` path as `zecurity-client up` (the ACL fetch inside it refreshes an expired access token).
+  - Retries with backoff: 2 s, doubling to once a minute, while the user still wants the tunnel and the device is active.
+  - Stops when the tunnel is up (also if `up` or login got there first), after a `down`, or when the device is no longer active. A revoke seen while restoring exits the daemon, as the startup ACL fetch does.
+- **Ordering:** `RuntimeState.tunnel_intent_lock` serializes IPC `Up`, `Down`, the login up and each restore attempt, so a `down` either lands before an attempt (which then stops) or after it (and takes the tunnel down).
+- **Status:** `IpcResponse.tunnel_restoring` (the last attempt's error); `status` prints `Tunnel: restoring after restart (last attempt: …)` instead of "down — run up" meanwhile.
+
+```rust
+// AFTER (daemon::run, after the saved state is loaded):
+if stored.tunnel_wanted {
+    tokio::spawn(async move {
+        restore_tunnel(&state_clone, &conf_clone, &tun_slot_clone).await;
+    });
+}
+```
+
+**Tests** (`daemon.rs` `tunnel_restore_tests`, the "up" step injected; saved state through the real `state_store` in a tempdir):
+- `a_tunnel_left_up_is_restored`; `the_restore_retries_until_up_succeeds` (status shows the last error meanwhile);
+- `a_tunnel_left_down_is_not_restored`; `a_revoked_or_disabled_device_is_not_restored`; `a_directive_during_the_restore_stops_it`;
+- `a_down_during_the_restore_stops_it_and_is_saved` (the `down` waits for the in-flight attempt);
+- `up_and_down_save_the_users_choice` (real IPC handler); `the_saved_choice_survives_other_saves_and_not_a_directive`; `startup_reads_the_saved_choice_and_old_state_starts_down`;
+- `status.rs`: `status_says_when_the_tunnel_is_being_restored`.
+
+Client 307 pass; clippy: no new findings. 8 mutants killed (down not taking the lock, down not saved, failed up saved, restore ignoring the choice, restore ignoring the device state, directive keeping the choice, startup ignoring the saved choice, no retry). Every restore test has a 5 s bound, so a broken stop condition fails instead of hanging.
+
+**Not covered by unit tests:** the spawn in `daemon::run` and the login path (`PostLoginState`) need a real TUN device and controller; both are covered by the live run below.
+
+**Live run 2026-11-02 (M2): PASS.**
+- **Stack:**
+  - This PC: throwaway controller on a fresh DB `zecurity_live_fu10_*` with the isolated Valkey (never `ztna_platform`), and a connector on the direct path (no relay).
+  - Resource: a Valkey container at `172.17.0.3:6379`. .53 has no route to it, so it's reachable only through the tunnel.
+  - The branch-built client installed as the system service (enabled at boot) on **manojinkyank (.53)**, which was rebooted for real.
+- **Results** (nothing was typed on .53 after a restart or boot before each check):
+
+  | Check | Result |
+  |---|---|
+  | Baseline: after login | `Tunnel: up`; `PING` → `+PONG` through the tunnel; connector `access allowed` / `tunnel_opened ok` for the device |
+  | `systemctl restart` | "restoring the tunnel the user left up"; `zecurity0 up` 35 ms after start, attempt 1; `+PONG` |
+  | Real reboot while up | Daemon started 14 s after boot. Attempts 1 and 2 failed (`ACL sync failed: transport error`, network not ready yet). Attempt 3 at +6 s (backoff 2 s, 4 s): tunnel restored; `+PONG`; connector `tunnel_opened ok` |
+  | `down`, then real reboot | `Tunnel: down`, no `zecurity0`, no restore line in the boot's log, resource unreachable |
+  | Plain `up` (not login), then restart | Restored in 37 ms; resource reachable |
+- **Lab notes:**
+  - Device tunnels use connector port **9092** (TCP and UDP), not 9091 (the shield port).
+  - A client on another host needs its login callback forwarded (`127.0.0.1:<port>` is on the client host), and the redirect must arrive within the controller's 60 s `ctrl_code` window.
+- **Cleanup:** client uninstalled and its state removed on .53; DB dropped; Valkey flushed and stopped; firewall rules removed.
 
 ### Fix: FU-11 public workspace discovery is rate limited (mitigation, not elimination)
 **Issue:** `lookupWorkspacesByEmail` (and the slug lookups) answered any number of unauthenticated calls: 85 in a burst during the live E2E run (F-6). That makes it an enumeration oracle.
