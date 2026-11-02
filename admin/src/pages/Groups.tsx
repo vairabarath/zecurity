@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { Plus, Users } from 'lucide-react'
@@ -180,14 +181,17 @@ export default function Groups() {
   )
 
   const [createGroup, { loading: creating }] = useMutation(CreateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowCreate(false); refetch() },
   })
 
   const [updateGroup, { loading: updating }] = useMutation(UpdateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setEditTarget(null); refetch() },
   })
 
   const [deleteGroup, { loading: deleting }] = useMutation(DeleteGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setDeleteTarget(null); refetch() },
   })
 

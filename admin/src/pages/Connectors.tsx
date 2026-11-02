@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
@@ -43,9 +44,11 @@ export default function Connectors() {
   })
 
   const [revokeConnector] = useMutation(RevokeConnectorDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }],
   })
   const [deleteConnector] = useMutation(DeleteConnectorDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }],
   })
 

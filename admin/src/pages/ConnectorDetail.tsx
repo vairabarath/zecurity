@@ -1,4 +1,5 @@
 import { Capability, useCan } from '@/lib/capabilities'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
@@ -197,6 +198,7 @@ export default function ConnectorDetail() {
   }
 
   const [revokeConnector, { loading: revoking }] = useMutation(RevokeConnectorDocument, {
+    onError: toastMutationError,
     // Refetch the by-id query so this page's status updates; refresh the list in
     // the background for when the user navigates back.
     refetchQueries: [
@@ -205,13 +207,16 @@ export default function ConnectorDetail() {
     ],
   })
   const [deleteConnector, { loading: deleting }] = useMutation(DeleteConnectorDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
     onCompleted: () => navigate('/connectors'),
   })
   const [revokeShield] = useMutation(RevokeShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: networkId ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: networkId } }] : [],
   })
   const [deleteShield] = useMutation(DeleteShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: networkId ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: networkId } }] : [],
   })
 

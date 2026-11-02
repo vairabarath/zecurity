@@ -1,3 +1,4 @@
+import { toastMutationError } from "@/lib/mutationErrors";
 import { useMemo, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMutation, useQuery } from "@apollo/client/react";
@@ -79,6 +80,7 @@ export default function DeviceProfiles() {
   const [deleteDeviceProfile, { loading: deleting }] = useMutation(
     DeleteDeviceProfileDocument,
     {
+    onError: toastMutationError,
       onCompleted: () => {
         setDeletingProfile(null);
         refetch();

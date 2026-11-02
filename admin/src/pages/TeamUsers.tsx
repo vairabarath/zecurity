@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { Mail, Plus, UserCircle2, UserCog } from 'lucide-react'
 import {
@@ -64,6 +65,7 @@ function InviteDialog({
   const [sent, setSent] = useState(false)
 
   const [createInvitation, { loading }] = useMutation(CreateInvitationDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setSent(true) },
   })
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
@@ -232,8 +233,10 @@ export default function RemoteNetworkDetail() {
   })
 
   const refetchConnectors = [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }]
-  const [revokeConnector] = useMutation(RevokeConnectorDocument, { refetchQueries: refetchConnectors })
-  const [deleteConnector] = useMutation(DeleteConnectorDocument, { refetchQueries: refetchConnectors })
+  const [revokeConnector] = useMutation(RevokeConnectorDocument, {
+    onError: toastMutationError, refetchQueries: refetchConnectors })
+  const [deleteConnector] = useMutation(DeleteConnectorDocument, {
+    onError: toastMutationError, refetchQueries: refetchConnectors })
   async function handleRevokeConnector(connectorId: string) {
     await revokeConnector({ variables: { id: connectorId } as RevokeConnectorMutationVariables })
   }

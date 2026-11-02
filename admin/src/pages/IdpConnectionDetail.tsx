@@ -1,4 +1,5 @@
 import { useNavigate, useParams } from 'react-router-dom'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Capability, useCan } from '@/lib/capabilities'
 import { useState } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
@@ -47,7 +48,8 @@ export default function IdpConnectionDetail() {
   })
   const [setConnectionStatus, { loading: statusPending }] = useMutation(
     SetIdpConnectionStatusDocument,
-    { refetchQueries: [{ query: GetIdpConnectionsDocument }] },
+    {
+    onError: toastMutationError, refetchQueries: [{ query: GetIdpConnectionsDocument }] },
   )
 
   const connection = (data?.idpConnections ?? []).find(

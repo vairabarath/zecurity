@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
@@ -67,9 +68,11 @@ export default function RemoteNetworks() {
   })
 
   const [createNetwork, { loading: creating }] = useMutation(CreateRemoteNetworkDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
   })
   const [deleteNetwork] = useMutation(DeleteRemoteNetworkDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
   })
 

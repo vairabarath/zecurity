@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ChevronDown, ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
@@ -57,9 +58,11 @@ export default function Shields() {
   })
 
   const [revokeShield] = useMutation(RevokeShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: id ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: id } }] : [],
   })
   const [deleteShield] = useMutation(DeleteShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: id ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: id } }] : [],
   })
 

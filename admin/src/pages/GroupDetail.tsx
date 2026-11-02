@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Capability, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
@@ -105,18 +106,22 @@ export default function GroupDetail() {
   const canChangeResources = canWrite && (isAdmin || !iAmMember)
 
   const [addMember, { loading: addingMember }] = useMutation(AddGroupMemberDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowAddMember(false); setSelectedUserId(''); refetch() },
   })
 
   const [removeMember, { loading: removingMember }] = useMutation(RemoveGroupMemberDocument, {
+    onError: toastMutationError,
     onCompleted: () => refetch(),
   })
 
   const [assignResource, { loading: assigning }] = useMutation(AssignResourceToGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowAssignResource(false); setSelectedResourceId(''); refetch() },
   })
 
   const [unassignResource, { loading: unassigning }] = useMutation(UnassignResourceFromGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => refetch(),
   })
 

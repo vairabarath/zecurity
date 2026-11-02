@@ -1,4 +1,5 @@
 import { Capability, useCan } from '@/lib/capabilities'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@apollo/client/react'
@@ -156,10 +157,12 @@ export default function ShieldDetail() {
   }
 
   const [revokeShield, { loading: revoking }] = useMutation(RevokeShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetShieldDocument, variables: { id: shieldId } }],
   })
 
   const [deleteShield, { loading: deleting }] = useMutation(DeleteShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
     onCompleted: () => navigate('/shields'),
   })
