@@ -3585,3 +3585,10 @@ serves on `127.0.0.1:9102`.
   - the DB-IP credit.
   - Admin gate: 29 files / 217 tests, build passes, lint unchanged (17).
 - Found while building: the profile modals rendered every server-side check as the "Approved by an admin" switch, so the country check needed its own editor before G1a could ship.
+- G1c live run PASS:
+  - real DB-IP Lite database and metric;
+  - a real client gained the resource in IN and lost it within 1 s of the switch to CN;
+  - the console editor's in-place update restored access in 8 s, with an audit row;
+  - the Devices page shows the country;
+  - the override is ignored with `ENV=production`.
+- Local DB was reset for migration 048 (with consent).

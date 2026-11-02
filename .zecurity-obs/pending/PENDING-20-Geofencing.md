@@ -1,6 +1,6 @@
 # PENDING-20: Geofencing for resource access
 
-**Status:** approved 2026-11-02. **G1a (backend) and G1b (console) built** on local branch `feat/geofencing-g1` (not pushed); gates green. Next: G1c live acceptance.
+**Status:** approved 2026-11-02. **G1a (backend), G1b (console) built; G1c live run PASS (2026-11-02)** on local branch `feat/geofencing-g1` (not pushed). Next: one PR.
 **Date:** 2026-11-02
 **Base:** `fixed-pendings`. Builds on the device-posture pipeline (ADR-030, migrations 030 and 044). It assumes PENDING-19 (workspace roles, PR #168) is merged: profile writes need `POSTURE_WRITE`.
 **Scope:** its own epic.
@@ -146,5 +146,18 @@ None. O-1 … O-5 were decided on 2026-11-02 as G-5 … G-9 (§3).
    - Create and Edit device profile: Edit adds the check, updates it in place via G-10, or removes it.
    - The profiles list shows a summary of each country rule, and the Devices page has a Country column.
    - Admin tests: 29 files, 217 tests.
-3. **G1c, live acceptance** on the lab (O-3 override).
+3. **G1c, live acceptance** on the lab (O-3 override). **PASS 2026-11-02 (local stack, real DB-IP Lite Country built 2026-11-01, local test login):**
+   - **Real database:** it loads, and the build-date metric is exported. Public addresses resolve as expected (8.8.8.8 → US, 49.36.0.1 → IN, 81.2.69.142 → GB); private and loopback addresses are unknown.
+   - **Setup:** resource `geo-db` in a group with `r3-geo1`, and an enforce profile "India only" (allow IN) bound to it. A real `zecurity-client` (root sandbox daemon, TUN up) logged in.
+   - **Allowed:**
+     - the controller recorded IN (only `127.0.0.0/24` stored);
+     - the first posture report evaluated as satisfied;
+     - the client got `geo-db` on its next poll (`hot-applied … added=1`).
+   - **Move:** the controller was restarted with the override switched to CN. Within 1 s of the client's reconnecting poll the controller logged "seen in country CN", the evaluation read "CN is not allowed", and the client removed `geo-db` (`removed=1`).
+   - **Console:**
+     - the Devices page showed "China (CN)", with the network and time on hover;
+     - the Edit dialog loaded "allow IN" in its own section with the DB-IP credit;
+     - adding China and saving sent one in-place update (audit row: old `["IN"]`, new `["CN","IN"]`);
+     - the device regained `geo-db` 8 s later.
+   - **Production guard:** with `ENV=production` the override was ignored ("GEOIP_DEV_OVERRIDES ignored"), and the localhost client was recorded as unknown, which denies.
 4. **G2:** a separate design note for device OS location.
