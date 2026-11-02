@@ -183,3 +183,33 @@ func refuseSelfGroupChange(ctx context.Context, callerID, targetUserID string) e
 	}
 	return apperr.UserErrorf("only an Admin can change their own group membership")
 }
+
+// refuseOwnGroupAccessChange enforces O-6: only an Admin may assign or
+// unassign a resource on a group they are a member of, since that changes
+// their own network access as surely as joining the group (R-9).
+func (r *Resolver) refuseOwnGroupAccessChange(ctx context.Context, tenantID, callerID, groupID string) error {
+	if role, ok := rbac.RoleFrom(ctx); ok && role == rbac.RoleAdmin {
+		return nil
+	}
+	gid, ok := rbac.CanonicalID(groupID)
+	if !ok {
+		return nil // the store rejects an invalid group id as not found
+	}
+	caller, ok := rbac.CanonicalID(callerID)
+	if !ok {
+		return apperr.UserErrorf("forbidden") // fail closed: no usable caller id
+	}
+	var member bool
+	if err := r.Pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM group_members gm JOIN groups g ON g.id = gm.group_id
+		    WHERE gm.group_id = $1 AND gm.user_id = $2 AND g.workspace_id = $3)`,
+		gid, caller, tenantID,
+	).Scan(&member); err != nil {
+		return fmt.Errorf("check own group membership: %w", err)
+	}
+	if member {
+		return apperr.UserErrorf("only an Admin can change resource access for a group they belong to")
+	}
+	return nil
+}

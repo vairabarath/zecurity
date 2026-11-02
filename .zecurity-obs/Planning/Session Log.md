@@ -3510,4 +3510,4 @@ serves on `127.0.0.1:9102`.
   - role cache could be repopulated with a stale role by a lookup racing an invalidation (generation counters);
   - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
 - Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
-- Open: O-6 (Security assigning a resource to a group it is in), O-7 (self device approval). Shared `ztna_platform` still has the old role CHECK until a reset. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
+- O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` still has the old role CHECK until a reset. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.

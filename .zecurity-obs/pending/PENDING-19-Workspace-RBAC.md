@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. Two new open items from the R1 security review (O-6, O-7, §8). Next: R2 admin UI.
+**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. Next: R2 admin UI.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -32,6 +32,8 @@ Teams want to give people part of the console (network operators, security staff
 | R-8 | **Helpdesk can't revoke devices.** It approves and unapproves only; `revokeDevice` (permanent) is Admin-only (was O-2). |
 | R-9 | **No self group changes for non-Admins** (2026-11-02, was O-1): the server refuses `addGroupMember` / `removeGroupMember` on yourself unless you are Admin. Collusion between two people remains; the audit log covers it. |
 | R-10 | **Invites stay Admin-only** (2026-11-02, was O-3): `createInvitation` and `POST /api/invitations` need `MEMBERS_ADMIN`. |
+| R-12 | **No resource access changes on your own group** (2026-11-02, was O-6): `assignResourceToGroup` / `unassignResourceFromGroup` are refused when the caller is a member of the group, unless Admin. |
+| R-13 | **No self device approval** (2026-11-02, was O-7): `approveDevice` / `unapproveDevice` on your own device are refused unless Admin. |
 | R-11 | **Never zero active Admins, from any path** (2026-11-02, was O-4). The last active Admin can't make themselves Member (no self-change, §7). SCIM is refused only when the change would leave zero active Admins; it may disable an Admin while another active Admin remains. Covered: `DirectoryService.Deprovision` (DELETE / suspend), `DirectoryService.Update` with `active=false` (PATCH), and the connection-disable bulk suspend (`idp/store.go suspendSCIMUsers`). Refusal is SCIM 409 plus an audit event, under the same Admin-row lock as `setMemberRole`. |
 
 ## 3. Roles
@@ -147,12 +149,7 @@ So Viewer can read every query. A test pins this: any new read field that return
 
 O-1, O-3 and O-4 were decided on 2026-11-02 as R-9, R-10 and R-11 (§2). The O-4 code check found that SCIM could disable the last Admin through three paths with no guard; R-11 closes them.
 
-Raised by the automated security review of the R1 commit (2026-11-02). Both widen an approved decision, so they wait for a decision:
-
-| # | Question | Recommendation |
-|---|---|---|
-| O-6 | **Security can assign a resource to a group it is in** (`assignResourceToGroup`). That grants Security network access to the resource as surely as adding itself to a group, which R-9 refuses. | Refuse `assignResourceToGroup` / `unassignResourceFromGroup` when the caller is a member of that group, unless Admin. Same rule and message as R-9. |
-| O-7 | **Helpdesk can approve its own device** (`approveDevice`). Today an Admin can too; nothing checks the device owner. | Refuse `approveDevice` / `unapproveDevice` on your own device unless Admin. |
+O-6 and O-7 (raised by the automated security review of the R1 commit) were decided on 2026-11-02 as R-12 and R-13 and built in R1.
 
 ## 9. Database
 

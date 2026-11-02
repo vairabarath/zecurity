@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,22 +106,29 @@ func (r *mutationResolver) setDeviceApproval(ctx context.Context, deviceID strin
 	defer tx.Rollback(ctx) //nolint:errcheck
 
 	var (
-		name              string
+		name, owner       string
 		revoked, approved bool
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT name, revoked_at IS NOT NULL, approved_at IS NOT NULL
+		`SELECT name, user_id::text, revoked_at IS NOT NULL, approved_at IS NOT NULL
 		   FROM client_devices
 		  WHERE id = $1
 		    AND workspace_id = $2
 		    FOR UPDATE`,
 		deviceUUID, workspaceID,
-	).Scan(&name, &revoked, &approved)
+	).Scan(&name, &owner, &revoked, &approved)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%s: device not found", op)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	// O-7 (PENDING-19): only an Admin may approve or unapprove their own
+	// device; Helpdesk can't vouch for itself. Live role from @requires.
+	if self, _ := rbac.CanonicalID(tc.UserID); owner == self {
+		if role, ok := rbac.RoleFrom(ctx); !ok || role != rbac.RoleAdmin {
+			return nil, apperr.UserErrorf("%s: only an Admin can approve or unapprove their own device", op)
+		}
 	}
 	if approve && revoked {
 		return nil, fmt.Errorf("%s: device is revoked", op)

@@ -404,3 +404,62 @@ func TestRBAC_NonCanonicalIDsCannotBypassGuards(t *testing.T) {
 	add := `mutation($g: ID!, $u: ID!) { addGroupMember(groupId: $g, userId: $u) { id } }`
 	f.wantErr("security", add, map[string]any{"g": group, "u": strings.ToUpper(f.users["security"])}, "only an Admin")
 }
+
+// O-6: only an Admin may change resource access for a group they belong to.
+// The guard runs before the store, so a placeholder resource id shows which
+// side of it a call landed on.
+func TestRBAC_OwnGroupResourceAssignment(t *testing.T) {
+	f := newRBACFixture(t)
+	var group string
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO groups (workspace_id, name) VALUES ($1, 'mine') RETURNING id::text`, f.ws).Scan(&group); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"security", "admin"} {
+		if _, err := f.pool.Exec(f.ctx, `INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, group, f.users[label]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := "00000000-0000-0000-0000-0000000000bb"
+	assign := `mutation($r: ID!, $g: ID!) { assignResourceToGroup(resourceId: $r, groupId: $g) { id } }`
+	unassign := `mutation($r: ID!, $g: ID!) { unassignResourceFromGroup(resourceId: $r, groupId: $g) { id } }`
+	v := map[string]any{"r": res, "g": group}
+	f.wantErr("security", assign, v, "group they belong to")
+	f.wantErr("security", unassign, v, "group they belong to")
+	f.wantErr("security", assign, map[string]any{"r": res, "g": strings.ToUpper(group)}, "group they belong to")
+	for _, q := range []string{assign, unassign} {
+		got := f.do("admin", q, v) // Admin passes the guard; the fake resource then fails in the store
+		if len(got.Errors) == 0 || strings.Contains(got.Errors[0].Message, "group they belong to") {
+			t.Fatalf("admin: errors %v, want a store error past the guard", got.Errors)
+		}
+	}
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM group_members WHERE user_id = $1`, f.users["security"]); err != nil {
+		t.Fatal(err)
+	}
+	got := f.do("security", assign, v)
+	if len(got.Errors) == 0 || strings.Contains(got.Errors[0].Message, "group they belong to") {
+		t.Fatalf("security, not a member: errors %v, want a store error past the guard", got.Errors)
+	}
+}
+
+// O-7: only an Admin may approve or unapprove their own device.
+func TestRBAC_OwnDeviceApproval(t *testing.T) {
+	f := newRBACFixture(t)
+	device := func(owner string) string {
+		var id string
+		if err := f.pool.QueryRow(f.ctx,
+			`INSERT INTO client_devices (user_id, workspace_id, name, os) VALUES ($1, $2, 'laptop', 'linux') RETURNING id::text`,
+			f.users[owner], f.ws).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	approve := `mutation($d: ID!) { approveDevice(deviceId: $d) { id } }`
+	unapprove := `mutation($d: ID!) { unapproveDevice(deviceId: $d) { id } }`
+	own := device("helpdesk")
+	f.wantErr("helpdesk", approve, map[string]any{"d": own}, "their own device")
+	f.wantErr("helpdesk", unapprove, map[string]any{"d": own}, "their own device")
+	f.wantOK("helpdesk", approve, map[string]any{"d": device("member")})
+	f.wantOK("admin", approve, map[string]any{"d": device("admin")})
+	f.wantOK("admin", approve, map[string]any{"d": own})
+}

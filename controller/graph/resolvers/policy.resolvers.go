@@ -166,6 +166,9 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 // AssignResourceToGroup is the resolver for the assignResourceToGroup field.
 func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
+	if err := r.refuseOwnGroupAccessChange(ctx, tc.TenantID, tc.UserID, groupID); err != nil {
+		return nil, err
+	}
 
 	// The store checks the resource and the group belong to this workspace (B-1).
 	if _, err := r.PolicyStore.AssignResourceToGroup(ctx, tc.TenantID, resourceID, groupID); err != nil {
@@ -184,6 +187,9 @@ func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID
 // UnassignResourceFromGroup is the resolver for the unassignResourceFromGroup field.
 func (r *mutationResolver) UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
+	if err := r.refuseOwnGroupAccessChange(ctx, tc.TenantID, tc.UserID, groupID); err != nil {
+		return nil, err
+	}
 
 	if err := r.PolicyStore.UnassignResourceFromGroup(ctx, tc.TenantID, resourceID, groupID); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
