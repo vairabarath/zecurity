@@ -4,6 +4,7 @@ import { useAuthStore } from '@/store/auth'
 import { apolloClient } from '@/apollo/client'
 import { MeDocument } from '@/generated/graphql'
 import type { MeQuery } from '@/generated/graphql'
+import { canUseConsole } from '@/lib/capabilities'
 
 // AuthCallback handles the return from Google OAuth.
 //
@@ -80,8 +81,8 @@ export default function AuthCallback() {
           // invitations should not block the user from logging in.
         }
 
-        // Step 6 — Role-based redirect
-        if (result.data!.me.role === 'ADMIN') {
+        // Step 6 — Redirect by console access (CONSOLE_READ), not by role name
+        if (canUseConsole(result.data!.me)) {
           navigate('/dashboard', { replace: true })
         } else {
           navigate('/install', { replace: true })

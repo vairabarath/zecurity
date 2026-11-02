@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Capability, useCan } from '@/lib/capabilities'
 import { useMutation } from '@apollo/client/react'
 import { toast } from 'sonner'
 import {
@@ -70,7 +71,8 @@ export function ConflictRow({
   // A pending conflict accepts a link, rejects, or reopens a previously
   // resolved one. Resolved rows (approved/rejected/expired) carry their
   // resolutionReason but take no further action here.
-  const canAct = conflict.status === 'pending'
+  const canWrite = useCan(Capability.IdentityAdmin)
+  const canAct = conflict.status === 'pending' && canWrite
   const busy =
     acceptingResult.loading || rejectingResult.loading || reopeningResult.loading
 
@@ -175,7 +177,7 @@ export function ConflictRow({
             </Button>
             {/* Reopen is only meaningful for a previously resolved row. */}
           </div>
-        ) : conflict.status === 'rejected' ? (
+        ) : conflict.status === 'rejected' && canWrite ? (
           <Button
             size="sm"
             variant="outline"

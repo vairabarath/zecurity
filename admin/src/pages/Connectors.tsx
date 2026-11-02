@@ -15,6 +15,7 @@ import type {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -28,6 +29,7 @@ function statusTone(status: ConnectorStatus): 'ok' | 'warn' | 'danger' | 'muted'
 export default function Connectors() {
   const { id } = useParams<{ id: string }>()
   const [showInstall, setShowInstall] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
 
   const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
     variables: { id: id! },
@@ -73,10 +75,12 @@ export default function Connectors() {
           <h2 className="page-title">Connectors</h2>
           <p className="page-subtitle">Connectors currently assigned to {networkName}.</p>
         </div>
+        {canWrite && (
         <Button onClick={() => setShowInstall(true)} className="gap-2">
           <Plus className="h-4 w-4" />
           Add Connector
         </Button>
+        )}
       </div>
 
       {id ? (
@@ -101,7 +105,7 @@ export default function Connectors() {
             <EmptyState
               title="No connectors for this network"
               description="Generate the first install command to start receiving heartbeat traffic."
-              action={<Button onClick={() => setShowInstall(true)}>Add Connector</Button>}
+              action={canWrite ? <Button onClick={() => setShowInstall(true)}>Add Connector</Button> : undefined}
             />
           ) : (
             <div className="min-w-232.5">
@@ -130,7 +134,7 @@ export default function Connectors() {
                     <div className="text-sm text-muted-foreground">{connector.publicIp ?? '—'}</div>
                     <div className="flex items-center justify-end gap-2">
                       <Link to={`/connectors/${connector.id}`} className="text-sm font-semibold text-primary">Manage</Link>
-                      {canRevoke ? (
+                      {canRevoke && canWrite ? (
                         <button
                           onClick={() => handleRevoke(connector.id)}
                           className="rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] p-2 text-warning"
@@ -138,7 +142,7 @@ export default function Connectors() {
                           <ShieldOff className="h-4 w-4" />
                         </button>
                       ) : null}
-                      {canDelete ? (
+                      {canDelete && canWrite ? (
                         <button
                           onClick={() => handleDelete(connector.id)}
                           className="rounded-xl border border-[oklch(0.75_0.16_25/0.28)] bg-[oklch(0.75_0.16_25/0.12)] p-2 text-[oklch(0.75_0.16_25)]"

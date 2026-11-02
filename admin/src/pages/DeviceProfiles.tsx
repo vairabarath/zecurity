@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { CreateDeviceProfileModal } from "@/components/CreateDeviceProfileModal";
 import { EditDeviceProfileModal } from "@/components/EditDeviceProfileModal";
+import { Capability, useCan } from "@/lib/capabilities";
 
 import { EmptyState, ErrorState, EntityIcon } from "@/lib/console";
 
@@ -63,6 +64,7 @@ function DeleteDeviceProfileDialog({
 
 export default function DeviceProfiles() {
   const [showAdd, setShowAdd] = useState(false);
+  const canWrite = useCan(Capability.PostureWrite);
   const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
   const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string } | null>(null);
 
@@ -101,10 +103,12 @@ export default function DeviceProfiles() {
             </span>{" "}
             total
           </span>
+          {canWrite && (
           <Button onClick={() => setShowAdd(true)} className="gap-2">
             <Plus className="h-4 w-4" />
             Create Device Profile
           </Button>
+          )}
         </div>
       </div>
 
@@ -143,9 +147,11 @@ export default function DeviceProfiles() {
               title="No device profiles defined"
               description="Create a device profile to start gating resource access on posture."
               action={
-                <Button onClick={() => setShowAdd(true)}>
-                  Create Device Profile
-                </Button>
+                canWrite ? (
+                  <Button onClick={() => setShowAdd(true)}>
+                    Create Device Profile
+                  </Button>
+                ) : undefined
               }
             />
           ) : (
@@ -182,6 +188,7 @@ export default function DeviceProfiles() {
                   </div>
 
                   <div className="flex items-center justify-end gap-3">
+                    {canWrite && (
                     <button
                       onClick={() =>
                         setEditingProfile({
@@ -195,12 +202,15 @@ export default function DeviceProfiles() {
                     >
                       Edit
                     </button>
+                    )}
+                    {canWrite && (
                     <button
                       onClick={() => setDeletingProfile({ id: profile.id, name: profile.name })}
                       className="text-[13px] font-bold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
                     >
                       Delete
                     </button>
+                    )}
                   </div>
                 </div>
               ))}

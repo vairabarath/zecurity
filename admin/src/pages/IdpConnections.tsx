@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Capability, useCan } from '@/lib/capabilities'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
 import { ChevronRight, KeyRound } from 'lucide-react'
@@ -39,6 +40,7 @@ function IdpIcon() {
 }
 
 export default function IdpConnections() {
+  const canWrite = useCan(Capability.IdentityAdmin)
   const navigate = useNavigate()
   const [selectedProvider, setSelectedProvider] = useState<ProviderKey>('okta')
   const [wizardOpen, setWizardOpen] = useState(false)
@@ -69,7 +71,7 @@ export default function IdpConnections() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <AddIdentityProviderMenu onSelect={openWizardFor} />
+          {canWrite && <AddIdentityProviderMenu onSelect={openWizardFor} />}
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{connections.length}</span> connections
           </span>
@@ -98,7 +100,7 @@ export default function IdpConnections() {
             icon={<KeyRound className="h-6 w-6" />}
             title="No identity providers"
             description="This workspace has no identity-provider connections yet. Add an enterprise identity provider to begin configuring SCIM directory synchronization."
-            action={<AddIdentityProviderMenu onSelect={openWizardFor} />}
+            action={canWrite ? <AddIdentityProviderMenu onSelect={openWizardFor} /> : undefined}
           />
         ) : (
           <div className="divide-y divide-border/40">

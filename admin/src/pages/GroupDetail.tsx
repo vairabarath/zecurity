@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Capability, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ArrowLeft, Box, Loader2, Minus, Plus, Users } from 'lucide-react'
@@ -59,6 +60,9 @@ export default function GroupDetail() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('members')
   const [showAddMember, setShowAddMember] = useState(false)
+  const canWrite = useCan(Capability.AccessWrite)
+  const isAdmin = useIsAdmin()
+  const myId = useCurrentUserId()
   const [showAssignResource, setShowAssignResource] = useState(false)
   const [selectedUserId, setSelectedUserId] = useState('')
   const [selectedResourceId, setSelectedResourceId] = useState('')
@@ -94,7 +98,11 @@ export default function GroupDetail() {
 
   const allUsers = usersData?.users ?? []
   const memberIds = new Set((group?.members ?? []).map((m) => m.id))
-  const nonMembers = allUsers.filter((u) => !memberIds.has(u.id))
+  // R-9: only an Admin may add or remove themselves.
+  const nonMembers = allUsers.filter((u) => !memberIds.has(u.id) && (isAdmin || u.id !== myId))
+  // R-12: only an Admin may change resource access for a group they belong to.
+  const iAmMember = !!myId && memberIds.has(myId)
+  const canChangeResources = canWrite && (isAdmin || !iAmMember)
 
   const [addMember, { loading: addingMember }] = useMutation(AddGroupMemberDocument, {
     onCompleted: () => { setShowAddMember(false); setSelectedUserId(''); refetch() },
@@ -221,7 +229,7 @@ export default function GroupDetail() {
             title="Members"
             subtitle={`${group.members.length} user${group.members.length === 1 ? '' : 's'} in this group`}
             action={
-              group.origin !== 'scim' ? (
+              group.origin !== 'scim' && canWrite ? (
                 <Button size="sm" className="gap-2" onClick={() => setShowAddMember(true)} disabled={nonMembers.length === 0}>
                   <Plus className="h-4 w-4" />
                   Add Member
@@ -256,7 +264,7 @@ export default function GroupDetail() {
                       <div className="text-[11.5px] capitalize text-muted-foreground">{member.role.toLowerCase()}</div>
                     </div>
                   </div>
-                  {group.origin !== 'scim' && (
+                  {group.origin !== 'scim' && canWrite && (isAdmin || member.id !== myId) && (
                     <button
                       onClick={() => removeMember({ variables: { groupId: group.id, userId: member.id } })}
                       disabled={removingMember}
@@ -284,18 +292,25 @@ export default function GroupDetail() {
                 : `${group.resources.length} resource${group.resources.length === 1 ? '' : 's'} accessible by this group`
             }
             action={
-              <Button size="sm" className="gap-2" onClick={() => setShowAssignResource(true)} disabled={unassignedResources.length === 0}>
-                <Plus className="h-4 w-4" />
-                Assign Resource
-              </Button>
+              canChangeResources ? (
+                <Button size="sm" className="gap-2" onClick={() => setShowAssignResource(true)} disabled={unassignedResources.length === 0}>
+                  <Plus className="h-4 w-4" />
+                  Assign Resource
+                </Button>
+              ) : undefined
             }
           />
+          {canWrite && !canChangeResources && (
+            <div className="border-b border-border px-5 py-3 text-xs text-muted-foreground">
+              You are a member of this group, so only an Admin can change its resources.
+            </div>
+          )}
 
           {group.resources.length === 0 ? (
             <div className="px-5 py-14 text-center">
               <p className="text-sm font-semibold text-[oklch(0.85_0.13_80)]">Default-deny active</p>
               <p className="mt-1 text-sm text-muted-foreground">No resources are assigned. Members of this group cannot access anything.</p>
-              {unassignedResources.length > 0 && (
+              {unassignedResources.length > 0 && canChangeResources && (
                 <Button size="sm" className="mt-4 gap-2" onClick={() => setShowAssignResource(true)}>
                   <Plus className="h-4 w-4" />
                   Assign Resource
@@ -321,6 +336,7 @@ export default function GroupDetail() {
                       </div>
                     </div>
                   </div>
+                  {canChangeResources && (
                   <button
                     onClick={() => unassignResource({ variables: { resourceId: resource.id, groupId: group.id } })}
                     disabled={unassigning}
@@ -329,6 +345,7 @@ export default function GroupDetail() {
                     <Minus className="h-3.5 w-3.5" />
                     Unassign
                   </button>
+                  )}
                 </div>
               ))}
             </div>

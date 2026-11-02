@@ -35,6 +35,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ScanModal } from '@/components/ScanModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { EmptyState, ErrorState, EntityIcon, StatusPill } from '@/lib/console'
 
 const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home }> = {
@@ -54,6 +55,7 @@ const healthTone: Record<NetworkHealth, 'ok' | 'warn' | 'danger'> = {
 
 export default function RemoteNetworks() {
   const [showComposer, setShowComposer] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
   const [name, setName] = useState('')
   const [location, setLocation] = useState<NetworkLocation>(NetworkLocation.Office)
   const [scanTarget, setScanTarget] = useState<{ networkId: string; connectorId: string } | null>(null)
@@ -105,18 +107,20 @@ export default function RemoteNetworks() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="metric-chip"><strong>{networks.length}</strong> total</span>
-          <Button
-            onClick={() => setShowComposer((open) => !open)}
-            variant={showComposer ? 'outline' : 'default'}
-            className="gap-2"
-          >
-            <Plus className="h-4 w-4" />
-            {showComposer ? 'Close' : 'Add Network'}
-          </Button>
+          {canWrite && (
+            <Button
+              onClick={() => setShowComposer((open) => !open)}
+              variant={showComposer ? 'outline' : 'default'}
+              className="gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              {showComposer ? 'Close' : 'Add Network'}
+            </Button>
+          )}
         </div>
       </div>
 
-      {showComposer ? (
+      {showComposer && canWrite ? (
         <div className="surface-card p-5">
           <div className="mb-4">
             <div className="text-sm font-semibold">Create Remote Network</div>
@@ -185,7 +189,7 @@ export default function RemoteNetworks() {
           <EmptyState
             title="No remote networks yet"
             description="Create the first network to start enrolling connectors and shields."
-            action={<Button onClick={() => setShowComposer(true)}>Add Network</Button>}
+            action={canWrite ? <Button onClick={() => setShowComposer(true)}>Add Network</Button> : undefined}
           />
         </div>
       ) : (
@@ -219,14 +223,14 @@ export default function RemoteNetworks() {
                     </div>
                   </div>
 
-                  <button
+                  {canWrite && <button
                     onClick={() => handleDelete(network.id)}
                     disabled={!canDelete}
                     className="rounded-xl border border-border bg-secondary p-2 text-muted-foreground transition hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
                     title={canDelete ? 'Delete network' : 'Delete disabled while connectors or shields still exist'}
                   >
                     <Trash2 className="h-4 w-4" />
-                  </button>
+                  </button>}
                 </div>
 
                 <div className="mt-5 grid gap-3 sm:grid-cols-2">
@@ -261,7 +265,7 @@ export default function RemoteNetworks() {
                         Launch connector-side TCP discovery for this segment.
                       </div>
                     </div>
-                    <Button
+                    {canWrite && <Button
                       type="button"
                       size="sm"
                       disabled={!selectedConnector}
@@ -271,7 +275,7 @@ export default function RemoteNetworks() {
                       }
                     >
                       Scan Network
-                    </Button>
+                    </Button>}
                   </div>
 
                   {network.connectors.length > 1 ? (

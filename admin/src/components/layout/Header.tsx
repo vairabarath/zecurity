@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { roleLabel } from '@/lib/capabilities'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Bell, ChevronDown, LogOut, Search, Settings, Shield } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -88,7 +89,7 @@ export function Header() {
             </Avatar>
             <div className="hidden min-w-0 md:block">
               <div className="max-w-[160px] truncate text-[12px] font-semibold">{user?.email ?? 'Workspace user'}</div>
-              <div className="text-[10.5px] capitalize text-muted-foreground">{user?.role ?? 'admin'}</div>
+              <div className="text-[10.5px] text-muted-foreground">{roleLabel(user?.role)}</div>
             </div>
             <ChevronDown className="h-4 w-4 text-muted-foreground" />
           </button>
@@ -99,7 +100,7 @@ export function Header() {
               <Shield className="h-4 w-4 text-primary" />
               <span className="truncate">{user?.email}</span>
             </div>
-            <div className="ml-6 mt-0.5 text-xs capitalize text-muted-foreground">{user?.role}</div>
+            <div className="ml-6 mt-0.5 text-xs text-muted-foreground">{roleLabel(user?.role)}</div>
           </div>
           <DropdownMenuItem onClick={() => navigate('/settings')} className="cursor-pointer">
             <Settings className="mr-2 h-4 w-4" />

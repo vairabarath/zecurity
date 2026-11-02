@@ -443,3 +443,13 @@ mutation ReopenScimConflict(
     reason: $reason
   )
 }
+
+# PENDING-19 §7 — change a member's console role. Admin only (MEMBERS_ADMIN);
+# the server refuses your own account and removing the last active Admin.
+mutation SetMemberRole($userId: ID!, $role: Role!, $reason: String!) {
+  setMemberRole(userId: $userId, role: $role, reason: $reason) {
+    id
+    role
+    capabilities
+  }
+}

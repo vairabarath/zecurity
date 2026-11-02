@@ -32,6 +32,7 @@ import type {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -210,6 +211,7 @@ export default function RemoteNetworkDetail() {
   const { id } = useParams<{ id: string }>()
   const [showConnectorInstall, setShowConnectorInstall] = useState(false)
   const [showShieldInstall, setShowShieldInstall] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
   const [hoveredConnector, setHoveredConnector] = useState<string | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
@@ -297,10 +299,12 @@ export default function RemoteNetworkDetail() {
           </div>
           <h2 className="text-xl font-semibold">No connectors yet</h2>
           <p className="mt-2 text-sm text-muted-foreground">Deploy a connector to establish topology for this network.</p>
+          {canWrite && (
           <Button onClick={() => setShowConnectorInstall(true)} className="mt-5 gap-2">
             <Plus className="h-4 w-4" />
             Add Connector
           </Button>
+          )}
         </div>
 
         {id ? <InstallCommandModal remoteNetworkId={id} open={showConnectorInstall} onClose={() => setShowConnectorInstall(false)} /> : null}
@@ -339,10 +343,12 @@ export default function RemoteNetworkDetail() {
             <Settings className="h-4 w-4" />
             Settings
           </button>
+          {canWrite && (
           <Button onClick={() => setShowConnectorInstall(true)} className="gap-2">
             <Plus className="h-4 w-4" />
             Add connector
           </Button>
+          )}
         </div>
       </div>
 
@@ -393,10 +399,12 @@ export default function RemoteNetworkDetail() {
               <div className="text-[1.15rem] font-bold">Connectors</div>
               <div className="mt-1 text-sm text-muted-foreground">{connectors.length} attached</div>
             </div>
+            {canWrite && (
             <Button size="sm" onClick={() => setShowConnectorInstall(true)} className="gap-2">
               <Plus className="h-4 w-4" />
               Connector
             </Button>
+            )}
           </div>
 
           <div>
@@ -439,7 +447,7 @@ export default function RemoteNetworkDetail() {
                       {connectorShields.map((shield) => (
                         <button
                           key={shield.id}
-                          onClick={() => setShowShieldInstall(true)}
+                          onClick={canWrite ? () => setShowShieldInstall(true) : undefined}
                           className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary px-3 py-1.5 text-sm text-muted-foreground transition hover:text-foreground"
                         >
                           <Shield className="h-3.5 w-3.5" />
@@ -451,17 +459,19 @@ export default function RemoteNetworkDetail() {
                   ) : null}
 
                   <div className="mt-4 flex items-center justify-end gap-2">
+                    {canWrite && (
                     <Button variant="ghost" size="sm" onClick={() => setShowShieldInstall(true)} className="gap-1.5">
                       <Plus className="h-3.5 w-3.5" />
                       Shield
                     </Button>
-                    {canRevoke ? (
+                    )}
+                    {canRevoke && canWrite ? (
                       <Button variant="outline" size="sm" onClick={() => handleRevokeConnector(connector.id)} className="gap-1.5">
                         <ShieldOff className="h-3.5 w-3.5" />
                         Revoke
                       </Button>
                     ) : null}
-                    {canDelete ? (
+                    {canDelete && canWrite ? (
                       <Button variant="outline" size="sm" onClick={() => handleDeleteConnector(connector.id)}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>

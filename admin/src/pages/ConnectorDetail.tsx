@@ -1,3 +1,4 @@
+import { Capability, useCan } from '@/lib/capabilities'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
@@ -177,13 +178,16 @@ export default function ConnectorDetail() {
   }
 
   const pending = found?.status === ConnectorStatus.Pending
+  // Install tokens are NETWORK_WRITE (Admin, DevOps; R-4): don't mint one for
+  // a role that may not, and don't show the install command.
+  const canWrite = useCan(Capability.NetworkWrite)
 
   useEffect(() => {
-    if (found && pending && !didFetch.current) {
+    if (found && pending && canWrite && !didFetch.current) {
       didFetch.current = true
       void fetchInstallCommand()
     }
-  }, [found, pending])
+  }, [found, pending, canWrite])
 
   function handleCopy() {
     if (!installCommand) return
@@ -305,13 +309,13 @@ export default function ConnectorDetail() {
         </div>
 
         <div className="flex items-center gap-3">
-          {canRevoke ? (
+          {canRevoke && canWrite ? (
             <Button variant="outline" onClick={handleRevokeConnector} disabled={revoking} className="gap-2 text-destructive">
               {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}
               Revoke
             </Button>
           ) : null}
-          {canDelete ? (
+          {canDelete && canWrite ? (
             <Button variant="outline" onClick={handleDeleteConnector} disabled={deleting} className="gap-2 text-destructive">
               {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
               Delete Connector
@@ -338,7 +342,7 @@ export default function ConnectorDetail() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.95fr)]">
         <div className="space-y-4">
-          {pending ? (
+          {pending && canWrite ? (
             <div className="surface-card overflow-hidden">
               <div className="flex items-center justify-between border-b border-border px-5 py-4">
                 <div className="text-sm font-semibold uppercase tracking-[0.08em] text-muted-foreground">Install Command</div>
@@ -428,10 +432,12 @@ export default function ConnectorDetail() {
                 <div className="text-[1.15rem] font-bold">Shields</div>
                 <div className="mt-1 text-sm text-muted-foreground">{shields.length} resource{shields.length === 1 ? '' : 's'} protected</div>
               </div>
+              {canWrite && (
               <Button size="sm" className="gap-2">
                 <Plus className="h-4 w-4" />
                 Shield
               </Button>
+              )}
             </div>
 
             {shields.length === 0 ? (
@@ -464,13 +470,13 @@ export default function ConnectorDetail() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
-                          {canRevokeShield ? (
+                          {canRevokeShield && canWrite ? (
                             <Button variant="outline" size="sm" onClick={() => handleRevokeShield(shield.id, shield.name)} className="gap-1.5">
                               <ShieldOff className="h-3.5 w-3.5" />
                               Revoke
                             </Button>
                           ) : null}
-                          {canDeleteShield ? (
+                          {canDeleteShield && canWrite ? (
                             <Button variant="outline" size="sm" onClick={() => handleDeleteShield(shield.id, shield.name)}>
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
