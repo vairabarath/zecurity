@@ -1,6 +1,6 @@
 # PENDING-20: Geofencing for resource access
 
-**Status:** approved 2026-11-02 (all open items decided). Nothing is built; next is G1a.
+**Status:** approved 2026-11-02. **G1a (backend) built** on local branch `feat/geofencing-g1` (not pushed); gate green. Next: G1b console.
 **Date:** 2026-11-02
 **Base:** `fixed-pendings`. Builds on the device-posture pipeline (ADR-030, migrations 030 and 044). It assumes PENDING-19 (workspace roles, PR #168) is merged: profile writes need `POSTURE_WRITE`.
 **Scope:** its own epic.
@@ -133,7 +133,13 @@ None. O-1 … O-5 were decided on 2026-11-02 as G-5 … G-9 (§3).
 
 ## 8. Phases
 
-1. **G1a, backend:** migration, observation, GeoIP loader and reload, check evaluation, validation, tests.
+1. **G1a, backend:** migration, observation, GeoIP loader and reload, check evaluation, validation, tests. **Built 2026-11-02:**
+   - migration `048_geofencing.sql`;
+   - `internal/geoip` (DB-IP Lite `.mmdb` read via `oschwald/maxminddb-golang/v2` v2.0.0; test databases via `maxmind/mmdbwriter` v1.1.0, versions chosen so no shared dependency moved);
+   - `posture/country.go` (rule, observation store, evaluation);
+   - `client/location.go` (peer-address observation on posture reports, and on ACL polls on change or every 2 min);
+   - `main.go` (`GEOIP_DB_PATH`, `GEOIP_DEV_OVERRIDES` honoured only with `ENV=development`, hourly reload that re-evaluates workspaces, warning at 60 days);
+   - GraphQL (`addProfileRequirement(countries)`, `DeviceProfileRequirement.countries`, `ClientDevice.observedCountry/observedNetwork/observedAt`).
 2. **G1b, console:** profile editor with country pickers, the Devices page column, attribution.
 3. **G1c, live acceptance** on the lab (O-3 override).
 4. **G2:** a separate design note for device OS location.

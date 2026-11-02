@@ -3557,3 +3557,24 @@ serves on `127.0.0.1:9102`.
   - demotion to Member with a page open redirects to `/install`;
   - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
   - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.
+
+## 2026-11-02 — M1: geofencing (PENDING-20), design approved + G1a backend
+- Design note PENDING-20 approved (G-1 … G-9):
+  - a GeoIP country check, server-attested from the controller's gRPC peer address;
+  - allow and deny lists;
+  - DB-IP Lite;
+  - unknown location denies;
+  - observe on posture reports and the 60 s ACL poll;
+  - store the country and the /24 or /48 prefix only;
+  - a dev-only override;
+  - deny-only rules allowed.
+  - Device OS location (G2) is a later note.
+- G1a built on local branch `feat/geofencing-g1` (from `fixed-pendings` `768a9736`):
+  - migration `048_geofencing.sql`;
+  - `internal/geoip`;
+  - the posture country check;
+  - RPC observation and re-evaluation on a move;
+  - the GraphQL fields.
+  - No connector, relay, shield or proto change.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; 2 pre-existing skips), `scripts/resource-test-fixture.sh`, admin 210 tests.
+- Dependencies were pinned so none shared moved: `maxminddb-golang/v2` v2.0.0 (v2.9.0 would have upgraded `x/crypto`, `x/net`, `x/tools` and others); `mmdbwriter` v1.1.0 is test-only.
