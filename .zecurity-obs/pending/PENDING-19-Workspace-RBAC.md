@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. Next: R3 lab acceptance.
+**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. **R3 live run 2026-11-02: PASS** (41/41 API checks, UI pass; one R2 fix, one follow-up). Branch local, not pushed.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -176,6 +176,26 @@ O-6 and O-7 (raised by the automated security review of the R1 commit) were deci
 1. **R1 — backend:** migration, capability table, `@requires`, live check (GraphQL and REST), `setMemberRole`, audit, tests. **Built 2026-11-02** (`feat/workspace-rbac-r1`): migration `047_workspace_roles.sql`, `internal/rbac` (table, cached `Checker` with race-safe invalidation, last-Admin lock), `graph/resolvers/directives.go` (`NewRequires`), `middleware.RequireCapability` (replaces `RequireRole`, removed), `member_role.go` (`setMemberRole`, R-9), SCIM/IdP guards (R-11). The authz test now globs every `*.graphqls`: the old hand-kept list missed `idp.graphqls` and `posture.graphqls`. Known gap: `/auth/refresh` re-mints the JWT with the old claim role, so the **display** hint stays stale until re-login (no authz effect).
 2. **R2 — admin UI:** Manage Role dialog (radio list + required reason), tabs and buttons driven by `me.capabilities`, read-only views for Viewer. **Built 2026-11-02:** `admin/src/lib/capabilities.ts` (mutation → capability map mirroring `@requires`, `canUseConsole`, `useCan`), console guard on `CONSOLE_READ` (Members → `/install`), every write control hidden per capability (pages and modal triggers; install tokens never minted without `NETWORK_WRITE`), R-9/R-12/R-13 reflected in the UI, `ManageRoleDialog` on Users. Tests: parity with `controller/graph/*.graphqls`, console guard, dialog, per-role page rendering, Viewer sweep over 18 page states (25 files, 195 tests). Known: the console reads `me.capabilities` once per load, so a user demoted mid-session keeps their controls until reload; the server refuses every call (R3 expectation). Build and typecheck pass; lint unchanged (17 pre-existing problems).
 3. **R3 — live acceptance on the lab:** one account per role; each role tries an allowed and a refused action; a demotion mid-session applies at once; the last-Admin guard.
+
+   **R3 result (2026-11-02, local stack, controller and console from `feat/workspace-rbac-r1`; local test login):**
+   - Setup through the product paths: workspace via the bootstrap code, users invited with `createInvitation` and joined by first login as Member, every role then set with `setMemberRole` (with reason).
+   - **API, 41/41 PASS:**
+     - each role's allowed and refused GraphQL calls;
+     - the REST token and invitation routes (200/403);
+     - R-9 (also with an upper-cased own ID), R-10, R-12, R-13 and R-8;
+     - Member keeps `me` and `myDevices`;
+     - a mid-session demotion refused the same token's next write, and a re-promotion restored it without re-login (the JWT role claim stayed `member` throughout: display only);
+     - self-change refused, also by an upper-cased ID; a missing reason refused; demoting one of two Admins allowed;
+     - 8 audit rows for 8 changes, none for refusals.
+   - Helpdesk device checks used `client_devices` rows inserted by SQL, since there was no real client in this run.
+   - SCIM last-Admin paths (R-11) were not live-checked: no SCIM users in this workspace. They are covered by the DB tests.
+   - **UI:**
+     - Viewer pages show no write controls;
+     - a Member lands on `/install`;
+     - the Admin changed a role through the Manage Role dialog, and the server and audit row agree;
+     - Helpdesk sees approve only on another user's device and no revoke.
+   - **Fix found by R3** (R2): the sidebar showed Identity Providers, Access Log, Devices, Policies and Install Client only to `ADMIN`. Fixed: shown to every console role, with a `Sidebar.test.tsx` that fails on the old code.
+   - **Follow-up (not fixed):** after a mid-session demotion, a write from a page that is still open is refused by the server, but some pages show no message. `RemoteNetworks.handleCreate` doesn't catch the mutation error, so the form just stays open. The console reads `me.capabilities` once per load, and a reload shows the new role's controls. Options: show mutation errors on every page, or re-probe `me` when a call is refused.
 
 ## 12. Reference: Twingate admin console (looked at 2026-10-31)
 

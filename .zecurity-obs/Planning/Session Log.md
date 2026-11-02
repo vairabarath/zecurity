@@ -3516,3 +3516,8 @@ serves on `127.0.0.1:9102`.
   - gate: `npm run codegen`, `npm run build`, `npm test` (25 files, 195 tests incl. a Viewer sweep over 18 page states, mutation-checked), lint unchanged (17 pre-existing).
   - Known: the console reads `me.capabilities` once per load; a user demoted mid-session keeps their controls until reload (server refuses every call). R3 should expect this.
   - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.
+- R3 live run (local stack, local test login), controller and console from this branch:
+  - API checks: 41/41 PASS (per-role allowed/refused, REST 200/403, R-8/9/10/12/13, mid-session demotion with the same token, self-change and last-Admin, 8 audit rows);
+  - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
+  - Follow-up: a page left open after a demotion gets no visible error on refused writes on some pages (RemoteNetworks), because `handleCreate` doesn't catch it.
+  - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.
