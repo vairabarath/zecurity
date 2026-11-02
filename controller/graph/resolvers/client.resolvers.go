@@ -9,11 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/yourorg/ztna/controller/internal/apperr"
 	"time"
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -94,6 +94,7 @@ func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, e
 		`SELECT `+clientDeviceColumns+`
 		   FROM client_devices d
 		   LEFT JOIN users u ON u.id = d.approved_by
+		   LEFT JOIN device_network_observations n ON n.device_id = d.id AND n.workspace_id = d.workspace_id
 		  WHERE d.user_id = $1
 		    AND d.workspace_id = $2
 		  ORDER BY d.created_at DESC`,
@@ -130,6 +131,7 @@ func (r *queryResolver) ClientDevices(ctx context.Context) ([]*graph.ClientDevic
 		`SELECT `+clientDeviceColumns+`
 		   FROM client_devices d
 		   LEFT JOIN users u ON u.id = d.approved_by
+		   LEFT JOIN device_network_observations n ON n.device_id = d.id AND n.workspace_id = d.workspace_id
 		  WHERE d.workspace_id = $1
 		  ORDER BY d.created_at DESC`,
 		tc.TenantID,

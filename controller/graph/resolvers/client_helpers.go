@@ -28,9 +28,11 @@ func invitationToGQL(inv *invitation.Invitation) *graph.Invitation {
 }
 
 // clientDeviceColumns is the select list scanClientDevice reads, for
-// client_devices d LEFT JOIN users u ON u.id = d.approved_by.
+// client_devices d LEFT JOIN users u ON u.id = d.approved_by
+// LEFT JOIN device_network_observations n (PENDING-20) on device and workspace.
 const clientDeviceColumns = `d.id, d.user_id, d.name, d.os, d.spiffe_id, d.cert_not_after,
-		        d.last_seen_at, d.created_at, d.revoked_at, d.approved_at, u.email`
+		        d.last_seen_at, d.created_at, d.revoked_at, d.approved_at, u.email,
+		        NULLIF(n.country, ''), host(n.network_prefix) || '/' || masklen(n.network_prefix), n.observed_at`
 
 func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 	var (
@@ -42,9 +44,12 @@ func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 		revokedAt            *time.Time
 		approvedAt           *time.Time
 		approvedByEmail      *string
+		observedCountry      *string
+		observedNetwork      *string
+		observedAt           *time.Time
 	)
 	if err := row.Scan(&id, &userID, &name, &os, &spiffeID, &certNotAfter, &lastSeenAt, &createdAt, &revokedAt,
-		&approvedAt, &approvedByEmail); err != nil {
+		&approvedAt, &approvedByEmail, &observedCountry, &observedNetwork, &observedAt); err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
 
@@ -56,6 +61,13 @@ func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 		Os:         os,
 		SpiffeID:   spiffeID,
 		CreatedAt:  createdAt.UTC().Format(time.RFC3339),
+		// PENDING-20 G1: last sighting (country + /24 or /48 network only).
+		ObservedCountry: observedCountry,
+		ObservedNetwork: observedNetwork,
+	}
+	if observedAt != nil {
+		s := observedAt.UTC().Format(time.RFC3339)
+		d.ObservedAt = &s
 	}
 	if certNotAfter != nil {
 		s := certNotAfter.UTC().Format(time.RFC3339)
@@ -169,6 +181,7 @@ func (r *mutationResolver) setDeviceApproval(ctx context.Context, deviceID strin
 		`SELECT `+clientDeviceColumns+`
 		   FROM client_devices d
 		   LEFT JOIN users u ON u.id = d.approved_by
+		   LEFT JOIN device_network_observations n ON n.device_id = d.id AND n.workspace_id = d.workspace_id
 		  WHERE d.id = $1`,
 		deviceUUID))
 	if err != nil {

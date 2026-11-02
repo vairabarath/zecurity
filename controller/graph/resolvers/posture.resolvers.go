@@ -49,6 +49,12 @@ func (r *deviceProfileResolver) Requirements(ctx context.Context, obj *graph.Dev
 			CheckID:          requirement.CheckID,
 			AllowUnsupported: requirement.AllowUnsupported,
 		}
+		if requirement.Countries != nil {
+			result[i].Countries = &graph.CountryRule{
+				Allow: append([]string{}, requirement.Countries.Allow...),
+				Deny:  append([]string{}, requirement.Countries.Deny...),
+			}
+		}
 	}
 
 	return result, nil
@@ -193,7 +199,7 @@ func (r *mutationResolver) UpdateDeviceProfileManualTrust(ctx context.Context, i
 }
 
 // AddProfileRequirement is the resolver for the addProfileRequirement field.
-func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool) (*graph.DeviceProfile, error) {
+func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *graph.CountryRuleInput) (*graph.DeviceProfile, error) {
 	tc := tenant.MustGet(ctx)
 
 	workspaceID, err := uuid.Parse(tc.TenantID)
@@ -210,6 +216,21 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		return nil, apperr.UserErrorf("unknown posture check: %s", checkID)
 	}
 
+	// PENDING-20 G1: the country check needs a rule; no other check takes one.
+	var countryRule *posture.CountryRule
+	switch {
+	case checkID == posture.CheckNetworkCountry && countries == nil:
+		return nil, apperr.UserErrorf("addProfileRequirement: the country check needs countries to allow or deny")
+	case checkID != posture.CheckNetworkCountry && countries != nil:
+		return nil, apperr.UserErrorf("addProfileRequirement: countries apply only to %s", posture.CheckNetworkCountry)
+	case countries != nil:
+		rule, err := posture.NormalizeCountryRule(posture.CountryRule{Allow: countries.Allow, Deny: countries.Deny})
+		if err != nil {
+			return nil, apperr.UserErrorf("addProfileRequirement: %v", err)
+		}
+		countryRule = &rule
+	}
+
 	err = r.PostureStore.AddRequirement(
 		ctx,
 		workspaceID,
@@ -217,6 +238,7 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		posture.Requirement{
 			CheckID:          checkID,
 			AllowUnsupported: allowUnsupported,
+			Countries:        countryRule,
 		},
 	)
 	if err != nil {
@@ -230,7 +252,12 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		}
 	}
 
-	r.auditAdmin(ctx, "device_profile.requirement.add", "device_profile", profileID, map[string]any{"check_id": checkID, "allow_unsupported": allowUnsupported})
+	auditDetails := map[string]any{"check_id": checkID, "allow_unsupported": allowUnsupported}
+	if countryRule != nil {
+		auditDetails["allow_countries"] = countryRule.Allow
+		auditDetails["deny_countries"] = countryRule.Deny
+	}
+	r.auditAdmin(ctx, "device_profile.requirement.add", "device_profile", profileID, auditDetails)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("addProfileRequirement notify: %w", err)
 	}

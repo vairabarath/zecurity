@@ -31,7 +31,7 @@ func TestAddProfileRequirement_UnknownCheck(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown check")
 	}
@@ -98,7 +98,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err != nil {
 		t.Fatalf("first add: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		t.Fatalf("push hook fired %d times after first add, want 1", got)
 	}
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err == nil {
 		t.Fatal("expected duplicate requirement error")
 	}
@@ -140,7 +140,7 @@ func TestAddProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true)
+	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}

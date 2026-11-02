@@ -89,6 +89,12 @@ var serverCheckDescriptors = []CheckDescriptor{
 		Label:    "Approved by an admin",
 		Platform: "any",
 	},
+	{
+		// PENDING-20 G1: needs a country rule (allow/deny lists) as params.
+		ID:       CheckNetworkCountry,
+		Label:    "Device country (public IP)",
+		Platform: "any",
+	},
 }
 
 // recognizedChecks are the checks a client may report.

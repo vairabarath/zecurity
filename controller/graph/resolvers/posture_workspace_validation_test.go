@@ -81,7 +81,7 @@ func TestAddProfileRequirementRejectsCrossWorkspaceProfile(t *testing.T) {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckLUKS, true)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckLUKS, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "addProfileRequirement: profile not found") {
 		t.Fatalf("cross-workspace add requirement error = %v", err)
 	}
@@ -95,7 +95,7 @@ func TestAddProfileRequirementRejectsInvalidProfileUUID(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
-	_, err := f.mr.AddProfileRequirement(f.ctx, "not-a-uuid", posture.CheckLUKS, false)
+	_, err := f.mr.AddProfileRequirement(f.ctx, "not-a-uuid", posture.CheckLUKS, false, nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid profile id") {
 		t.Fatalf("invalid UUID add requirement error = %v", err)
 	}

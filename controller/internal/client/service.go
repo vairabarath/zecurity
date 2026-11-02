@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -70,6 +71,8 @@ type Service struct {
 	transportCompiler        *transport.Compiler
 	postureStore             *posture.Store
 	postureEvaluator         *posture.Evaluator
+	// location records where devices connect from (PENDING-20); nil = off.
+	location *locationObserver
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -756,6 +759,17 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	}
 
 	workspaceID := claims.TenantID
+
+	// PENDING-20 G1: note where the device connects from; a country change
+	// re-evaluates it before the snapshot is served, so this very response
+	// already reflects the move.
+	if wsUUID, err := uuid.Parse(workspaceID); err == nil {
+		if devUUID, err := uuid.Parse(req.GetDeviceId()); err == nil {
+			if s.observeLocation(ctx, wsUUID, devUUID, false) {
+				s.reevaluateAfterMove(ctx, wsUUID, devUUID)
+			}
+		}
+	}
 
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
 	// policy change is not cached as stale (ADR-013).
