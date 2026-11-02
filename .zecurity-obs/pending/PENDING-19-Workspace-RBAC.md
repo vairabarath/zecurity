@@ -201,6 +201,18 @@ O-6 and O-7 (raised by the automated security review of the R1 commit) were deci
 
      Fix: mount sonner's `<Toaster>` once; the Apollo error link turns a capability refusal into a toast and re-reads `me`, so the controls follow the live role without a reload. Live-checked.
    - **Correction to the first R3 note:** the first "silent refusal" observation on Remote Networks came from a click on a still-disabled Create button: the test script had filled the header search box. The re-check filled the right field, the request was sent and refused, and the toast appeared.
+   - **Live round 2 (2026-11-02, everything except SCIM), all PASS:**
+     - **Role × endpoint (22 checks):**
+       - Security may create device profiles; DevOps and Helpdesk are refused;
+       - every non-Admin is refused identity-provider changes;
+       - the shield install-token REST route returns 403 for Security, Viewer, Helpdesk and Member, while DevOps and Admin pass the capability check;
+       - `POST /api/invitations` succeeds for Admin and returns 403 otherwise.
+       - (No connector was connected, so the shield-token handler refused DevOps on a business rule after the capability check.)
+     - **30 s cache backstop:** a role changed by direct SQL is not seen while the cache entry is valid (a write 1 s later was allowed) and is enforced after it expires (refused at 32 s). Changes made through the product apply at once.
+     - **Demotion to Member with a page open:** the next in-app request is refused, a toast shows, the console re-reads `me` and redirects to `/install`.
+     - **Real client devices (13 checks):** devices enrolled with `zecurity-client login`, including one fully connected client (root daemon, `zecurity0` up). Helpdesk approves and unapproves another user's device; its own device is refused (R-13); revoke is refused (R-8); a Member is refused approval; Admin can approve and revoke. In the console, Helpdesk sees approval controls only on other users' devices.
+     - **Found:** client device enrolment requires `workspace_members.status = 'active'`. So before the invited-join fix, a user who joined by signing in without the invite link's accept call could never enrol a client. Users invited after the fix enrol fine.
+     - SCIM last-Admin (R-11) is still DB-tested only.
    - **Further fixes found during R3 (2026-11-02), shipped in the same PR:**
      - **Invited join:** an invited user who signs in (without the invite link's accept call) is now an active member, and the invitation is marked accepted, in the provisioning transaction. Before, both stayed `invited`/`pending`.
      - **Silent mutation errors:** 24 mutation hooks in 11 console pages had no error handling. They now toast the server's message (`toastMutationError`). A guard test fails for any new mutation hook without `onError` unless it is listed as handled at its call site.

@@ -3540,3 +3540,9 @@ serves on `127.0.0.1:9102`.
   - `/auth/refresh` stamps the current role.
   - The Users "active" pill needed no change: `users` lists only active users. A list of invited-not-joined people would be a feature.
   - Gates green; live-checked.
+- Live round 2 (no SCIM), all PASS:
+  - 22 role × endpoint checks (posture, identity, shield-token REST, invitation REST);
+  - the 30 s cache backstop for a role changed in SQL;
+  - demotion to Member with a page open redirects to `/install`;
+  - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
+  - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.
