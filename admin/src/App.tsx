@@ -75,7 +75,7 @@ export default function App() {
         <Route path="/install" element={<ClientInstall />} />
       </Route>
 
-      {/* Admin-only routes — full AppShell with sidebar */}
+      {/* Console routes (CONSOLE_READ) — full AppShell with sidebar */}
       <Route element={<AdminLayout />}>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
