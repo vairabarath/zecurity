@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { toastMutationError } from '@/lib/mutationErrors'
-import { Capability, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
+import { Capability, roleLabel, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ArrowLeft, Box, Loader2, Minus, Plus, Users } from 'lucide-react'
@@ -266,7 +266,7 @@ export default function GroupDetail() {
                     </div>
                     <div>
                       <div className="text-[14px] font-semibold">{member.email}</div>
-                      <div className="text-[11.5px] capitalize text-muted-foreground">{member.role.toLowerCase()}</div>
+                      <div className="text-[11.5px] text-muted-foreground">{roleLabel(member.role)}</div>
                     </div>
                   </div>
                   {group.origin !== 'scim' && canWrite && (isAdmin || member.id !== myId) && (
@@ -375,7 +375,7 @@ export default function GroupDetail() {
               <option value="">Select a user…</option>
               {nonMembers.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {u.email} ({u.role.toLowerCase()})
+                  {u.email} ({roleLabel(u.role)})
                 </option>
               ))}
             </select>

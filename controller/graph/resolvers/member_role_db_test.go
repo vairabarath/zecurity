@@ -483,10 +483,7 @@ func TestGroupNameErrors(t *testing.T) {
 	f.wantErr("security", update, map[string]any{"id": g.ID, "n": "ops"}, "a group with this name already exists")
 	f.wantErr("security", update, map[string]any{"id": g.ID, "n": " "}, "group name is required")
 
-	// An internal error (here: updateGroup on an unknown id, a plain resolver
-	// error) reaches the client masked, never as resolver/driver text.
-	r := f.do("security", update, map[string]any{"id": "00000000-0000-0000-0000-0000000000cc", "n": "x"})
-	if len(r.Errors) == 0 || r.Errors[0].Message != "an unexpected error occurred" {
-		t.Fatalf("internal error not masked: %v", r.Errors)
-	}
+	// A not-found is a user error with a clear message (internal errors stay
+	// masked: see presenter_test.go TestErrorPresenter_GqlgenWrapped*).
+	f.wantErr("security", update, map[string]any{"id": "00000000-0000-0000-0000-0000000000cc", "n": "x"}, "updateGroup: group not found")
 }

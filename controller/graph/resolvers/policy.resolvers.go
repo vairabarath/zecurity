@@ -45,12 +45,12 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 	existing, err := r.PolicyStore.GetGroup(ctx, id)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("updateGroup: group not found")
+			return nil, apperr.UserErrorf("updateGroup: group not found")
 		}
 		return nil, fmt.Errorf("updateGroup: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return nil, fmt.Errorf("updateGroup: group not found")
+		return nil, apperr.UserErrorf("updateGroup: group not found")
 	}
 	if existing.Origin == "scim" {
 		return nil, apperr.UserErrorf("updateGroup: cannot edit a directory-managed (SCIM) group")
@@ -66,7 +66,7 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 	row, err := r.PolicyStore.UpdateGroup(ctx, id, name, description)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("updateGroup: group not found")
+			return nil, apperr.UserErrorf("updateGroup: group not found")
 		}
 		if isDuplicateGroupName(err) {
 			return nil, errDuplicateGroupName
@@ -87,12 +87,12 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 	existing, err := r.PolicyStore.GetGroup(ctx, id)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return false, fmt.Errorf("deleteGroup: group not found")
+			return false, apperr.UserErrorf("deleteGroup: group not found")
 		}
 		return false, fmt.Errorf("deleteGroup: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return false, fmt.Errorf("deleteGroup: group not found")
+		return false, apperr.UserErrorf("deleteGroup: group not found")
 	}
 	if existing.Origin == "scim" {
 		return false, apperr.UserErrorf("deleteGroup: cannot delete a directory-managed (SCIM) group")
@@ -100,7 +100,7 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 
 	if err := r.PolicyStore.DeleteGroup(ctx, id); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return false, fmt.Errorf("deleteGroup: group not found")
+			return false, apperr.UserErrorf("deleteGroup: group not found")
 		}
 		return false, fmt.Errorf("deleteGroup: %w", err)
 	}
@@ -156,12 +156,12 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("removeGroupMember: group not found")
+			return nil, apperr.UserErrorf("removeGroupMember: group not found")
 		}
 		return nil, fmt.Errorf("removeGroupMember: %w", err)
 	}
 	if existing.WorkspaceID != tc.TenantID {
-		return nil, fmt.Errorf("removeGroupMember: group not found")
+		return nil, apperr.UserErrorf("removeGroupMember: group not found")
 	}
 	if existing.Origin == "scim" {
 		return nil, apperr.UserErrorf("removeGroupMember: cannot remove members from a directory-managed (SCIM) group; membership is managed by the identity provider")
@@ -169,7 +169,7 @@ func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string
 
 	if err := r.PolicyStore.RemoveGroupMember(ctx, groupID, userID); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
-			return nil, fmt.Errorf("removeGroupMember: member not found")
+			return nil, apperr.UserErrorf("removeGroupMember: member not found")
 		}
 		return nil, fmt.Errorf("removeGroupMember: %w", err)
 	}

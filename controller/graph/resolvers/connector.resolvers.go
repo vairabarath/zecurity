@@ -60,7 +60,7 @@ func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("delete remote network: network not found, already deleted, or has active connectors")
+			return false, apperr.UserErrorf("delete remote network: network not found, already deleted, or has active connectors")
 		}
 		return false, fmt.Errorf("delete remote network: %w", err)
 	}
@@ -155,7 +155,7 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string, alsoR
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("revoke connector: connector not found or not in revocable status")
+			return false, apperr.UserErrorf("revoke connector: connector not found or not in revocable status")
 		}
 		return false, fmt.Errorf("revoke connector: %w", err)
 	}
@@ -239,7 +239,7 @@ func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool
 			).Scan(&attached); qErr == nil && attached > 0 {
 				return false, fmt.Errorf("delete connector: %d shield(s) still attached; let them fail over to another connector or revoke them first", attached)
 			}
-			return false, fmt.Errorf("delete connector: connector not found or must be revoked before deletion")
+			return false, apperr.UserErrorf("delete connector: connector not found or must be revoked before deletion")
 		}
 		return false, fmt.Errorf("delete connector: %w", err)
 	}
