@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** design note, awaiting approval. Nothing is built.
+**Status:** design note, approved 2026-11-02 (all open items decided). Nothing is built; next is R1.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -30,6 +30,9 @@ Teams want to give people part of the console (network operators, security staff
 | R-6 | **A reason is required** for every role change and is stored in the audit log. |
 | R-7 | **Keep the Security role** (groups, access policies, device posture), although Twingate has no equivalent (was O-5). |
 | R-8 | **Helpdesk can't revoke devices.** It approves and unapproves only; `revokeDevice` (permanent) is Admin-only (was O-2). |
+| R-9 | **No self group changes for non-Admins** (2026-11-02, was O-1): the server refuses `addGroupMember` / `removeGroupMember` on yourself unless you are Admin. Collusion between two people remains; the audit log covers it. |
+| R-10 | **Invites stay Admin-only** (2026-11-02, was O-3): `createInvitation` and `POST /api/invitations` need `MEMBERS_ADMIN`. |
+| R-11 | **Never zero active Admins, from any path** (2026-11-02, was O-4). The last active Admin can't make themselves Member (no self-change, §7). SCIM is refused only when the change would leave zero active Admins; it may disable an Admin while another active Admin remains. Covered: `DirectoryService.Deprovision` (DELETE / suspend), `DirectoryService.Update` with `active=false` (PATCH), and the connection-disable bulk suspend (`idp/store.go suspendSCIMUsers`). Refusal is SCIM 409 plus an audit event, under the same Admin-row lock as `setMemberRole`. |
 
 ## 3. Roles
 
@@ -142,11 +145,7 @@ So Viewer can read every query. A test pins this: any new read field that return
 
 ## 8. Decisions still open
 
-| # | Question | Recommendation |
-|---|---|---|
-| O-1 | **Security can add itself to a group** (`addGroupMember`) and so gain network access to resources. | Server refuses `addGroupMember` / `removeGroupMember` on yourself unless you are Admin. Collusion between two people remains; the audit log covers it. |
-| O-3 | **Who can invite:** `createInvitation` is Admin-only here. | Keep it. Inviting adds a person to the workspace; that is a membership decision. |
-| O-4 | **SCIM deprovision of the last Admin** bypasses `setMemberRole`. **Checked 2026-11-02: yes, it can.** An Admin is SCIM-owned after a conflict `AcceptLink` (`scim/conflict.go`, sets `provisioning_owner='scim'`, keeps the role) or, once R1 lands, after `setMemberRole` promotes a SCIM-provisioned user. Three paths then disable them with no role check: `DirectoryService.Deprovision` (DELETE / suspend), `DirectoryService.Update` with `active=false` (PATCH), and `suspendSCIMUsers` when a connection is disabled (`idp/store.go`). No last-Admin guard exists anywhere today. Provider console has no tenant writes (D-30), so a workspace with zero active Admins has no in-product recovery. | Fix in R1 with the same lock helper: `Deprovision` and `Update(active=false)` refuse the last active Admin with SCIM 409 and an audit event (the IdP retries; an Admin promotes someone else first); connection-disable refuses if it would suspend the last active Admin. Trade-off: an offboarded last Admin keeps access until another Admin exists, which is visible in the audit log. |
+None. O-1, O-3 and O-4 were decided on 2026-11-02 as R-9, R-10 and R-11 (§2). The O-4 code check found that SCIM could disable the last Admin through three paths with no guard; R-11 closes them.
 
 ## 9. Database
 
@@ -162,6 +161,8 @@ So Viewer can read every query. A test pins this: any new read field that return
   - self-change refused;
   - a demotion applies on the caller's very next request;
   - cache invalidation on role change, disable and deprovision;
+  - SCIM DELETE, PATCH `active=false` and connection disable on the last active Admin: refused (409, audited); on an Admin with another active Admin: allowed (R-11);
+  - a non-Admin adding or removing themselves from a group: refused (R-9);
   - fail closed when the lookup errors;
   - a Member keeps `me` / `myDevices` / client issuance.
 - **Secrets:** no read field of a `CONSOLE_READ` query returns a token or secret.
