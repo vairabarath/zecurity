@@ -1,6 +1,6 @@
 # PENDING-20: Geofencing for resource access
 
-**Status:** design note, awaiting approval. Nothing is built.
+**Status:** approved 2026-11-02 (all open items decided). Nothing is built; next is G1a.
 **Date:** 2026-11-02
 **Base:** `fixed-pendings`. Builds on the device-posture pipeline (ADR-030, migrations 030 and 044). It assumes PENDING-19 (workspace roles, PR #168) is merged: profile writes need `POSTURE_WRITE`.
 **Scope:** its own epic.
@@ -39,6 +39,11 @@ Admins want to allow or block access to a resource by **where the device is**. E
 | G-2 | **Rule shape: allow and deny lists of countries.** Deny wins over allow. |
 | G-3 | **GeoIP data: DB-IP Lite Country** (CC BY 4.0, no account or key, monthly, `.mmdb` format). It is loaded from a local file, so no client IP leaves the controller. The `.mmdb` format makes MaxMind a config change later. |
 | G-4 | **Unknown location means deny** (fail closed), like every other posture check. Unknown covers: no recent observation, private or reserved address, no match in the database, lookup error, database not loaded. |
+| G-5 | **Observe on posture reports and on the 60 s ACL poll** (was O-1). A country change is noticed within about 1 min; there is a DB write only when the country changes. |
+| G-6 | **Store the country code plus the IP's /24 (IPv4) or /48 (IPv6) prefix**, never the full address (was O-2). |
+| G-7 | **A dev-only override for lab and testing** (was O-3): `GEOIP_DEV_OVERRIDES="10.0.0.0/8=IN,127.0.0.0/8=US"`, ignored unless `ENV=development`. Unit tests use a generated `.mmdb`. |
+| G-8 | **Deny-only rules are allowed** (was O-4): empty `allow` with a non-empty `deny`. Unknown is still denied. |
+| G-9 | **No user-facing "why denied" in G1** (was O-5). The resource disappears for the device; the admin sees the device's observed country. |
 
 ## 4. Phase G1: country geofence (server-attested)
 
@@ -107,15 +112,9 @@ Only outlined here. G2 needs its own note before any build.
 - **Permissions and privacy:** OS location permission, and storing precise location (personal data). The likely design reduces it on the device to "inside or outside the configured area".
 - **Rule shape:** radius or polygon areas. This is different from the G1 country lists.
 
-## 6. Decisions still open (recommendations)
+## 6. Decisions still open
 
-| # | Question | Recommendation |
-|---|---|---|
-| O-1 | **Observe on the ACL poll too** (every 60 s), or only on posture reports (every 5 min)? | Both. A country change is seen within about 1 min. The extra cost is one in-memory lookup per poll, with a database write only when the country changes. |
-| O-2 | **Store the observed IP?** | Store the country only, plus the IP's /24 (IPv4) or /48 (IPv6) prefix for troubleshooting. Never the full address. It is personal data, and Viewer can read the devices list. |
-| O-3 | **Lab and testing with private IPs** (every local client is 127.0.0.1 or 10.x, which is unknown and denied). | A dev-only override, `GEOIP_DEV_OVERRIDES="10.0.0.0/8=IN,127.0.0.0/8=US"`, ignored unless `ENV=development`. Unit tests use a small generated `.mmdb`. |
-| O-4 | **Deny-only rules** ("anything except X"). | Allowed (empty `allow`, non-empty `deny`). The console makes clear that unknown is still denied. |
-| O-5 | **Where to show "why denied"** to the user. | Out of scope for G1. The device sees the resource disappear, as with other posture failures. The Devices page shows the admin the observed country. |
+None. O-1 … O-5 were decided on 2026-11-02 as G-5 … G-9 (§3).
 
 ## 7. Tests (build gate)
 
