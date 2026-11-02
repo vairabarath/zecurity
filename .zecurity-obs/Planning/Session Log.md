@@ -3519,5 +3519,5 @@ serves on `127.0.0.1:9102`.
 - R3 live run (local stack, local test login), controller and console from this branch:
   - API checks: 41/41 PASS (per-role allowed/refused, REST 200/403, R-8/9/10/12/13, mid-session demotion with the same token, self-change and last-Admin, 8 audit rows);
   - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
-  - Follow-up: a page left open after a demotion gets no visible error on refused writes on some pages (RemoteNetworks), because `handleCreate` doesn't catch it.
+  - Follow-up fixed: no toast container was mounted (every toast() was dropped); a capability refusal now shows a toast and re-reads `me`, so controls follow the live role without reload. Live-checked. (The first "silent" observation was partly a test-script slip: the click hit a disabled Create button.)
   - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.

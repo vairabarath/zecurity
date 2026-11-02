@@ -1,6 +1,6 @@
 # PENDING-19: Workspace admin-console roles (RBAC)
 
-**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. **R3 live run 2026-11-02: PASS** (41/41 API checks, UI pass; one R2 fix, one follow-up). Branch local, not pushed.
+**Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. **R3 live run 2026-11-02: PASS** (41/41 API checks, UI pass; one R2 fix, one follow-up, both fixed). Branch local, not pushed.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).
 **Scope:** its own epic, outside Sprint 22. Sprint 22's "don't modify `admin/`" rule is why it waits; this epic does change `admin/`.
@@ -195,7 +195,12 @@ O-6 and O-7 (raised by the automated security review of the R1 commit) were deci
      - the Admin changed a role through the Manage Role dialog, and the server and audit row agree;
      - Helpdesk sees approve only on another user's device and no revoke.
    - **Fix found by R3** (R2): the sidebar showed Identity Providers, Access Log, Devices, Policies and Install Client only to `ADMIN`. Fixed: shown to every console role, with a `Sidebar.test.tsx` that fails on the old code.
-   - **Follow-up (not fixed):** after a mid-session demotion, a write from a page that is still open is refused by the server, but some pages show no message. `RemoteNetworks.handleCreate` doesn't catch the mutation error, so the form just stays open. The console reads `me.capabilities` once per load, and a reload shows the new role's controls. Options: show mutation errors on every page, or re-probe `me` when a call is refused.
+   - **Follow-up, fixed the same day:** after a mid-session demotion, a write from a page that is still open was refused by the server with no visible message. Two causes:
+     - no toast container was mounted, so every `toast()` in the console was dropped;
+     - nothing re-read the role.
+
+     Fix: mount sonner's `<Toaster>` once; the Apollo error link turns a capability refusal into a toast and re-reads `me`, so the controls follow the live role without a reload. Live-checked.
+   - **Correction to the first R3 note:** the first "silent refusal" observation on Remote Networks came from a click on a still-disabled Create button: the test script had filled the header search box. The re-check filled the right field, the request was sent and refused, and the toast appeared.
 
 ## 12. Reference: Twingate admin console (looked at 2026-10-31)
 
