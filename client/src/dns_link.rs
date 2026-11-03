@@ -22,6 +22,9 @@ use crate::tun::CmdRunner;
 
 const LINK: &str = "zecurity0";
 
+/// Seconds each resolved/ip call may take (coreutils `timeout`).
+const COMMAND_TIMEOUT: &str = "5";
+
 /// The DNS-name resources of an applied config: TCP (or empty protocol)
 /// entries whose address is a resource name.
 pub(crate) fn names_in(cfg: &AppliedConfig) -> BTreeSet<String> {
@@ -121,8 +124,11 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
 
     let mut result = Ok(names.len());
     for (program, args) in desired_commands(&names) {
-        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-        if let Err(e) = runner.run(program, &argv, None) {
+        // Bounded: a stuck resolved or D-Bus must not stall bring-up or a
+        // hot-apply (the daemon's watchdog would restart it).
+        let mut argv: Vec<&str> = vec![COMMAND_TIMEOUT, program];
+        argv.extend(args.iter().map(String::as_str));
+        if let Err(e) = runner.run("timeout", &argv, None) {
             if names.is_empty() {
                 // Nothing to resolve; a failed revert (no resolved, link
                 // already gone) changes nothing.
@@ -282,7 +288,7 @@ mod tests {
             .borrow()
             .last()
             .unwrap()
-            .starts_with("resolvectl revert"));
+            .starts_with("timeout 5 resolvectl revert"));
 
         clear();
         assert_eq!(status_line(), None);

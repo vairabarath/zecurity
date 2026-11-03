@@ -3658,6 +3658,48 @@ mod tests {
         assert_eq!(lab.spawned[0].port, 443);
     }
 
+    /// PENDING-14 F3: systemd-resolved sends from zecurity0's own address,
+    /// 100.64.0.1, which the capture interface also holds. The answer must
+    /// still go back to it.
+    #[test]
+    fn a_dns_query_from_the_tunnel_address_is_answered() {
+        let fake = Ipv4Addr::new(198, 18, 9, 9);
+        let mut lab = Lab::multi(&[(fake, 443)], |iface| configure_capture_iface(iface).unwrap());
+        lab.c_iface.update_ip_addrs(|a| {
+            a.clear();
+            a.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::from(TUNNEL_IFACE_ADDR)), 32))
+                .unwrap();
+        });
+        let dns = new_dns_socket(&mut lab.s_sockets).expect("dns socket");
+        let lookup = move |n: &str| (n == "src.f3.example").then_some(fake);
+        let mut q = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+        );
+        q.bind((IpAddress::Ipv4(Ipv4Address::from(TUNNEL_IFACE_ADDR)), 40_153)).unwrap();
+        let qh = lab.c_sockets.add(q);
+        let mut query = vec![0x56, 0x78, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for l in "src.f3.example".split('.') {
+            query.push(l.len() as u8);
+            query.extend_from_slice(l.as_bytes());
+        }
+        query.extend_from_slice(&[0, 0, 1, 0, 1]);
+        let resolver = IpAddress::Ipv4(Ipv4Address::from(crate::name_map::DNS_RESPONDER_ADDR));
+        lab.c_sockets.get_mut::<udp::Socket>(qh).send_slice(&query, (resolver, 53)).unwrap();
+        let mut got = None;
+        for _ in 0..20 {
+            lab.step(10);
+            serve_dns(&mut lab.s_sockets, dns, &lookup);
+            let sock = lab.c_sockets.get_mut::<udp::Socket>(qh);
+            if sock.can_recv() {
+                got = Some(sock.recv().unwrap().0.to_vec());
+                break;
+            }
+        }
+        let reply = got.expect("an answer to a query from 100.64.0.1");
+        assert_eq!(&reply[reply.len() - 4..], &fake.octets());
+    }
+
     #[test]
     fn routable_key_is_ipv4_tcp_or_empty_protocol() {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
