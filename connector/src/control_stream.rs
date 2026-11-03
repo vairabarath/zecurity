@@ -2906,4 +2906,92 @@ mod acl_diff_session_tests {
         echo_ok(&mut client, b"after").await;
         assert!(!task.is_finished(), "name-only edit must not cancel");
     }
+
+    /// PENDING-14 F2: a DNS-name resource is authorized on the name, then
+    /// resolved and filtered; a name that resolves only to loopback is refused
+    /// with NAME_UNRESOLVED (and an error access log), never dialled, even
+    /// though a server is listening on that loopback port.
+    #[tokio::test]
+    async fn a_name_resolving_only_to_loopback_is_refused() {
+        crate::test_support::install_crypto_provider();
+        let port = echo_server().await;
+        let mut e = env();
+        let mut named = entry("res-name", port);
+        named.address = "localhost".into();
+        push(&e, acl(1, vec![named])).await;
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (acl_c, reg, hub, crl, log_tx) =
+            (e.policy.clone(), e.registry.clone(), e.hub.clone(), e.crl.clone(), e.log_tx.clone());
+        let task = tokio::spawn(async move {
+            crate::device_tunnel::handle_stream(
+                server,
+                SPIFFE.to_string(),
+                vec![0x01, 0x02],
+                acl_c,
+                reg,
+                SessionTransport::Quic,
+                hub,
+                crl,
+                crate::test_support::CONNECTOR_ID,
+                &log_tx,
+                &crate::authorization::AuthzGate::open_for_tests(),
+            )
+            .await
+        });
+        write_frame(
+            &mut client,
+            serde_json::json!({"destination": "localhost", "port": port, "protocol": "tcp"}),
+        )
+        .await;
+        let resp = tokio::time::timeout(WAIT, read_frame(&mut client)).await.expect("tunnel response");
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], crate::name_target::ERR_NAME_UNRESOLVED, "{resp}");
+        assert!(tokio::time::timeout(WAIT, task).await.unwrap().unwrap().is_err());
+
+        let mut saw = false;
+        while let Ok(msg) = e._log_rx.try_recv() {
+            if let Some(crate::proto::connector_control_message::Body::ConnectorLog(log)) = msg.body {
+                if log.resource_id == "res-name" {
+                    assert_eq!(log.action, "error", "{log:?}");
+                    assert!(log.error.starts_with("name_unresolved"), "{log:?}");
+                    assert_eq!(log.destination, "localhost");
+                    saw = true;
+                }
+            }
+        }
+        assert!(saw, "no access log for the refused name");
+    }
+
+    /// The same request for a name over UDP is refused before any lookup:
+    /// DNS-name resources are TCP only (the controller refuses others).
+    #[tokio::test]
+    async fn a_name_over_udp_is_refused() {
+        crate::test_support::install_crypto_provider();
+        let e = env();
+        let mut named = entry("res-name-udp", 5353);
+        named.address = "db.example.invalid".into();
+        named.protocol = "udp".into();
+        push(&e, acl(1, vec![named])).await;
+
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (acl_c, reg, hub, crl, log_tx) =
+            (e.policy.clone(), e.registry.clone(), e.hub.clone(), e.crl.clone(), e.log_tx.clone());
+        let task = tokio::spawn(async move {
+            crate::device_tunnel::handle_stream(
+                server, SPIFFE.to_string(), vec![0x01, 0x02], acl_c, reg, SessionTransport::Quic, hub, crl,
+                crate::test_support::CONNECTOR_ID, &log_tx, &crate::authorization::AuthzGate::open_for_tests(),
+            )
+            .await
+        });
+        write_frame(
+            &mut client,
+            serde_json::json!({"destination": "db.example.invalid", "port": 5353, "protocol": "udp"}),
+        )
+        .await;
+        let resp = tokio::time::timeout(WAIT, read_frame(&mut client)).await.expect("tunnel response");
+        assert_eq!(resp["ok"], false, "{resp}");
+        assert_eq!(resp["error"], crate::name_target::ERR_NAME_UNRESOLVED, "{resp}");
+        assert!(tokio::time::timeout(WAIT, task).await.unwrap().unwrap().is_err());
+    }
 }

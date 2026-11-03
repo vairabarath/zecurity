@@ -18,6 +18,7 @@ use x509_parser::prelude::*;
 
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
+use crate::name_target::{self, ERR_NAME_UNRESOLVED};
 use crate::policy::PolicyCache;
 use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::server_cfg::build_device_tunnel_tls_dynamic;
@@ -293,6 +294,67 @@ where
         ));
     }
 
+    // PENDING-14 F2: a DNS-name destination is resolved here, inside the
+    // remote network, with the connector's resolver, and filtered
+    // (name_target::allowed_resolved: no loopback, link-local or IPv6). Both
+    // routes below use the checked address, never the name: the direct route
+    // dials it, the shield route hands it to the shield, which accepts only its
+    // own LAN IP. Authorization above already matched the name itself.
+    let dial_host: String = if name_target::is_name(&req.destination) {
+        let route = if acl_entry.route_type == "shield" { "shield" } else { "connector" };
+        let resolved = if req.protocol.to_lowercase() == "udp" {
+            Err("DNS-name resources are TCP only".to_string())
+        } else {
+            name_target::resolve_target(&req.destination, req.port)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        match resolved {
+            Ok(addr) => {
+                tracing::debug!(dest = %req.destination, resolved = %addr, "resolved resource name");
+                addr.ip().to_string()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    spiffe_id = %client_spiffe_id,
+                    resource_id = %acl_entry.resource_id,
+                    dest = %req.destination,
+                    port = req.port,
+                    error = %e,
+                    "tunnel refused — resource name has no usable address",
+                );
+                let response = TunnelResponse {
+                    ok: false,
+                    error: Some(ERR_NAME_UNRESOLVED.to_string()),
+                    quic_addr: quic_advertise_addr().map(String::from),
+                };
+                send_response(&mut stream, &response).await?;
+                emit_access_log(
+                    control_tx,
+                    connector_id,
+                    AccessLogFields {
+                        resource_id: &acl_entry.resource_id,
+                        client_spiffe_id: &client_spiffe_id,
+                        route_type: route,
+                        destination: &req.destination,
+                        port: req.port,
+                        protocol: &req.protocol,
+                        action: "error",
+                        error: &format!("name_unresolved: {e}"),
+                        legacy_message: format!(
+                            "error spiffe_id={} resource={} dest={}:{} proto={} reason=name_unresolved: {}",
+                            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, e,
+                        ),
+                    },
+                )
+                .await;
+                return Err(anyhow!("resource name {} has no usable address: {}", req.destination, e));
+            }
+        }
+    } else {
+        req.destination.clone()
+    };
+
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
             tracing::error!(
@@ -372,7 +434,7 @@ where
         .await;
 
         match tunnel_hub
-            .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
+            .open_relay_session(&shield_id, &dial_host, req.port, &req.protocol)
             .await
         {
             Ok(relay) => {
@@ -534,7 +596,7 @@ where
         return Ok(());
     }
 
-    let target = format!("{}:{}", req.destination, req.port);
+    let target = format!("{}:{}", dial_host, req.port);
     let mut resource_conn = match TcpStream::connect(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");

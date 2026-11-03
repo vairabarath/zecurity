@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). F2–F4 not built yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
+**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). F3–F4 not built yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -175,7 +175,7 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 |---|---|---|
 | **F0** ✅ | Controller: refuse an invalid host (non-IPv4 for now), with tests; console validation and label | built 2026-11-03 (§9) |
 | **F1** ✅ | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | built 2026-11-03 (§10) |
-| **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
+| **F2** ✅ | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | built 2026-11-03 (§11) |
 | **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
 
@@ -267,4 +267,36 @@ So without the rule the v1 client design can't work, and with it it can. Still t
   - plus F0's create and update mutants.
 - **Go:** `go build`, `go vet`, and `go test -count=1 ./...` with every DB variable and `AUTH_TEST_VALKEY_URL`: 1669 pass, 0 fail, 2 expected skips. `scripts/resource-test-fixture.sh` ok.
 - **Admin:** 30 files / 268 tests, `tsc` clean, build ok. Lint is unchanged at 17; the changed files lint clean.
+
+## 11. F2 record (2026-11-03)
+
+**Connector**
+- New module `connector/src/name_target.rs`:
+  - `is_name`;
+  - `allowed_resolved`: IPv4 only; never loopback, link-local (incl. 169.254.169.254), unspecified, multicast or broadcast;
+  - `pick_allowed`: the first allowed result, in resolver order;
+  - `resolve_target`: an IP literal is used as given (unchanged behaviour), and a name goes through `tokio::net::lookup_host` plus the filter;
+  - `ERR_NAME_UNRESOLVED` (`"NAME_UNRESOLVED"`).
+- `device_tunnel::handle_stream`, after authorization (unchanged: exact match on the name) and the gate re-checks:
+  - A name destination is resolved **once**.
+  - The direct route dials `"<checked IP>:port"`.
+  - The shield route calls `open_relay_session(shield_id, <checked IP>, …)`, so the shield's own `allows_tunnel` check (its LAN IP only) stays the authority.
+  - A name over UDP is refused before any lookup.
+  - On failure the client gets `ok:false, error:"NAME_UNRESOLVED"`, and the controller gets an `error` access log with `error = "name_unresolved: <reason>"` and the name as `destination`.
+- No proto change: the tunnel request is JSON with a string `destination`.
+
+**Tests and gates**
+- **Unit tests** (`name_target`, 7):
+  - the allowed and refused address table;
+  - order and skipping in `pick_allowed`;
+  - nothing allowed;
+  - IP literals untouched (incl. 127.0.0.1 for IP resources);
+  - `localhost` refused (loopback);
+  - `.invalid` is a lookup error.
+- **Handler** (`acl_diff_session_tests`, the production `handle_stream`):
+  - A name resource resolving only to loopback is refused with `NAME_UNRESOLVED` and an error access log, although an echo server listens on that loopback port.
+  - A name over UDP is refused.
+- **Mutants:** "no address filter" and "names not resolved" are each killed.
+  - **Not covered by an automated test:** the shield route passing the resolved IP. It needs a live shield session, so it's covered by the F4 lab run.
+- **Gates:** `cargo build`; `cargo test` 288 + 4 pass, 0 fail; clippy has no findings in the changed code; `name_target.rs` rustfmt-formatted. Existing files were not reformatted, because `cargo fmt` would format the whole crate.
 
