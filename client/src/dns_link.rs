@@ -116,7 +116,7 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
         let s = DnsState {
             configured: BTreeSet::new(),
             status: (!names.is_empty())
-                .then(|| Err(format!("resource address {ip} is inside 198.18.0.0/15, reserved for DNS name resources"))),
+                .then(|| Err(format!("resource address {ip} is inside 198.18.0.0/15, reserved for DNS name resources; change or remove it, then restart the tunnel (zecurity-client down && zecurity-client up)"))),
         };
         set_state(s.clone());
         return s;
@@ -155,7 +155,11 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
 
 /// The tunnel went down: the link (and its resolved config) is gone.
 pub(crate) fn clear() {
-    name_map::with(|m| m.set_active(BTreeSet::new()));
+    name_map::with(|m| {
+        m.set_active(BTreeSet::new());
+        // The next bring-up records only the clashes its ACL still has.
+        m.clear_conflicts();
+    });
     set_state(DnsState::default());
 }
 
