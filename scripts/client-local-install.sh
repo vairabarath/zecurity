@@ -91,6 +91,40 @@ sed "s/^User=$/User=${ENROLLING_USER}/" "$SERVICE_SRC" \
     > "${SYSTEMD_DIR}/${SERVICE_NAME}"
 chmod 0644 "${SYSTEMD_DIR}/${SERVICE_NAME}"
 
+# ── polkit rule for systemd-resolved (PENDING-14 F-8) ───────────────────────
+# Same rule as client/scripts/client-install.sh (see the reasoning there):
+# only this user's process in zecurity-client.service may set DNS on links.
+POLKIT_RULE="/etc/polkit-1/rules.d/50-zecurity-client.rules"
+if [[ "$ENROLLING_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] && [[ -d "$(dirname "$POLKIT_RULE")" ]]; then
+    log "installing polkit rule for DNS name resources: $POLKIT_RULE"
+    cat > "$POLKIT_RULE" <<RULE
+// Installed by zecurity client-local-install.sh (PENDING-14 F-8): let the
+// zecurity-client daemon, and nothing else of its user, configure
+// systemd-resolved for DNS-name resources.
+polkit.addRule(function(action, subject) {
+    var allowed = ["org.freedesktop.resolve1.set-dns-servers",
+                   "org.freedesktop.resolve1.set-domains",
+                   "org.freedesktop.resolve1.set-default-route",
+                   "org.freedesktop.resolve1.revert"];
+    if (allowed.indexOf(action.id) < 0 || subject.user != "${ENROLLING_USER}") {
+        return;
+    }
+    var cgroup;
+    try {
+        cgroup = polkit.spawn(["/bin/cat", "/proc/" + subject.pid + "/cgroup"]);
+    } catch (e) {
+        return;
+    }
+    if (/^0::\/system\.slice\/zecurity-client\.service\$/m.test(cgroup)) {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    chmod 0644 "$POLKIT_RULE"
+else
+    log "WARNING: polkit rule not installed; DNS name resources will be unavailable"
+fi
+
 # ── Write config file ────────────────────────────────────────────────────────
 # /etc/zecurity/ may already exist if the connector is installed on the same host.
 log "creating $CONFIG_DIR"

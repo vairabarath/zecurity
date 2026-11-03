@@ -44,15 +44,21 @@ pub fn is_name(destination: &str) -> bool {
 
 /// Whether a resolved address may be a resource's address (F-3). IPv4 only in
 /// v1; never loopback (the connector itself), link-local (169.254/16, incl.
-/// cloud metadata at 169.254.169.254), unspecified, multicast or broadcast.
+/// cloud metadata at 169.254.169.254), unspecified, multicast, broadcast, or
+/// `198.18.0.0/15`, the range Zecurity clients use for DNS-name resources'
+/// fake addresses (F-7). A client on the connector's own host answers the
+/// names with fake addresses through systemd-resolved; dialling one would
+/// loop the tunnel back into that client (found in the F4 live run).
 pub fn allowed_resolved(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
             !(v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_multicast()
-                || v4.is_broadcast())
+                || v4.is_broadcast()
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)))
         }
         IpAddr::V6(_) => false,
     }
@@ -99,6 +105,8 @@ mod tests {
             "10.0.0.5",
             "192.168.1.33",
             "172.16.0.1",
+            "198.17.255.255",
+            "198.20.0.1",
             "8.8.8.8",
             "100.64.1.1",
         ] {
@@ -108,6 +116,8 @@ mod tests {
             );
         }
         for bad in [
+            "198.18.0.1",
+            "198.19.255.53",
             "127.0.0.1",
             "127.1.2.3",
             "169.254.169.254",
