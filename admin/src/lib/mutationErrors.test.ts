@@ -38,6 +38,7 @@ const HANDLED_AT_CALL_SITE: Record<string, string> = {
   'components/DiscoveredServicesPanel.tsx promoteOne': 'Promise.allSettled → summary toast',
   'components/EditDeviceProfileModal.tsx addProfileRequirement': 'try/catch → setError',
   'components/EditDeviceProfileModal.tsx removeProfileRequirement': 'try/catch → setError',
+  'components/EditDeviceProfileModal.tsx updateCountries': 'try/catch → setError',
   'components/InstallCommandModal.tsx generateConnectorToken': 'try/catch → setError',
   'components/InstallCommandModal.tsx generateShieldToken': 'try/catch → setError',
   'components/ScanModal.tsx triggerScan': 'hook error state → combinedError',

@@ -25,6 +25,9 @@ type ClientDevice struct {
 	RevokedAt       *string `json:"revokedAt,omitempty"`
 	ApprovedAt      *string `json:"approvedAt,omitempty"`
 	ApprovedByEmail *string `json:"approvedByEmail,omitempty"`
+	ObservedCountry *string `json:"observedCountry,omitempty"`
+	ObservedNetwork *string `json:"observedNetwork,omitempty"`
+	ObservedAt      *string `json:"observedAt,omitempty"`
 }
 
 type Connector struct {
@@ -51,6 +54,16 @@ type ConnectorLog struct {
 
 type ConnectorToken struct {
 	ConnectorID string `json:"connectorId"`
+}
+
+type CountryRule struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
+}
+
+type CountryRuleInput struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
 }
 
 type CreateIdpConnectionInput struct {
@@ -104,9 +117,10 @@ type DeviceProfile struct {
 }
 
 type DeviceProfileRequirement struct {
-	ID               string `json:"id"`
-	CheckID          string `json:"checkId"`
-	AllowUnsupported bool   `json:"allowUnsupported"`
+	ID               string       `json:"id"`
+	CheckID          string       `json:"checkId"`
+	AllowUnsupported bool         `json:"allowUnsupported"`
+	Countries        *CountryRule `json:"countries,omitempty"`
 }
 
 type DiscoveredService struct {

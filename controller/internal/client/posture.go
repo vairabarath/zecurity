@@ -39,6 +39,9 @@ func (s *Service) ReportDevicePosture(
 	if err := s.verifyPostureDevice(ctx, deviceID, workspaceID, claims.UserID); err != nil {
 		return nil, err
 	}
+	// PENDING-20 G1: record where the device reports from before evaluating,
+	// so the country observation is at least as fresh as this report.
+	s.observeLocation(ctx, workspaceID, deviceID, true)
 
 	wireReport := req.GetReport()
 	if _, err := parseCanonicalUUID(wireReport.GetReportId()); err != nil {

@@ -178,7 +178,15 @@ func (e *Evaluator) evaluateDevice(
 		e.afterApprovalRead()
 	}
 
-	observationByCheck := make(map[string]Observation, len(observations)+1)
+	// PENDING-20 G1: the country the controller last saw the device in.
+	var netObs *NetworkObservation
+	if o, err := e.store.LatestNetworkObservation(ctx, workspaceID, deviceID); err == nil {
+		netObs = &o
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, false, fmt.Errorf("load network observation for evaluation: %w", err)
+	}
+
+	observationByCheck := make(map[string]Observation, len(observations)+2)
 	for _, observation := range observations {
 		observationByCheck[observation.CheckID] = observation
 	}
@@ -188,6 +196,8 @@ func (e *Evaluator) evaluateDevice(
 	results := make([]ProfileResult, 0, len(profiles))
 	policyChanged := false
 	now := e.now()
+	// Server-side check (PENDING-20): judged per requirement in EvaluateProfile.
+	observationByCheck[CheckNetworkCountry] = countryObservation(report.ID, netObs, now)
 
 	for _, profile := range profiles {
 		requirements, err := e.store.ListRequirements(ctx, workspaceID,
@@ -284,6 +294,15 @@ func EvaluateProfile(
 				"missing required check %s",
 				requirement.CheckID,
 			)
+			return result
+		}
+
+		if requirement.CheckID == CheckNetworkCountry {
+			ok, reason := countryRequirementSatisfied(requirement, observation)
+			if ok {
+				continue
+			}
+			result.Reason = reason
 			return result
 		}
 

@@ -47,6 +47,7 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   deleteDeviceProfile: Capability.PostureWrite,
   bindResourceToProfile: Capability.PostureWrite,
   unbindResourceFromProfile: Capability.PostureWrite,
+  updateProfileRequirementCountries: Capability.PostureWrite, // PENDING-20 G-10
   // DEVICE_WRITE — Helpdesk
   approveDevice: Capability.DeviceWrite,
   unapproveDevice: Capability.DeviceWrite,

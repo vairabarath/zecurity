@@ -22,6 +22,20 @@ type DeviceProfileRequirement {
   id: ID!
   checkId: String!
   allowUnsupported: Boolean!
+  # Set only for zecurity.network.country (PENDING-20 G1).
+  countries: CountryRule
+}
+
+# PENDING-20 G1: ISO 3166-1 alpha-2 codes. Deny wins over allow; an empty allow
+# list means "any country not denied". An unknown location never passes.
+type CountryRule {
+  allow: [String!]!
+  deny: [String!]!
+}
+
+input CountryRuleInput {
+  allow: [String!]!
+  deny: [String!]!
 }
 
 type DeviceProfile {
@@ -85,6 +99,15 @@ extend type Mutation {
     profileId: ID!
     checkId: String!
     allowUnsupported: Boolean!
+    # Required for zecurity.network.country, refused for every other check.
+    countries: CountryRuleInput
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
+
+  # PENDING-20 G-10: replace the allow/deny lists of a profile's country
+  # requirement atomically (no window without a country check).
+  updateProfileRequirementCountries(
+    profileId: ID!
+    countries: CountryRuleInput!
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   deleteDeviceProfile(

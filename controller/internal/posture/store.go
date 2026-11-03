@@ -88,6 +88,9 @@ type Requirement struct {
 	ProfileID        uuid.UUID
 	CheckID          string
 	AllowUnsupported bool
+	// Countries is the rule of a CheckNetworkCountry requirement (stored in
+	// device_profile_requirements.params); nil for every other check.
+	Countries *CountryRule
 }
 
 type ResourceBinding struct {
@@ -715,14 +718,21 @@ func (s *Store) AddRequirement(
 	if err != nil {
 		return fmt.Errorf("check device profile: %w", err)
 	}
+	params := []byte("{}")
+	if requirement.Countries != nil {
+		if params, err = json.Marshal(requirement.Countries); err != nil {
+			return fmt.Errorf("encode requirement params: %w", err)
+		}
+	}
 	_, err = tx.Exec(
 		ctx,
 		`INSERT INTO device_profile_requirements
-	(profile_id, check_id, allow_unsupported)
-	VALUES ($1, $2, $3)`,
+	(profile_id, check_id, allow_unsupported, params)
+	VALUES ($1, $2, $3, $4)`,
 		profileID,
 		requirement.CheckID,
 		requirement.AllowUnsupported,
+		params,
 	)
 
 	if err != nil {
@@ -865,7 +875,8 @@ func (s *Store) ListRequirements(
 		`SELECT r.id,
 		        r.profile_id,
 		        r.check_id,
-		        r.allow_unsupported
+		        r.allow_unsupported,
+		        r.params
 		   FROM device_profile_requirements r
 		   JOIN device_profiles p ON p.id = r.profile_id
 		  WHERE p.workspace_id = $1
@@ -882,13 +893,20 @@ func (s *Store) ListRequirements(
 	requirements := make([]Requirement, 0)
 	for rows.Next() {
 		var requirement Requirement
+		var params []byte
 		if err := rows.Scan(
 			&requirement.ID,
 			&requirement.ProfileID,
 			&requirement.CheckID,
 			&requirement.AllowUnsupported,
+			&params,
 		); err != nil {
 			return nil, fmt.Errorf("scan posture requirement: %w", err)
+		}
+		if requirement.CheckID == CheckNetworkCountry {
+			if requirement.Countries, err = countryRuleFromParams(params); err != nil {
+				return nil, err
+			}
 		}
 		requirements = append(requirements, requirement)
 	}

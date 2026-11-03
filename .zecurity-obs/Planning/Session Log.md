@@ -3585,3 +3585,38 @@ serves on `127.0.0.1:9102`.
   - revoke: connector refused in 85 ms and the stream closed at once;
   - the 10 s shutdown is the existing O-8 issue (the base controller takes the same).
 - Lab torn down: DB dropped, Valkey db7 flushed, relays, controller and the .53 connector/file server stopped and removed, lab secrets deleted. Pending at commit time (sudo not entered): uninstalling the local client service and deleting the two `fu8-live` ufw rules.
+
+## 2026-11-02 — M1: geofencing (PENDING-20), design approved + G1a backend
+- Design note PENDING-20 approved (G-1 … G-9):
+  - a GeoIP country check, server-attested from the controller's gRPC peer address;
+  - allow and deny lists;
+  - DB-IP Lite;
+  - unknown location denies;
+  - observe on posture reports and the 60 s ACL poll;
+  - store the country and the /24 or /48 prefix only;
+  - a dev-only override;
+  - deny-only rules allowed.
+  - Device OS location (G2) is a later note.
+- G1a built on local branch `feat/geofencing-g1` (from `fixed-pendings` `768a9736`):
+  - migration `048_geofencing.sql`;
+  - `internal/geoip`;
+  - the posture country check;
+  - RPC observation and re-evaluation on a move;
+  - the GraphQL fields.
+  - No connector, relay, shield or proto change.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; 2 pre-existing skips), `scripts/resource-test-fixture.sh`, admin 210 tests.
+- Dependencies were pinned so none shared moved: `maxminddb-golang/v2` v2.0.0 (v2.9.0 would have upgraded `x/crypto`, `x/net`, `x/tools` and others); `mmdbwriter` v1.1.0 is test-only.
+- G1b built (same branch):
+  - the country rule editor in Create and Edit device profile (Edit uses the in-place update);
+  - a profile-list summary;
+  - the Devices page Country column;
+  - the DB-IP credit.
+  - Admin gate: 29 files / 217 tests, build passes, lint unchanged (17).
+- Found while building: the profile modals rendered every server-side check as the "Approved by an admin" switch, so the country check needed its own editor before G1a could ship.
+- G1c live run PASS:
+  - real DB-IP Lite database and metric;
+  - a real client gained the resource in IN and lost it within 1 s of the switch to CN;
+  - the console editor's in-place update restored access in 8 s, with an audit row;
+  - the Devices page shows the country;
+  - the override is ignored with `ENV=production`.
+- Local DB was reset for migration 048 (with consent).

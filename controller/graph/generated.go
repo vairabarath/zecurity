@@ -57,6 +57,9 @@ type ComplexityRoot struct {
 		ID              func(childComplexity int) int
 		LastSeenAt      func(childComplexity int) int
 		Name            func(childComplexity int) int
+		ObservedAt      func(childComplexity int) int
+		ObservedCountry func(childComplexity int) int
+		ObservedNetwork func(childComplexity int) int
 		Os              func(childComplexity int) int
 		RevokedAt       func(childComplexity int) int
 		SpiffeID        func(childComplexity int) int
@@ -87,6 +90,11 @@ type ComplexityRoot struct {
 
 	ConnectorToken struct {
 		ConnectorID func(childComplexity int) int
+	}
+
+	CountryRule struct {
+		Allow func(childComplexity int) int
+		Deny  func(childComplexity int) int
 	}
 
 	DevicePostureObservation struct {
@@ -121,6 +129,7 @@ type ComplexityRoot struct {
 	DeviceProfileRequirement struct {
 		AllowUnsupported func(childComplexity int) int
 		CheckID          func(childComplexity int) int
+		Countries        func(childComplexity int) int
 		ID               func(childComplexity int) int
 	}
 
@@ -165,58 +174,59 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		AcceptScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		AddGroupMember                 func(childComplexity int, groupID string, userID string) int
-		AddProfileRequirement          func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
-		ApproveDevice                  func(childComplexity int, deviceID string) int
-		AssignResourceToGroup          func(childComplexity int, resourceID string, groupID string) int
-		BindResourceToProfile          func(childComplexity int, profileID string, resourceID string) int
-		CreateDeviceProfile            func(childComplexity int, name string, manualTrust *bool) int
-		CreateGroup                    func(childComplexity int, name string, description *string) int
-		CreateIdpConnection            func(childComplexity int, input CreateIdpConnectionInput) int
-		CreateInvitation               func(childComplexity int, email string) int
-		CreateRemoteNetwork            func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource                 func(childComplexity int, input CreateResourceInput) int
-		DeleteConnector                func(childComplexity int, id string) int
-		DeleteDeviceProfile            func(childComplexity int, id string) int
-		DeleteGroup                    func(childComplexity int, id string) int
-		DeleteIdpConnection            func(childComplexity int, id string, force bool) int
-		DeleteRemoteNetwork            func(childComplexity int, id string) int
-		DeleteResource                 func(childComplexity int, id string) int
-		DeleteShield                   func(childComplexity int, id string) int
-		EnableScimBreakGlass           func(childComplexity int, connectionID string, reason string) int
-		ForceDeleteResource            func(childComplexity int, id string) int
-		GenerateConnectorToken         func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken            func(childComplexity int, remoteNetworkID string, shieldName string) int
-		GrantPermission                func(childComplexity int, userID string, permission string) int
-		InitiateAuth                   func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
-		MintScimToken                  func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		PromoteDiscoveredService       func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource                func(childComplexity int, id string) int
-		RejectScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RemoveGroupMember              func(childComplexity int, groupID string, userID string) int
-		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
-		ReopenScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RevokeConnector                func(childComplexity int, id string, alsoRevokeShields *bool) int
-		RevokeDevice                   func(childComplexity int, deviceID string) int
-		RevokeScimToken                func(childComplexity int, connectionID string, tokenID string) int
-		RevokeShield                   func(childComplexity int, id string) int
-		RotateScimToken                func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		SetIdpConnectionStatus         func(childComplexity int, id string, status string) int
-		SetMemberRole                  func(childComplexity int, userID string, role Role, reason string) int
-		SetPlatformLoginEnabled        func(childComplexity int, enabled bool) int
-		TestIdpConnection              func(childComplexity int, id string) int
-		TriggerScan                    func(childComplexity int, connectorID string, targets []string, ports []int) int
-		UnapproveDevice                func(childComplexity int, deviceID string) int
-		UnassignResourceFromGroup      func(childComplexity int, resourceID string, groupID string) int
-		UnbindResourceFromProfile      func(childComplexity int, profileID string, resourceID string) int
-		UnprotectResource              func(childComplexity int, id string) int
-		UpdateDeviceProfileManualTrust func(childComplexity int, id string, enabled bool) int
-		UpdateDeviceProfileMode        func(childComplexity int, id string, mode DeviceProfileMode) int
-		UpdateGroup                    func(childComplexity int, id string, name *string, description *string) int
-		UpdateIdpConnection            func(childComplexity int, id string, input UpdateIdpConnectionInput) int
-		UpdateResource                 func(childComplexity int, id string, input UpdateResourceInput) int
-		UpdateScimConfig               func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
+		AcceptScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		AddGroupMember                    func(childComplexity int, groupID string, userID string) int
+		AddProfileRequirement             func(childComplexity int, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) int
+		ApproveDevice                     func(childComplexity int, deviceID string) int
+		AssignResourceToGroup             func(childComplexity int, resourceID string, groupID string) int
+		BindResourceToProfile             func(childComplexity int, profileID string, resourceID string) int
+		CreateDeviceProfile               func(childComplexity int, name string, manualTrust *bool) int
+		CreateGroup                       func(childComplexity int, name string, description *string) int
+		CreateIdpConnection               func(childComplexity int, input CreateIdpConnectionInput) int
+		CreateInvitation                  func(childComplexity int, email string) int
+		CreateRemoteNetwork               func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource                    func(childComplexity int, input CreateResourceInput) int
+		DeleteConnector                   func(childComplexity int, id string) int
+		DeleteDeviceProfile               func(childComplexity int, id string) int
+		DeleteGroup                       func(childComplexity int, id string) int
+		DeleteIdpConnection               func(childComplexity int, id string, force bool) int
+		DeleteRemoteNetwork               func(childComplexity int, id string) int
+		DeleteResource                    func(childComplexity int, id string) int
+		DeleteShield                      func(childComplexity int, id string) int
+		EnableScimBreakGlass              func(childComplexity int, connectionID string, reason string) int
+		ForceDeleteResource               func(childComplexity int, id string) int
+		GenerateConnectorToken            func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken               func(childComplexity int, remoteNetworkID string, shieldName string) int
+		GrantPermission                   func(childComplexity int, userID string, permission string) int
+		InitiateAuth                      func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
+		MintScimToken                     func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		PromoteDiscoveredService          func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource                   func(childComplexity int, id string) int
+		RejectScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RemoveGroupMember                 func(childComplexity int, groupID string, userID string) int
+		RemoveProfileRequirement          func(childComplexity int, profileID string, checkID string) int
+		ReopenScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RevokeConnector                   func(childComplexity int, id string, alsoRevokeShields *bool) int
+		RevokeDevice                      func(childComplexity int, deviceID string) int
+		RevokeScimToken                   func(childComplexity int, connectionID string, tokenID string) int
+		RevokeShield                      func(childComplexity int, id string) int
+		RotateScimToken                   func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		SetIdpConnectionStatus            func(childComplexity int, id string, status string) int
+		SetMemberRole                     func(childComplexity int, userID string, role Role, reason string) int
+		SetPlatformLoginEnabled           func(childComplexity int, enabled bool) int
+		TestIdpConnection                 func(childComplexity int, id string) int
+		TriggerScan                       func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnapproveDevice                   func(childComplexity int, deviceID string) int
+		UnassignResourceFromGroup         func(childComplexity int, resourceID string, groupID string) int
+		UnbindResourceFromProfile         func(childComplexity int, profileID string, resourceID string) int
+		UnprotectResource                 func(childComplexity int, id string) int
+		UpdateDeviceProfileManualTrust    func(childComplexity int, id string, enabled bool) int
+		UpdateDeviceProfileMode           func(childComplexity int, id string, mode DeviceProfileMode) int
+		UpdateGroup                       func(childComplexity int, id string, name *string, description *string) int
+		UpdateIdpConnection               func(childComplexity int, id string, input UpdateIdpConnectionInput) int
+		UpdateProfileRequirementCountries func(childComplexity int, profileID string, countries CountryRuleInput) int
+		UpdateResource                    func(childComplexity int, id string, input UpdateResourceInput) int
+		UpdateScimConfig                  func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
 	}
 
 	PostureCheckDescriptor struct {
@@ -467,7 +477,8 @@ type MutationResolver interface {
 	CreateDeviceProfile(ctx context.Context, name string, manualTrust *bool) (*DeviceProfile, error)
 	UpdateDeviceProfileMode(ctx context.Context, id string, mode DeviceProfileMode) (*DeviceProfile, error)
 	UpdateDeviceProfileManualTrust(ctx context.Context, id string, enabled bool) (*DeviceProfile, error)
-	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool) (*DeviceProfile, error)
+	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) (*DeviceProfile, error)
+	UpdateProfileRequirementCountries(ctx context.Context, profileID string, countries CountryRuleInput) (*DeviceProfile, error)
 	DeleteDeviceProfile(ctx context.Context, id string) (bool, error)
 	RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*DeviceProfile, error)
 	BindResourceToProfile(ctx context.Context, profileID string, resourceID string) (*DeviceProfile, error)
@@ -607,6 +618,24 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ClientDevice.Name(childComplexity), true
+	case "ClientDevice.observedAt":
+		if e.ComplexityRoot.ClientDevice.ObservedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ObservedAt(childComplexity), true
+	case "ClientDevice.observedCountry":
+		if e.ComplexityRoot.ClientDevice.ObservedCountry == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ObservedCountry(childComplexity), true
+	case "ClientDevice.observedNetwork":
+		if e.ComplexityRoot.ClientDevice.ObservedNetwork == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ObservedNetwork(childComplexity), true
 	case "ClientDevice.os":
 		if e.ComplexityRoot.ClientDevice.Os == nil {
 			break
@@ -736,6 +765,19 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ConnectorToken.ConnectorID(childComplexity), true
+
+	case "CountryRule.allow":
+		if e.ComplexityRoot.CountryRule.Allow == nil {
+			break
+		}
+
+		return e.ComplexityRoot.CountryRule.Allow(childComplexity), true
+	case "CountryRule.deny":
+		if e.ComplexityRoot.CountryRule.Deny == nil {
+			break
+		}
+
+		return e.ComplexityRoot.CountryRule.Deny(childComplexity), true
 
 	case "DevicePostureObservation.checkId":
 		if e.ComplexityRoot.DevicePostureObservation.CheckID == nil {
@@ -872,6 +914,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.DeviceProfileRequirement.CheckID(childComplexity), true
+	case "DeviceProfileRequirement.countries":
+		if e.ComplexityRoot.DeviceProfileRequirement.Countries == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfileRequirement.Countries(childComplexity), true
 	case "DeviceProfileRequirement.id":
 		if e.ComplexityRoot.DeviceProfileRequirement.ID == nil {
 			break
@@ -1083,7 +1131,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool)), true
+		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool), args["countries"].(*CountryRuleInput)), true
 	case "Mutation.approveDevice":
 		if e.ComplexityRoot.Mutation.ApproveDevice == nil {
 			break
@@ -1601,6 +1649,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateIdpConnection(childComplexity, args["id"].(string), args["input"].(UpdateIdpConnectionInput)), true
+	case "Mutation.updateProfileRequirementCountries":
+		if e.ComplexityRoot.Mutation.UpdateProfileRequirementCountries == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateProfileRequirementCountries_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateProfileRequirementCountries(childComplexity, args["profileId"].(string), args["countries"].(CountryRuleInput)), true
 	case "Mutation.updateResource":
 		if e.ComplexityRoot.Mutation.UpdateResource == nil {
 			break
@@ -2655,6 +2714,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	opCtx := graphql.GetOperationContext(ctx)
 	ec := newExecutionContext(opCtx, e, make(chan graphql.DeferredResult))
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
+		ec.unmarshalInputCountryRuleInput,
 		ec.unmarshalInputCreateIdpConnectionInput,
 		ec.unmarshalInputCreateResourceInput,
 		ec.unmarshalInputUpdateIdpConnectionInput,
@@ -2799,6 +2859,12 @@ func (ec *executionContext) childFields_ClientDevice(ctx context.Context, field 
 		return ec.fieldContext_ClientDevice_approvedAt(ctx, field)
 	case "approvedByEmail":
 		return ec.fieldContext_ClientDevice_approvedByEmail(ctx, field)
+	case "observedCountry":
+		return ec.fieldContext_ClientDevice_observedCountry(ctx, field)
+	case "observedNetwork":
+		return ec.fieldContext_ClientDevice_observedNetwork(ctx, field)
+	case "observedAt":
+		return ec.fieldContext_ClientDevice_observedAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ClientDevice", field.Name)
 }
@@ -2853,6 +2919,16 @@ func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, fiel
 		return ec.fieldContext_ConnectorToken_connectorId(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ConnectorToken", field.Name)
+}
+
+func (ec *executionContext) childFields_CountryRule(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "allow":
+		return ec.fieldContext_CountryRule_allow(ctx, field)
+	case "deny":
+		return ec.fieldContext_CountryRule_deny(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type CountryRule", field.Name)
 }
 
 func (ec *executionContext) childFields_DevicePostureObservation(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2921,6 +2997,8 @@ func (ec *executionContext) childFields_DeviceProfileRequirement(ctx context.Con
 		return ec.fieldContext_DeviceProfileRequirement_checkId(ctx, field)
 	case "allowUnsupported":
 		return ec.fieldContext_DeviceProfileRequirement_allowUnsupported(ctx, field)
+	case "countries":
+		return ec.fieldContext_DeviceProfileRequirement_countries(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type DeviceProfileRequirement", field.Name)
 }
@@ -3568,6 +3646,14 @@ func (ec *executionContext) field_Mutation_addProfileRequirement_args(ctx contex
 		return nil, err
 	}
 	args["allowUnsupported"] = arg2
+	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "countries",
+		func(ctx context.Context, v any) (*CountryRuleInput, error) {
+			return ec.unmarshalOCountryRuleInput2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRuleInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["countries"] = arg3
 	return args, nil
 }
 
@@ -4533,6 +4619,28 @@ func (ec *executionContext) field_Mutation_updateIdpConnection_args(ctx context.
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_updateProfileRequirementCountries_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "countries",
+		func(ctx context.Context, v any) (CountryRuleInput, error) {
+			return ec.unmarshalNCountryRuleInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRuleInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["countries"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_updateResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -5215,6 +5323,75 @@ func (ec *executionContext) fieldContext_ClientDevice_approvedByEmail(_ context.
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _ClientDevice_observedCountry(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_observedCountry(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ObservedCountry, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_observedCountry(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_observedNetwork(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_observedNetwork(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ObservedNetwork, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_observedNetwork(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_observedAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_observedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ObservedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_observedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _Connector_id(ctx context.Context, field graphql.CollectedField, obj *Connector) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -5604,6 +5781,52 @@ func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, fie
 }
 func (ec *executionContext) fieldContext_ConnectorToken_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _CountryRule_allow(ctx context.Context, field graphql.CollectedField, obj *CountryRule) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_CountryRule_allow(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Allow, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []string) graphql.Marshaler {
+			return ec.marshalNString2ᚕstringᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_CountryRule_allow(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("CountryRule", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _CountryRule_deny(ctx context.Context, field graphql.CollectedField, obj *CountryRule) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_CountryRule_deny(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Deny, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []string) graphql.Marshaler {
+			return ec.marshalNString2ᚕstringᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_CountryRule_deny(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("CountryRule", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _DevicePostureObservation_checkId(ctx context.Context, field graphql.CollectedField, obj *DevicePostureObservation) (ret graphql.Marshaler) {
@@ -6160,6 +6383,38 @@ func (ec *executionContext) _DeviceProfileRequirement_allowUnsupported(ctx conte
 }
 func (ec *executionContext) fieldContext_DeviceProfileRequirement_allowUnsupported(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("DeviceProfileRequirement", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _DeviceProfileRequirement_countries(ctx context.Context, field graphql.CollectedField, obj *DeviceProfileRequirement) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfileRequirement_countries(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Countries, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *CountryRule) graphql.Marshaler {
+			return ec.marshalOCountryRule2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRule(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfileRequirement_countries(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DeviceProfileRequirement",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_CountryRule(ctx, field)
+		},
+	}
+	return fc, nil
 }
 
 func (ec *executionContext) _DiscoveredService_shieldId(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
@@ -8800,7 +9055,7 @@ func (ec *executionContext) _Mutation_addProfileRequirement(ctx context.Context,
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().AddProfileRequirement(ctx, fc.Args["profileId"].(string), fc.Args["checkId"].(string), fc.Args["allowUnsupported"].(bool))
+			return ec.Resolvers.Mutation().AddProfileRequirement(ctx, fc.Args["profileId"].(string), fc.Args["checkId"].(string), fc.Args["allowUnsupported"].(bool), fc.Args["countries"].(*CountryRuleInput))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -8846,6 +9101,68 @@ func (ec *executionContext) fieldContext_Mutation_addProfileRequirement(ctx cont
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_addProfileRequirement_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateProfileRequirementCountries(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateProfileRequirementCountries(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateProfileRequirementCountries(ctx, fc.Args["profileId"].(string), fc.Args["countries"].(CountryRuleInput))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateProfileRequirementCountries(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateProfileRequirementCountries_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -15635,6 +15952,43 @@ func (ec *executionContext) fieldContext___Type_isOneOf(_ context.Context, field
 
 // region    **************************** input.gotpl *****************************
 
+func (ec *executionContext) unmarshalInputCountryRuleInput(ctx context.Context, obj any) (CountryRuleInput, error) {
+	var it CountryRuleInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"allow", "deny"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "allow":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("allow"))
+			data, err := ec.unmarshalNString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Allow = data
+		case "deny":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("deny"))
+			data, err := ec.unmarshalNString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Deny = data
+		}
+	}
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputCreateIdpConnectionInput(ctx context.Context, obj any) (CreateIdpConnectionInput, error) {
 	var it CreateIdpConnectionInput
 	if obj == nil {
@@ -16072,6 +16426,12 @@ func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.Selection
 			out.Values[i] = ec._ClientDevice_approvedAt(ctx, field, obj)
 		case "approvedByEmail":
 			out.Values[i] = ec._ClientDevice_approvedByEmail(ctx, field, obj)
+		case "observedCountry":
+			out.Values[i] = ec._ClientDevice_observedCountry(ctx, field, obj)
+		case "observedNetwork":
+			out.Values[i] = ec._ClientDevice_observedNetwork(ctx, field, obj)
+		case "observedAt":
+			out.Values[i] = ec._ClientDevice_observedAt(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -16238,6 +16598,50 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 			out.Values[i] = graphql.MarshalString("ConnectorToken")
 		case "connectorId":
 			out.Values[i] = ec._ConnectorToken_connectorId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var countryRuleImplementors = []string{"CountryRule"}
+
+func (ec *executionContext) _CountryRule(ctx context.Context, sel ast.SelectionSet, obj *CountryRule) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, countryRuleImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("CountryRule")
+		case "allow":
+			out.Values[i] = ec._CountryRule_allow(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deny":
+			out.Values[i] = ec._CountryRule_deny(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -16542,6 +16946,8 @@ func (ec *executionContext) _DeviceProfileRequirement(ctx context.Context, sel a
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "countries":
+			out.Values[i] = ec._DeviceProfileRequirement_countries(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -17069,6 +17475,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "addProfileRequirement":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_addProfileRequirement(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateProfileRequirementCountries":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateProfileRequirementCountries(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -19737,6 +20150,11 @@ func (ec *executionContext) marshalNConnectorToken2ᚖgithubᚗcomᚋyourorgᚋz
 	return ec._ConnectorToken(ctx, sel, v)
 }
 
+func (ec *executionContext) unmarshalNCountryRuleInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRuleInput(ctx context.Context, v any) (CountryRuleInput, error) {
+	res, err := ec.unmarshalInputCountryRuleInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
 func (ec *executionContext) unmarshalNCreateIdpConnectionInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCreateIdpConnectionInput(ctx context.Context, v any) (CreateIdpConnectionInput, error) {
 	res, err := ec.unmarshalInputCreateIdpConnectionInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -20756,6 +21174,21 @@ func (ec *executionContext) marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztna�
 		return graphql.Null
 	}
 	return ec._Connector(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOCountryRule2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRule(ctx context.Context, sel ast.SelectionSet, v *CountryRule) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._CountryRule(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalOCountryRuleInput2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRuleInput(ctx context.Context, v any) (*CountryRuleInput, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := ec.unmarshalInputCountryRuleInput(ctx, v)
+	return &res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) marshalOGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx context.Context, sel ast.SelectionSet, v *Group) graphql.Marshaler {

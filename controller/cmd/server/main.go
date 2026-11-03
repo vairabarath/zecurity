@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/geoip"
 	"io"
 	"log"
 	"net"
@@ -680,6 +681,10 @@ func main() {
 	)
 	// Open hint streams end on shutdown so they don't hold GracefulStop (O-8).
 	clientSvc.EnableChangeHints(hintHub, transportNotifier, ctx.Done())
+
+	// PENDING-20 G1: country of the address each device connects from.
+	geoDB := openGeoIP()
+	clientSvc.WithGeoIP(geoDB)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 
 	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM
@@ -757,6 +762,21 @@ func main() {
 	)
 	workers.Go("posture-retention", func() {
 		retentionWorker.Run(ctx)
+	})
+
+	// PENDING-20 G1: pick up a new GeoIP database file (operators replace it
+	// monthly); devices are re-judged on their next poll.
+	workers.Go("geoip-reload", func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reloadGeoIP(geoDB)
+			}
+		}
 	})
 
 	workers.Go("hourly-ticker", func() {
@@ -1380,4 +1400,43 @@ func devAllowPrivateRelayAddrs() bool {
 	}
 	log.Printf("DEV: relays on private addresses are advertised (RELAY_DEV_ALLOW_PRIVATE_ADDR=true, ENV=development)")
 	return true
+}
+
+// geoipMaxAge is when an unchanged GeoIP database is reported as stale.
+const geoipMaxAge = 60 * 24 * time.Hour
+
+// openGeoIP opens the country database (GEOIP_DB_PATH, PENDING-20 G-3). The
+// GEOIP_DEV_OVERRIDES map (G-7) is honoured only with ENV=development, so a
+// production controller can never be told a private address is in a country.
+func openGeoIP() *geoip.DB {
+	overrides := os.Getenv("GEOIP_DEV_OVERRIDES")
+	if overrides != "" && os.Getenv("ENV") != "development" {
+		log.Printf("geoip: GEOIP_DEV_OVERRIDES ignored: only honoured with ENV=development")
+		overrides = ""
+	}
+	geoDB, err := geoip.Open(os.Getenv("GEOIP_DB_PATH"), overrides)
+	if err != nil {
+		log.Fatalf("geoip: %v", err)
+	}
+	metrics.SetGeoIPBuild(geoDB.Build())
+	warnStaleGeoIP(geoDB)
+	return geoDB
+}
+
+func warnStaleGeoIP(geoDB *geoip.DB) {
+	if b := geoDB.Build(); !b.IsZero() && time.Since(b) > geoipMaxAge {
+		log.Printf("geoip: WARNING database built %s is older than %d days; replace it (DB-IP Lite Country is monthly)",
+			b.Format("2006-01-02"), int(geoipMaxAge.Hours()/24))
+	}
+}
+
+// reloadGeoIP re-reads the database file if it changed. Nothing else is
+// needed: each device's next ACL poll (≤ 60 s) or posture report resolves its
+// address against the new database, and a changed country re-evaluates it.
+func reloadGeoIP(geoDB *geoip.DB) {
+	if _, err := geoDB.Reload(); err != nil {
+		log.Printf("geoip: reload: %v", err)
+	}
+	metrics.SetGeoIPBuild(geoDB.Build())
+	warnStaleGeoIP(geoDB)
 }

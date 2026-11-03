@@ -5,12 +5,21 @@ import {
   RemoveProfileRequirementDocument,
   GetDeviceProfilesDocument,
   GetSupportedPostureChecksDocument,
+  UpdateProfileRequirementCountriesDocument,
 } from "@/generated/graphql";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Loader2, Plug, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
+import { CountryRuleEditor } from "@/components/CountryRuleEditor";
+import { COUNTRY_CHECK_ID } from "@/lib/countries";
+import {
+  EMPTY_COUNTRY_RULE,
+  countryRuleChanged,
+  countryRuleProblem,
+  type CountryRuleValue,
+} from "@/lib/countryRule";
 
 interface EditDeviceProfileModalProps {
   open: boolean;
@@ -19,7 +28,10 @@ interface EditDeviceProfileModalProps {
     id: string;
     name: string;
     manualTrust: boolean;
-    requirements: { checkId: string }[];
+    requirements: {
+      checkId: string;
+      countries?: { allow: string[]; deny: string[] } | null;
+    }[];
   } | null;
   onSuccess?: () => void;
 }
@@ -31,12 +43,17 @@ export function EditDeviceProfileModal({
   onSuccess,
 }: EditDeviceProfileModalProps) {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  // PENDING-20: the country check is edited with its own lists.
+  const [countryRule, setCountryRule] = useState<CountryRuleValue>(EMPTY_COUNTRY_RULE);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (profile) {
-      setCheckedIds(new Set(profile.requirements.map((r) => r.checkId)));
+      setCheckedIds(
+        new Set(profile.requirements.map((r) => r.checkId).filter((id) => id !== COUNTRY_CHECK_ID)),
+      );
+      setCountryRule(originalCountryRule(profile));
       setError(null);
     }
   }, [profile]);
@@ -47,12 +64,18 @@ export function EditDeviceProfileModal({
   const linuxChecks = (checksData?.supportedPostureChecks ?? []).filter(
     (check) => check.platform === "linux",
   );
-  // Server-side checks (ADR-030), e.g. "Approved by an admin".
+  // Server-side checks (ADR-030), e.g. "Approved by an admin". The country
+  // check (PENDING-20) is server-side too but has its own editor.
   const serverChecks = (checksData?.supportedPostureChecks ?? []).filter(
-    (check) => check.platform === "any",
+    (check) => check.platform === "any" && check.id !== COUNTRY_CHECK_ID,
   );
+  const countryCheckAvailable = (checksData?.supportedPostureChecks ?? []).some(
+    (check) => check.id === COUNTRY_CHECK_ID,
+  );
+  const countryProblem = countryRuleProblem(countryRule);
 
   const [addProfileRequirement] = useMutation(AddProfileRequirementDocument);
+  const [updateCountries] = useMutation(UpdateProfileRequirementCountriesDocument);
   const [removeProfileRequirement] = useMutation(RemoveProfileRequirementDocument, {
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
   });
@@ -75,20 +98,44 @@ export function EditDeviceProfileModal({
     setError(null);
     if (!profile) return;
 
-    const originalIds = new Set(profile.requirements.map((r) => r.checkId));
+    if (countryProblem) {
+      setError(countryProblem);
+      return;
+    }
+
+    const originalIds = new Set(
+      profile.requirements.map((r) => r.checkId).filter((id) => id !== COUNTRY_CHECK_ID),
+    );
     const toAdd = [...checkedIds].filter((id) => !originalIds.has(id));
     const toRemove = [...originalIds].filter((id) => !checkedIds.has(id));
+    const originalCountry = originalCountryRule(profile);
+    const countries = { allow: countryRule.allow, deny: countryRule.deny };
 
     setSaving(true);
     try {
+      // Adds first and removes last, so an enforce profile never passes
+      // through "no requirements" (the server refuses that).
       for (const checkId of toAdd) {
         await addProfileRequirement({
           variables: { profileId: profile.id, checkId, allowUnsupported: false },
         });
       }
+      if (countryRule.enabled && !originalCountry.enabled) {
+        await addProfileRequirement({
+          variables: { profileId: profile.id, checkId: COUNTRY_CHECK_ID, allowUnsupported: false, countries },
+        });
+      } else if (countryRule.enabled && countryRuleChanged(countryRule, originalCountry)) {
+        // G-10: replace the lists in place — no window without a country check.
+        await updateCountries({ variables: { profileId: profile.id, countries } });
+      }
       for (const checkId of toRemove) {
         await removeProfileRequirement({
           variables: { profileId: profile.id, checkId },
+        });
+      }
+      if (!countryRule.enabled && originalCountry.enabled) {
+        await removeProfileRequirement({
+          variables: { profileId: profile.id, checkId: COUNTRY_CHECK_ID },
         });
       }
 
@@ -174,6 +221,10 @@ export function EditDeviceProfileModal({
                 </div>
               ))}
 
+              {countryCheckAvailable && (
+                <CountryRuleEditor value={countryRule} onChange={setCountryRule} />
+              )}
+
               <button
                 type="button"
                 onClick={comingSoon}
@@ -235,7 +286,7 @@ export function EditDeviceProfileModal({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" disabled={saving || countryProblem !== null}>
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save
             </Button>
@@ -244,4 +295,16 @@ export function EditDeviceProfileModal({
       </div>
     </div>
   );
+}
+
+type EditableProfile = NonNullable<EditDeviceProfileModalProps["profile"]>;
+
+function originalCountryRule(profile: EditableProfile): CountryRuleValue {
+  const req = profile.requirements.find((r) => r.checkId === COUNTRY_CHECK_ID);
+  if (!req) return EMPTY_COUNTRY_RULE;
+  return {
+    enabled: true,
+    allow: [...(req.countries?.allow ?? [])],
+    deny: [...(req.countries?.deny ?? [])],
+  };
 }

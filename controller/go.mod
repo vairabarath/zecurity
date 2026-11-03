@@ -8,6 +8,8 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
+	github.com/maxmind/mmdbwriter v1.1.0
+	github.com/oschwald/maxminddb-golang/v2 v2.0.0
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.42.0
 	github.com/valkey-io/valkey-go v1.0.74
 	github.com/valkey-io/valkey-go/valkeycompat v1.0.74
@@ -19,6 +21,7 @@ require (
 require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/urfave/cli/v3 v3.8.0 // indirect
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 )

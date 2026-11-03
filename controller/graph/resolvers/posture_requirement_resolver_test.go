@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
@@ -31,7 +32,7 @@ func TestAddProfileRequirement_UnknownCheck(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown check")
 	}
@@ -98,7 +99,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err != nil {
 		t.Fatalf("first add: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		t.Fatalf("push hook fired %d times after first add, want 1", got)
 	}
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err == nil {
 		t.Fatal("expected duplicate requirement error")
 	}
@@ -140,7 +141,7 @@ func TestAddProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true)
+	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}
@@ -174,7 +175,7 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}
@@ -242,5 +243,76 @@ func TestRemoveProfileRequirement_LastEnforceRejected(t *testing.T) {
 	}
 	if got := f.fires.Load(); got != 0 {
 		t.Fatalf("push hook fired %d times, want 0", got)
+	}
+}
+
+// PENDING-20 G1: the country check needs a valid rule; no other check takes one.
+func TestAddProfileRequirement_CountryRule(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	store := posture.NewStore(f.pool)
+	f.mr.Resolver.PostureStore = store
+	f.mr.Resolver.PostureEvaluator = posture.NewEvaluator(store, nil)
+
+	profile, err := store.CreateProfile(f.ctx, uuid.MustParse(f.tenantID), "test-country-"+uuid.NewString(), true)
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.DeleteProfile(context.Background(), uuid.MustParse(f.tenantID), profile.ID)
+	})
+	id := profile.ID.String()
+
+	for _, tc := range []struct {
+		name      string
+		check     string
+		countries *graph.CountryRuleInput
+		want      string
+	}{
+		{"country without rule", posture.CheckNetworkCountry, nil, "needs countries"},
+		{"rule on another check", posture.CheckFirewall, &graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}, "countries apply only to"},
+		{"bad code", posture.CheckNetworkCountry, &graph.CountryRuleInput{Allow: []string{"India"}, Deny: []string{}}, "not an ISO 3166-1 alpha-2"},
+		{"both empty", posture.CheckNetworkCountry, &graph.CountryRuleInput{Allow: []string{}, Deny: []string{}}, "at least one country"},
+		{"in both lists", posture.CheckNetworkCountry, &graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{"in"}}, "in both the allow and the deny list"},
+	} {
+		_, err := f.mr.AddProfileRequirement(f.ctx, id, tc.check, false, tc.countries)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	if _, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckNetworkCountry, true,
+		&graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil || !strings.Contains(err.Error(), "allowUnsupported does not apply") {
+		t.Errorf("allowUnsupported on the country check: err = %v", err)
+	}
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil ||
+		!strings.Contains(err.Error(), "no country check") {
+		t.Errorf("update before a country check exists: err = %v", err)
+	}
+	if got := f.fires.Load(); got != 0 {
+		t.Fatalf("refused requirements fired the push hook %d times", got)
+	}
+
+	got, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckNetworkCountry, false,
+		&graph.CountryRuleInput{Allow: []string{"in", "us"}, Deny: []string{"cn"}})
+	if err != nil {
+		t.Fatalf("valid country rule: %v", err)
+	}
+	reqs, err := f.mr.DeviceProfile().Requirements(f.ctx, got)
+	if err != nil || len(reqs) != 1 || reqs[0].Countries == nil {
+		t.Fatalf("requirements: %+v %v", reqs, err)
+	}
+	if a, d := strings.Join(reqs[0].Countries.Allow, ","), strings.Join(reqs[0].Countries.Deny, ","); a != "IN,US" || d != "CN" {
+		t.Fatalf("stored rule allow=%s deny=%s, want IN,US / CN", a, d)
+	}
+
+	// G-10: replace the lists in place.
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{}, Deny: []string{"ru"}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	reqs, _ = f.mr.DeviceProfile().Requirements(f.ctx, got)
+	if len(reqs) != 1 || len(reqs[0].Countries.Allow) != 0 || strings.Join(reqs[0].Countries.Deny, ",") != "RU" {
+		t.Fatalf("after update: %+v", reqs[0].Countries)
+	}
+	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{}, Deny: []string{}}); err == nil {
+		t.Fatal("update to an empty rule accepted")
 	}
 }
