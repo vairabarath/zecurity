@@ -83,7 +83,6 @@ CREATE TABLE resource_policies (
   name         TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 100),
   description  TEXT,
   is_default   BOOLEAN NOT NULL DEFAULT FALSE,
-  revision     BIGINT  NOT NULL DEFAULT 1 CHECK (revision > 0),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (workspace_id, name),
@@ -101,7 +100,8 @@ CREATE TABLE resource_policy_profiles (
 );
 
 -- Default policy for every workspace (trigger) + resources.policy_id NOT NULL,
--- FK (policy_id, tenant_id) -> resource_policies(id, workspace_id) ON DELETE RESTRICT.
+-- FK (policy_id, tenant_id) -> resource_policies(id, workspace_id) ON DELETE NO ACTION
+-- (not RESTRICT: a workspace delete cascades to resources and policies together).
 DROP TABLE resource_profile_bindings;
 ALTER TABLE device_profiles DROP COLUMN mode;
 ```
@@ -181,3 +181,23 @@ ALTER TABLE device_profiles DROP COLUMN mode;
 | **R1** | Migration `049_`, store, compiler, GraphQL, audit, tests | approval |
 | **R2** | Console: Resource Policies tab, resource page section, profile "in use", preview | R1 |
 | **R3** | Live run (§6), then one PR `[schema: reset DB]` | R1, R2 |
+
+## 8. Build record
+
+**R1a: migration `049_resource_policies.sql` (2026-11-03).** Written and checked on throwaway databases; the Go code isn't updated yet (R1b).
+- **All 52 migration files apply in order.** On a fresh database:
+  - each new workspace gets exactly one Default;
+  - a resource inserted without a policy gets the Default;
+  - a second Default is refused;
+  - cross-workspace policy and profile links are refused;
+  - a policy still used by a resource can't be deleted;
+  - deleting a profile removes it from its policies;
+  - `resource_profile_bindings` and `device_profiles.mode` are gone;
+  - `policy_id` can't be NULL;
+  - deleting a workspace with resources, policies and profiles cascades cleanly.
+- **Backfill:** applying 049 over existing data (a workspace, a resource and an enforce-mode binding created under 048) gives the workspace its Default and the resource that policy.
+- **Deviations from the §4.1 sketch:**
+  - no `revision` column (nothing would read it);
+  - `NO ACTION` instead of `RESTRICT` on `resources.policy_id`, so a workspace delete still cascades.
+- **Until R1b lands, the Go posture code and its tests on this branch still use the dropped table and column**, so the branch isn't mergeable on its own.
+
