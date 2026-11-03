@@ -16,7 +16,7 @@ tags: [pending, adr, policy, resource-policy, device-profile, posture]
 
 # PENDING-16: Resource policies (Resource → Resource Policy → Device Profiles)
 
-**Status:** design note, **awaiting approval** (rewritten 2026-11-03 against `main` `07152f51`). The 2026-08-10 version predated device approval (ADR-030), geofencing (PENDING-20) and workspace roles (PENDING-19). Nothing is built.
+**Status:** design note, **decisions taken 2026-11-03** (O-1…O-4, §5; rewritten against `main` `07152f51`). The 2026-08-10 version predated device approval (ADR-030), geofencing (PENDING-20) and workspace roles (PENDING-19). Nothing is built.
 **Base:** `main`.
 **Scope:** its own epic. It needs a schema change (`[schema: reset DB]`).
 
@@ -64,7 +64,9 @@ Resource ──(exactly one)──▶ Resource Policy ──(zero or more, OR)�
 - **P-3: A persisted Default policy per workspace.** `is_default` with a partial unique index (one per workspace). It is created with the workspace by a DB trigger, so every creation path and every test gets one. It **can't be deleted or renamed**, but **its profiles can be edited**. New resources get the Default policy unless one is given.
 - **P-4: Profiles in a policy are OR'd; no profiles means "Any Device"** (ungated, exactly as an unbound resource is today).
 - **P-5: No audit/enforce mode anywhere.** A policy's profiles always gate. The "what would happen" visibility audit mode was meant to give is a **preview** instead (§4.5): before saving, the console shows how many devices currently allowed would pass.
-- **P-6: Deleting a policy moves its resources to Default** in the same transaction, then notifies. A **profile used by any policy can't be deleted** (refused, listing the policies), and **its last requirement can't be removed**. Either change would silently turn "these devices" into "any device", a fail-open (today's cascade delete has that hole).
+- **P-6: Deleting a policy moves its resources to Default** in the same transaction, then notifies.
+- **Deleting a profile that policies use needs explicit confirmation (D-4).** `deleteDeviceProfile(id, confirmInUse: true)`; without it the server refuses and lists the policies. With it, the profile is removed from those policies in the same transaction, and any policy left with no profiles becomes "any device". The console warns about that by name before confirming. The audit entry lists every affected policy and which became "any device".
+- **A profile's last requirement can't be removed while policies use it.** An empty profile is unsatisfied, so it would block every device of those policies.
 - **P-7: Roles.** Creating, editing and deleting policies, and choosing their profiles, needs `POSTURE_WRITE` (Admin, Security), the same as profiles today. **Assigning a resource to a policy** also needs `POSTURE_WRITE`, because it changes which devices may connect. DevOps (`NETWORK_WRITE`) still creates resources; they land in Default.
 - **P-8: No proto, connector, client or shield change.** Gating stays "narrow `allowed_spiffe_ids`". The compiler reads `resource → policy → profiles` instead of the enforce bindings. The fail-closed evaluation rules (current revision, report under 10 min) are unchanged.
 - **P-9: Extensibility.** Future conditions (e.g. a location rule at policy level, or sign-in strength) become new child tables or columns of `resource_policies`. The resource → policy link doesn't change.
@@ -95,7 +97,7 @@ CREATE TABLE resource_policy_profiles (
   workspace_id UUID NOT NULL,
   PRIMARY KEY (policy_id, profile_id),
   FOREIGN KEY (policy_id, workspace_id)  REFERENCES resource_policies(id, workspace_id) ON DELETE CASCADE,
-  FOREIGN KEY (profile_id, workspace_id) REFERENCES device_profiles(id, workspace_id)   ON DELETE RESTRICT
+  FOREIGN KEY (profile_id, workspace_id) REFERENCES device_profiles(id, workspace_id)   ON DELETE CASCADE
 );
 
 -- Default policy for every workspace (trigger) + resources.policy_id NOT NULL,
@@ -104,7 +106,7 @@ DROP TABLE resource_profile_bindings;
 ALTER TABLE device_profiles DROP COLUMN mode;
 ```
 
-- `ON DELETE RESTRICT` on the profile side backs P-6 in the database.
+- `ON DELETE CASCADE` on the profile side: the server only deletes an in-use profile after the explicit confirmation (D-4), and records what changed.
 - **Triggers:** `AFTER INSERT ON workspaces` creates the Default policy. `BEFORE INSERT ON resources` sets `policy_id` to the workspace's Default policy when it's NULL. So every insert path (resolvers, discovery promote, SQL in tests) gets a policy without changes, and `policy_id NOT NULL` still holds.
 - Policy deletion is application code: move the resources to Default, then delete, in one transaction under a row lock.
 
@@ -156,21 +158,21 @@ ALTER TABLE device_profiles DROP COLUMN mode;
 - **Profiles in `audit` mode bound by API stop existing.** After the reset there are no bindings; nothing to migrate.
 - **Every resource starts in the Default policy, "Any device"**, i.e. ungated. That's today's state for every console-made setup.
 
-## 5. Decisions still open (for approval)
+## 5. Decisions taken (2026-11-03, Sathiya)
 
-- **O-1:** P-3 — should the **Default policy start as "Any device"** (proposed), or should admins be required to pick profiles for Default at setup?
-- **O-2:** P-7 — should assigning a resource to a policy need `POSTURE_WRITE` (proposed), or `NETWORK_WRITE`, so DevOps can choose a policy when creating resources?
-- **O-3:** P-5 — is a **preview** an acceptable replacement for audit mode, or should a per-policy "report only" switch be kept?
-- **O-4:** P-6 — should deleting a profile that's in use be **refused** (proposed), or should it be allowed with the profile removed from those policies after an explicit confirm?
+- **D-1 (was O-1):** the Default policy starts as **any device**.
+- **D-2 (was O-2):** assigning a resource to a policy needs **`POSTURE_WRITE`** (Admin, Security). DevOps-created resources land in Default.
+- **D-3 (was O-3):** **no report-only mode.** The preview before saving replaces audit mode.
+- **D-4 (was O-4):** deleting a profile that policies use is **allowed after an explicit, server-checked confirmation** (P-6). Without it, the delete is refused with the list of policies.
 
 ## 6. Tests (build gate)
 
 - **Migration and schema:** a fresh DB gives every workspace exactly one Default policy (including workspaces created after the migration); `resources.policy_id` is never null; cross-workspace policy and profile links are refused by FKs.
-- **Store:** create, rename and delete (Default refused); delete moves resources to Default atomically, with a race test (delete vs assign); profile delete and last-requirement removal are refused while in use; an empty profile can't be added to a policy; revision bumps; the notifier is called on every access-changing write.
+- **Store:** create, rename and delete (Default refused); delete moves resources to Default atomically, with a race test (delete vs assign); deleting an in-use profile is refused without confirmation and, with it, removes the profile from its policies (a policy left empty becomes any device, audited); last-requirement removal is refused while in use; an empty profile can't be added to a policy; revision bumps; the notifier is called on every access-changing write.
 - **Compiler:** no profiles means ungated; one or more profiles OR'd; the fail-closed cases from `TestApplyPosture_FailsClosedForInvalidEvaluations` re-pinned on policies; moving a resource between policies changes `allowed_spiffe_ids`.
 - **Resolvers:** capabilities per role (Admin and Security write; DevOps, Viewer and Helpdesk refused, under O-2); user-safe errors; audit rows; preview counts.
 - **Console:** the policies list, the editor (empty profiles disabled), the delete confirm, the resource policy section, the preview text; capability-gated controls.
-- **Live run:** a device allowed by group; move its resource to a policy whose profile it fails, and access is cut and the session ended; add an OR profile it passes, and access returns; delete the policy, and the resource moves to Default (any device); deleting a profile in use is refused.
+- **Live run:** a device allowed by group; move its resource to a policy whose profile it fails, and access is cut and the session ended; add an OR profile it passes, and access returns; delete the policy, and the resource moves to Default (any device); deleting a profile in use is refused without confirmation, and with it the policy becomes any device and access widens accordingly.
 
 ## 7. Phases
 
