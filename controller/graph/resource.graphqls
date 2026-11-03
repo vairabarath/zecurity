@@ -43,7 +43,9 @@ extend type Query {
 extend type Mutation {
   createResource(input: CreateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
   updateResource(id: ID!, input: UpdateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
-  protectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
+  # shieldId: required for a DNS-name host (the shield on the machine the name
+  # points at); optional for an IPv4 host (must then be the shield on that IP).
+  protectResource(id: ID!, shieldId: ID): Resource! @requires(capability: NETWORK_WRITE)
   unprotectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
   deleteResource(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
   # Break-glass (ADR-004 Phase 4): hard-delete a resource in ANY state, bypassing

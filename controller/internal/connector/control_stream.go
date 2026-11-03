@@ -456,15 +456,21 @@ func (r *ConnectorRegistry) PushInstruction(row *resource.Row) {
 	if row.ConnectorID == "" {
 		return
 	}
-	instr := &shieldpb.ResourceInstruction{
+	_ = r.PushResourceInstruction(row.ConnectorID, row.ShieldID, []*shieldpb.ResourceInstruction{instructionForRow(row)})
+}
+
+// instructionForRow is the shield instruction for a resource row. Its host is
+// row.ShieldHost, never row.Host: for a DNS-name resource the shield protects
+// its own LAN IP and never sees the name (PENDING-14 F-5).
+func instructionForRow(row *resource.Row) *shieldpb.ResourceInstruction {
+	return &shieldpb.ResourceInstruction{
 		ResourceId: row.ID,
-		Host:       row.Host,
+		Host:       row.ShieldHost,
 		Protocol:   row.Protocol,
 		PortFrom:   int32(row.PortFrom),
 		PortTo:     int32(row.PortTo),
 		Action:     row.PendingAction,
 	}
-	_ = r.PushResourceInstruction(row.ConnectorID, row.ShieldID, []*shieldpb.ResourceInstruction{instr})
 }
 
 // PushResourceInstruction delivers a resource instruction to the connector that

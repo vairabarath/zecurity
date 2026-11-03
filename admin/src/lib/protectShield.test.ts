@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ShieldStatus } from '@/generated/graphql'
-import { hostShield, protectTargetShield, type ShieldLike } from './protectShield'
+import { hostShield, nameProtectTarget, protectTargetShield, type ShieldLike } from './protectShield'
 
 const HOST = '192.168.1.41'
 const sh = (id: string, status: ShieldStatus, lanIp: string | null = HOST): ShieldLike => ({
@@ -43,5 +43,25 @@ describe('hostShield (what to describe when nothing is protectable)', () => {
     expect(hostShield(HOST, bound, [onHost])).toBe(bound)
     expect(hostShield(HOST, null, [onHost])).toBe(onHost)
     expect(hostShield(HOST, null, [sh('x', ShieldStatus.Active, '10.0.0.9')])).toBeNull()
+  })
+})
+
+describe('nameProtectTarget (mirrors MarkProtecting for a DNS name)', () => {
+  const a = sh('a', ShieldStatus.Active, '10.0.0.1')
+  const b = sh('b', ShieldStatus.Active, '10.0.0.2')
+  const off = sh('off', ShieldStatus.Disconnected, '10.0.0.3')
+
+  it('nothing chosen and nothing bound: no target (the admin must choose)', () => {
+    expect(nameProtectTarget('', null, [a, b])).toBeNull()
+  })
+  it('the chosen active shield wins, whatever its LAN IP', () => {
+    expect(nameProtectTarget('b', a, [a, b])).toBe(b)
+  })
+  it('falls back to the bound shield when it is active', () => {
+    expect(nameProtectTarget('', a, [a, b])).toBe(a)
+  })
+  it('never targets an inactive or foreign shield', () => {
+    expect(nameProtectTarget('off', null, [a, off])).toBeNull()
+    expect(nameProtectTarget('x', off, [a, off])).toBeNull()
   })
 })

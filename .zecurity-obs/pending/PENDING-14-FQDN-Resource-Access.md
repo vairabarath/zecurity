@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** design note, **awaiting approval** for F1–F4 (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). **F0 built 2026-11-03** (approved by Sathiya; branch `fix/pending14-f0-host-ipv4`, see §9). F1–F4 not built.
+**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). F2–F4 not built yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -174,7 +174,7 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 | Phase | What | Depends on |
 |---|---|---|
 | **F0** ✅ | Controller: refuse an invalid host (non-IPv4 for now), with tests; console validation and label | built 2026-11-03 (§9) |
-| **F1** | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | approval |
+| **F1** ✅ | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | built 2026-11-03 (§10) |
 | **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
 | **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
@@ -199,4 +199,72 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - New tests: `TestNormalizeHost` (table) and `TestCreateUpdateRefuseInvalidHost` (DB-backed: nothing written on a refused create, nothing changed on a refused update, trimmed host stored).
 - Mutants: removing the check from `Create` or from `Update` each fails the new test.
 - Admin: 30 files / 242 tests (new `resourceHost.test.ts`, the same cases as the Go table), build ok. Lint is unchanged at 17; the one finding in a touched file (`CreateResourceModal.tsx` `as any`) is pre-existing on `main`.
+
+## 10. F1 record (2026-11-03)
+
+**Controller (`internal/resource/store.go`)**
+- **`NormalizeHost`** now returns the host and its kind (`HostIPv4` or `HostName`). A name is lowercased and loses one trailing dot. It must have at most 253 characters, at least two labels, LDH labels of 1–63 characters with no leading or trailing hyphen, and a letter in the last label. No wildcards.
+- **`IsNameHost`** and the SQL pattern `ipv4HostPattern` tell the two kinds apart. A test checks that Go and SQL agree on the same hosts.
+- **New user-safe errors:** `ErrNameNeedsTCP`, `ErrNameCollision`, `ErrNameProtectedMove`, `ErrProtectNoShield` and `ErrProtectNameNeedsShield`. Protect's old error was a plain error, which the console masked.
+- **`shieldHostSQL` / `Row.ShieldHost`:** for a name, the bound shield's `lan_ip`; for an IPv4 host, the host. It's used at every shield-facing site:
+  - `desiredForShield` (snapshot, fingerprint, reconciler);
+  - `GetPendingForShield` (removes on reconnect);
+  - the signed set's removes (`connector/resource_set.go`);
+  - `PushInstruction` (via `instructionForRow`);
+  - the `RecordAck` host comparison and `logIgnoredAck`.
+- **`Create`:**
+  - A name must use TCP.
+  - A name is never auto-matched to a shield.
+  - It runs in a transaction. For a name it takes `pg_advisory_xact_lock(workspace, name)` and refuses an overlapping port range on the same name in another remote network (F-6).
+  - IPv4 hosts aren't checked for collisions: they legitimately repeat across networks.
+- **`Update`:**
+  - The final host and protocol must satisfy the TCP rule, including a protocol-only edit.
+  - The collision check runs under the same lock.
+  - A protected name can't move to another network (`ErrNameProtectedMove`).
+  - A new **name** host doesn't count as a shield change, so name→name and IPv4→name keep the bound shield, stay `protected` and push nothing.
+  - Name→IPv4 uses the existing LAN-IP match.
+- **`MarkProtecting(…, shieldID)`:**
+  - IPv4: unchanged auto-match. A given `shieldID` must be the shield on that IP.
+  - Name: `shieldID` is required and must be an active shield in the same workspace and remote network. A foreign shield answers like a missing one.
+  - It is still one atomic `UPDATE`.
+- **GraphQL:** `protectResource(id: ID!, shieldId: ID)`. The audit entry records `shield_id`. gqlgen's import reorder in `resource.resolvers.go` was reverted.
+- **A shield `lan_ip` change:** the heartbeat re-sync leaves names alone, and `handleShieldStatus` pushes a snapshot, which carries the new LAN IP for names (checked in the code; covered by a test on the desired set).
+
+**Console (`admin/`)**
+- `lib/resourceHost.ts`: `resourceHostKind` mirrors the server, with the same test table, and `isNameHost` is added.
+- The Create and Edit modals: label "Host (IPv4 address or DNS name)", and the TCP rule for names.
+- `lib/protectShield.ts` `nameProtectTarget`, with tests.
+- `ResourceDetail`: for a name, a shield picker (the network's active shields, "name (LAN IP)") and an explanation that the name must resolve, on the connector, to that shield's LAN IP. All three Protect buttons pass `shieldId` for names.
+- `ProtectResource` mutation: `$shieldId`; codegen regenerated.
+
+**Tests and gates**
+- **New:** `TestDNSNameResources`, 12 DB-backed subtests:
+  - Go/SQL agreement;
+  - TCP rule on create, on a protocol-only edit, and on UDP IPv4→name;
+  - no auto-match;
+  - collision with edges, the same network, IPv4 exempt, update and self-edit;
+  - a race with 8 concurrent saves through a test seam that pauses between check and insert;
+  - protect with no, foreign, offline, other-network, bad or valid shield;
+  - IPv4 protect with a wrong shield;
+  - acks (the name ignored, the LAN IP counted);
+  - the unprotect remove;
+  - updates to a protected name;
+  - IPv4→name;
+  - a `lan_ip` change.
+
+  Also new: `TestShieldInstructionsCarryLANIPForNames` (pushed instruction, snapshot, signed resources and removes). `TestNormalizeHost` gained names.
+- **Mutants:** 11, all killed:
+  - shield host uses the name;
+  - ack compares the name;
+  - no TCP rule on update;
+  - no collision check;
+  - no lock (needed the seam);
+  - a new name host counts as a shield change;
+  - protect accepts any shield for a name;
+  - no last-label letter rule;
+  - signed removes use the name;
+  - pushed instruction uses the name;
+  - plus F0's create and update mutants.
+- **Go:** `go build`, `go vet`, and `go test -count=1 ./...` with every DB variable and `AUTH_TEST_VALKEY_URL`: 1669 pass, 0 fail, 2 expected skips. `scripts/resource-test-fixture.sh` ok.
+- **Admin:** 30 files / 268 tests, `tsc` clean, build ok. Lint is unchanged at 17; the changed files lint clean.
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	"github.com/yourorg/ztna/controller/internal/resource"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -40,12 +41,13 @@ func (p *peerListIssuer) signResourceSet(
 	}
 
 	rows, err := db.Query(ctx,
-		`SELECT id::text, host, protocol, port_from, port_to
-		   FROM resources
-		  WHERE shield_id = $1
-		    AND ((status = 'protecting' AND pending_action = 'remove')
-		         OR status = 'deleting')
-		  ORDER BY id`,
+		`SELECT r.id::text, `+resource.ShieldHostSQL+`, r.protocol, r.port_from, r.port_to
+		   FROM resources r
+		   LEFT JOIN shields s ON s.id = r.shield_id
+		  WHERE r.shield_id = $1
+		    AND ((r.status = 'protecting' AND r.pending_action = 'remove')
+		         OR r.status = 'deleting')
+		  ORDER BY r.id`,
 		shieldID,
 	)
 	if err != nil {

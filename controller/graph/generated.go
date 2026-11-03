@@ -201,7 +201,7 @@ type ComplexityRoot struct {
 		InitiateAuth                      func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
 		MintScimToken                     func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
 		PromoteDiscoveredService          func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource                   func(childComplexity int, id string) int
+		ProtectResource                   func(childComplexity int, id string, shieldID *string) int
 		RejectScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
 		RemoveGroupMember                 func(childComplexity int, groupID string, userID string) int
 		RemoveProfileRequirement          func(childComplexity int, profileID string, checkID string) int
@@ -457,7 +457,7 @@ type MutationResolver interface {
 	DeleteShield(ctx context.Context, id string) (bool, error)
 	CreateResource(ctx context.Context, input CreateResourceInput) (*Resource, error)
 	UpdateResource(ctx context.Context, id string, input UpdateResourceInput) (*Resource, error)
-	ProtectResource(ctx context.Context, id string) (*Resource, error)
+	ProtectResource(ctx context.Context, id string, shieldID *string) (*Resource, error)
 	UnprotectResource(ctx context.Context, id string) (*Resource, error)
 	DeleteResource(ctx context.Context, id string) (bool, error)
 	ForceDeleteResource(ctx context.Context, id string) (bool, error)
@@ -1406,7 +1406,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.ProtectResource(childComplexity, args["id"].(string)), true
+		return e.ComplexityRoot.Mutation.ProtectResource(childComplexity, args["id"].(string), args["shieldId"].(*string)), true
 	case "Mutation.rejectScimConflict":
 		if e.ComplexityRoot.Mutation.RejectScimConflict == nil {
 			break
@@ -4132,6 +4132,14 @@ func (ec *executionContext) field_Mutation_protectResource_args(ctx context.Cont
 		return nil, err
 	}
 	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "shieldId",
+		func(ctx context.Context, v any) (*string, error) {
+			return ec.unmarshalOID2ᚖstring(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["shieldId"] = arg1
 	return args, nil
 }
 
@@ -7815,7 +7823,7 @@ func (ec *executionContext) _Mutation_protectResource(ctx context.Context, field
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().ProtectResource(ctx, fc.Args["id"].(string))
+			return ec.Resolvers.Mutation().ProtectResource(ctx, fc.Args["id"].(string), fc.Args["shieldId"].(*string))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next

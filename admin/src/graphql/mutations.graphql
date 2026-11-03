@@ -86,8 +86,8 @@ mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {
   }
 }
 
-mutation ProtectResource($id: ID!) {
-  protectResource(id: $id) {
+mutation ProtectResource($id: ID!, $shieldId: ID) {
+  protectResource(id: $id, shieldId: $shieldId) {
     id
     status
   }
