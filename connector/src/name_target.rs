@@ -15,6 +15,10 @@ use std::net::{IpAddr, SocketAddr};
 /// The error text a client gets when a name has no usable address.
 pub const ERR_NAME_UNRESOLVED: &str = "NAME_UNRESOLVED";
 
+/// The error text a client gets when a shield-protected name resolves to an
+/// address that isn't the shield's (the shield refuses it, F-5).
+pub const ERR_NAME_NOT_ON_SHIELD: &str = "NAME_NOT_ON_SHIELD";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResolveError {
     /// The lookup itself failed (NXDOMAIN, resolver down, timeout).
