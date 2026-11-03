@@ -90,14 +90,18 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 }
 
 // ProtectResource is the resolver for the protectResource field.
-func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*graph.Resource, error) {
+func (r *mutationResolver) ProtectResource(ctx context.Context, id string, shieldID *string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	row, err := resource.MarkProtecting(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+	chosen := ""
+	if shieldID != nil {
+		chosen = *shieldID
+	}
+	row, err := resource.MarkProtecting(ctx, r.ResourceCfg.DB, tc.TenantID, id, chosen)
 	if err != nil {
 		return nil, fmt.Errorf("protectResource: %w", err)
 	}
-	r.auditAdmin(ctx, "resource.protect", "resource", id, nil)
+	r.auditAdmin(ctx, "resource.protect", "resource", id, map[string]any{"shield_id": row.ShieldID})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("protectResource: notify policy change: %w", err)
 	}

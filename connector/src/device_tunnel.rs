@@ -18,6 +18,7 @@ use x509_parser::prelude::*;
 
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
+use crate::name_target::{self, ERR_NAME_UNRESOLVED};
 use crate::policy::PolicyCache;
 use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::server_cfg::build_device_tunnel_tls_dynamic;
@@ -293,6 +294,67 @@ where
         ));
     }
 
+    // PENDING-14 F2: a DNS-name destination is resolved here, inside the
+    // remote network, with the connector's resolver, and filtered
+    // (name_target::allowed_resolved: no loopback, link-local or IPv6). Both
+    // routes below use the checked address, never the name: the direct route
+    // dials it, the shield route hands it to the shield, which accepts only its
+    // own LAN IP. Authorization above already matched the name itself.
+    let dial_host: String = if name_target::is_name(&req.destination) {
+        let route = if acl_entry.route_type == "shield" { "shield" } else { "connector" };
+        let resolved = if req.protocol.to_lowercase() == "udp" {
+            Err("DNS-name resources are TCP only".to_string())
+        } else {
+            name_target::resolve_target(&req.destination, req.port)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        match resolved {
+            Ok(addr) => {
+                tracing::debug!(dest = %req.destination, resolved = %addr, "resolved resource name");
+                addr.ip().to_string()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    spiffe_id = %client_spiffe_id,
+                    resource_id = %acl_entry.resource_id,
+                    dest = %req.destination,
+                    port = req.port,
+                    error = %e,
+                    "tunnel refused — resource name has no usable address",
+                );
+                let response = TunnelResponse {
+                    ok: false,
+                    error: Some(ERR_NAME_UNRESOLVED.to_string()),
+                    quic_addr: quic_advertise_addr().map(String::from),
+                };
+                send_response(&mut stream, &response).await?;
+                emit_access_log(
+                    control_tx,
+                    connector_id,
+                    AccessLogFields {
+                        resource_id: &acl_entry.resource_id,
+                        client_spiffe_id: &client_spiffe_id,
+                        route_type: route,
+                        destination: &req.destination,
+                        port: req.port,
+                        protocol: &req.protocol,
+                        action: "error",
+                        error: &format!("name_unresolved: {e}"),
+                        legacy_message: format!(
+                            "error spiffe_id={} resource={} dest={}:{} proto={} reason=name_unresolved: {}",
+                            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, e,
+                        ),
+                    },
+                )
+                .await;
+                return Err(anyhow!("resource name {} has no usable address: {}", req.destination, e));
+            }
+        }
+    } else {
+        req.destination.clone()
+    };
+
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
             tracing::error!(
@@ -372,7 +434,7 @@ where
         .await;
 
         match tunnel_hub
-            .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
+            .open_relay_session(&shield_id, &dial_host, req.port, &req.protocol)
             .await
         {
             Ok(relay) => {
@@ -408,21 +470,36 @@ where
                     error = %e,
                     "tunnel_opened error"
                 );
-                let response = if e.to_string().contains("not connected") {
-                    TunnelResponse {
-                        ok: false,
-                        error: Some(ERR_SHIELD_NOT_ATTACHED.to_string()),
-                        quic_addr: quic_advertise_addr().map(String::from),
-                    }
-                } else {
-                    TunnelResponse {
-                        ok: false,
-                        error: Some("INTERNAL".to_string()),
-                        quic_addr: quic_advertise_addr().map(String::from),
-                    }
+                let (client_error, log_error) =
+                    shield_failure(&req.destination, &dial_host, &e.to_string());
+                let response = TunnelResponse {
+                    ok: false,
+                    error: Some(client_error.to_string()),
+                    quic_addr: quic_advertise_addr().map(String::from),
                 };
-
                 let _ = send_response(&mut stream, &response).await;
+                // F4 live run: a shield refusal was only logged on the
+                // connector host; the admin console never saw it.
+                emit_access_log(
+                    control_tx,
+                    connector_id,
+                    AccessLogFields {
+                        resource_id: &acl_entry.resource_id,
+                        client_spiffe_id: &client_spiffe_id,
+                        route_type: "shield",
+                        destination: &req.destination,
+                        port: req.port,
+                        protocol: &req.protocol,
+                        action: "error",
+                        error: &log_error,
+                        legacy_message: format!(
+                            "error spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={} reason={}",
+                            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+                            shield_id, log_error,
+                        ),
+                    },
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -534,7 +611,7 @@ where
         return Ok(());
     }
 
-    let target = format!("{}:{}", req.destination, req.port);
+    let target = format!("{}:{}", dial_host, req.port);
     let mut resource_conn = match TcpStream::connect(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
@@ -662,6 +739,29 @@ where
         }
     }
     Ok(())
+}
+
+/// What a client is told, and what the access log records, when the shield
+/// route fails. `destination` is the request's (a name or an IP), `dialled`
+/// the address handed to the shield (the resolved IP for a name).
+///
+/// PENDING-14 F-5: a shield protects only its own LAN IP, so a DNS-name
+/// resource whose name resolves (on the connector) to another address is
+/// refused by the shield; say so, with both the name and the address, so the
+/// admin can fix DNS.
+fn shield_failure(destination: &str, dialled: &str, error: &str) -> (&'static str, String) {
+    if error.contains("not connected") {
+        return (ERR_SHIELD_NOT_ATTACHED, format!("shield_not_attached: {error}"));
+    }
+    if name_target::is_name(destination) && error.contains("not a resource this shield protects") {
+        return (
+            name_target::ERR_NAME_NOT_ON_SHIELD,
+            format!(
+                "name_not_on_shield: {destination} resolved to {dialled}, which is not the shield's LAN IP; point the name at the shield's host"
+            ),
+        );
+    }
+    ("INTERNAL", format!("shield_error: {error}"))
 }
 
 async fn send_response<S>(stream: &mut S, response: &TunnelResponse) -> Result<()>
@@ -798,5 +898,37 @@ mod revocation_action_tests {
             revocation_action(RevocationStatus::Unavailable),
             Err("certificate revocation state unavailable"),
         );
+    }
+}
+
+#[cfg(test)]
+mod shield_failure_tests {
+    use super::*;
+
+    #[test]
+    fn a_name_the_shield_refuses_names_both_the_name_and_the_address() {
+        let (client, log) = shield_failure(
+            "db.acme.example",
+            "192.168.1.164",
+            "shield rejected tunnel: destination is not a resource this shield protects",
+        );
+        assert_eq!(client, name_target::ERR_NAME_NOT_ON_SHIELD);
+        assert!(log.starts_with("name_not_on_shield: db.acme.example resolved to 192.168.1.164"), "{log}");
+    }
+
+    #[test]
+    fn other_shield_failures_keep_their_codes_and_are_logged() {
+        assert_eq!(
+            shield_failure("db.acme.example", "10.0.0.5", "shield abc not connected").0,
+            ERR_SHIELD_NOT_ATTACHED
+        );
+        // An IP resource the shield refuses is not a DNS problem.
+        let (client, log) = shield_failure(
+            "10.0.0.5",
+            "10.0.0.5",
+            "shield rejected tunnel: destination is not a resource this shield protects",
+        );
+        assert_eq!(client, "INTERNAL");
+        assert!(log.starts_with("shield_error: "), "{log}");
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -314,6 +314,7 @@ async fn handle_request(
                 } else {
                     Some(s.device_state_reason.clone())
                 },
+                dns_names: if tunnel_up { crate::dns_link::status_line() } else { None },
                 ..Default::default()
             }
         }
@@ -725,6 +726,10 @@ async fn handle_up(
             ..Default::default()
         };
     }
+    // PENDING-14 F3: point systemd-resolved at the client for the DNS-name
+    // resources. Forced: the link is new, so it has no resolved config. A
+    // failure only leaves the names unresolvable (status says why).
+    crate::dns_link::sync(&crate::tun::SystemRunner, &applied, true);
 
     let route_count = allowed_flows.len();
     let dev = match mgr.take_device() {
@@ -958,6 +963,8 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
             warn!(error = %e, "error cleaning up TUN routes");
         }
     }
+    // The link and its resolved config are gone with it.
+    crate::dns_link::clear();
 
     info!("zecurity0 down");
     IpcResponse {
@@ -1568,6 +1575,8 @@ where
     }));
     drop(s);
     drop(kernel_guard);
+    // PENDING-14 F3: the DNS-name set may have changed with the resources.
+    crate::dns_link::sync(&crate::tun::SystemRunner, &plan.target, false);
     info!(
         resources = plan.flows_after.len(),
         removed = plan.removed.len(),
@@ -5976,10 +5985,10 @@ fn build_transports_by_resource_with_crl(
     let mut out: HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>> = HashMap::new();
     let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
-        let Ok(ip) = entry.address.parse::<IpAddr>() else {
+        // An IPv4 literal, or a DNS name on its fake address (PENDING-14 F3).
+        let Some(v4) = crate::name_map::resource_ipv4(&entry.address) else {
             continue;
         };
-        let IpAddr::V4(v4) = ip else { continue };
 
         let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, revoked);
 

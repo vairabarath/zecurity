@@ -77,6 +77,9 @@ pub async fn run() -> Result<()> {
             if let Some(last_sync) = resp.acl_last_sync_at {
                 println!("ACL Sync:   {}", format_duration_since(last_sync));
             }
+            if let Some(dns) = &resp.dns_names {
+                println!("DNS names:  {}", dns);
+            }
         }
         _ => {
             // The daemon may not be reachable because it exited after a

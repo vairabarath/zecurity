@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, Info, Loader2, X, Server } from 'lucide-react'
 import { toast } from 'sonner'
-import { isValidResourceHost, RESOURCE_HOST_ERROR } from '@/lib/resourceHost'
+import { NAME_NEEDS_TCP_ERROR, RESOURCE_HOST_ERROR, resourceHostKind } from '@/lib/resourceHost'
 
 interface CreateResourceDefaults {
   remoteNetworkId?: string
@@ -80,8 +80,13 @@ export function CreateResourceModal({
       return
     }
 
-    if (!isValidResourceHost(host)) {
+    const hostKind = resourceHostKind(host)
+    if (hostKind === null) {
       setError(RESOURCE_HOST_ERROR)
+      return
+    }
+    if (hostKind === 'name' && protocol !== 'tcp') {
+      setError(NAME_NEEDS_TCP_ERROR)
       return
     }
 
@@ -192,20 +197,20 @@ export function CreateResourceModal({
 
               <div className="space-y-2">
                 <Label className="flex items-center gap-2 text-sm font-semibold">
-                  Host IP <span className="text-destructive">*</span>
+                  Host <span className="text-destructive">*</span>
                   <span className="text-xs font-normal text-muted-foreground">
-                    (IPv4 address)
+                    (IPv4 address or DNS name)
                   </span>
                 </Label>
                 <Input
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
-                  placeholder="e.g. 192.168.1.100"
+                  placeholder="e.g. 192.168.1.100 or db.internal.example.com"
                   className="h-11 font-mono text-sm"
                 />
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Info className="h-3 w-3" />
-                  <span>To protect it later, a shield must be installed on this machine.</span>
+                  <span>To protect it later, a shield must be installed on this machine (for a DNS name: the machine the name points at).</span>
                 </div>
               </div>
 

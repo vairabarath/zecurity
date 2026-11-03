@@ -41,3 +41,23 @@ export function hostShield<T extends ShieldLike>(
 ): T | null {
   return boundShield ?? shields.find((s) => s.lanIp === host) ?? null
 }
+
+/**
+ * The shield `protectResource` binds for a DNS-name resource (PENDING-14 F-5),
+ * mirroring `MarkProtecting`: the controller can't resolve the name, so the
+ * admin chooses an ACTIVE shield of the resource's remote network. `chosenId`
+ * wins when it names one; otherwise the bound shield, if active. `shields` must
+ * be the shields of the resource's remote network.
+ */
+export function nameProtectTarget<T extends ShieldLike>(
+  chosenId: string,
+  boundShield: T | null | undefined,
+  shields: readonly T[],
+): T | null {
+  const active = shields.filter((s) => s.status === ShieldStatus.Active)
+  return (
+    active.find((s) => s.id === chosenId) ??
+    active.find((s) => s.id === boundShield?.id) ??
+    null
+  )
+}

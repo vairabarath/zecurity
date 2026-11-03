@@ -240,7 +240,7 @@ func TestProtectResource_Invalidates(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	id := f.seedResource(t, aclFixtureShieldLAN, "unprotected")
 
-	if _, err := f.mr.ProtectResource(f.ctx, id); err != nil {
+	if _, err := f.mr.ProtectResource(f.ctx, id, nil); err != nil {
 		t.Fatalf("ProtectResource: %v", err)
 	}
 	if got := f.fires.Load(); got != 1 {

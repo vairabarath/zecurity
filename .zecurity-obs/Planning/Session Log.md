@@ -3640,3 +3640,24 @@ serves on `127.0.0.1:9102`.
   - all are allowed with a rule scoped to the client user;
   - another user is still refused.
 - F0 built on `fix/pending14-f0-host-ipv4`: the controller refuses a non-IPv4 resource host on create and update (`resource.NormalizeHost`), with a console mirror. Gates in PENDING-14 §9: Go 1655 pass / 0 fail / 2 expected skips with all DB and Valkey vars, fixture script ok, both mutants killed, admin 242 tests and build ok, lint unchanged (17).
+- Later the same day:
+  - F0 pushed as PR #173 (into `main`).
+  - PENDING-14 approved ("start the work").
+  - F1 built on `feat/pending14-f1-names` (from F0): DNS-name resources in the controller and console, shield-protected names (shield instructions carry the shield's LAN IP), the TCP rule, and the race-safe collision check.
+  - Gates in PENDING-14 §10: Go 1669 / 0 / 2 skips; 11 mutants killed; admin 268 tests.
+  - F1–F3 ship as one PR (F1 alone would let names save that no client reaches).
+  - F2 (connector resolve and filter) and F3 (client) built on the same branch:
+    - fake addresses from `198.18.0.0/16`;
+    - a smoltcp DNS answerer on `198.19.255.53`;
+    - `resolvectl` wiring and a status line;
+    - the installer polkit rule.
+  - Gates and records in PENDING-14 §11 and §12. F4 (live lab run) is next, then one PR.
+  - **F4 live run PASS** (PENDING-14 §13):
+    - client on this machine (real service, scoped polkit rule); connector and shield on luffy;
+    - names via `nip.io`;
+    - resolved routing on the real `zecurity0`;
+    - connector and shield routes by name;
+    - loopback and DNS-mismatch refusals;
+    - hot add and remove;
+    - rule-removed fallback.
+  - Three fixes from the run: a connector loop when it shares a host with a client; the polkit rule scoped to the service by cgroup; shield refusals now logged on the controller.

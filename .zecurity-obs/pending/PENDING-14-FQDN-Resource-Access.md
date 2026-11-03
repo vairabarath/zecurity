@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** design note, **awaiting approval** for F1–F4 (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). **F0 built 2026-11-03** (approved by Sathiya; branch `fix/pending14-f0-host-ipv4`, see §9). F1–F4 not built.
+**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). **F4 live run PASS 2026-11-03** (§13), with three fixes from the run. Ready for one PR. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -51,7 +51,7 @@ So the connector half largely works already. The missing half is the client: it 
 - **F-5 Shield-protected names (amends F-1).** A name is an alias for a host's IP, so a name resource can be shield-protected. The connector resolves the name and routes the tunnel to the bound shield, which checks the IP as it does today, if the client has access.
 - **F-6 Collisions (was O-3).** The same name and port in two remote networks of one workspace is refused when the second is saved.
 - **F-7 Fake-address range (was O-2).** Names get addresses from `198.18.0.0/16` (RFC 2544); the DNS responder is `198.19.255.53`; the client refuses to activate name resources on an overlap (§4.7).
-- **F-8 Permission for resolved (was O-1).** The client installer ships a polkit rule granting only the installed client user the four resolved link actions (§4.6). Lab-verified 2026-11-03 (§4.6 evidence).
+- **F-8 Permission for resolved (was O-1).** The client installers ship a polkit rule granting the four resolved link actions only to the installed client user **and only to a process in `zecurity-client.service`**, checked through the caller's cgroup (§13). Lab-verified 2026-11-03.
 
 ## 4. Design (v1)
 
@@ -174,10 +174,10 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 | Phase | What | Depends on |
 |---|---|---|
 | **F0** ✅ | Controller: refuse an invalid host (non-IPv4 for now), with tests; console validation and label | built 2026-11-03 (§9) |
-| **F1** | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | approval |
-| **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
-| **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
-| **F4** | Live lab run (§7), then one PR | F2, F3 |
+| **F1** ✅ | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | built 2026-11-03 (§10) |
+| **F2** ✅ | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | built 2026-11-03 (§11) |
+| **F3** ✅ | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` (→ F4) | built 2026-11-03 (§12) |
+| **F4** ✅ | Live lab run (§7), then one PR | PASS 2026-11-03 (§13) |
 
 ## 9. F0 record (2026-11-03)
 
@@ -199,4 +199,195 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - New tests: `TestNormalizeHost` (table) and `TestCreateUpdateRefuseInvalidHost` (DB-backed: nothing written on a refused create, nothing changed on a refused update, trimmed host stored).
 - Mutants: removing the check from `Create` or from `Update` each fails the new test.
 - Admin: 30 files / 242 tests (new `resourceHost.test.ts`, the same cases as the Go table), build ok. Lint is unchanged at 17; the one finding in a touched file (`CreateResourceModal.tsx` `as any`) is pre-existing on `main`.
+
+## 10. F1 record (2026-11-03)
+
+**Controller (`internal/resource/store.go`)**
+- **`NormalizeHost`** now returns the host and its kind (`HostIPv4` or `HostName`). A name is lowercased and loses one trailing dot. It must have at most 253 characters, at least two labels, LDH labels of 1–63 characters with no leading or trailing hyphen, and a letter in the last label. No wildcards.
+- **`IsNameHost`** and the SQL pattern `ipv4HostPattern` tell the two kinds apart. A test checks that Go and SQL agree on the same hosts.
+- **New user-safe errors:** `ErrNameNeedsTCP`, `ErrNameCollision`, `ErrNameProtectedMove`, `ErrProtectNoShield` and `ErrProtectNameNeedsShield`. Protect's old error was a plain error, which the console masked.
+- **`shieldHostSQL` / `Row.ShieldHost`:** for a name, the bound shield's `lan_ip`; for an IPv4 host, the host. It's used at every shield-facing site:
+  - `desiredForShield` (snapshot, fingerprint, reconciler);
+  - `GetPendingForShield` (removes on reconnect);
+  - the signed set's removes (`connector/resource_set.go`);
+  - `PushInstruction` (via `instructionForRow`);
+  - the `RecordAck` host comparison and `logIgnoredAck`.
+- **`Create`:**
+  - A name must use TCP.
+  - A name is never auto-matched to a shield.
+  - It runs in a transaction. For a name it takes `pg_advisory_xact_lock(workspace, name)` and refuses an overlapping port range on the same name in another remote network (F-6).
+  - IPv4 hosts aren't checked for collisions: they legitimately repeat across networks.
+- **`Update`:**
+  - The final host and protocol must satisfy the TCP rule, including a protocol-only edit.
+  - The collision check runs under the same lock.
+  - A protected name can't move to another network (`ErrNameProtectedMove`).
+  - A new **name** host doesn't count as a shield change, so name→name and IPv4→name keep the bound shield, stay `protected` and push nothing.
+  - Name→IPv4 uses the existing LAN-IP match.
+- **`MarkProtecting(…, shieldID)`:**
+  - IPv4: unchanged auto-match. A given `shieldID` must be the shield on that IP.
+  - Name: `shieldID` is required and must be an active shield in the same workspace and remote network. A foreign shield answers like a missing one.
+  - It is still one atomic `UPDATE`.
+- **GraphQL:** `protectResource(id: ID!, shieldId: ID)`. The audit entry records `shield_id`. gqlgen's import reorder in `resource.resolvers.go` was reverted.
+- **A shield `lan_ip` change:** the heartbeat re-sync leaves names alone, and `handleShieldStatus` pushes a snapshot, which carries the new LAN IP for names (checked in the code; covered by a test on the desired set).
+
+**Console (`admin/`)**
+- `lib/resourceHost.ts`: `resourceHostKind` mirrors the server, with the same test table, and `isNameHost` is added.
+- The Create and Edit modals: label "Host (IPv4 address or DNS name)", and the TCP rule for names.
+- `lib/protectShield.ts` `nameProtectTarget`, with tests.
+- `ResourceDetail`: for a name, a shield picker (the network's active shields, "name (LAN IP)") and an explanation that the name must resolve, on the connector, to that shield's LAN IP. All three Protect buttons pass `shieldId` for names.
+- `ProtectResource` mutation: `$shieldId`; codegen regenerated.
+
+**Tests and gates**
+- **New:** `TestDNSNameResources`, 12 DB-backed subtests:
+  - Go/SQL agreement;
+  - TCP rule on create, on a protocol-only edit, and on UDP IPv4→name;
+  - no auto-match;
+  - collision with edges, the same network, IPv4 exempt, update and self-edit;
+  - a race with 8 concurrent saves through a test seam that pauses between check and insert;
+  - protect with no, foreign, offline, other-network, bad or valid shield;
+  - IPv4 protect with a wrong shield;
+  - acks (the name ignored, the LAN IP counted);
+  - the unprotect remove;
+  - updates to a protected name;
+  - IPv4→name;
+  - a `lan_ip` change.
+
+  Also new: `TestShieldInstructionsCarryLANIPForNames` (pushed instruction, snapshot, signed resources and removes). `TestNormalizeHost` gained names.
+- **Mutants:** 11, all killed:
+  - shield host uses the name;
+  - ack compares the name;
+  - no TCP rule on update;
+  - no collision check;
+  - no lock (needed the seam);
+  - a new name host counts as a shield change;
+  - protect accepts any shield for a name;
+  - no last-label letter rule;
+  - signed removes use the name;
+  - pushed instruction uses the name;
+  - plus F0's create and update mutants.
+- **Go:** `go build`, `go vet`, and `go test -count=1 ./...` with every DB variable and `AUTH_TEST_VALKEY_URL`: 1669 pass, 0 fail, 2 expected skips. `scripts/resource-test-fixture.sh` ok.
+- **Admin:** 30 files / 268 tests, `tsc` clean, build ok. Lint is unchanged at 17; the changed files lint clean.
+
+## 11. F2 record (2026-11-03)
+
+**Connector**
+- New module `connector/src/name_target.rs`:
+  - `is_name`;
+  - `allowed_resolved`: IPv4 only; never loopback, link-local (incl. 169.254.169.254), unspecified, multicast or broadcast;
+  - `pick_allowed`: the first allowed result, in resolver order;
+  - `resolve_target`: an IP literal is used as given (unchanged behaviour), and a name goes through `tokio::net::lookup_host` plus the filter;
+  - `ERR_NAME_UNRESOLVED` (`"NAME_UNRESOLVED"`).
+- `device_tunnel::handle_stream`, after authorization (unchanged: exact match on the name) and the gate re-checks:
+  - A name destination is resolved **once**.
+  - The direct route dials `"<checked IP>:port"`.
+  - The shield route calls `open_relay_session(shield_id, <checked IP>, …)`, so the shield's own `allows_tunnel` check (its LAN IP only) stays the authority.
+  - A name over UDP is refused before any lookup.
+  - On failure the client gets `ok:false, error:"NAME_UNRESOLVED"`, and the controller gets an `error` access log with `error = "name_unresolved: <reason>"` and the name as `destination`.
+- No proto change: the tunnel request is JSON with a string `destination`.
+
+**Tests and gates**
+- **Unit tests** (`name_target`, 7):
+  - the allowed and refused address table;
+  - order and skipping in `pick_allowed`;
+  - nothing allowed;
+  - IP literals untouched (incl. 127.0.0.1 for IP resources);
+  - `localhost` refused (loopback);
+  - `.invalid` is a lookup error.
+- **Handler** (`acl_diff_session_tests`, the production `handle_stream`):
+  - A name resource resolving only to loopback is refused with `NAME_UNRESOLVED` and an error access log, although an echo server listens on that loopback port.
+  - A name over UDP is refused.
+- **Mutants:** "no address filter" and "names not resolved" are each killed.
+  - **Not covered by an automated test:** the shield route passing the resolved IP. It needs a live shield session, so it's covered by the F4 lab run.
+- **Gates:** `cargo build`; `cargo test` 288 + 4 pass, 0 fail; clippy has no findings in the changed code; `name_target.rs` rustfmt-formatted. Existing files were not reformatted, because `cargo fmt` would format the whole crate.
+
+## 12. F3 record (2026-11-03)
+
+**Client**
+- **`client/src/name_map.rs`** (process-wide, behind a mutex):
+  - Names get fake addresses from 198.18.0.1 to 198.18.255.254, sequentially. A name keeps its address for the daemon's lifetime, and an address is never reused.
+  - `is_resource_name` mirrors the controller's rule for stored names.
+  - `resource_ipv4(address)`: the IPv4 literal, or the fake address for a name. It also records any real resource IP inside `198.18.0.0/15`; while one exists, names are disabled (§4.7).
+  - `destination_for(ip)`: the name for a fake address.
+  - `answer_a`: only **active** names (the currently applied ACL) resolve.
+  - `DNS_RESPONDER_ADDR = 198.19.255.53`.
+- **The parse points now use it:** `routable_key` (startup preflight, `net_stack::run`, the hot-apply plan) and `build_transports_by_resource_with_crl`. The rest of the capture path (nft marks, table-105 routes, AnyIP listeners, the transport map) is unchanged and works on the fake address.
+- **`net_stack` `FlowTable::service`:** the tunnel request `destination` is `name_map::destination_for(ip)`, so the connector gets the name.
+- **`client/src/dns.rs`:** a pure authoritative answerer.
+  - A query for an active name gets the fake address, TTL 30 s, AA.
+  - Other types get NODATA; other names get NXDOMAIN; other opcodes get NOTIMP.
+  - Malformed packets, responses, more than one question, or a compression pointer in QNAME are dropped.
+  - An EDNS OPT in the query is ignored, and the reply carries no additional records.
+- **`net_stack`:** a smoltcp UDP socket bound to 198.19.255.53:53 (`new_dns_socket`), served every loop iteration (`serve_dns`).
+- **`client/src/dns_link.rs`:**
+  - `names_in(applied)` lists the TCP name entries.
+  - `sync` runs `ip route replace 198.19.255.53/32 dev zecurity0` (main table), then `resolvectl dns zecurity0 198.19.255.53`, `resolvectl domain zecurity0 ~<name>…` and `resolvectl default-route zecurity0 false`. With no names it runs `resolvectl revert zecurity0`.
+  - It never fails the caller. On failure the names are inactive and the status says why.
+  - It is called from `handle_up` (forced: a new link has no resolved config), from the resource hot-apply commit, and `clear()` from `handle_down`.
+- **Status:** `IpcResponse.dns_names`, printed as `DNS names:  active (N names)` or `unavailable: <reason>`. Absent when there are no names.
+- **`client/scripts/client-install.sh`:** installs `/etc/polkit-1/rules.d/50-zecurity-client.rules`, granting only the installing user the four resolved link actions. It's removed on `-f` reinstall, and skipped with a warning if there's no rules.d directory or the user name is unusual.
+
+**Tests and gates**
+- **New unit tests:**
+  - `dns` (6): A answer, case, NODATA, NXDOMAIN, dropped packets, NOTIMP.
+  - `name_map` (6): the name rule, stable and distinct addresses, never reused, pool end, reserved-range conflict, destination mapping.
+  - `dns_link` (3): name selection, the exact commands, and sync with status, failure and revert.
+- **End to end through the production capture interface** (`a_resource_name_resolves_to_its_fake_address_and_tunnels_by_name`): a DNS query packet to 198.19.255.53:53 is answered from that address with the fake IP. A TCP connection to the fake IP is tunnelled with `destination` set to the name.
+- **Changed test:** `routable_key_is_ipv4_tcp_or_empty_protocol` (a name is now routable over TCP; `localhost` and UDP are not).
+- **Polkit rule:** rendered from the installer and evaluated under Node with a stub `polkit` (7 cases: the four actions for the user; other actions and other users refused).
+- **Mutants**, all killed:
+  - "tunnel sends the fake IP" (2 tests fail);
+  - "inactive names still resolve" (2 tests fail).
+- **Gates:** `cargo test` 334 pass, 0 fail; clippy has no findings in the new code (the remaining warnings were already there); the new files are rustfmt-formatted. `cargo build --release` needs `ZECURITY_PLATFORM_ROOT_PEM_FILE` by design, so dev builds use `client/scripts/dev-build.sh`.
+
+**Still to verify live (F4):**
+- resolved routes `~<name>` queries to 198.19.255.53 on the real `zecurity0` (the O-1 dummy link showed `Current Scopes: none`);
+- the shield route receives the resolved IP (F2);
+- a real application resolves and connects;
+- hot-add and hot-remove of a name;
+- a name resolving to loopback is refused at the connector;
+- resolved stopped → status explains it, and IP resources keep working.
+
+## 13. F4 live run (2026-11-03)
+
+**Topology**
+- **Controller:** branch build, user unit `fqdn-controller` on `inkyank-01-computer` (.164).
+- **Client:** this machine's real `zecurity-client.service`, branch build (`93acaa0f…`) installed with `scripts/client-local-install.sh` (incl. the polkit rule), user `r3-geo1`, workspace `rbac-r3`.
+- **Connector and shield:** branch builds on **luffy** (.48, Arch), installed with the local installers. The connector couldn't stay on the client's host; see finding 1.
+- **Test names:** public wildcard DNS (`*.nip.io`), so names resolve to real lab addresses without editing any DNS.
+- **No DB reset:** F0–F3 add no migration.
+
+**Results (all PASS)**
+
+| Check | Result |
+|---|---|
+| Client status with the rule | `DNS names: active (2 names)` |
+| resolved on the real `zecurity0` (open item from O-1) | `Current Scopes: DNS`, `DNS Servers: 198.19.255.53`, routing domains = exactly the resource names; `resolvectl query` answers `198.18.0.1` via `zecurity0` in 14.6 ms; `example.com` unaffected |
+| Connector route by name | `curl http://192-168-1-164.nip.io:18080` → 200; the server saw the request from luffy (.48), i.e. luffy resolved and dialled |
+| Name resolving to loopback | refused at the connector; controller access log `error name_unresolved: … not allowed: [127.0.0.1]` |
+| API refusals | UDP name → "must use protocol tcp"; `*.example.com` → invalid host |
+| Protect a name | without `shieldId` → "needs a shield chosen"; with the luffy shield → `protecting` → `protected` in seconds (the shield got and acked its LAN IP) |
+| Shield route by name (the F2 path without an automated test) | `curl http://192-168-1-48.nip.io:18082` → 200, `route_type=shield`; direct `192.168.1.48:18082` from the client host → timeout (the shield enforces) |
+| Shield-protected name whose DNS points at another host | the shield refuses; the wrong host got **0** requests; the controller logs `name_not_on_shield: 192-168-1-164.nip.io resolved to 192.168.1.164, which is not the shield's LAN IP …` (after fix 3) |
+| Hot add (tunnel up) | the new name is resolvable and routed without a restart |
+| Hot remove | the routing domain is gone within 2 s; the name resolves through normal DNS again |
+| Polkit rule removed, tunnel restarted | `DNS names: unavailable: systemd-resolved configuration failed: … resolvectl dns zecurity0 … exit status: 1`; no DNS scope; the IPv4 control resource still 200; the name falls back to its real IP, and the shield blocks the direct path |
+| Rule restored, tunnel restarted | `active (2 names)` again; both names 200; fake addresses unchanged (`.1`, `.3`) |
+
+**Findings, all fixed on the branch**
+1. **The connector looped when a client ran on its host** (`942b7998`).
+   - The connector's resolver goes through systemd-resolved, which routed the names to that client's answerer. The connector got `198.18.0.1`, dialled it, and the tunnel looped back into the client.
+   - Fix: the connector refuses `198.18.0.0/15` like loopback, giving `NAME_UNRESOLVED`. Verified live in the co-located setup ("not allowed: [198.18.0.1]").
+2. **The polkit rule was user-wide** (`cc421d6a`; automated security review).
+   - Lab probes (systemd 255, polkit 124): resolved passes polkit **no link details**, and `subject.system_unit` is **null**.
+   - The rule now also requires the caller's cgroup `0::/system.slice/zecurity-client.service`, read via `polkit.spawn(cat /proc/<pid>/cgroup)`.
+   - Lab-checked: the service unit is allowed; another unit of the same user is refused. Node check: 9 cases.
+   - Same rule in `scripts/client-local-install.sh`.
+3. **Shield refusals were invisible to the controller** (`b7f93369`).
+   - The connector logged them only on its host and told the client `INTERNAL`.
+   - Every shield-route failure now sends an `error` access log. A name the shield refuses gets the client error `NAME_NOT_ON_SHIELD` and a log naming both the name and the address.
+
+**Observations, not caused by this branch**
+- On this desktop, a process in the user's **graphical session** could set resolved link DNS **without** any of our rules, while `pkcheck` reported "authentication required". This is a local polkit/desktop behaviour, not investigated further. Our rule adds nothing for session processes and is scoped to the service unit.
+- `deleteResource` with an unknown ID answers `INTERNAL`, not "not found".
+- The GraphQL `remoteNetworks { shields { lanIp } }` path returned null while the DB row had the LAN IP.
 
