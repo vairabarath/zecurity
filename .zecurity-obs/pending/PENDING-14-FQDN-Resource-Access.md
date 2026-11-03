@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). F3–F4 not built yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
+**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). F4 (live lab run) not done yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -176,7 +176,7 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 | **F0** ✅ | Controller: refuse an invalid host (non-IPv4 for now), with tests; console validation and label | built 2026-11-03 (§9) |
 | **F1** ✅ | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | built 2026-11-03 (§10) |
 | **F2** ✅ | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | built 2026-11-03 (§11) |
-| **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
+| **F3** ✅ | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` (→ F4) | built 2026-11-03 (§12) |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
 
 ## 9. F0 record (2026-11-03)
@@ -299,4 +299,51 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - **Mutants:** "no address filter" and "names not resolved" are each killed.
   - **Not covered by an automated test:** the shield route passing the resolved IP. It needs a live shield session, so it's covered by the F4 lab run.
 - **Gates:** `cargo build`; `cargo test` 288 + 4 pass, 0 fail; clippy has no findings in the changed code; `name_target.rs` rustfmt-formatted. Existing files were not reformatted, because `cargo fmt` would format the whole crate.
+
+## 12. F3 record (2026-11-03)
+
+**Client**
+- **`client/src/name_map.rs`** (process-wide, behind a mutex):
+  - Names get fake addresses from 198.18.0.1 to 198.18.255.254, sequentially. A name keeps its address for the daemon's lifetime, and an address is never reused.
+  - `is_resource_name` mirrors the controller's rule for stored names.
+  - `resource_ipv4(address)`: the IPv4 literal, or the fake address for a name. It also records any real resource IP inside `198.18.0.0/15`; while one exists, names are disabled (§4.7).
+  - `destination_for(ip)`: the name for a fake address.
+  - `answer_a`: only **active** names (the currently applied ACL) resolve.
+  - `DNS_RESPONDER_ADDR = 198.19.255.53`.
+- **The parse points now use it:** `routable_key` (startup preflight, `net_stack::run`, the hot-apply plan) and `build_transports_by_resource_with_crl`. The rest of the capture path (nft marks, table-105 routes, AnyIP listeners, the transport map) is unchanged and works on the fake address.
+- **`net_stack` `FlowTable::service`:** the tunnel request `destination` is `name_map::destination_for(ip)`, so the connector gets the name.
+- **`client/src/dns.rs`:** a pure authoritative answerer.
+  - A query for an active name gets the fake address, TTL 30 s, AA.
+  - Other types get NODATA; other names get NXDOMAIN; other opcodes get NOTIMP.
+  - Malformed packets, responses, more than one question, or a compression pointer in QNAME are dropped.
+  - An EDNS OPT in the query is ignored, and the reply carries no additional records.
+- **`net_stack`:** a smoltcp UDP socket bound to 198.19.255.53:53 (`new_dns_socket`), served every loop iteration (`serve_dns`).
+- **`client/src/dns_link.rs`:**
+  - `names_in(applied)` lists the TCP name entries.
+  - `sync` runs `ip route replace 198.19.255.53/32 dev zecurity0` (main table), then `resolvectl dns zecurity0 198.19.255.53`, `resolvectl domain zecurity0 ~<name>…` and `resolvectl default-route zecurity0 false`. With no names it runs `resolvectl revert zecurity0`.
+  - It never fails the caller. On failure the names are inactive and the status says why.
+  - It is called from `handle_up` (forced: a new link has no resolved config), from the resource hot-apply commit, and `clear()` from `handle_down`.
+- **Status:** `IpcResponse.dns_names`, printed as `DNS names:  active (N names)` or `unavailable: <reason>`. Absent when there are no names.
+- **`client/scripts/client-install.sh`:** installs `/etc/polkit-1/rules.d/50-zecurity-client.rules`, granting only the installing user the four resolved link actions. It's removed on `-f` reinstall, and skipped with a warning if there's no rules.d directory or the user name is unusual.
+
+**Tests and gates**
+- **New unit tests:**
+  - `dns` (6): A answer, case, NODATA, NXDOMAIN, dropped packets, NOTIMP.
+  - `name_map` (6): the name rule, stable and distinct addresses, never reused, pool end, reserved-range conflict, destination mapping.
+  - `dns_link` (3): name selection, the exact commands, and sync with status, failure and revert.
+- **End to end through the production capture interface** (`a_resource_name_resolves_to_its_fake_address_and_tunnels_by_name`): a DNS query packet to 198.19.255.53:53 is answered from that address with the fake IP. A TCP connection to the fake IP is tunnelled with `destination` set to the name.
+- **Changed test:** `routable_key_is_ipv4_tcp_or_empty_protocol` (a name is now routable over TCP; `localhost` and UDP are not).
+- **Polkit rule:** rendered from the installer and evaluated under Node with a stub `polkit` (7 cases: the four actions for the user; other actions and other users refused).
+- **Mutants**, all killed:
+  - "tunnel sends the fake IP" (2 tests fail);
+  - "inactive names still resolve" (2 tests fail).
+- **Gates:** `cargo test` 334 pass, 0 fail; clippy has no findings in the new code (the remaining warnings were already there); the new files are rustfmt-formatted. `cargo build --release` needs `ZECURITY_PLATFORM_ROOT_PEM_FILE` by design, so dev builds use `client/scripts/dev-build.sh`.
+
+**Still to verify live (F4):**
+- resolved routes `~<name>` queries to 198.19.255.53 on the real `zecurity0` (the O-1 dummy link showed `Current Scopes: none`);
+- the shield route receives the resolved IP (F2);
+- a real application resolves and connects;
+- hot-add and hot-remove of a name;
+- a name resolving to loopback is refused at the connector;
+- resolved stopped → status explains it, and IP resources keep working.
 
