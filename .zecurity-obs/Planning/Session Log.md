@@ -3557,3 +3557,31 @@ serves on `127.0.0.1:9102`.
   - demotion to Member with a page open redirects to `/install`;
   - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
   - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.
+
+## 2026-11-02 — M2: FU-8 client wake-up hints (PR #170)
+- Branch `fix/fu8-client-wake-hints` (from `fixed-pendings` `11e2ed94`, after #169). Barath chose option B: an advisory `WatchChanges` stream; the snapshot RPCs and the 60 s poll stay authoritative.
+- Verified first:
+  - device approval already bumps the ACL version, only on a posture transition, so no approval change was needed;
+  - snapshot versions equal the notifier counters;
+  - `transport.Notifier` had no hook;
+  - the stream interceptor demanded a SPIFFE cert from every stream.
+- Built:
+  - additive proto RPC;
+  - `internal/changehint` hub (1-slot wake per stream, one stream per device, never blocks);
+  - `AddChangeListener` on both notifiers (after the unchanged connector push hook);
+  - the stream handler: subscribe then read, coalesced and deduplicated, 60 s device re-check plus heartbeat, ends at token expiry, on a directive, when replaced, at shutdown;
+  - `AccessTokenClaims.ExpiresAt`; interceptor skip for ClientService streams;
+  - client `change_watch.rs` (jittered backoff 1–60 s, 150 s idle limit) waking the existing scheduler.
+- ADR-018 amended; ADR-016 and ADR-017 notes; the 120 s drain cap unchanged.
+- Gates:
+  - Go 1605 pass / 0 fail / 2 expected skips; build and vet clean; `-race` clean on the six touched packages.
+  - Client 317 pass; no new clippy findings.
+  - 15 mutants killed (10 controller, 5 client). Pre-lab review fixes: a device revoke now ends the stream on the wake (every revoke path notifies the policy plane), and `RENEW_SOON` no longer ends it.
+- A mid-run `git stash` (for a clippy baseline) overlapped the first Go run, so that run was discarded and the suite re-run clean.
+- Live check 2026-11-02 PASS (details in `Sprint22/path.md` → FU-8):
+  - re-add → hint 49 ms, resource back 83 ms;
+  - relay drain → hint 41 ms, new connections on the other relay from 78 ms; a running download was cut at the unchanged 120 s drain timeout;
+  - restart: counter reset handled; with no hint stream (base controller) the 60 s poll converged in 55 s;
+  - revoke: connector refused in 85 ms and the stream closed at once;
+  - the 10 s shutdown is the existing O-8 issue (the base controller takes the same).
+- Lab torn down: DB dropped, Valkey db7 flushed, relays, controller and the .53 connector/file server stopped and removed, lab secrets deleted. Pending at commit time (sudo not entered): uninstalling the local client service and deleting the two `fu8-live` ufw rules.

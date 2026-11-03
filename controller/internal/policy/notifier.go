@@ -25,6 +25,12 @@ type Notifier struct {
 	// forced to mint its own background context rather than capture a
 	// request-scoped one that is cancelled when the mutation returns.
 	pushHook func(workspaceID string)
+
+	// listeners are extra non-blocking consumers fired after pushHook (FU-8:
+	// the client wake-up hint hub). Same contract as pushHook: registered at
+	// startup before serving, read-only afterwards, must return promptly. They
+	// are separate from pushHook so the connector push never depends on them.
+	listeners []func(workspaceID string)
 }
 
 var (
@@ -75,7 +81,17 @@ func (n *Notifier) NotifyPolicyChange(_ context.Context, workspaceID string) err
 	if n.pushHook != nil {
 		n.pushHook(workspaceID)
 	}
+	for _, listen := range n.listeners {
+		listen(workspaceID)
+	}
 	return nil
+}
+
+// AddChangeListener registers an extra non-blocking consumer of policy
+// changes, fired after the push hook (FU-8 client wake-up hints). Call it
+// during startup wiring, before serving; fn must return promptly.
+func (n *Notifier) AddChangeListener(fn func(workspaceID string)) {
+	n.listeners = append(n.listeners, fn)
 }
 
 // RegisterPushHook installs the proactive-push callback fired after every

@@ -70,13 +70,17 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 	if err != nil {
 		return nil, err
 	}
-	return &AccessTokenClaims{
+	out := &AccessTokenClaims{
 		UserID:     claims.Subject,
 		TenantID:   claims.TenantID,
 		Role:       claims.Role,
 		Email:      claims.Email,
 		Generation: claims.IdentityGeneration,
-	}, nil
+	}
+	if claims.ExpiresAt != nil {
+		out.ExpiresAt = claims.ExpiresAt.Time
+	}
+	return out, nil
 }
 
 // issueAccessToken creates a signed short-lived JWT.

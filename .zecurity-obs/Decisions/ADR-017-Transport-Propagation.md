@@ -265,6 +265,9 @@ maintains a separate `transport_snapshot` field in `SharedState`, populated via 
 | Relay expiry (90s heartbeat gap) → snapshot recompiled | < 95s total |
 | Client polling interval | 60s (same as ACL) |
 | Max convergence window (client) | 120s (2 × poll interval) |
+| Client convergence with a live WatchChanges stream (FU-8, 2026-11-02) | typically ~1 s (hint + one sync); advisory, not guaranteed |
+
+**Amendment 2026-11-02 (FU-8, see ADR-018):** the transport notifier now also wakes the clients' `WatchChanges` streams, so a connected client usually picks up a topology change (including a connector moving off a drained relay) within about a second. The 120 s maximum is unchanged: it is what applies when the stream is down (a controller restart, a network break, an older controller), because then the 60 s poll is all the client has. Anything sized against the worst case, such as `RELAY_DRAIN_TIMEOUT_SECS`, keeps using 120 s.
 
 **Observable:** Each connector includes `transport_version` in its heartbeat. The controller exposes a metric:
 `transport_convergence{workspace=X}` = fraction of connected connectors whose

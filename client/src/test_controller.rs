@@ -178,6 +178,16 @@ impl ClientService for FakeController {
         Ok(Response::new(LogoutResponse {}))
     }
 
+    type WatchChangesStream = crate::change_watch::HintStream;
+
+    async fn watch_changes(
+        &self,
+        r: Request<WatchChangesRequest>,
+    ) -> Result<Response<Self::WatchChangesStream>, Status> {
+        self.record("WatchChanges", &r.into_inner().access_token);
+        Err(Status::unimplemented("not used by these tests"))
+    }
+
     async fn renew_cert(
         &self,
         r: Request<RenewCertRequest>,

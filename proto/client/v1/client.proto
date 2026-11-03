@@ -66,6 +66,22 @@ service ClientService {
   // reveals nothing about session liveness. Replaces the client's plain-HTTP
   // /auth/logout.
   rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+  // 2026-11-02). Carries only the workspace's current ACL and transport
+  // versions, never rules or topology: on a hint whose versions differ from
+  // its cached snapshots the client reconciles through GetACLSnapshot /
+  // GetTransportSnapshot, which stay authoritative. The first message is sent
+  // right after the server subscribes, so a change made before or during the
+  // client's last sync is never missed; later messages coalesce (latest
+  // versions only) and repeat about once a minute as a heartbeat. The client
+  // keeps its 60 s poll whether or not the stream is up.
+  // Same authentication as GetACLSnapshot (access_token + device_id). The
+  // stream ends with UNAUTHENTICATED when the access token expires, with
+  // FAILED_PRECONDITION when the device carries a directive (revoked,
+  // re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+  // the controller shuts down.
+  rpc WatchChanges(WatchChangesRequest) returns (stream ChangeHint);
 }
 message ReportDevicePostureRequest {
   string access_token = 1;
@@ -337,3 +353,15 @@ message LogoutRequest {
 }
 
 message LogoutResponse {}
+
+message WatchChangesRequest {
+  string access_token = 1;
+  string device_id    = 2;
+}
+
+// Advisory only: grants nothing. Versions are per controller process (they
+// restart at 0), so the client compares them for equality, not order.
+message ChangeHint {
+  uint64 acl_version       = 1; // == GetACLSnapshot snapshot.version
+  uint64 transport_version = 2; // == GetTransportSnapshot snapshot.version
+}

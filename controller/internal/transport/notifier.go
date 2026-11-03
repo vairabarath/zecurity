@@ -14,8 +14,11 @@ import (
 //
 // There is no proactive push: the client is the sole consumer of the transport
 // snapshot and fetches it via GetTransportSnapshot (poll + relay-failure
-// re-poll). A topology change just bumps the version and invalidates the cache;
-// the client's next poll observes the new version and recompiles. The
+// re-poll). A topology change bumps the version and invalidates the cache;
+// the client's next poll observes the new version and recompiles. Since FU-8
+// a change listener (the client wake-up hint hub) also tells connected
+// clients that the version moved, so they poll at once; it carries no
+// snapshot and the poll stays authoritative. The
 // affectedConnectorIDs argument is retained for a future push channel and for
 // observability, but is not acted on today.
 //
@@ -38,6 +41,10 @@ type Notifier struct {
 	cache    *SnapshotCache
 	mu       sync.Mutex
 	versions map[string]*atomic.Uint64
+
+	// listeners are non-blocking consumers fired after each change (FU-8).
+	// Registered at startup before serving, read-only afterwards.
+	listeners []func(workspaceID string)
 }
 
 // NewNotifier creates a Notifier backed by the given cache.
@@ -68,7 +75,18 @@ func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string, a
 
 	v.Add(1)
 	n.cache.Invalidate(workspaceID)
+	for _, listen := range n.listeners {
+		listen(workspaceID)
+	}
 	return nil
+}
+
+// AddChangeListener registers a non-blocking consumer of topology changes,
+// fired after the version bump and cache invalidation (FU-8 client wake-up
+// hints). Call it during startup wiring, before serving; fn must return
+// promptly.
+func (n *Notifier) AddChangeListener(fn func(workspaceID string)) {
+	n.listeners = append(n.listeners, fn)
 }
 
 // Version returns the current transport version for workspaceID (0 if never

@@ -30,6 +30,7 @@ const (
 	ClientService_ReportDevicePosture_FullMethodName  = "/client.v1.ClientService/ReportDevicePosture"
 	ClientService_RefreshSession_FullMethodName       = "/client.v1.ClientService/RefreshSession"
 	ClientService_Logout_FullMethodName               = "/client.v1.ClientService/Logout"
+	ClientService_WatchChanges_FullMethodName         = "/client.v1.ClientService/WatchChanges"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -87,6 +88,21 @@ type ClientServiceClient interface {
 	// reveals nothing about session liveness. Replaces the client's plain-HTTP
 	// /auth/logout.
 	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
+	// WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+	// 2026-11-02). Carries only the workspace's current ACL and transport
+	// versions, never rules or topology: on a hint whose versions differ from
+	// its cached snapshots the client reconciles through GetACLSnapshot /
+	// GetTransportSnapshot, which stay authoritative. The first message is sent
+	// right after the server subscribes, so a change made before or during the
+	// client's last sync is never missed; later messages coalesce (latest
+	// versions only) and repeat about once a minute as a heartbeat. The client
+	// keeps its 60 s poll whether or not the stream is up.
+	// Same authentication as GetACLSnapshot (access_token + device_id). The
+	// stream ends with UNAUTHENTICATED when the access token expires, with
+	// FAILED_PRECONDITION when the device carries a directive (revoked,
+	// re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+	// the controller shuts down.
+	WatchChanges(ctx context.Context, in *WatchChangesRequest, opts ...grpc.CallOption) (ClientService_WatchChangesClient, error)
 }
 
 type clientServiceClient struct {
@@ -207,6 +223,39 @@ func (c *clientServiceClient) Logout(ctx context.Context, in *LogoutRequest, opt
 	return out, nil
 }
 
+func (c *clientServiceClient) WatchChanges(ctx context.Context, in *WatchChangesRequest, opts ...grpc.CallOption) (ClientService_WatchChangesClient, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ClientService_ServiceDesc.Streams[0], ClientService_WatchChanges_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &clientServiceWatchChangesClient{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type ClientService_WatchChangesClient interface {
+	Recv() (*ChangeHint, error)
+	grpc.ClientStream
+}
+
+type clientServiceWatchChangesClient struct {
+	grpc.ClientStream
+}
+
+func (x *clientServiceWatchChangesClient) Recv() (*ChangeHint, error) {
+	m := new(ChangeHint)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // ClientServiceServer is the server API for ClientService service.
 // All implementations must embed UnimplementedClientServiceServer
 // for forward compatibility
@@ -262,6 +311,21 @@ type ClientServiceServer interface {
 	// reveals nothing about session liveness. Replaces the client's plain-HTTP
 	// /auth/logout.
 	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
+	// WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+	// 2026-11-02). Carries only the workspace's current ACL and transport
+	// versions, never rules or topology: on a hint whose versions differ from
+	// its cached snapshots the client reconciles through GetACLSnapshot /
+	// GetTransportSnapshot, which stay authoritative. The first message is sent
+	// right after the server subscribes, so a change made before or during the
+	// client's last sync is never missed; later messages coalesce (latest
+	// versions only) and repeat about once a minute as a heartbeat. The client
+	// keeps its 60 s poll whether or not the stream is up.
+	// Same authentication as GetACLSnapshot (access_token + device_id). The
+	// stream ends with UNAUTHENTICATED when the access token expires, with
+	// FAILED_PRECONDITION when the device carries a directive (revoked,
+	// re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+	// the controller shuts down.
+	WatchChanges(*WatchChangesRequest, ClientService_WatchChangesServer) error
 	mustEmbedUnimplementedClientServiceServer()
 }
 
@@ -301,6 +365,9 @@ func (UnimplementedClientServiceServer) RefreshSession(context.Context, *Refresh
 }
 func (UnimplementedClientServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Logout not implemented")
+}
+func (UnimplementedClientServiceServer) WatchChanges(*WatchChangesRequest, ClientService_WatchChangesServer) error {
+	return status.Errorf(codes.Unimplemented, "method WatchChanges not implemented")
 }
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 
@@ -513,6 +580,27 @@ func _ClientService_Logout_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_WatchChanges_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchChangesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClientServiceServer).WatchChanges(m, &clientServiceWatchChangesServer{ServerStream: stream})
+}
+
+type ClientService_WatchChangesServer interface {
+	Send(*ChangeHint) error
+	grpc.ServerStream
+}
+
+type clientServiceWatchChangesServer struct {
+	grpc.ServerStream
+}
+
+func (x *clientServiceWatchChangesServer) Send(m *ChangeHint) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 // ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -565,6 +653,12 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ClientService_Logout_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchChanges",
+			Handler:       _ClientService_WatchChanges_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/client/v1/client.proto",
 }

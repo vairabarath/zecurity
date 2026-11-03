@@ -264,7 +264,7 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-5 | **The rest of FU-2's class.** A catalogue audit found 28 more single-column foreign keys between two workspace-scoped tables: devices, posture reports and evaluations, profiles and bindings, shields, connectors, `resources.shield_id`, SCIM sync instances, user references. Also: scan requests weren't bound to a connector, so another connector of the same workspace could add rows; and scan results had no key to their connector. | FU-2 follow-up, 2026-10-28 | **Fixed** 2026-10-28 (branch `fix/fu2-schema-workspace-constraints`, migration `046_`, see Post-Sprint Fixes → FU-5); the 5 keys to `identity_connections` are excluded on purpose |
 | FU-6 | **Relay list reconciliation.** A failed post-commit `broadcastRelayList` (drain, revoke, expiry) leaves connected connectors on the old list until the next broadcast or reconnect. Phase D only logs it (P8). Consider a periodic re-broadcast or a list-version check in the connector heartbeat response. | Phase D design review, 2026-10-29 | **Fixed** 2026-10-30 (branch `sprint22/fu6-fu7-relay-drain-residuals`, see Post-Sprint Fixes → FU-6) |
 | FU-7 | **Phase D review residuals (low).** Drain vs `EvictRelays` deadlock (retryable 500); `RecordHeartbeat` newer-count guard; one clock for the 120 s window; `GetActiveRelay` ignoring drain; NULL-safe `eligible.Where`; concurrency tests for drain vs revoke/eviction/resume. See the Phase D file → Post-Phase Fixes. | Phase D review, 2026-10-29 | **Fixed** 2026-10-30 (same branch, see Post-Sprint Fixes → FU-7) |
-| FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | Open |
+| FU-8 | **Clients learn regained access only on their 60 s poll (O-3, live E2E run 2026-10-29).** Losing access is pushed (connectors tear sessions down at once), but a client only re-adds a resource on its background ACL sync, so a just-approved device or re-added member sees up to a minute of refusals (`zecurity-client sync` is immediate). Needs a design decision (push a hint to clients, or a shorter poll); left as is by the user's decision. | Live E2E run, 2026-10-29 | **Fixed** 2026-11-02 (PR #170, branch `fix/fu8-client-wake-hints`): option B, an advisory `WatchChanges` hint stream; the 60 s poll stays authoritative and on. See Post-Sprint Fixes → FU-8 |
 | FU-9 | **A steadily slow reader loses its tunnel (F-2, live E2E run 2026-10-29).** A download read at 25 KB/s through the tunnel is ended by the connector after 2–10 s (`device stalled with its tunnel queue full`, 3/3 runs); 50 KB/s and faster, and a 5 s pause at 500 KB/s, survive. Cause: Sprint 20 Fix 14 `DEVICE_STALL_LIMIT = 2 s` (accepted limit, F48) — all tunnels of a shield share one Control stream. Fix is the recorded per-tunnel flow control (proto change). | Live E2E run, 2026-10-29 | Open |
 | FU-10 | **The tunnel isn't restored after a client daemon restart or reboot (O-5).** The daemon loads its state but only `login` / `up` bring the tunnel up, so a user has no access after a reboot until `zecurity-client up`. `status` now says `Tunnel: down` (fixed); restoring the previous up state at start needs a decision. | Live E2E run, 2026-10-29 | **Fixed** 2026-11-02 (branch `fix/fu10-restore-tunnel`): option (a), the daemon remembers whether the user left the tunnel up and restores it at start. See Post-Sprint Fixes → FU-10 |
 | FU-11 | **Anyone can look up which workspaces an email belongs to (F-6, live E2E run 2026-10-30).** Public `lookupWorkspacesByEmail` (login page) returns the workspaces of any email without sign-in and without a limit (85 lookups in a burst, all answered). ADR-009 (proposed) plans 30/min per IP for it "to prevent enumeration" (Tier 3, pre-GA). Options: that limit, and/or email the list instead of returning it. | Live E2E run, 2026-10-30 | **Mitigated** 2026-10-31 (branch `fu11/discovery-rate-limit`): shared per-IP budget on all four discovery entry points + per-email budget; the oracle remains (email-verified discovery to decide before GA). See Post-Sprint Fixes → FU-11 |
@@ -339,6 +339,91 @@ async fn drain_old_relay(tracker: &RelayDrainTracker, drain_timeout: Duration, r
 Connector 277 pass; 3 mutants killed (no cut at timeout, handler doesn't attach, cut doesn't close). Not live-tested.
 
 **Console text (follow-up decision):** with FU-14 deployed, open connections on a draining relay end at most `relay_drain_timeout_secs` (120 s) after their connector moves. The console text changed in #160 ("keep running until they end") can name the limit again once connectors run this fix. Older connectors still don't cut.
+
+### Fix: FU-8 clients learn about changes from a wake-up hint, not only the 60 s poll
+**Issue:** live E2E run 2026-10-29 (O-3).
+- Losing access was immediate: the ACL is pushed to connectors, which cut the session.
+- **Regaining** access waited for the client's next 60 s `GetACLSnapshot` poll: a re-added member or a newly approved device saw up to a minute of refusals.
+- Relay moves had the same delay: AT-D6 showed new connections leaving a drained relay only at +59 s.
+
+**Root cause:** by design (ADR-018, Sprint 13): clients only poll, and nothing tells them a version moved.
+
+**Decision (Barath, 2026-11-02):** option B, an advisory wake-up stream with the poll kept as the authority and the fallback. (Not chosen: A, a 15 s poll; C, leave as is.) Recorded as an amendment to ADR-018; ADR-016 and ADR-017 notes added; the 120 s relay drain cap is unchanged.
+
+**Verified first:**
+- Device approval (ADR-030) already bumps the ACL version, and only when access changes: `setDeviceApproval` → `posture.Evaluator.EvaluateDevice` → `NotifyPolicyChange` on a posture transition. No approval change was needed.
+- Snapshot versions are the notifiers' counters, so a hint's versions compare directly with the client's cached snapshots.
+- `transport.Notifier` had no hook at all.
+- The stream interceptor demanded a SPIFFE certificate on every stream, client streams included.
+
+**Fix applied:**
+- **Proto** (`client.proto`, additive): `rpc WatchChanges(WatchChangesRequest) returns (stream ChangeHint)`; `ChangeHint{acl_version, transport_version}` only. Go stubs regenerated with `buf generate`.
+- **Controller:**
+  - `internal/changehint` (new): a hub with a 1-slot wake per stream, at most one stream per device, non-blocking `Notify`.
+  - `policy.Notifier` and `transport.Notifier` gain `AddChangeListener`, fired after the version bump and cache invalidation. The policy one fires after the unchanged connector push hook.
+  - `client/watch_changes.go`:
+    - the handler subscribes, **then** reads and sends the versions;
+    - it sends again on each change (deduplicated, coalesced), re-checking the device on every wake; every 60 s it re-checks again and sends a heartbeat;
+    - it ends at token expiry (`UNAUTHENTICATED`), on a directive that removes standing (`FAILED_PRECONDITION`: revoked, re-enroll required), when replaced (`ABORTED`) and on shutdown (`UNAVAILABLE`);
+    - a device revoke ends the stream at once, because every revoke path (`revokeDevice` mutation, client self-revoke, SCIM bulk revoke) calls `NotifyPolicyChange`, which wakes it; the 60 s re-check only covers a failed notify. The stream never grants access: snapshots run the same device gate, and connectors enforce the revoke on their own;
+    - `RENEW_SOON` keeps the stream open: the device is still fully trusted, the poll delivers the directive, and the client renews at that same threshold (±15 min jitter), so ending the stream there would turn hints off around every renewal.
+  - `auth.AccessTokenClaims.ExpiresAt` (new), so the stream can't outlive its token.
+  - `connector.StreamSPIFFEInterceptor` skips `/client.v1.ClientService/`, as the unary one does.
+  - `main.go` wires the hub to both notifiers and gives the service the shutdown signal.
+- **Client:**
+  - `change_watch.rs` (new) holds one stream open while logged in with an active device. On a hint whose versions differ from the cache, it wakes `RuntimeState::change_hint`.
+  - Reconnects use jittered backoff from 1 s to 60 s, reset after a stream delivers a hint. A connection silent for 150 s is dropped. `UNAUTHENTICATED` wakes the sync, which refreshes the token.
+  - `run_acl_sync_scheduler` gains a `change_hint` arm that runs the same `sync_and_restart_if_changed` as the tick, on the same task, so syncs never run concurrently. The 60 s tick is untouched.
+  - `tokio` `test-util` was added to dev-dependencies only.
+
+**Kept as is:** the snapshot RPCs and their version rules, connector enforcement and revocation, the 60 s poll, and the Track B separation (a transport change never moves the ACL version).
+
+**Tests:**
+- **Controller:**
+  - `changehint` hub: coalescing, workspace isolation, replacement, concurrent use under `-race`.
+  - Notifier listeners: run after the connector push with the new version; a stream that never reads doesn't block 1000 connector pushes; transport changes leave the ACL version alone.
+  - `WatchChanges` handler (real notifiers and hub):
+    - refusals: bad token, unknown device, directives, expired token;
+    - first hint plus each change, with no duplicates;
+    - a change right after the first read is not missed;
+    - a burst collapses to the latest version;
+    - heartbeat, revoke while open, revoke ending the stream on the wake (not the 60 s re-check), `RENEW_SOON` keeping it open, token expiry, shutdown, replacement.
+  - Interceptor: client streams pass without a certificate, connector streams still need one.
+  - DB-backed **device approval → wake → authorized by the snapshot, with the hinted version equal to the snapshot version**.
+- **Client** (`change_watch`, paused clock):
+  - only moved versions sync;
+  - a burst leaves one pending sync;
+  - backoff 1, 2, 4 … capped at 60 s, with jitter in [d/2, d], reset after a hint;
+  - 150 s idle limit;
+  - an expired token wakes the sync and reconnects;
+  - no stream while logged out or revoked;
+  - aborting the task drops the stream.
+- **Gates:**
+  - Go: 1605 pass, 0 fail, 2 expected skips; build, vet and `-race` clean.
+  - Client: 317 pass; no new clippy findings.
+- **Mutation checks:** 15 mutants killed (subscribe-after-read, listeners not fired ×2, blocking hub, no periodic re-check, no re-check on the wake, `RENEW_SOON` ending the stream, stream outliving its token, interceptor, duplicates, and five on the client).
+
+**Live check, 2026-11-02: PASS.** Covers what the automated tests can't: the real Rust client ↔ Go controller stream and the scheduler's `change_hint` arm.
+- **Setup:** throwaway controller and DB on .223; two relays on .223 (UDP 19094/19095); connector and a test file server on .53. The connector's direct address was a TEST-NET address, so every connection went through a relay. The branch client ran as the systemd daemon on .223, with probes forced through `zecurity0` (`curl --interface`) so a removed resource could not leak over the LAN.
+- **Access restored (L1):**
+  - remove member → hint 51 ms, client dropped the resource 87 ms;
+  - re-add → hint **49 ms**, resource back in the client **83 ms**; first successful fetch 2.65 s (2 s of it is the lab's deliberate direct-path timeout before relay fallback; the baseline fetch took 2.08 s).
+  - Before FU-8: up to 60 s.
+- **Relay drain (L2):**
+  - drain → hint **41 ms** (`transport_version` moved), new relay map applied **78 ms**;
+  - every new connection after that used the other relay (≈37 probes, all 200);
+  - one connection opened 8 ms after the drain, before the hint, still used the drained relay and succeeded;
+  - the connector logged "Active relay absent from new list; migrating immediately";
+  - a download already running on the drained relay was cut at ≈122 s after the drain (the 120 s connector drain timeout, unchanged, as in AT-D6).
+  - Resume sent no hint: the connector stayed on its new relay, so the client's map didn't change.
+- **Stream lifecycle and fallback (L3):**
+  - **Controller restart:** the stream reconnected and the reset counters (ACL 8 → 0/1) were treated as a change and synced.
+  - **Hint stream unavailable** (base `fixed-pendings` controller, no `WatchChanges`): no hints; the 60 s poll still converged. Removal reached the client at 23.2 s, re-add at 53.1 s, working at 55.2 s.
+  - **Switching back** to the branch controller: the stream reconnected after its backoff; later hints arrived in 42 ms and 47 ms.
+  - **Controller shutdown:** 10.06 s with clients connected, "graceful shutdown timed out". The base controller, with no hint streams, takes the same 10.06 s, so this is the existing O-8 issue (connector and relay streams), not FU-8.
+  - **Connector enforcement without the client:** with no hint stream, a member removal was refused by the connector in 91 ms ("tunnel denied: access denied") while the client still listed the resource.
+  - **Device revoke:** the connector refused the tunnel in 85 ms. The client received no hint for the revoke or for two access changes 2–3 s later (the stream closed at the revoke). Its next poll, 23 s later, delivered `DIRECTIVE_REVOKED`, and the client wiped its credentials and exited.
+- **Not observed live:** the moment the stream reconnects (logged only at `debug`, and the client's log filter is fixed at `info`).
 
 ### Fix: FU-10 the client restores the tunnel after a daemon restart or reboot
 **Issue:** live E2E run 2026-10-29 (O-5): after a reboot or a daemon restart the client had no access until `zecurity-client up`. The daemon loaded its saved state, synced the ACL and refreshed tokens, but only `login` and `up` created the tunnel.
