@@ -27,6 +27,26 @@ var ErrNoMatchingShield = errors.New("no active shield installed on resource hos
 // response reveals nothing about other workspaces' networks.
 var ErrRemoteNetworkNotFound = apperr.UserErrorf("remote network not found")
 
+// User-safe answers for a resource that isn't there (or isn't this
+// workspace's: every query is scoped to the tenant, so the answer is the same
+// and reveals nothing), or isn't in a state the action allows. They used to be
+// plain errors, which the GraphQL presenter masks as INTERNAL, so the console
+// showed "an unexpected error occurred" for a wrong or stale id.
+var (
+	ErrResourceNotFound     = apperr.UserErrorf("resource not found")
+	ErrUnprotectNotPossible = apperr.UserErrorf("unprotect resource: resource not found or not in protected state")
+	ErrDeleteNotPossible    = apperr.UserErrorf("delete resource: resource not found or in invalid state")
+	ErrDeleteNeedsUnprotect = apperr.UserErrorf("resource not found or must be unprotected before deleting")
+)
+
+// isResourceID reports whether id can be a resource id. A malformed one would
+// make Postgres fail (invalid uuid) and surface as INTERNAL; it is answered
+// like a missing resource instead.
+func isResourceID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
+}
+
 // ErrInvalidHost refuses a resource host that is neither a usable IPv4
 // address nor a valid DNS name. The client handles IPv4 literals and, from
 // PENDING-14, DNS names; anything else (IPv6, a port, a CIDR) used to be stored
@@ -336,6 +356,9 @@ func checkNameCollision(ctx context.Context, tx pgx.Tx, tenantID, host, networkI
 
 // GetByID fetches a single resource by id + tenant.
 func GetByID(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+	if !isResourceID(id) {
+		return nil, ErrResourceNotFound
+	}
 	row, err := scanRow(db.QueryRow(ctx,
 		`SELECT `+resourceSelectCols+resourceJoins+`
 		  WHERE r.id = $1 AND r.tenant_id = $2`,
@@ -343,7 +366,7 @@ func GetByID(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, 
 	))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("resource not found")
+			return nil, ErrResourceNotFound
 		}
 		return nil, fmt.Errorf("get resource: %w", err)
 	}
@@ -631,6 +654,9 @@ var ErrResourceBusy = errors.New("resource is being unprotected or deleted; wait
 //     a snapshot without the resource, never a remove instruction, so it sends no
 //     'unprotected' ack that could undo the move.
 func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*UpdateResult, error) {
+	if !isResourceID(id) {
+		return nil, ErrResourceNotFound
+	}
 	if input.Host != nil {
 		h, _, err := NormalizeHost(*input.Host)
 		if err != nil {
@@ -659,7 +685,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 		id, tenantID,
 	).Scan(&status, &action, &host, &networkID, &protocol, &portFrom, &portTo, &shieldID, &connectorID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("resource not found")
+		return nil, ErrResourceNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update resource: %w", err)
@@ -887,6 +913,9 @@ var ErrProtectNameNeedsShield = apperr.UserErrorf("protect resource: a resource 
 // shield in the resource's workspace and remote network. The name is an alias
 // for that shield's host; the shield is told its own LAN IP (shieldHostSQL).
 func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id, shieldID string) (*Row, error) {
+	if !isResourceID(id) {
+		return nil, ErrProtectNoShield
+	}
 	if shieldID != "" {
 		if _, err := uuid.Parse(shieldID); err != nil {
 			return nil, ErrProtectNoShield
@@ -951,6 +980,9 @@ func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id, shieldI
 // 'remove' when it flips to 'unprotected', so the resolve-through end-state is
 // identical: ('unprotected', 'remove').
 func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+	if !isResourceID(id) {
+		return nil, ErrUnprotectNotPossible
+	}
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`UPDATE resources
@@ -971,7 +1003,7 @@ func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("unprotect resource: resource not found or not in protected state")
+			return nil, ErrUnprotectNotPossible
 		}
 		return nil, fmt.Errorf("unprotect resource: %w", err)
 	}
@@ -983,6 +1015,9 @@ func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string
 // RecordAck once the shield confirms the nftables rule is gone. Only states
 // that may hold a rule (protected, failed) take this path.
 func MarkDeleting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+	if !isResourceID(id) {
+		return nil, ErrDeleteNotPossible
+	}
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`UPDATE resources
@@ -994,7 +1029,7 @@ func MarkDeleting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("delete resource: resource not found or in invalid state")
+			return nil, ErrDeleteNotPossible
 		}
 		return nil, fmt.Errorf("mark deleting: %w", err)
 	}
@@ -1004,6 +1039,9 @@ func MarkDeleting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*
 // DeleteRow hard-deletes a resource that cannot have a shield rule (pending or
 // unprotected). Protected/failed resources must go through MarkDeleting first.
 func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error {
+	if !isResourceID(id) {
+		return ErrDeleteNeedsUnprotect
+	}
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`DELETE FROM resources
@@ -1014,7 +1052,7 @@ func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("resource not found or must be unprotected before deleting")
+			return ErrDeleteNeedsUnprotect
 		}
 		return fmt.Errorf("delete resource: %w", err)
 	}

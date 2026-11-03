@@ -318,7 +318,7 @@ func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetw
 	// Batch-load shields for all networks.
 	sRows, err := r.TenantDB.Query(ctx,
 		`SELECT id, name, status, remote_network_id, connector_id,
-		        last_heartbeat_at, version, hostname, public_ip,
+		        last_heartbeat_at, version, hostname, lan_ip,
 		        interface_addr, cert_not_after, created_at
 		   FROM shields
 		  WHERE remote_network_id = ANY($1)
