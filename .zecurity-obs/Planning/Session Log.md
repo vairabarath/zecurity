@@ -3652,3 +3652,12 @@ serves on `127.0.0.1:9102`.
     - `resolvectl` wiring and a status line;
     - the installer polkit rule.
   - Gates and records in PENDING-14 §11 and §12. F4 (live lab run) is next, then one PR.
+  - **F4 live run PASS** (PENDING-14 §13):
+    - client on this machine (real service, scoped polkit rule); connector and shield on luffy;
+    - names via `nip.io`;
+    - resolved routing on the real `zecurity0`;
+    - connector and shield routes by name;
+    - loopback and DNS-mismatch refusals;
+    - hot add and remove;
+    - rule-removed fallback.
+  - Three fixes from the run: a connector loop when it shares a host with a client; the polkit rule scoped to the service by cgroup; shield refusals now logged on the controller.

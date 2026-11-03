@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). F4 (live lab run) not done yet. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
+**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). **F4 live run PASS 2026-11-03** (§13), with three fixes from the run. Ready for one PR. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -51,7 +51,7 @@ So the connector half largely works already. The missing half is the client: it 
 - **F-5 Shield-protected names (amends F-1).** A name is an alias for a host's IP, so a name resource can be shield-protected. The connector resolves the name and routes the tunnel to the bound shield, which checks the IP as it does today, if the client has access.
 - **F-6 Collisions (was O-3).** The same name and port in two remote networks of one workspace is refused when the second is saved.
 - **F-7 Fake-address range (was O-2).** Names get addresses from `198.18.0.0/16` (RFC 2544); the DNS responder is `198.19.255.53`; the client refuses to activate name resources on an overlap (§4.7).
-- **F-8 Permission for resolved (was O-1).** The client installer ships a polkit rule granting only the installed client user the four resolved link actions (§4.6). Lab-verified 2026-11-03 (§4.6 evidence).
+- **F-8 Permission for resolved (was O-1).** The client installers ship a polkit rule granting the four resolved link actions only to the installed client user **and only to a process in `zecurity-client.service`**, checked through the caller's cgroup (§13). Lab-verified 2026-11-03.
 
 ## 4. Design (v1)
 
@@ -177,7 +177,7 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 | **F1** ✅ | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | built 2026-11-03 (§10) |
 | **F2** ✅ | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | built 2026-11-03 (§11) |
 | **F3** ✅ | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` (→ F4) | built 2026-11-03 (§12) |
-| **F4** | Live lab run (§7), then one PR | F2, F3 |
+| **F4** ✅ | Live lab run (§7), then one PR | PASS 2026-11-03 (§13) |
 
 ## 9. F0 record (2026-11-03)
 
@@ -346,4 +346,48 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - hot-add and hot-remove of a name;
 - a name resolving to loopback is refused at the connector;
 - resolved stopped → status explains it, and IP resources keep working.
+
+## 13. F4 live run (2026-11-03)
+
+**Topology**
+- **Controller:** branch build, user unit `fqdn-controller` on `inkyank-01-computer` (.164).
+- **Client:** this machine's real `zecurity-client.service`, branch build (`93acaa0f…`) installed with `scripts/client-local-install.sh` (incl. the polkit rule), user `r3-geo1`, workspace `rbac-r3`.
+- **Connector and shield:** branch builds on **luffy** (.48, Arch), installed with the local installers. The connector couldn't stay on the client's host; see finding 1.
+- **Test names:** public wildcard DNS (`*.nip.io`), so names resolve to real lab addresses without editing any DNS.
+- **No DB reset:** F0–F3 add no migration.
+
+**Results (all PASS)**
+
+| Check | Result |
+|---|---|
+| Client status with the rule | `DNS names: active (2 names)` |
+| resolved on the real `zecurity0` (open item from O-1) | `Current Scopes: DNS`, `DNS Servers: 198.19.255.53`, routing domains = exactly the resource names; `resolvectl query` answers `198.18.0.1` via `zecurity0` in 14.6 ms; `example.com` unaffected |
+| Connector route by name | `curl http://192-168-1-164.nip.io:18080` → 200; the server saw the request from luffy (.48), i.e. luffy resolved and dialled |
+| Name resolving to loopback | refused at the connector; controller access log `error name_unresolved: … not allowed: [127.0.0.1]` |
+| API refusals | UDP name → "must use protocol tcp"; `*.example.com` → invalid host |
+| Protect a name | without `shieldId` → "needs a shield chosen"; with the luffy shield → `protecting` → `protected` in seconds (the shield got and acked its LAN IP) |
+| Shield route by name (the F2 path without an automated test) | `curl http://192-168-1-48.nip.io:18082` → 200, `route_type=shield`; direct `192.168.1.48:18082` from the client host → timeout (the shield enforces) |
+| Shield-protected name whose DNS points at another host | the shield refuses; the wrong host got **0** requests; the controller logs `name_not_on_shield: 192-168-1-164.nip.io resolved to 192.168.1.164, which is not the shield's LAN IP …` (after fix 3) |
+| Hot add (tunnel up) | the new name is resolvable and routed without a restart |
+| Hot remove | the routing domain is gone within 2 s; the name resolves through normal DNS again |
+| Polkit rule removed, tunnel restarted | `DNS names: unavailable: systemd-resolved configuration failed: … resolvectl dns zecurity0 … exit status: 1`; no DNS scope; the IPv4 control resource still 200; the name falls back to its real IP, and the shield blocks the direct path |
+| Rule restored, tunnel restarted | `active (2 names)` again; both names 200; fake addresses unchanged (`.1`, `.3`) |
+
+**Findings, all fixed on the branch**
+1. **The connector looped when a client ran on its host** (`942b7998`).
+   - The connector's resolver goes through systemd-resolved, which routed the names to that client's answerer. The connector got `198.18.0.1`, dialled it, and the tunnel looped back into the client.
+   - Fix: the connector refuses `198.18.0.0/15` like loopback, giving `NAME_UNRESOLVED`. Verified live in the co-located setup ("not allowed: [198.18.0.1]").
+2. **The polkit rule was user-wide** (`cc421d6a`; automated security review).
+   - Lab probes (systemd 255, polkit 124): resolved passes polkit **no link details**, and `subject.system_unit` is **null**.
+   - The rule now also requires the caller's cgroup `0::/system.slice/zecurity-client.service`, read via `polkit.spawn(cat /proc/<pid>/cgroup)`.
+   - Lab-checked: the service unit is allowed; another unit of the same user is refused. Node check: 9 cases.
+   - Same rule in `scripts/client-local-install.sh`.
+3. **Shield refusals were invisible to the controller** (`b7f93369`).
+   - The connector logged them only on its host and told the client `INTERNAL`.
+   - Every shield-route failure now sends an `error` access log. A name the shield refuses gets the client error `NAME_NOT_ON_SHIELD` and a log naming both the name and the address.
+
+**Observations, not caused by this branch**
+- On this desktop, a process in the user's **graphical session** could set resolved link DNS **without** any of our rules, while `pkcheck` reported "authentication required". This is a local polkit/desktop behaviour, not investigated further. Our rule adds nothing for session processes and is scoped to the service unit.
+- `deleteResource` with an unknown ID answers `INTERNAL`, not "not found".
+- The GraphQL `remoteNetworks { shields { lanIp } }` path returned null while the DB row had the LAN IP.
 
