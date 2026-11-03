@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -32,7 +34,6 @@ var ErrRemoteNetworkNotFound = apperr.UserErrorf("remote network not found")
 // showed "an unexpected error occurred" for a wrong or stale id.
 var (
 	ErrResourceNotFound     = apperr.UserErrorf("resource not found")
-	ErrProtectNotPossible   = apperr.UserErrorf("protect resource: resource not found, invalid state, or no active shield is installed on its host")
 	ErrUnprotectNotPossible = apperr.UserErrorf("unprotect resource: resource not found or not in protected state")
 	ErrDeleteNotPossible    = apperr.UserErrorf("delete resource: resource not found or in invalid state")
 	ErrDeleteNeedsUnprotect = apperr.UserErrorf("resource not found or must be unprotected before deleting")
@@ -45,6 +46,97 @@ func isResourceID(id string) bool {
 	_, err := uuid.Parse(id)
 	return err == nil
 }
+
+// ErrInvalidHost refuses a resource host that is neither a usable IPv4
+// address nor a valid DNS name. The client handles IPv4 literals and, from
+// PENDING-14, DNS names; anything else (IPv6, a port, a CIDR) used to be stored
+// and could never be reached (PENDING-14 F0).
+var ErrInvalidHost = apperr.UserErrorf("host must be an IPv4 address (such as 10.0.0.5) or a DNS name (such as db.internal.example.com); IPv6 is not supported")
+
+// ErrNameNeedsTCP refuses a DNS-name resource whose protocol isn't TCP: the
+// client resolves names to addresses it captures for TCP only (PENDING-14 F-1).
+var ErrNameNeedsTCP = apperr.UserErrorf("a resource with a DNS name host must use protocol tcp")
+
+// ErrNameProtectedMove refuses moving a protected DNS-name resource to another
+// remote network: its shield was chosen by the admin, and a name has no LAN IP
+// to find a shield in the new network by (PENDING-14 F-5).
+var ErrNameProtectedMove = apperr.UserErrorf("a protected resource with a DNS name can't move to another remote network; unprotect it first")
+
+// ErrNameCollision refuses a DNS-name resource whose name and ports overlap a
+// resource with the same name in another remote network of the workspace: a
+// client allowed both could not tell which network to reach (PENDING-14 F-6).
+var ErrNameCollision = apperr.UserErrorf("another remote network in this workspace already has a resource with this DNS name on an overlapping port")
+
+// HostKind says what a normalised resource host is.
+type HostKind int
+
+const (
+	HostIPv4 HostKind = iota
+	HostName
+)
+
+// ipv4HostPattern tells the two kinds of normalised host apart, in Go and in
+// SQL (shieldHostSQL): a canonical IPv4 literal is digits and dots only, and a
+// valid name always has a letter in its last label, so a name never matches.
+const ipv4HostPattern = `^[0-9.]+$`
+
+var ipv4HostRe = regexp.MustCompile(ipv4HostPattern)
+
+// IsNameHost reports whether a stored (normalised) host is a DNS name.
+func IsNameHost(host string) bool { return !ipv4HostRe.MatchString(host) }
+
+// NormalizeHost validates a resource host and returns its canonical form and
+// kind. Surrounding spaces are trimmed.
+//
+// IPv4: a dotted-quad literal, stored in canonical form. Refused: leading
+// zeros, IPv6 (incl. IPv4-mapped "::ffff:a.b.c.d"), zone suffixes, and the
+// unspecified, broadcast and multicast addresses, which never name one host.
+//
+// DNS name (PENDING-14): lowercased, one trailing dot dropped; at most 253
+// characters; at least two labels; each label 1-63 letters, digits or hyphens,
+// not starting or ending with a hyphen; the last label contains a letter (so a
+// name can never be mistaken for an address). No wildcards (F-4).
+func NormalizeHost(host string) (string, HostKind, error) {
+	h := strings.TrimSpace(host)
+	if a, err := netip.ParseAddr(h); err == nil {
+		if !a.Is4() || a.IsUnspecified() || a.IsMulticast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+			return "", 0, ErrInvalidHost
+		}
+		return a.String(), HostIPv4, nil
+	}
+	name := strings.ToLower(strings.TrimSuffix(h, "."))
+	if len(name) == 0 || len(name) > 253 {
+		return "", 0, ErrInvalidHost
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return "", 0, ErrInvalidHost
+	}
+	for _, l := range labels {
+		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return "", 0, ErrInvalidHost
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return "", 0, ErrInvalidHost
+			}
+		}
+	}
+	if !strings.ContainsAny(labels[len(labels)-1], "abcdefghijklmnopqrstuvwxyz") {
+		return "", 0, ErrInvalidHost
+	}
+	return name, HostName, nil
+}
+
+// shieldHostSQL is the host a shield is told to protect and acks back, for a
+// query that has the resource as r and LEFT JOINs its bound shield as s
+// (s.id = r.shield_id). An IPv4 resource's host is the shield's LAN IP already.
+// A DNS-name resource is an alias for its shield's host (PENDING-14 F-5), so
+// the shield gets its own LAN IP, never the name; the shield then sees an
+// ordinary IP resource. Without a shield it falls back to the name, which no
+// shield accepts.
+const shieldHostSQL = `CASE WHEN r.host ~ '` + ipv4HostPattern + `' THEN r.host ELSE COALESCE(NULLIF(s.lan_ip, ''), r.host) END`
 
 // querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
 // single-source desired-state query can run either standalone or inside the
@@ -74,6 +166,10 @@ type Row struct {
 	ShieldStatus    *string
 	RemoteNetworkID string
 	NetworkName     string
+	// ShieldHost is the host its shield protects (shieldHostSQL): Host for an
+	// IPv4 resource, the bound shield's LAN IP for a DNS-name resource. Use it,
+	// never Host, in instructions to a shield (PENDING-14 F-5).
+	ShieldHost string
 }
 
 // PendingRow is a minimal resource record used in stream instruction delivery.
@@ -102,7 +198,8 @@ const resourceSelectCols = `
 	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
 	COALESCE(r.shield_id::text, ''), r.remote_network_id,
 	s.name, s.status, COALESCE(s.connector_id::text, ''),
-	COALESCE(rn.name, '')`
+	COALESCE(rn.name, ''),
+	` + shieldHostSQL
 
 // The network join requires the network to belong to the resource's own
 // workspace: a legacy row pointing at another workspace's network still lists
@@ -121,6 +218,7 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 		&row.ShieldID, &row.RemoteNetworkID,
 		&row.ShieldName, &row.ShieldStatus, &row.ConnectorID,
 		&row.NetworkName,
+		&row.ShieldHost,
 	); err != nil {
 		return nil, err
 	}
@@ -150,24 +248,51 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 }
 
 // Create inserts an unprotected resource. A matching active Shield is retained
-// as a convenience for a later Protect operation, but is not required. The
-// remote network must belong to tenantID; the INSERT itself checks it, so
-// nothing is written otherwise (ErrRemoteNetworkNotFound).
+// as a convenience for a later Protect operation, but is not required (an IPv4
+// host only: a DNS name has no LAN IP to match, PENDING-14 F-5). The remote
+// network must belong to tenantID; the INSERT itself checks it, so nothing is
+// written otherwise (ErrRemoteNetworkNotFound). A DNS-name host must use TCP
+// (ErrNameNeedsTCP) and must not collide with the same name in another remote
+// network (ErrNameCollision, checked under a lock in the same transaction).
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
+	host, kind, err := NormalizeHost(input.Host)
+	if err != nil {
+		return nil, err
+	}
+	input.Host = host
+	if kind == HostName && input.Protocol != "tcp" {
+		return nil, ErrNameNeedsTCP
+	}
 	if _, err := uuid.Parse(input.RemoteNetworkID); err != nil {
 		return nil, ErrRemoteNetworkNotFound
 	}
-	shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
-	if err != nil && !errors.Is(err, ErrNoMatchingShield) {
-		return nil, err
-	}
 	var shieldArg any
-	if shieldID != "" {
-		shieldArg = shieldID
+	if kind == HostIPv4 {
+		shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
+		if err != nil && !errors.Is(err, ErrNoMatchingShield) {
+			return nil, err
+		}
+		if shieldID != "" {
+			shieldArg = shieldID
+		}
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create resource: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if kind == HostName {
+		if err := checkNameCollision(ctx, tx, tenantID, host, input.RemoteNetworkID, "", input.PortFrom, input.PortTo); err != nil {
+			return nil, err
+		}
+		if afterNameCollisionCheck != nil {
+			afterNameCollisionCheck()
+		}
 	}
 
 	var id string
-	err = db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO resources
 		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host,
 		     port_from, port_to, status, pending_action)
@@ -185,8 +310,48 @@ func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input Create
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("create resource: commit: %w", err)
+	}
 
 	return GetByID(ctx, db, tenantID, id)
+}
+
+// afterNameCollisionCheck is a test seam: when set, Create calls it between
+// the collision check and the INSERT, to widen the window two concurrent saves
+// would race in without the lock. Always nil outside tests.
+var afterNameCollisionCheck func()
+
+// checkNameCollision refuses a DNS-name resource whose ports overlap a resource
+// with the same name in another remote network of the workspace (PENDING-14
+// F-6): a client allowed both could not tell which network to reach. It takes
+// a transaction-scoped advisory lock on (workspace, name) first, so two
+// concurrent saves of the same name serialise and the second sees the first.
+// excludeID skips the resource being updated. IPv4 hosts are not checked: the
+// same private IP legitimately exists in several networks.
+func checkNameCollision(ctx context.Context, tx pgx.Tx, tenantID, host, networkID, excludeID string, portFrom, portTo int) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('resource-name:' || $1 || ':' || $2, 0))`,
+		tenantID, host,
+	); err != nil {
+		return fmt.Errorf("check name collision: lock: %w", err)
+	}
+	var clash bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+		     SELECT 1 FROM resources
+		      WHERE tenant_id = $1 AND host = $2
+		        AND remote_network_id::text <> $3
+		        AND id::text <> $4
+		        AND port_from <= $6 AND port_to >= $5)`,
+		tenantID, host, networkID, excludeID, portFrom, portTo,
+	).Scan(&clash); err != nil {
+		return fmt.Errorf("check name collision: %w", err)
+	}
+	if clash {
+		return ErrNameCollision
+	}
+	return nil
 }
 
 // GetByID fetches a single resource by id + tenant.
@@ -286,10 +451,11 @@ func GetByIDs(
 // Called on stream connect to deliver any queued instructions to a reconnecting connector.
 func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
-		`SELECT id, host, protocol, port_from, port_to, pending_action
-		   FROM resources
-		  WHERE shield_id = $1
-		    AND status IN ('protecting', 'deleting')`,
+		`SELECT r.id, `+shieldHostSQL+`, r.protocol, r.port_from, r.port_to, r.pending_action
+		   FROM resources r
+		   LEFT JOIN shields s ON s.id = r.shield_id
+		  WHERE r.shield_id = $1
+		    AND r.status IN ('protecting', 'deleting')`,
 		shieldID,
 	)
 	if err != nil {
@@ -327,11 +493,12 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 // absent — the shield's replace-semantics drops anything not listed here.
 func desiredForShield(ctx context.Context, q querier, shieldID string) ([]*PendingRow, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, host, protocol, port_from, port_to, pending_action
-		   FROM resources
-		  WHERE shield_id = $1
-		    AND (status IN ('protected', 'failed')
-		         OR (status = 'protecting' AND pending_action = 'apply'))`,
+		`SELECT r.id, `+shieldHostSQL+`, r.protocol, r.port_from, r.port_to, r.pending_action
+		   FROM resources r
+		   LEFT JOIN shields s ON s.id = r.shield_id
+		  WHERE r.shield_id = $1
+		    AND (r.status IN ('protected', 'failed')
+		         OR (r.status = 'protecting' AND r.pending_action = 'apply'))`,
 		shieldID,
 	)
 	if err != nil {
@@ -490,8 +657,12 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	if !isResourceID(id) {
 		return nil, ErrResourceNotFound
 	}
-	if input.Host != nil && strings.TrimSpace(*input.Host) == "" {
-		return nil, fmt.Errorf("update resource: host must not be empty")
+	if input.Host != nil {
+		h, _, err := NormalizeHost(*input.Host)
+		if err != nil {
+			return nil, err
+		}
+		input.Host = &h
 	}
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -523,8 +694,45 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	// while a protect is still in flight (e.g. its shield is offline) is allowed
 	// and simply replaces the pending rule.
 	enforced := status == "protected" || status == "failed" || (status == "protecting" && action == "apply")
+
+	// The resulting values, for the DNS-name rules (PENDING-14 F-1, F-6).
+	finalHost, finalNetworkID, finalProtocol, finalFrom, finalTo := host, networkID, protocol, portFrom, portTo
+	if input.Host != nil {
+		finalHost = *input.Host
+	}
+	if input.RemoteNetworkID != nil {
+		finalNetworkID = *input.RemoteNetworkID
+	}
+	if input.Protocol != nil {
+		finalProtocol = *input.Protocol
+	}
+	if input.PortFrom != nil {
+		finalFrom = *input.PortFrom
+	}
+	if input.PortTo != nil {
+		finalTo = *input.PortTo
+	}
+	finalIsName := IsNameHost(finalHost)
+	if finalIsName && finalProtocol != "tcp" {
+		return nil, ErrNameNeedsTCP
+	}
+	if finalIsName && enforced && finalNetworkID != networkID {
+		// A protected name is bound to a shield chosen by the admin; there is
+		// no LAN IP to find a shield in the new network by.
+		return nil, ErrNameProtectedMove
+	}
+	if finalIsName {
+		if err := checkNameCollision(ctx, tx, tenantID, finalHost, finalNetworkID, id, finalFrom, finalTo); err != nil {
+			return nil, err
+		}
+	}
+
 	// Compare values, not presence: the admin UI sends every field on each save.
-	shieldChanged := changedStr(input.Host, host, true) || changedStr(input.RemoteNetworkID, networkID, false) ||
+	// A new DNS-name host doesn't change what the shield enforces: the shield
+	// protects its own LAN IP for a name (PENDING-14 F-5), and an IPv4 resource
+	// was bound to the shield on that IP. So only a new IPv4 host counts.
+	hostChangedForShield := changedStr(input.Host, host, true) && !finalIsName
+	shieldChanged := hostChangedForShield || changedStr(input.RemoteNetworkID, networkID, false) ||
 		changedStr(input.Protocol, protocol, false) || changedInt(input.PortFrom, portFrom) || changedInt(input.PortTo, portTo)
 	if shieldChanged && ((status == "protecting" && action == "remove") || status == "deleting") {
 		return nil, fmt.Errorf("update resource: %w", ErrResourceBusy)
@@ -581,7 +789,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	}
 
 	result := &UpdateResult{}
-	if enforced && (newHost != host || newNetworkID != networkID) {
+	if enforced && !finalIsName && (newHost != host || newNetworkID != networkID) {
 		var newShieldID, newConnectorID string
 		err := tx.QueryRow(ctx,
 			`SELECT s.id::text, s.connector_id::text
@@ -683,11 +891,35 @@ func joinSets(sets []string) string {
 	return b.String()
 }
 
+// ErrProtectNoShield answers a protect that found no usable shield: the
+// resource doesn't exist in this workspace, is in a state that can't be
+// protected, or no matching active shield is in its remote network. One answer
+// for all, so a foreign resource or shield looks exactly like a missing one.
+var ErrProtectNoShield = apperr.UserErrorf("protect resource: resource not found, invalid state, or no matching active shield in its remote network")
+
+// ErrProtectNameNeedsShield asks the admin to choose the shield for a DNS-name
+// resource: the controller can't resolve the name, so it can't match a shield
+// by LAN IP (PENDING-14 F-5).
+var ErrProtectNameNeedsShield = apperr.UserErrorf("protect resource: a resource with a DNS name needs a shield chosen to protect it")
+
 // MarkProtecting atomically matches an active Shield and transitions the
 // resource to protected intent. ACL routing becomes Shield-based immediately.
-func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+//
+// IPv4 host: the shield is the active one in the resource's remote network
+// whose LAN IP is the host, preferring the one already bound. shieldID may be
+// empty; if given, it must be that kind of shield.
+//
+// DNS-name host (PENDING-14 F-5): shieldID is required and must be an active
+// shield in the resource's workspace and remote network. The name is an alias
+// for that shield's host; the shield is told its own LAN IP (shieldHostSQL).
+func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id, shieldID string) (*Row, error) {
 	if !isResourceID(id) {
-		return nil, ErrProtectNotPossible
+		return nil, ErrProtectNoShield
+	}
+	if shieldID != "" {
+		if _, err := uuid.Parse(shieldID); err != nil {
+			return nil, ErrProtectNoShield
+		}
 	}
 	var discardedID string
 	err := db.QueryRow(ctx,
@@ -697,10 +929,13 @@ func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 		       JOIN shields s
 		         ON s.tenant_id = r.tenant_id
 		        AND s.remote_network_id = r.remote_network_id
-		        AND s.lan_ip = r.host
 		        AND s.status = 'active'
 		      WHERE r.id = $1 AND r.tenant_id = $2
 		        AND r.status = ANY($3)
+		        AND (
+		              (r.host ~ '`+ipv4HostPattern+`' AND s.lan_ip = r.host AND ($4 = '' OR s.id::text = $4))
+		           OR (r.host !~ '`+ipv4HostPattern+`' AND s.id::text = $4)
+		            )
 		      ORDER BY CASE WHEN s.id = r.shield_id THEN 0 ELSE 1 END
 		      LIMIT 1
 		 )
@@ -711,11 +946,17 @@ func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 		   FROM candidate
 		  WHERE r.id = $1 AND r.tenant_id = $2
 		 RETURNING r.id`,
-		id, tenantID, []string{"pending", "failed", "unprotected"},
+		id, tenantID, []string{"pending", "failed", "unprotected"}, shieldID,
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrProtectNotPossible
+			if shieldID == "" {
+				var host string
+				if db.QueryRow(ctx, `SELECT host FROM resources WHERE id = $1 AND tenant_id = $2`, id, tenantID).Scan(&host) == nil && IsNameHost(host) {
+					return nil, ErrProtectNameNeedsShield
+				}
+			}
+			return nil, ErrProtectNoShield
 		}
 		return nil, fmt.Errorf("protect resource: %w", err)
 	}
@@ -985,6 +1226,7 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) 
 		        applied_at       = CASE WHEN $2 = 'protected' AND r.applied_at IS NULL THEN NOW() ELSE r.applied_at END,
 		        updated_at       = NOW()
 		   FROM (SELECT id, status FROM resources WHERE id = $1 AND tenant_id = $5 FOR UPDATE) prev
+		   LEFT JOIN shields s ON s.id::text = $6
 		  WHERE r.id = prev.id
 			AND r.status != 'deleting'
 		    AND NOT (r.status = 'protecting' AND r.pending_action = 'remove' AND $2 != 'unprotected')
@@ -997,7 +1239,7 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) 
 		    -- the shield sent for the old host/port right before an edit is stale.
 		    AND r.shield_id::text = $6
 		    AND ($2 NOT IN ('protected', 'failed')
-		         OR (r.host = $7 AND r.protocol = $8 AND r.port_from = $9 AND r.port_to = $10))
+		         OR ((`+shieldHostSQL+`) = $7 AND r.protocol = $8 AND r.port_from = $9 AND r.port_to = $10))
 		 RETURNING prev.status`,
 		ack.ResourceID, ack.Status, ack.Error, ack.VerifiedAt, tenantID,
 		ack.ShieldID, ack.Host, ack.Protocol, ack.PortFrom, ack.PortTo,
@@ -1022,8 +1264,10 @@ func logIgnoredAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack A
 		portFrom, portTo         int
 	)
 	if err := db.QueryRow(ctx,
-		`SELECT COALESCE(shield_id::text, ''), host, protocol, port_from, port_to
-		   FROM resources WHERE id = $1 AND tenant_id = $2`,
+		`SELECT COALESCE(r.shield_id::text, ''), `+shieldHostSQL+`, r.protocol, r.port_from, r.port_to
+		   FROM resources r
+		   LEFT JOIN shields s ON s.id = r.shield_id
+		  WHERE r.id = $1 AND r.tenant_id = $2`,
 		ack.ResourceID, tenantID,
 	).Scan(&shieldID, &host, &protocol, &portFrom, &portTo); err != nil {
 		return
@@ -1100,3 +1344,7 @@ func ReapTombstone(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID, re
 	}
 	return ct.RowsAffected() > 0, nil
 }
+
+// ShieldHostSQL exports shieldHostSQL for other packages' shield-facing
+// queries (internal/connector's signed resource set). Same r/s aliases.
+const ShieldHostSQL = shieldHostSQL

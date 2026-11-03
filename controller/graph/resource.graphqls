@@ -19,7 +19,7 @@ input CreateResourceInput {
   remoteNetworkId: String!
   name:            String!
   description:     String
-  host:            String!       # IP of the resource host — must match a shield's lan_ip
+  host:            String!       # IPv4 address of the resource host (resource.NormalizeHost); a shield on it can protect it later
   protocol:        String!       # "tcp", "udp", "any"
   portFrom:        Int!
   portTo:          Int!
@@ -29,7 +29,7 @@ input UpdateResourceInput {
   remoteNetworkId: String
   name:            String
   description:     String
-  host:            String        # protected: must be an active shield's lan_ip (the resource moves to that shield)
+  host:            String        # IPv4 address (resource.NormalizeHost); protected: must be an active shield's lan_ip (the resource moves to that shield)
   protocol:        String
   portFrom:        Int
   portTo:          Int
@@ -43,7 +43,9 @@ extend type Query {
 extend type Mutation {
   createResource(input: CreateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
   updateResource(id: ID!, input: UpdateResourceInput!): Resource! @requires(capability: NETWORK_WRITE)
-  protectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
+  # shieldId: required for a DNS-name host (the shield on the machine the name
+  # points at); optional for an IPv4 host (must then be the shield on that IP).
+  protectResource(id: ID!, shieldId: ID): Resource! @requires(capability: NETWORK_WRITE)
   unprotectResource(id: ID!): Resource! @requires(capability: NETWORK_WRITE)
   deleteResource(id: ID!): Boolean! @requires(capability: NETWORK_WRITE)
   # Break-glass (ADR-004 Phase 4): hard-delete a resource in ANY state, bypassing

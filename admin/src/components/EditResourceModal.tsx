@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, Loader2, X, Server } from 'lucide-react'
 import { toast } from 'sonner'
+import { NAME_NEEDS_TCP_ERROR, RESOURCE_HOST_ERROR, resourceHostKind } from '@/lib/resourceHost'
 
 interface EditResourceModalProps {
   open: boolean
@@ -87,6 +88,16 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
 
     if (!name.trim() || !host.trim() || !portFrom || !remoteNetworkId) {
       setError('Name, Host, Remote Network and Port From are required')
+      return
+    }
+
+    const hostKind = resourceHostKind(host)
+    if (hostKind === null) {
+      setError(RESOURCE_HOST_ERROR)
+      return
+    }
+    if (hostKind === 'name' && protocol !== 'tcp') {
+      setError(NAME_NEEDS_TCP_ERROR)
       return
     }
 
@@ -215,6 +226,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
               <div className="space-y-2">
                 <Label className="text-sm font-semibold">
                   Host <span className="text-destructive">*</span>
+                  <span className="text-xs font-normal text-muted-foreground"> (IPv4 address or DNS name)</span>
                 </Label>
                 <Input
                   value={host}

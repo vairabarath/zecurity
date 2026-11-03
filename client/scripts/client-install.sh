@@ -34,6 +34,7 @@ INSTALL_BIN="/usr/local/bin/zecurity-client"
 CONFIG_DIR="/etc/zecurity"
 CONFIG_FILE="${CONFIG_DIR}/client.conf"
 SYSTEMD_DIR="/etc/systemd/system"
+POLKIT_RULE="/etc/polkit-1/rules.d/50-zecurity-client.rules"
 FORCE=0
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -103,6 +104,7 @@ if [[ $FORCE -eq 1 ]]; then
     systemctl disable zecurity-client.service 2>/dev/null || true
     rm -f "$INSTALL_BIN"
     rm -f "${SYSTEMD_DIR}/zecurity-client.service"
+    rm -f "$POLKIT_RULE"
 fi
 
 # ── Download release artifacts ──────────────────────────────────────────────
@@ -166,6 +168,50 @@ fi
 SERVICE_TMP="${TMP_DIR}/zecurity-client.service"
 sed "s/^User=$/User=${INSTALL_USER}/" "${UNITS_SRC}/zecurity-client.service" > "$SERVICE_TMP"
 install -m 0644 "$SERVICE_TMP" "${SYSTEMD_DIR}/zecurity-client.service"
+
+# ── polkit rule for systemd-resolved (PENDING-14 F-8) ───────────────────────
+# DNS-name resources need the daemon (running as the installing user with
+# CAP_NET_ADMIN only) to set per-link DNS on zecurity0. systemd-resolved
+# requires admin authentication for that from any non-root caller.
+#
+# The rule grants exactly four resolved actions, to exactly this user, and
+# only to a process running in zecurity-client.service: polkit reads the
+# caller's cgroup (/proc/<pid>/cgroup is world-readable, and a user process
+# can't move itself into a system service's cgroup). Lab-checked 2026-11-03
+# (systemd 255, polkit 124): resolved passes polkit no link details and
+# polkit's subject.system_unit is null there, so neither can be used; the
+# cgroup check allowed the service unit and refused another unit of the same
+# user. Without the rule, DNS-name resources stay unavailable (IP resources
+# are unaffected).
+if [[ "$INSTALL_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] && [[ -d "$(dirname "$POLKIT_RULE")" ]]; then
+    log "installing polkit rule for DNS name resources: $POLKIT_RULE"
+    cat > "${TMP_DIR}/polkit.rules" <<RULE
+// Installed by zecurity client-install.sh (PENDING-14 F-8): let the
+// zecurity-client daemon, and nothing else of its user, configure
+// systemd-resolved for DNS-name resources.
+polkit.addRule(function(action, subject) {
+    var allowed = ["org.freedesktop.resolve1.set-dns-servers",
+                   "org.freedesktop.resolve1.set-domains",
+                   "org.freedesktop.resolve1.set-default-route",
+                   "org.freedesktop.resolve1.revert"];
+    if (allowed.indexOf(action.id) < 0 || subject.user != "${INSTALL_USER}") {
+        return;
+    }
+    var cgroup;
+    try {
+        cgroup = polkit.spawn(["/bin/cat", "/proc/" + subject.pid + "/cgroup"]);
+    } catch (e) {
+        return;
+    }
+    if (/^0::\/system\.slice\/zecurity-client\.service\$/m.test(cgroup)) {
+        return polkit.Result.YES;
+    }
+});
+RULE
+    install -m 0644 "${TMP_DIR}/polkit.rules" "$POLKIT_RULE"
+else
+    log "WARNING: polkit rule not installed (no $(dirname "$POLKIT_RULE") or unusual user name); DNS name resources will be unavailable"
+fi
 
 # ── Write system config (optional — only if addresses provided) ──────────────
 install -d -m 0755 "$CONFIG_DIR"

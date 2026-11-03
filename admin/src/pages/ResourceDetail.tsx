@@ -8,8 +8,10 @@ import {
   DeleteResourceDocument,
   ForceDeleteResourceDocument,
   GetShieldsDocument,
+  ShieldStatus,
 } from '@/generated/graphql'
-import { protectTargetShield, hostShield, type ShieldLike } from '@/lib/protectShield'
+import { protectTargetShield, hostShield, nameProtectTarget, type ShieldLike } from '@/lib/protectShield'
+import { isNameHost } from '@/lib/resourceHost'
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
 import { Capability, useCan } from '@/lib/capabilities'
@@ -78,6 +80,8 @@ export default function ResourceDetail() {
   const navigate = useNavigate()
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // DNS-name resources (PENDING-14 F-5): the shield the admin chose to protect it.
+  const [chosenShieldId, setChosenShieldId] = useState('')
   const canWrite = useCan(Capability.NetworkWrite)
   const canAccessWrite = useCan(Capability.AccessWrite)
 
@@ -136,9 +140,11 @@ export default function ResourceDetail() {
     onError: (e) => toast.error(e.message),
   })
 
-  function handleProtect() {
+  // shieldId: the chosen shield for a DNS-name resource; omitted for an IPv4
+  // host, whose shield the controller matches by LAN IP.
+  function handleProtect(shieldId?: string) {
     if (!resourceId) return
-    void protectResource({ variables: { id: resourceId } })
+    void protectResource({ variables: { id: resourceId, shieldId } })
   }
 
   function handleUnprotect() {
@@ -204,9 +210,15 @@ export default function ResourceDetail() {
   const rnShields: readonly ShieldLike[] = shieldsData?.shields ?? []
   // Mirror the backend gate (MarkProtecting): an ACTIVE shield in this remote
   // network on the resource host, the bound one preferred. A resource created
-  // before its shield has no bound shield but is still protectable.
-  const protectTarget = protectTargetShield(resource.host, boundShield, rnShields)
-  const shield = protectTarget ?? hostShield(resource.host, boundShield, rnShields)
+  // before its shield has no bound shield but is still protectable. A DNS name
+  // has no LAN IP to match: the admin chooses the shield (PENDING-14 F-5).
+  const nameHost = isNameHost(resource.host)
+  const activeShields = rnShields.filter((s) => s.status === ShieldStatus.Active)
+  const protectTarget = nameHost
+    ? nameProtectTarget(chosenShieldId, boundShield, rnShields)
+    : protectTargetShield(resource.host, boundShield, rnShields)
+  const shield = protectTarget ?? (nameHost ? boundShield : hostShield(resource.host, boundShield, rnShields))
+  const protectWith = nameHost ? protectTarget?.id : undefined
   const canProtect = protectTarget !== null
   const targetIsBound = protectTarget !== null && protectTarget.id === boundShield?.id
   const transitional = ['protecting', 'deleting'].includes(resource.status)
@@ -252,7 +264,7 @@ export default function ResourceDetail() {
         <div className="flex shrink-0 items-center gap-2">
           {!isProtected && !transitional && canWrite && (
             <Button
-              onClick={handleProtect}
+              onClick={() => handleProtect(protectWith)}
               disabled={protecting || !canProtect}
               className="gap-2"
               variant="outline"
@@ -361,7 +373,40 @@ export default function ResourceDetail() {
               <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[oklch(0.85_0.13_80)]">Unprotected</div>
               <div className="text-lg font-bold">No shield is enforcing this resource</div>
               <div className="text-sm text-muted-foreground">
-                {canProtect ? (
+                {nameHost ? (
+                  activeShields.length > 0 ? (
+                    <div className="space-y-2">
+                      <div>
+                        <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code> is a DNS
+                        name. Choose the shield on the machine it points at: on the connector, the name must resolve
+                        to that shield's LAN IP, or the shield refuses the connection.
+                      </div>
+                      {canWrite && (
+                        <select
+                          aria-label="Shield to protect this resource"
+                          value={protectTarget?.id ?? ''}
+                          onChange={(e) => setChosenShieldId(e.target.value)}
+                          className="flex h-10 w-full max-w-md rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        >
+                          <option value="" disabled>
+                            Choose a shield
+                          </option>
+                          {activeShields.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name} ({s.lanIp ?? 'no LAN IP'})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      Install a shield on the machine{' '}
+                      <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code> points at,
+                      in {resource.remoteNetwork.name}, to start enforcing access.
+                    </>
+                  )
+                ) : canProtect ? (
                   <>
                     The shield <strong>{protectTarget.name}</strong> is available on{' '}
                     <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code>
@@ -384,7 +429,7 @@ export default function ResourceDetail() {
               </div>
             </div>
             {canProtect && canWrite && (
-              <Button onClick={handleProtect} disabled={protecting} className="shrink-0 gap-2">
+              <Button onClick={() => handleProtect(protectWith)} disabled={protecting} className="shrink-0 gap-2">
                 {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                 Protect
               </Button>
@@ -594,11 +639,11 @@ export default function ResourceDetail() {
                     <>
                       <p className="mb-3 mt-3 text-xs text-muted-foreground">
                         {targetIsBound ? 'This resource is bound to the shield on' : 'Protecting binds this resource to the shield on'}{' '}
-                        <code className="rounded bg-secondary px-1 font-mono">{resource.host}</code>. Click{' '}
+                        <code className="rounded bg-secondary px-1 font-mono">{nameHost ? shield.lanIp : resource.host}</code>. Click{' '}
                         <strong>Protect this resource</strong> to enable enforcement.
                       </p>
                       {canWrite && (
-                      <Button onClick={handleProtect} disabled={protecting} className="w-full gap-2">
+                      <Button onClick={() => handleProtect(protectWith)} disabled={protecting} className="w-full gap-2">
                         {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                         Protect this resource
                       </Button>

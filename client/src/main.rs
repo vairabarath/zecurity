@@ -4,12 +4,15 @@ mod change_watch;
 mod config;
 mod crl;
 mod daemon;
+mod dns;
+mod dns_link;
 #[cfg(test)]
 mod daemon_tests;
 mod error;
 mod grpc;
 mod ipc;
 mod login;
+mod name_map;
 mod net_stack;
 mod relay_pool;
 mod runtime;

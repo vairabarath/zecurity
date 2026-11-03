@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1002,7 +1002,9 @@ impl FlowTable {
             });
         }
         for ((ip, port), handle) in accepted {
-            let dest = ip.to_string();
+            // PENDING-14 F3: a fake address stands for a DNS name; the
+            // connector authorizes and resolves the name, so send that.
+            let dest = crate::name_map::destination_for(ip);
             tracing::info!(dest = %dest, port, "new TCP connection");
 
             match transports_for(transports, (ip, port)) {
@@ -1073,7 +1075,8 @@ impl FlowTable {
 
 // --- Phase 5-C: resource hot-apply commands ---
 
-/// The single definition of a client-routable resource: an IPv4 literal with
+/// The single definition of a client-routable resource: an IPv4 literal, or
+/// a DNS name (captured on its fake address, PENDING-14 F3, `name_map`), with
 /// protocol `tcp` (case-insensitive) or empty. Shared by the classifier,
 /// `handle_up`, `net_stack::run` and the resource hot-apply so they can never
 /// disagree about which entries produce data-plane state. `port` keeps the
@@ -1082,10 +1085,7 @@ pub(crate) fn routable_key(address: &str, protocol: &str, port: u32) -> Option<(
     if !(protocol.to_lowercase() == "tcp" || protocol.is_empty()) {
         return None;
     }
-    match address.parse::<IpAddr>().ok()? {
-        IpAddr::V4(v4) => Some((v4, port as u16)),
-        IpAddr::V6(_) => None,
-    }
+    crate::name_map::resource_ipv4(address).map(|v4| (v4, port as u16))
 }
 
 /// Sequenced, acknowledged data-plane mutations sent by the daemon's resource
@@ -1248,6 +1248,8 @@ pub async fn run(
     // the loop and refilled as connections are accepted; the SYN gate holds
     // whatever a poll cannot take (see FlowTable).
     let mut flows = FlowTable::new(&mut sockets, &resource_entries);
+    // PENDING-14 F3: the DNS answerer for DNS-name resources.
+    let dns_socket = new_dns_socket(&mut sockets);
     let mut stats_last_logged: (usize, usize, LifecycleStats, SynGateStats) =
         (0, 0, LifecycleStats::default(), SynGateStats::default());
     let mut stats_next_at = tokio::time::Instant::now() + LIFECYCLE_STATS_INTERVAL;
@@ -1323,6 +1325,9 @@ pub async fn run(
 
         flows.service(&mut sockets, smol_now, &transports, &mut spawn_relay);
         complete_pending_closes(&flows, &mut pending_closes);
+        if let Some(h) = dns_socket {
+            serve_dns(&mut sockets, h, &|name| crate::name_map::with(|m| m.answer_a(name)));
+        }
 
         // --- Fix 05-A observability ---
         let n_relays = flows.active_relays.len();
@@ -1380,6 +1385,39 @@ pub async fn run(
             continue;
         }
         tokio::time::sleep(poll_delay.min(Duration::from_millis(SMOL_TICK_MS))).await;
+    }
+}
+
+/// PENDING-14 F3: the UDP socket systemd-resolved sends resource-name queries
+/// to (`name_map::DNS_RESPONDER_ADDR`:53, routed into zecurity0 by
+/// `dns_link`). AnyIP delivers it like any captured address.
+fn new_dns_socket(sockets: &mut SocketSet<'_>) -> Option<SocketHandle> {
+    let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
+    let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 512]);
+    let mut socket = udp::Socket::new(rx, tx);
+    let addr = crate::name_map::DNS_RESPONDER_ADDR;
+    if let Err(e) = socket.bind((IpAddress::Ipv4(Ipv4Address::from(addr)), 53)) {
+        tracing::warn!(error = ?e, "DNS answerer socket not bound; DNS name resources won't resolve");
+        return None;
+    }
+    Some(sockets.add(socket))
+}
+
+/// Answers every queued query (`dns::answer`) from `lookup` (the active
+/// names' fake addresses); malformed ones are dropped.
+fn serve_dns(sockets: &mut SocketSet<'_>, handle: SocketHandle, lookup: &dyn Fn(&str) -> Option<Ipv4Addr>) {
+    let socket = sockets.get_mut::<udp::Socket>(handle);
+    while socket.can_recv() {
+        let (query, meta) = match socket.recv() {
+            Ok((data, meta)) => (data.to_vec(), meta),
+            Err(_) => break,
+        };
+        let reply = crate::dns::answer(&query, lookup);
+        if let Some(reply) = reply {
+            if let Err(e) = socket.send_slice(&reply, meta.endpoint) {
+                tracing::debug!(error = ?e, "DNS answer dropped");
+            }
+        }
     }
 }
 
@@ -3562,6 +3600,106 @@ mod tests {
         assert_eq!(lab.s_iface.ip_addrs().len(), 1, "no address per resource IP");
     }
 
+    /// PENDING-14 F3, end to end through the production capture interface:
+    /// a DNS query to 198.19.255.53:53 is answered with the name's fake
+    /// address (source 198.19.255.53), and a connection to that fake address
+    /// is tunnelled with the NAME as destination, for the connector to
+    /// authorize and resolve.
+    #[test]
+    fn a_resource_name_resolves_to_its_fake_address_and_tunnels_by_name() {
+        let name = "lab.f3.example";
+        let fake = crate::name_map::resource_ipv4(name).expect("fake address");
+        let key = routable_key(name, "tcp", 443).expect("routable");
+        assert_eq!(key, (fake, 443));
+        let mut lab = Lab::multi(&[key], |iface| configure_capture_iface(iface).unwrap());
+        let dns = new_dns_socket(&mut lab.s_sockets).expect("dns socket");
+        let lookup = move |n: &str| (n == name).then_some(fake);
+
+        // The app side asks for the name, as systemd-resolved would.
+        let mut q = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+        );
+        q.bind((IpAddress::v4(10, 0, 0, 2), 40_053)).unwrap();
+        let qh = lab.c_sockets.add(q);
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for l in name.split('.') {
+            query.push(l.len() as u8);
+            query.extend_from_slice(l.as_bytes());
+        }
+        query.extend_from_slice(&[0, 0, 1, 0, 1]);
+        let resolver = IpAddress::Ipv4(Ipv4Address::from(crate::name_map::DNS_RESPONDER_ADDR));
+        lab.c_sockets
+            .get_mut::<udp::Socket>(qh)
+            .send_slice(&query, (resolver, 53))
+            .unwrap();
+        let mut reply = None;
+        for _ in 0..20 {
+            lab.step(10);
+            serve_dns(&mut lab.s_sockets, dns, &lookup);
+            let sock = lab.c_sockets.get_mut::<udp::Socket>(qh);
+            if sock.can_recv() {
+                let (data, meta) = sock.recv().unwrap();
+                reply = Some((data.to_vec(), meta.endpoint));
+                break;
+            }
+        }
+        let (reply, from) = reply.expect("a DNS answer");
+        assert_eq!(from.addr, resolver, "answered from the responder address");
+        assert_eq!(from.port, 53);
+        assert_eq!(&reply[0..2], &[0x12, 0x34]);
+        assert_eq!(&reply[reply.len() - 4..], &fake.octets(), "the fake address");
+
+        // The app connects to the answer: tunnelled, destination = the name.
+        lab.connect_to(fake, 443, 40_054);
+        lab.pump(5);
+        assert_eq!(lab.spawned.len(), 1, "connection to the fake address is tunnelled");
+        assert_eq!(lab.spawned[0].dest, name);
+        assert_eq!(lab.spawned[0].port, 443);
+    }
+
+    /// PENDING-14 F3: systemd-resolved sends from zecurity0's own address,
+    /// 100.64.0.1, which the capture interface also holds. The answer must
+    /// still go back to it.
+    #[test]
+    fn a_dns_query_from_the_tunnel_address_is_answered() {
+        let fake = Ipv4Addr::new(198, 18, 9, 9);
+        let mut lab = Lab::multi(&[(fake, 443)], |iface| configure_capture_iface(iface).unwrap());
+        lab.c_iface.update_ip_addrs(|a| {
+            a.clear();
+            a.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::from(TUNNEL_IFACE_ADDR)), 32))
+                .unwrap();
+        });
+        let dns = new_dns_socket(&mut lab.s_sockets).expect("dns socket");
+        let lookup = move |n: &str| (n == "src.f3.example").then_some(fake);
+        let mut q = udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+        );
+        q.bind((IpAddress::Ipv4(Ipv4Address::from(TUNNEL_IFACE_ADDR)), 40_153)).unwrap();
+        let qh = lab.c_sockets.add(q);
+        let mut query = vec![0x56, 0x78, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for l in "src.f3.example".split('.') {
+            query.push(l.len() as u8);
+            query.extend_from_slice(l.as_bytes());
+        }
+        query.extend_from_slice(&[0, 0, 1, 0, 1]);
+        let resolver = IpAddress::Ipv4(Ipv4Address::from(crate::name_map::DNS_RESPONDER_ADDR));
+        lab.c_sockets.get_mut::<udp::Socket>(qh).send_slice(&query, (resolver, 53)).unwrap();
+        let mut got = None;
+        for _ in 0..20 {
+            lab.step(10);
+            serve_dns(&mut lab.s_sockets, dns, &lookup);
+            let sock = lab.c_sockets.get_mut::<udp::Socket>(qh);
+            if sock.can_recv() {
+                got = Some(sock.recv().unwrap().0.to_vec());
+                break;
+            }
+        }
+        let reply = got.expect("an answer to a query from 100.64.0.1");
+        assert_eq!(&reply[reply.len() - 4..], &fake.octets());
+    }
+
     #[test]
     fn routable_key_is_ipv4_tcp_or_empty_protocol() {
         let ip = Ipv4Addr::new(10, 0, 0, 1);
@@ -3570,7 +3708,11 @@ mod tests {
         assert_eq!(routable_key("10.0.0.1", "", 80), Some((ip, 80)));
         assert_eq!(routable_key("10.0.0.1", "udp", 80), None);
         assert_eq!(routable_key("::1", "tcp", 80), None);
-        assert_eq!(routable_key("db.internal", "tcp", 80), None);
+        // PENDING-14 F3: a DNS name is routable on its fake address.
+        let fake = routable_key("db.internal", "tcp", 80).expect("a name is routable").0;
+        assert!(crate::name_map::in_reserved_range(fake), "{fake}");
+        assert_eq!(routable_key("db.internal", "udp", 80), None);
+        assert_eq!(routable_key("localhost", "tcp", 80), None);
         // Existing `as u16` conversion is preserved.
         assert_eq!(routable_key("10.0.0.1", "tcp", 65_536 + 22), Some((ip, 22)));
     }

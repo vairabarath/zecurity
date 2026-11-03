@@ -102,6 +102,10 @@ pub struct IpcResponse {
     /// after a restart; the last attempt's error, "" before the first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_restoring: Option<String>,
+    /// Status (PENDING-14 F3): DNS-name resources, "active (N names)" or
+    /// "unavailable: <reason>"; absent when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_names: Option<String>,
 }
 
 // ── Socket path ──────────────────────────────────────────────────────────────

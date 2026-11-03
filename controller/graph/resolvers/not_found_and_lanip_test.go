@@ -72,8 +72,8 @@ func TestResourceActions_NotFoundIsUserSafe(t *testing.T) {
 			_, err := f.mr.UpdateResource(f.a.ctx, id, graph.UpdateResourceInput{Name: &name})
 			return err
 		}},
-		{"protectResource", "protect resource: resource not found, invalid state, or no active shield is installed on its host", func(id string) error {
-			_, err := f.mr.ProtectResource(f.a.ctx, id)
+		{"protectResource", "protect resource: resource not found, invalid state, or no matching active shield in its remote network", func(id string) error {
+			_, err := f.mr.ProtectResource(f.a.ctx, id, nil)
 			return err
 		}},
 		{"unprotectResource", "unprotect resource: resource not found or not in protected state", func(id string) error {
