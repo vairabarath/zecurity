@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** design note, **awaiting approval** (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). Nothing is built.
+**Status:** design note, **awaiting approval**; only O-4 (F0 timing) still open (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). Nothing is built.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -50,6 +50,8 @@ So the connector half largely works already. The missing half is the client: it 
 - **F-4 No wildcards.** `*.domain` resources are **not** in v1 and **not planned** as a follow-up.
 - **F-5 Shield-protected names (amends F-1).** A name is an alias for a host's IP, so a name resource can be shield-protected. The connector resolves the name and routes the tunnel to the bound shield, which checks the IP as it does today, if the client has access.
 - **F-6 Collisions (was O-3).** The same name and port in two remote networks of one workspace is refused when the second is saved.
+- **F-7 Fake-address range (was O-2).** Names get addresses from `198.18.0.0/16` (RFC 2544); the DNS responder is `198.19.255.53`; the client refuses to activate name resources on an overlap (§4.7).
+- **F-8 Permission for resolved (was O-1).** The client installer ships a polkit rule granting only the installed client user the four resolved link actions (§4.6). Lab-verified 2026-11-03 (§4.6 evidence).
 
 ## 4. Design (v1)
 
@@ -82,10 +84,10 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 
 ### 4.3 Client
 
-1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool (proposed `198.18.0.0/16`, see O-2). The mapping is **stable for the daemon's lifetime**: the same name keeps the same address across ACL updates. A name removed from the ACL keeps its address reserved until the daemon restarts, so it is never reused for a different name while an old connection might still exist.
+1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool, `198.18.0.0/16` (F-7). The mapping is **stable for the daemon's lifetime**: the same name keeps the same address across ACL updates. A name removed from the ACL keeps its address reserved until the daemon restarts, so it is never reused for a different name while an old connection might still exist.
 2. **Capture.** The fake address goes through the existing path unchanged: an nft mark rule `ip daddr <fake> tcp dport <port>`, a table 105 route, and the smoltcp listener keyed `(fake, port)`.
 3. **Tunnel request.** For a connection to `(fake, port)`, the client sends the **name** (the ACL entry's address string) as `destination`, never the fake IP. The connector authorizes and resolves on that string.
-4. **DNS responder.** A small authoritative responder runs inside the client's smoltcp stack on a second address, proposed `198.19.255.53:53/udp` (outside the name pool), routed into `zecurity0`. Because smoltcp owns it, the daemon needs no `CAP_NET_BIND_SERVICE` and opens no kernel port 53.
+4. **DNS responder.** A small authoritative responder runs inside the client's smoltcp stack on a second address, `198.19.255.53:53/udp` (outside the name pool), routed into `zecurity0`. Because smoltcp owns it, the daemon needs no `CAP_NET_BIND_SERVICE` and opens no kernel port 53.
    - `A <name>` for an admitted name → the fake address, TTL 30 s.
    - `AAAA` or any other type for an admitted name → NODATA at once (so apps don't wait on IPv6).
    - Any other name under a routing domain → NXDOMAIN (see 4.3.5).
@@ -110,9 +112,22 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 - No ACL, posture, geofence or transport-plane change. Name and IP resources compile the same way (`route_type` and `shield_id` as today).
 - Split tunnelling (ADR-009) is unchanged: only resource traffic enters the TUN.
 
-### 4.6 Privilege for resolved (**blocking open decision, §6 O-1**)
+### 4.6 Privilege for resolved (decided as F-8; lab-verified 2026-11-03)
 
 On the lab host, resolved's link-DNS actions require `auth_admin` for any non-root caller. The client daemon runs as the enrolling user with only `CAP_NET_ADMIN`, so these calls will most likely be refused. Proposed fix: `client/scripts/client-install.sh` (already run as root) installs a polkit rule, `/etc/polkit-1/rules.d/50-zecurity-client.rules`. The rule grants **only** the installed client user the actions `set-dns-servers`, `set-domains`, `set-default-route` and `revert`. The uninstall path removes it.
+
+**Lab check (2026-11-03, `inkyank-01-computer`, systemd 255.4-1ubuntu8.18, polkit 124).** A throwaway dummy link was used. Each call was run as the user through `systemd-run --uid=<user>` with `CAP_NET_ADMIN` ambient and bounding and `NoNewPrivileges`, the same way `zecurity-client.service` runs. Results:
+
+| Case | `dns` / `domain` / `default-route` / `revert` |
+|---|---|
+| A: no rule, with `CAP_NET_ADMIN` | all **refused** ("Interactive authentication required") |
+| B: no rule, no capability | all refused (same) |
+| C: with the rule, with `CAP_NET_ADMIN` | all **allowed**; the link showed `DNS Servers: 198.19.255.53`, `DNS Domain: ~db.fqdn-test.example`, `-DefaultRoute` |
+| D: with the rule, as user `nobody` | refused (the rule is scoped to one user) |
+| E: with the rule, no capability | allowed (the rule alone grants it; `CAP_NET_ADMIN` plays no part for resolved) |
+| F: with the rule, `revert` | allowed |
+
+So without the rule the v1 client design can't work, and with it it can. Still to check in F3: the dummy link showed `Current Scopes: none` (no address, no carrier), so it remains to confirm that on the real `zecurity0`, with its address, resolved actually sends queries for `~<name>` to `198.19.255.53` and the smoltcp responder.
 
 ### 4.7 Known limits (state them in the console and docs)
 
@@ -134,12 +149,8 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
 
 ## 6. Decisions still open
 
-- **O-1 (blocking): how the client gets permission to configure resolved.** Options:
-  - (a) an installer polkit rule (recommended, §4.6);
-  - (b) run the daemon as root;
-  - (c) a small root helper.
-  First verify on the lab that the call really is refused without the rule and allowed with it. If (a) fails, the v1 client design changes.
-- **O-2: the fake pool and the responder address.** Candidates:
+- **O-1 (decided as F-8, lab-verified 2026-11-03):** the installer polkit rule (§4.6).
+- **O-2 (decided as F-7, 2026-11-03): the fake pool and the responder address.** Candidates considered:
 
   | Range | For | Against |
   |---|---|---|
@@ -148,7 +159,7 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
   | `10.x` / `172.16.x` / `192.168.x` | none | collides with real company LANs and real resource IPs |
   | `240.0.0.0/4` (reserved) | unused anywhere | some OS stacks and apps refuse it; avoid |
 
-  Proposal: names from `198.18.0.0/16`, responder `198.19.255.53`, refuse on overlap (§4.7). A config override can come later if a customer needs it.
+  Chosen: names from `198.18.0.0/16`, responder `198.19.255.53`, refuse on overlap (§4.7). A config override can come later if a customer needs it.
 - **O-4: step F0 timing.** Ship the "refuse non-IP host" fix now, before the rest, so today's silent failure ends. It becomes "refuse an invalid host" when names land.
 
 ## 7. Tests (build gate)
@@ -165,5 +176,5 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
 | **F0** | Controller: refuse an invalid host (non-IP for now), with codes and tests; console label | approval of O-4 |
 | **F1** | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | approval |
 | **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
-| **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule (O-1) | F1, O-1 verified |
+| **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
