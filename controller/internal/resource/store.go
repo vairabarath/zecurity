@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,30 @@ var ErrNoMatchingShield = errors.New("no active shield installed on resource hos
 // belongs to another workspace, with one user-safe message for both, so the
 // response reveals nothing about other workspaces' networks.
 var ErrRemoteNetworkNotFound = apperr.UserErrorf("remote network not found")
+
+// ErrInvalidHost refuses a resource host that isn't a usable IPv4 address.
+// Every data-plane component handles IPv4 literals only: the client drops any
+// other address before capturing traffic, and a shield protects only its own
+// LAN IP. Before this check, a DNS name or an IPv6 address was stored and the
+// resource could never be reached (PENDING-14 F0). DNS names come with
+// PENDING-14 F1.
+var ErrInvalidHost = apperr.UserErrorf("host must be an IPv4 address, such as 10.0.0.5 (DNS names and IPv6 are not supported yet)")
+
+// NormalizeHost validates a resource host and returns its canonical form. It
+// accepts an IPv4 literal (surrounding spaces trimmed) and refuses everything
+// else with ErrInvalidHost: empty input, names, IPv6 (incl. IPv4-mapped
+// "::ffff:a.b.c.d"), zone suffixes, leading zeros, and the unspecified,
+// broadcast and multicast addresses, which never name a single host.
+func NormalizeHost(host string) (string, error) {
+	a, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil || !a.Is4() {
+		return "", ErrInvalidHost
+	}
+	if a.IsUnspecified() || a.IsMulticast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+		return "", ErrInvalidHost
+	}
+	return a.String(), nil
+}
 
 // querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
 // single-source desired-state query can run either standalone or inside the
@@ -133,6 +158,11 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 // remote network must belong to tenantID; the INSERT itself checks it, so
 // nothing is written otherwise (ErrRemoteNetworkNotFound).
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
+	host, err := NormalizeHost(input.Host)
+	if err != nil {
+		return nil, err
+	}
+	input.Host = host
 	if _, err := uuid.Parse(input.RemoteNetworkID); err != nil {
 		return nil, ErrRemoteNetworkNotFound
 	}
@@ -463,8 +493,12 @@ var ErrResourceBusy = errors.New("resource is being unprotected or deleted; wait
 //     a snapshot without the resource, never a remove instruction, so it sends no
 //     'unprotected' ack that could undo the move.
 func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*UpdateResult, error) {
-	if input.Host != nil && strings.TrimSpace(*input.Host) == "" {
-		return nil, fmt.Errorf("update resource: host must not be empty")
+	if input.Host != nil {
+		h, err := NormalizeHost(*input.Host)
+		if err != nil {
+			return nil, err
+		}
+		input.Host = &h
 	}
 	tx, err := db.Begin(ctx)
 	if err != nil {

@@ -3620,3 +3620,23 @@ serves on `127.0.0.1:9102`.
   - the Devices page shows the country;
   - the override is ignored with `ENV=production`.
 - Local DB was reset for migration 048 (with consent).
+
+## 2026-11-03 — M1: main updated; PENDING-14 (DNS name resources) design + F0
+- `fixed-pendings` merged into `main` as PR #172 (merge commit `f5bd339f`, CI 7/7 green); local `main` reset to it. 46 merged local branches deleted; 10 unmerged branches and 3 `.worktrees` kept for a decision.
+- PENDING-14 rewritten as a v1 design note against `main`:
+  - Today a name host is stored, but every client drops it.
+  - The connector already resolves names, unfiltered.
+  - No proto change is needed.
+- Decided F-1 … F-8:
+  - exact names, TCP only;
+  - client DNS through systemd-resolved with fake addresses from `198.18.0.0/16`, responder `198.19.255.53`;
+  - the connector resolves and refuses loopback and link-local results;
+  - **no wildcards, not planned**;
+  - shield-protected names: protect takes an explicit shield, shield instructions carry its `lan_ip`, and the connector hands the resolved IP to the shield (no shield change);
+  - the same name:port across a workspace's networks is refused;
+  - an installer polkit rule for resolved.
+- O-1 lab check (local host, systemd 255, polkit 124, run in the Orca `~/zecurity` tab):
+  - every resolved link call is refused for a non-root `CAP_NET_ADMIN` service;
+  - all are allowed with a rule scoped to the client user;
+  - another user is still refused.
+- F0 built on `fix/pending14-f0-host-ipv4`: the controller refuses a non-IPv4 resource host on create and update (`resource.NormalizeHost`), with a console mirror. Gates in PENDING-14 §9: Go 1655 pass / 0 fail / 2 expected skips with all DB and Valkey vars, fixture script ok, both mutants killed, admin 242 tests and build ok, lint unchanged (17).
