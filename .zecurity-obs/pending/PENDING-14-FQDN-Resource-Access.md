@@ -44,10 +44,12 @@ So the connector half largely works already. The missing half is the client: it 
 
 ## 3. Decisions taken (2026-11-03, Sathiya)
 
-- **F-1 Scope of v1:** exact names only, TCP only, connector-routed only.
+- **F-1 Scope of v1:** exact names only, TCP only.
 - **F-2 Client DNS:** Linux through systemd-resolved; the client answers resource names with fake addresses from a private pool.
 - **F-3 Resolution:** the connector resolves the name inside the remote network, and refuses loopback and link-local results.
 - **F-4 No wildcards.** `*.domain` resources are **not** in v1 and **not planned** as a follow-up.
+- **F-5 Shield-protected names (amends F-1).** A name is an alias for a host's IP, so a name resource can be shield-protected. The connector resolves the name and routes the tunnel to the bound shield, which checks the IP as it does today, if the client has access.
+- **F-6 Collisions (was O-3).** The same name and port in two remote networks of one workspace is refused when the second is saved.
 
 ## 4. Design (v1)
 
@@ -56,7 +58,7 @@ So the connector half largely works already. The missing half is the client: it 
 A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **DNS name**. A name resource:
 
 - is TCP only (`protocol = 'tcp'`);
-- is never shield-protected; it routes via a connector of its remote network;
+- is either **unprotected** (connector route: the connector resolves and dials) or **shield-protected** (shield route: the connector resolves and hands the IP to the bound shield, §4.4);
 - uses the normal ACL, posture, geofence and session-revocation path, keyed on `resource_id` as today. Nothing there changes.
 
 **Name rules (controller, on create and update):**
@@ -67,23 +69,28 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 
 ### 4.2 Controller and console
 
-- **Fix the silent failure (step F0, can ship on its own):** refuse a `host` that is neither an IPv4 literal nor a valid name. Refuse a name resource whose protocol isn't `tcp`. Refuse `Protect` on a name resource with a clear error ("name resources can't be shield-protected"), not the current `lan_ip` miss. Each refusal has its own `apperr` code and test.
-- **Collision rule:** two resources with the same name and port in **different** remote networks of a workspace would be ambiguous for a client that may access both. Refuse the second at save time (one name:port per workspace). Same name with a different port is fine.
-- **Console:** relabel the field "Host (IP or DNS name)", add client-side validation that mirrors the server, show the Protect action as unavailable for name resources, and show "via connector" in the route column.
+- **Fix the silent failure (step F0, can ship on its own):** refuse a `host` that is neither an IPv4 literal nor a valid name. Refuse a name resource whose protocol isn't `tcp`. Each refusal has its own `apperr` code and test.
+- **Collision rule (F-6):** two resources with the same name and port in **different** remote networks of a workspace would be ambiguous for a client that may access both. The second is refused at save time with its own code (one name:port per workspace). Same name with a different port is fine.
+- **Protecting a name resource (F-5).** The controller can't resolve the name, because it isn't in the remote network, so `AutoMatchShield` (`lan_ip = host`) can't find the shield. Instead:
+  - `protectResource` takes an optional `shieldId`. It is **required** for a name resource and must be an active shield in the resource's remote network.
+  - The resource stores `host` = the name and `shield_id` = the chosen shield. IP resources keep today's auto-match and `lan_ip = host` rule unchanged.
+  - **Instructions to the shield carry the shield's LAN IP, never the name.** `buildSnapshotMsg`, `PushInstruction` (`controller/internal/connector/control_stream.go:392`, `:459`) and the signed resource set (`controller/internal/connector/resource_set.go:70`) take, for a name resource, `host` = the bound shield's current `lan_ip`. The shield sees an ordinary IP resource, so `validate_host`, nftables and `allows_tunnel` need no change.
+  - If the shield's `lan_ip` changes, the next snapshot carries the new IP. The name binding stays valid; only DNS has to follow.
+- **Console:** relabel the field "Host (IP or DNS name)", add client-side validation that mirrors the server, offer a shield picker in Protect for name resources (listing the network's shields with their LAN IPs), and show the route as today (connector or shield).
 - **Schema:** no change needed (`host TEXT`). A DB `CHECK` on the format is optional defence in depth; if we add one, it's a new numbered migration `[schema: reset DB]`.
 - **Discovery:** unchanged (`promoteDiscoveredService` always creates IP resources).
 
 ### 4.3 Client
 
-1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool (proposed `100.127.0.0/16`, inside the CGNAT range the TUN already uses). The mapping is **stable for the daemon's lifetime**: the same name keeps the same address across ACL updates. A name removed from the ACL keeps its address reserved until the daemon restarts, so it is never reused for a different name while an old connection might still exist.
+1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool (proposed `198.18.0.0/16`, see O-2). The mapping is **stable for the daemon's lifetime**: the same name keeps the same address across ACL updates. A name removed from the ACL keeps its address reserved until the daemon restarts, so it is never reused for a different name while an old connection might still exist.
 2. **Capture.** The fake address goes through the existing path unchanged: an nft mark rule `ip daddr <fake> tcp dport <port>`, a table 105 route, and the smoltcp listener keyed `(fake, port)`.
 3. **Tunnel request.** For a connection to `(fake, port)`, the client sends the **name** (the ACL entry's address string) as `destination`, never the fake IP. The connector authorizes and resolves on that string.
-4. **DNS responder.** A small authoritative responder runs inside the client's smoltcp stack on a second address, proposed `100.127.255.53:53/udp`, routed into `zecurity0`. Because smoltcp owns it, the daemon needs no `CAP_NET_BIND_SERVICE` and opens no kernel port 53.
+4. **DNS responder.** A small authoritative responder runs inside the client's smoltcp stack on a second address, proposed `198.19.255.53:53/udp` (outside the name pool), routed into `zecurity0`. Because smoltcp owns it, the daemon needs no `CAP_NET_BIND_SERVICE` and opens no kernel port 53.
    - `A <name>` for an admitted name → the fake address, TTL 30 s.
    - `AAAA` or any other type for an admitted name → NODATA at once (so apps don't wait on IPv6).
    - Any other name under a routing domain → NXDOMAIN (see 4.3.5).
    - UDP only. Answers are small, so we never set TC and never need TCP DNS.
-5. **systemd-resolved wiring.** The client sets per-link DNS on `zecurity0` to `100.127.255.53`, routing domains `~<name>` for each admitted name, and `default-route=false`. Only these names go to the client; all other DNS is untouched.
+5. **systemd-resolved wiring.** The client sets per-link DNS on `zecurity0` to `198.19.255.53`, routing domains `~<name>` for each admitted name, and `default-route=false`. Only these names go to the client; all other DNS is untouched.
    - Consequence: resolved routes **subdomains** of a resource name to us too (`~db.acme.com` also covers `x.db.acme.com`), and we answer them NXDOMAIN. That's a known limit (§4.7).
 6. **Without systemd-resolved,** or if wiring fails: name resources are not activated, IP resources work as today, the daemon logs it once per change, and `zecurity-client status` reports "DNS name resources unavailable: <reason>". The client never falls back to `/etc/hosts` or `resolv.conf` edits.
 
@@ -92,13 +99,15 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 - **Authorization:** unchanged (`resolve_resource` exact string match, then the SPIFFE ID).
 - **Resolution:** for a name destination, resolve explicitly (`tokio::net::lookup_host`). Drop loopback, link-local (`169.254.0.0/16`, which covers cloud metadata), unspecified, multicast and broadcast addresses, and use IPv4 results only in v1. Connect to **the checked IP**, never to `"name:port"`, so the name can't be re-resolved to something else between the check and the connect.
 - **No usable address:** the tunnel fails with a distinct error ("name did not resolve to an allowed address"), and the connector log records it. Today's `destination` field already carries the name.
+- **Shield route (F-5):** the same resolve-and-filter, then `open_relay_session(shield_id, <resolved IP>, port, protocol)` (`connector/src/device_tunnel.rs:375`) with the **IP**, not the name. The shield stays the authority: `allows_tunnel` opens the tunnel only if that IP equals a resource host it protects (its LAN IP). If DNS points somewhere else, the shield refuses. The connector logs it as a distinct error ("name resolved to an address the shield does not protect"), so the admin can fix DNS. A connector, hostile or not, still can't use the shield to reach anything else (D21-R D unchanged).
 - **IP destinations:** unchanged.
 
 ### 4.5 What does not change
 
 - **No proto change.** `ACLEntry.address` is already a string, and the client-to-connector tunnel request is JSON with a string `destination`.
-- No relay or shield change.
-- No ACL, posture, geofence or transport-plane change. Name and IP resources compile the same way.
+- No relay or shield change. A shield-protected name reaches the shield as an ordinary IP resource (§4.2).
+- No schema change: `host` holds the name, and `shield_id` already exists.
+- No ACL, posture, geofence or transport-plane change. Name and IP resources compile the same way (`route_type` and `shield_id` as today).
 - Split tunnelling (ADR-009) is unchanged: only resource traffic enters the TUN.
 
 ### 4.6 Privilege for resolved (**blocking open decision, §6 O-1**)
@@ -108,8 +117,9 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
 ### 4.7 Known limits (state them in the console and docs)
 
 - Linux with systemd-resolved only.
+- A shield-protected name must resolve, **on the connector**, to the bound shield's LAN IP. If it doesn't, connections are refused at the shield (and logged); nothing is reached unprotected.
 - Subdomains of a resource name answer NXDOMAIN while the client is connected.
-- The fake pool can collide with another CGNAT user on the device (Tailscale uses `100.64.0.0/10`; so do some carriers). If the pool overlaps an existing route, the client refuses to activate name resources and reports it.
+- The fake pool can collide with a network that really uses `198.18.0.0/15` (benchmark labs, some test networks), or with another tool that uses the same range for the same trick. If the pool overlaps an existing route on the device, or a real resource IP in the ACL falls inside it, the client refuses to activate name resources and reports it.
 - Apps that bypass the system resolver (their own DoH, or a hardcoded `8.8.8.8`) won't see the fake address.
 - IPv4 only, at both ends.
 - An app that cached a name's real IP before the client connected keeps using that IP until its own cache expires.
@@ -118,7 +128,7 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
 
 - Wildcard or domain resources (F-4; not planned).
 - UDP or "any"-protocol name resources.
-- Shield-protected name resources.
+- The controller checking DNS at protect time (it can't see the remote network's DNS).
 - IPv6 (fake AAAA, IPv6 at the connector).
 - Non-Linux clients, and Linux without systemd-resolved.
 
@@ -129,23 +139,31 @@ On the lab host, resolved's link-DNS actions require `auth_admin` for any non-ro
   - (b) run the daemon as root;
   - (c) a small root helper.
   First verify on the lab that the call really is refused without the rule and allowed with it. If (a) fails, the v1 client design changes.
-- **O-2: the fake pool and the responder address.** `100.127.0.0/16` and `100.127.255.53` are proposals. Choose them, and choose what happens on overlap (refuse, as proposed, or make the pool configurable).
-- **O-3: the collision rule.** Refuse the same name:port across a workspace's remote networks (proposed), or allow it and let the client pick by remote network.
+- **O-2: the fake pool and the responder address.** Candidates:
+
+  | Range | For | Against |
+  |---|---|---|
+  | **`198.18.0.0/15`** (RFC 2544, recommended) | IANA special-purpose, never routed on the internet, almost never used on real LANs; already the usual "fake-IP" range for proxy tools (e.g. Clash/mihomo default `198.18.0.1/16`) | a benchmark lab or another fake-IP tool on the same device can overlap |
+  | `100.64.0.0/10` sub-range (CGNAT) | next to the TUN's `100.64.0.1` | Tailscale uses the whole `/10` (and `100.100.100.100` for its DNS); carrier CGNAT uses it too |
+  | `10.x` / `172.16.x` / `192.168.x` | none | collides with real company LANs and real resource IPs |
+  | `240.0.0.0/4` (reserved) | unused anywhere | some OS stacks and apps refuse it; avoid |
+
+  Proposal: names from `198.18.0.0/16`, responder `198.19.255.53`, refuse on overlap (§4.7). A config override can come later if a customer needs it.
 - **O-4: step F0 timing.** Ship the "refuse non-IP host" fix now, before the rest, so today's silent failure ends. It becomes "refuse an invalid host" when names land.
 
 ## 7. Tests (build gate)
 
-- **Controller:** name normalisation and validation (table test: case, trailing dot, IP literal, `*`, label and total lengths); a name resource with `udp`/`any` is refused; `Protect` on a name is refused with its code; the name:port collision is refused; ACL output carries the normalised name. DB-backed tests run, not skip.
+- **Controller:** name normalisation and validation (table test: case, trailing dot, IP literal, `*`, label and total lengths); a name resource with `udp`/`any` is refused; the name:port collision is refused; `protectResource` on a name without `shieldId`, or with a shield from another network or an inactive shield, is refused; a protected name's shield snapshot, pushed instruction and signed resource set carry the shield's `lan_ip`, never the name, and follow a `lan_ip` change; ACL output carries the normalised name with `route_type = shield` and the `shield_id`. DB-backed tests run, not skip.
 - **Client:** fake-pool allocation is stable across ACL updates and never reuses an address; nft batch and routes for name entries; the DNS responder answers A, AAAA→NODATA, other types, NXDOMAIN, and malformed packets dropped; the tunnel request carries the name, not the fake IP; resolved wiring builds the right calls and degrades cleanly when resolved is missing.
-- **Connector:** the resolve-and-filter function (loopback, link-local, metadata, unspecified and multicast are refused; mixed results keep only allowed ones; IPv6 is ignored); it connects to the checked IP; a name that resolves to nothing allowed is refused with its error.
-- **Live (lab):** a real client reaches `db.<lab-domain>` that resolves only on the connector's network; access follows grant and revoke and posture like an IP resource; removing the resource removes the DNS answer; a name resolving to `127.0.0.1` is refused at the connector; with resolved stopped, IP resources keep working and status explains why names don't.
+- **Connector:** the resolve-and-filter function (loopback, link-local, metadata, unspecified and multicast are refused; mixed results keep only allowed ones; IPv6 is ignored); it connects to the checked IP; a name that resolves to nothing allowed is refused with its error; on a shield route the resolved IP (not the name) goes to `open_relay_session`.
+- **Live (lab):** a real client reaches `db.<lab-domain>` that resolves only on the connector's network; access follows grant and revoke and posture like an IP resource; removing the resource removes the DNS answer; a name resolving to `127.0.0.1` is refused at the connector; a shield-protected name that resolves to the shield's LAN IP works through the shield, and the same name pointed (in DNS) at another host is refused by the shield; with resolved stopped, IP resources keep working and status explains why names don't.
 
 ## 8. Phases
 
 | Phase | What | Depends on |
 |---|---|---|
 | **F0** | Controller: refuse an invalid host (non-IP for now), with codes and tests; console label | approval of O-4 |
-| **F1** | Controller and console: name validation and normalisation, TCP-only rule, Protect refusal, collision rule | approval |
-| **F2** | Connector: resolve, filter, connect to the checked IP | F1 |
+| **F1** | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | approval |
+| **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
 | **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule (O-1) | F1, O-1 verified |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
