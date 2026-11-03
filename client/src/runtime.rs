@@ -185,6 +185,11 @@ pub struct RuntimeState {
     /// scheduler that's running late (sleep/suspend, clock drift), not the
     /// primary trigger. See daemon::run_cert_renewal_scheduler.
     pub cert_renewal_resync: Arc<tokio::sync::Notify>,
+    /// FU-8: woken by the WatchChanges hint stream (change_watch.rs) when the
+    /// controller's ACL or transport version differs from the cached one; the
+    /// ACL sync scheduler then syncs at once instead of on its next tick.
+    /// Coalescing: any burst of hints leaves one pending wake.
+    pub change_hint: Arc<tokio::sync::Notify>,
     /// FU-10: in-memory copy of `StoredWorkspaceState::tunnel_wanted` — the
     /// user last left the tunnel up. Read by the startup restore.
     pub tunnel_wanted: bool,
@@ -265,6 +270,7 @@ pub fn new_shared() -> SharedState {
         device_state: DeviceState::Active,
         device_state_reason: String::new(),
         cert_renewal_resync: Arc::new(tokio::sync::Notify::new()),
+        change_hint: Arc::new(tokio::sync::Notify::new()),
         tunnel_wanted: false,
         tunnel_intent_lock: Arc::new(tokio::sync::Mutex::new(())),
         tunnel_restore: None,

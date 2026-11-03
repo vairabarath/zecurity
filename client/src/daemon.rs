@@ -204,6 +204,9 @@ pub async fn run() -> Result<()> {
             run_acl_sync_scheduler(state_clone, conf_clone, tun_slot_clone).await;
         });
     }
+    // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
+    // the scheduler's own tick keeps running whether or not this is connected.
+    tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -4781,6 +4784,8 @@ async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tu
     // managed-resource relay transport fails, so we re-sync early rather than
     // waiting out the 60s tick.
     let resync = { state.read().await.relay_resync.clone() };
+    // FU-8: woken by a change hint whose versions differ from the cache.
+    let change_hint = { state.read().await.change_hint.clone() };
 
     let mut ticker =
         tokio::time::interval(std::time::Duration::from_secs(ACL_REFRESH_TTL_SECS as u64));
@@ -4800,6 +4805,13 @@ async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tu
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
+            }
+            _ = change_hint.notified() => {
+                // FU-8: the controller says a version moved. Same authoritative
+                // sync as the tick; runs on this task, so never concurrently
+                // with it. The tick is not reset: it stays the fallback.
+                info!("change hint — syncing now");
                 sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
             }
             _ = resync.notified() => {
@@ -6937,6 +6949,15 @@ mod renewal_tests {
             _request: tonic::Request<crate::grpc::client_v1::LogoutRequest>,
         ) -> Result<tonic::Response<crate::grpc::client_v1::LogoutResponse>, tonic::Status>
         {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        type WatchChangesStream = crate::change_watch::HintStream;
+
+        async fn watch_changes(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::WatchChangesRequest>,
+        ) -> Result<tonic::Response<Self::WatchChangesStream>, tonic::Status> {
             Err(tonic::Status::unimplemented("not used in this test"))
         }
 

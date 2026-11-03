@@ -128,3 +128,25 @@ func TestNotifier_TransportAndPolicyPlanesAreIndependent(t *testing.T) {
 		t.Fatal("policy event incorrectly invalidated transport cache")
 	}
 }
+
+// FU-8: a topology change wakes listeners after the version bump, so a client
+// woken by the hint fetches the new transport version. It never touches the
+// ACL version (Track B).
+func TestNotifier_ChangeListenerSeesNewTransportVersion(t *testing.T) {
+	n := NewNotifier(NewSnapshotCache())
+	acl := policy.NewNotifier(policy.NewSnapshotCache())
+	var seen []uint64
+	n.AddChangeListener(func(ws string) { seen = append(seen, n.Version(ws)) })
+
+	for i := 0; i < 2; i++ {
+		if err := n.NotifyTopologyChange(context.Background(), "w1", []string{"c1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
+		t.Fatalf("listener saw versions %v, want [1 2]", seen)
+	}
+	if acl.Version("w1") != 0 {
+		t.Fatal("a transport change moved the ACL version")
+	}
+}
