@@ -52,6 +52,7 @@ So the connector half largely works already. The missing half is the client: it 
 - **F-6 Collisions (was O-3).** The same name and port in two remote networks of one workspace is refused when the second is saved.
 - **F-7 Fake-address range (was O-2).** Names get addresses from `198.18.0.0/16` (RFC 2544); the DNS responder is `198.19.255.53`; the client refuses to activate name resources on an overlap (§4.7).
 - **F-8 Permission for resolved (was O-1).** The client installers ship a polkit rule granting the four resolved link actions only to the installed client user **and only to a process in `zecurity-client.service`**, checked through the caller's cgroup (§13). Lab-verified 2026-11-03.
+- **F-9 Fake addresses survive restarts (2026-11-03, Sathiya).** A name's fake address is derived from the name (FNV-1a 64 into the pool), not allocated in sequence, so it is the same after a daemon restart, an upgrade or a reboot (§4.3, §14).
 
 ## 4. Design (v1)
 
@@ -84,7 +85,10 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 
 ### 4.3 Client
 
-1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool, `198.18.0.0/16` (F-7). The mapping is **stable for the daemon's lifetime**: the same name keeps the same address across ACL updates. A name removed from the ACL keeps its address reserved until the daemon restarts, so it is never reused for a different name while an old connection might still exist.
+1. **Name map.** On every ACL apply, the client gives each admitted name resource a fake address from a reserved pool, `198.18.0.0/16` (F-7).
+   - The address is **derived from the name** (F-9): FNV-1a 64 of the name, mod 65534, from `198.18.0.1`. It is the same after a daemon restart, an upgrade or a reboot. The hash must never change; a test pins known values.
+   - If two names hash to the same address, the second takes the next free one. For such a pair, which name keeps the hashed address depends on the order the daemon first sees them (the ACL order).
+   - Within one daemon run, a name removed from the ACL keeps its address reserved, so the address is never reused for a different name while an old connection might still exist.
 2. **Capture.** The fake address goes through the existing path unchanged: an nft mark rule `ip daddr <fake> tcp dport <port>`, a table 105 route, and the smoltcp listener keyed `(fake, port)`.
 3. **Tunnel request.** For a connection to `(fake, port)`, the client sends the **name** (the ACL entry's address string) as `destination`, never the fake IP. The connector authorizes and resolves on that string.
 4. **DNS responder.** A small authoritative responder runs inside the client's smoltcp stack on a second address, `198.19.255.53:53/udp` (outside the name pool), routed into `zecurity0`. Because smoltcp owns it, the daemon needs no `CAP_NET_BIND_SERVICE` and opens no kernel port 53.
@@ -134,7 +138,8 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - Linux with systemd-resolved only.
 - A shield-protected name must resolve, **on the connector**, to the bound shield's LAN IP. If it doesn't, connections are refused at the shield (and logged); nothing is reached unprotected.
 - Subdomains of a resource name answer NXDOMAIN while the client is connected.
-- The fake pool can collide with a network that really uses `198.18.0.0/15` (benchmark labs, some test networks), or with another tool that uses the same range for the same trick. If the pool overlaps an existing route on the device, or a real resource IP in the ACL falls inside it, the client refuses to activate name resources and reports it.
+- The fake pool can collide with a network that really uses `198.18.0.0/15` (benchmark labs, some test networks), or with another tool that uses the same range for the same trick. If a real resource IP in the ACL falls inside it, the client turns name resources off and the status says so. Once that resource is changed or removed, restarting the tunnel (`zecurity-client down && zecurity-client up`) turns them back on; no daemon restart is needed.
+- Two names that hash to the same fake address (about a 2% chance with 50 names) keep their addresses across a restart only if the ACL lists them in the same order.
 - Apps that bypass the system resolver (their own DoH, or a hardcoded `8.8.8.8`) won't see the fake address.
 - IPv4 only, at both ends.
 - An app that cached a name's real IP before the client connected keeps using that IP until its own cache expires.
@@ -390,4 +395,26 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 - On this desktop, a process in the user's **graphical session** could set resolved link DNS **without** any of our rules, while `pkcheck` reported "authentication required". This is a local polkit/desktop behaviour, not investigated further. Our rule adds nothing for session processes and is scoped to the service unit.
 - `deleteResource` with an unknown ID answers `INTERNAL`, not "not found".
 - The GraphQL `remoteNetworks { shields { lanIp } }` path returned null while the DB row had the LAN IP.
+
+## 14. Restart-stable fake addresses (2026-11-03, F-9)
+
+**Why:** with sequential allocation, addresses started again at `198.18.0.1` on every daemon restart. An application or resolver that cached `a.example → 198.18.0.1` could then reach `b.example`'s service. That isn't an access bypass (the connector authorizes the name it receives), but it is misdirection, for example credentials sent to the wrong service.
+
+**Change (client only)**
+- `name_map.rs`: `home_slot(name)` is FNV-1a 64 mod 65534. `fake_ip_for` takes the hashed address, or probes to the next free one (wrapping); it returns None when the pool is full.
+- `clear_conflicts()` runs from `dns_link::clear()` on tunnel down, so a reserved-range clash is re-checked at the next bring-up.
+- The status message now says to change or remove the resource and restart the tunnel.
+
+**Tests**
+- `stable_addresses_are_pinned`: values computed independently in Python.
+- `a_restart_gives_the_same_addresses_whatever_the_order`.
+- `a_hash_collision_takes_the_next_free_address`: a real colliding pair.
+- `probing_wraps_and_the_pool_can_fill`.
+- `clearing_conflicts_re_enables_names`.
+- Mutants killed: "hash changed" and "sequential allocation".
+- `cargo test`: 339 pass. Clippy has no findings in the changed files.
+
+**Live check**
+- On the F4 lab (client on this PC, connector and shield on luffy), with this build installed, the names resolved to their pinned addresses: `192-168-1-164.nip.io → 198.18.130.157` and `192-168-1-48.nip.io → 198.18.46.98`.
+- After `systemctl restart zecurity-client` (new PID), the tunnel came back by itself, the addresses were unchanged, and both names still answered HTTP 200.
 

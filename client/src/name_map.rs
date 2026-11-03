@@ -7,9 +7,14 @@
 //! the tunnel request maps it back: the connector authorizes and resolves the
 //! **name** (PENDING-14 §4.3).
 //!
-//! The mapping is process-wide and stable for the daemon's lifetime: a name
-//! keeps its address across ACL updates, and an address is never reused for
-//! another name, so an old connection can never be redirected.
+//! A name's address is **derived from the name** (FNV-1a 64 of the name into
+//! the pool, PENDING-14 F-9), so it is the same after a daemon restart, an
+//! upgrade or a reboot: an application that cached it reaches the same
+//! resource. Within one daemon run an address is never reused for another
+//! name, so an old connection can never be redirected. Two names that hash
+//! to the same slot are separated by probing to the next free address; for
+//! such a pair, which one keeps the slot depends on the order the daemon
+//! first sees them (the ACL order, normally unchanged across restarts).
 //!
 //! The DNS answerer (`dns.rs`) answers only names in the **active** set (the
 //! names in the currently applied ACL); a removed name keeps its address but
@@ -61,9 +66,24 @@ pub fn is_resource_name(address: &str) -> bool {
             .any(|c| c.is_ascii_lowercase())
 }
 
+/// Number of addresses in the pool.
+const POOL_SIZE: u32 = POOL_LAST - POOL_FIRST + 1;
+
+/// The pool slot a name hashes to: FNV-1a 64 of its bytes. **Never change
+/// this function**: the addresses it yields must stay the same across client
+/// versions (applications and resolvers cache them). `stable_addresses_are_pinned`
+/// fails if it changes.
+fn home_slot(name: &str) -> u32 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % u64::from(POOL_SIZE)) as u32
+}
+
 #[derive(Default)]
 pub struct NameMap {
-    next: u32,
     by_name: HashMap<String, Ipv4Addr>,
     by_ip: HashMap<Ipv4Addr, String>,
     active: BTreeSet<String>,
@@ -74,9 +94,10 @@ pub struct NameMap {
 }
 
 impl NameMap {
-    /// The fake address for `name`, allocating one on first use. None when
-    /// the name is invalid, the pool is exhausted, or the reserved range is
-    /// in use by a real resource.
+    /// The fake address for `name`: its hashed slot (`home_slot`), or the
+    /// next free one if another name already holds that slot. None when the
+    /// name is invalid, the pool is full, or the reserved range is in use by
+    /// a real resource.
     pub fn fake_ip_for(&mut self, name: &str) -> Option<Ipv4Addr> {
         if !is_resource_name(name) || !self.conflicts.is_empty() {
             return None;
@@ -84,17 +105,17 @@ impl NameMap {
         if let Some(ip) = self.by_name.get(name) {
             return Some(*ip);
         }
-        let n = if self.next == 0 {
-            POOL_FIRST
-        } else {
-            self.next
-        };
-        if n > POOL_LAST {
+        let home = home_slot(name);
+        let ip = (0..POOL_SIZE)
+            .map(|i| Ipv4Addr::from(POOL_FIRST + (home + i) % POOL_SIZE))
+            .find(|ip| !self.by_ip.contains_key(ip));
+        let Some(ip) = ip else {
             tracing::warn!(name, "DNS name resources: fake address pool exhausted");
             return None;
+        };
+        if ip != Ipv4Addr::from(POOL_FIRST + home) {
+            tracing::info!(name, %ip, "DNS name resources: hashed address taken by another name; using the next free one");
         }
-        self.next = n + 1;
-        let ip = Ipv4Addr::from(n);
         self.by_name.insert(name.to_string(), ip);
         self.by_ip.insert(ip, name.to_string());
         Some(ip)
@@ -127,6 +148,14 @@ impl NameMap {
 
     pub fn conflict(&self) -> Option<Ipv4Addr> {
         self.conflicts.iter().next().copied()
+    }
+
+    /// Forget the recorded reserved-range clashes. Called when the tunnel
+    /// goes down: the next bring-up records only the clashes its ACL still
+    /// has, so removing the clashing resource and restarting the tunnel
+    /// re-enables names (no daemon restart needed).
+    pub fn clear_conflicts(&mut self) {
+        self.conflicts.clear();
     }
 }
 
@@ -199,8 +228,14 @@ mod tests {
         let mut m = NameMap::default();
         let a = m.fake_ip_for("a.example").unwrap();
         let b = m.fake_ip_for("b.example").unwrap();
-        assert_eq!(a, Ipv4Addr::new(198, 18, 0, 1));
-        assert_eq!(b, Ipv4Addr::new(198, 18, 0, 2));
+        assert_ne!(a, b);
+        for ip in [a, b] {
+            assert!(ip.octets()[0] == 198 && ip.octets()[1] == 18, "{ip}");
+            assert!(
+                ip != Ipv4Addr::new(198, 18, 0, 0) && ip != Ipv4Addr::new(198, 18, 255, 255),
+                "{ip}"
+            );
+        }
         assert_eq!(m.fake_ip_for("a.example"), Some(a), "stable");
         assert_eq!(m.name_for(a), Some("a.example"));
         assert!(m.fake_ip_for("localhost").is_none());
@@ -229,16 +264,86 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_ends_at_198_18_255_254() {
-        let mut m = NameMap {
-            next: POOL_LAST,
-            ..Default::default()
-        };
+    fn stable_addresses_are_pinned() {
+        // Computed independently (FNV-1a 64, mod 65534, from 198.18.0.1).
+        // If this fails, addresses changed for every installed client.
+        let mut m = NameMap::default();
+        for (name, ip) in [
+            ("db.internal", Ipv4Addr::new(198, 18, 230, 163)),
+            ("192-168-1-164.nip.io", Ipv4Addr::new(198, 18, 130, 157)),
+            ("a.example", Ipv4Addr::new(198, 18, 201, 129)),
+        ] {
+            assert_eq!(m.fake_ip_for(name), Some(ip), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_restart_gives_the_same_addresses_whatever_the_order() {
+        let names = [
+            "db.internal",
+            "web.acme.example",
+            "x.y2k",
+            "api-1.svc.cluster.local",
+        ];
+        let mut first = NameMap::default();
+        let before: Vec<_> = names
+            .iter()
+            .map(|n| first.fake_ip_for(n).unwrap())
+            .collect();
+        let mut restarted = NameMap::default();
+        for n in names.iter().rev() {
+            restarted.fake_ip_for(n);
+        }
+        let after: Vec<_> = names
+            .iter()
+            .map(|n| restarted.fake_ip_for(n).unwrap())
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_hash_collision_takes_the_next_free_address() {
+        // n132.example and n369.example share slot 31761 (198.18.124.18).
+        let mut m = NameMap::default();
         assert_eq!(
-            m.fake_ip_for("last.example"),
-            Some(Ipv4Addr::new(198, 18, 255, 254))
+            m.fake_ip_for("n132.example"),
+            Some(Ipv4Addr::new(198, 18, 124, 18))
         );
-        assert_eq!(m.fake_ip_for("over.example"), None);
+        assert_eq!(
+            m.fake_ip_for("n369.example"),
+            Some(Ipv4Addr::new(198, 18, 124, 19))
+        );
+        assert_eq!(
+            m.name_for(Ipv4Addr::new(198, 18, 124, 19)),
+            Some("n369.example")
+        );
+    }
+
+    #[test]
+    fn probing_wraps_and_the_pool_can_fill() {
+        // w15805.example hashes to the last address; taken, it wraps to the first.
+        let mut m = NameMap::default();
+        m.by_ip
+            .insert(Ipv4Addr::new(198, 18, 255, 254), "holder.example".into());
+        assert_eq!(
+            m.fake_ip_for("w15805.example"),
+            Some(Ipv4Addr::new(198, 18, 0, 1))
+        );
+
+        let mut full = NameMap::default();
+        for n in POOL_FIRST..=POOL_LAST {
+            full.by_ip.insert(Ipv4Addr::from(n), String::new());
+        }
+        assert_eq!(full.fake_ip_for("late.example"), None, "pool full");
+    }
+
+    #[test]
+    fn clearing_conflicts_re_enables_names() {
+        let mut m = NameMap::default();
+        m.note_literal(Ipv4Addr::new(198, 18, 7, 7));
+        assert!(m.fake_ip_for("c.example").is_none());
+        m.clear_conflicts();
+        assert!(m.fake_ip_for("c.example").is_some());
     }
 
     #[test]

@@ -3661,3 +3661,8 @@ serves on `127.0.0.1:9102`.
     - hot add and remove;
     - rule-removed fallback.
   - Three fixes from the run: a connector loop when it shares a host with a client; the polkit rule scoped to the service by cgroup; shield refusals now logged on the controller.
+- PENDING-14 F-9 (same day):
+  - Fake addresses are derived from the name (FNV-1a), so they survive daemon restarts.
+  - A reserved-range clash is re-checked when the tunnel restarts.
+  - Live check: pinned addresses unchanged across `systemctl restart zecurity-client`.
+  - Branch `feat/pending14-stable-fake-addresses`.
