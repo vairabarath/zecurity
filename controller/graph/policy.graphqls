@@ -6,6 +6,16 @@ type Group {
   resources:   [Resource!]!
   createdAt:   String!
   updatedAt:   String!
+
+  # Where this group came from (ADR-025 §7): "manual" | "scim" | "system".
+  # The UI MUST render origin alongside every group name — a directory-pushed
+  # group and a local one can share a display name, and confusing them is an
+  # authorization mistake. Read-only: the directory owns scim-origin groups.
+  origin:       String!
+  # SCIM group id for scim-origin groups; null for manual/system.
+  externalId:   String
+  # The IdP connection that pushed this group; null for manual/system.
+  connectionId: ID
 }
 
 extend type Resource {
@@ -13,18 +23,18 @@ extend type Resource {
 }
 
 extend type Query {
-  groups: [Group!]! @hasRole(roles: [ADMIN])
-  group(id: ID!): Group @hasRole(roles: [ADMIN])
+  groups: [Group!]! @requires(capability: CONSOLE_READ)
+  group(id: ID!): Group @requires(capability: CONSOLE_READ)
 }
 
 extend type Mutation {
-  createGroup(name: String!, description: String): Group! @hasRole(roles: [ADMIN])
-  updateGroup(id: ID!, name: String, description: String): Group! @hasRole(roles: [ADMIN])
-  deleteGroup(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  createGroup(name: String!, description: String): Group! @requires(capability: ACCESS_WRITE)
+  updateGroup(id: ID!, name: String, description: String): Group! @requires(capability: ACCESS_WRITE)
+  deleteGroup(id: ID!): Boolean! @requires(capability: ACCESS_WRITE)
 
-  addGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
-  removeGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
+  addGroupMember(groupId: ID!, userId: ID!): Group! @requires(capability: ACCESS_WRITE)
+  removeGroupMember(groupId: ID!, userId: ID!): Group! @requires(capability: ACCESS_WRITE)
 
-  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
-  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
+  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource! @requires(capability: ACCESS_WRITE)
+  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource! @requires(capability: ACCESS_WRITE)
 }

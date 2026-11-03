@@ -4,10 +4,12 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 // TestPushACLSnapshot_DeliversCachedAndRespectsGate verifies the heartbeat path
@@ -20,10 +22,11 @@ func TestPushACLSnapshot_DeliversCachedAndRespectsGate(t *testing.T) {
 	const ws = "ws-A"
 	cache := policy.NewSnapshotCache()
 	// Seed via the public epoch-aware store (Set is unexported after the ADR-013 seal).
-	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, cache.Epoch(ws))
+	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, time.Time{}, cache.Epoch(ws))
 
 	h := &EnrollmentHandler{
 		PolicyStore:    policy.NewStore(nil), // non-nil for the guard; never used on a cache hit
+		PostureStore: posture.NewStore(nil),
 		PolicyCache:    cache,
 		PolicyNotifier: policy.NewNotifier(cache),
 	}
@@ -94,9 +97,10 @@ func TestClientsForWorkspace_EmptyWhenNone(t *testing.T) {
 // not change the already-returned slice (callers send outside the lock).
 func TestClientsForWorkspace_ReturnsCopy(t *testing.T) {
 	r := NewConnectorRegistry()
-	r.add("c1", testClient("c1", "ws-A"))
+	c1 := testClient("c1", "ws-A")
+	r.add("c1", c1)
 	got := r.ClientsForWorkspace("ws-A")
-	r.remove("c1")
+	r.removeIfCurrent("c1", c1)
 	if len(got) != 1 {
 		t.Fatalf("returned slice changed after remove: got %d", len(got))
 	}
@@ -117,10 +121,11 @@ func TestRegistry_ConcurrentAddRemoveScan(t *testing.T) {
 			id := "c" + string(rune('a'+w))
 			ws := "ws-" + string(rune('a'+(w%3)))
 			for i := 0; i < iters; i++ {
-				r.add(id, testClient(id, ws))
+				c := testClient(id, ws)
+				r.add(id, c)
 				_ = r.get(id)
 				_ = r.ClientsForWorkspace(ws)
-				r.remove(id)
+				r.removeIfCurrent(id, c)
 			}
 		}(w)
 	}

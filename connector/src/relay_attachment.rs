@@ -62,7 +62,6 @@ impl RelayAttachmentSlot {
             guard.active = None;
         }
     }
-
 }
 
 pub fn new_slot() -> RelayAttachmentSlot {

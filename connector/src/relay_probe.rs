@@ -62,6 +62,7 @@ pub async fn probe_relays(
     key_pem: &[u8],
     workspace_ca_pem: &[u8],
     intermediate_ca_pem: &[u8],
+    relay_crl_manager: crate::crl::CrlManager,
     max_concurrent: usize,
     probe_timeout: Duration,
 ) -> Vec<RelayProbeResult> {
@@ -79,6 +80,7 @@ pub async fn probe_relays(
         let workspace_ca_pem = workspace_ca_pem.to_owned();
         let intermediate_ca_pem = intermediate_ca_pem.to_owned();
         let candidate = candidate.clone();
+        let relay_crl_manager = relay_crl_manager.clone();
         set.spawn(async move {
             let _permit = permits.acquire_owned().await.ok()?;
             probe_one(
@@ -88,6 +90,7 @@ pub async fn probe_relays(
                 &key_pem,
                 &workspace_ca_pem,
                 &intermediate_ca_pem,
+                relay_crl_manager,
                 probe_timeout,
             )
             .await
@@ -110,6 +113,7 @@ async fn probe_one(
     key_pem: &[u8],
     workspace_ca_pem: &[u8],
     intermediate_ca_pem: &[u8],
+    relay_crl_manager: crate::crl::CrlManager,
     probe_timeout: Duration,
 ) -> Option<RelayProbeResult> {
     let socket_addr = tokio::net::lookup_host(&candidate.relay_addr)
@@ -130,6 +134,7 @@ async fn probe_one(
             key_pem,
             workspace_ca_pem,
             intermediate_ca_pem,
+            relay_crl_manager,
             PROBE_BIDI_STREAM_LIMIT,
             PROBE_IDLE_TIMEOUT,
         ),

@@ -40,7 +40,7 @@ tags:
 
 ### 1. Modify `proto/shield/v1/shield.proto`
 
-- [ ] Add `ResourceInstruction` message:
+- [x] Add `ResourceInstruction` message:
   ```protobuf
   message ResourceInstruction {
     string resource_id = 1;
@@ -51,7 +51,7 @@ tags:
     string action      = 6;  // "apply" or "remove"
   }
   ```
-- [ ] Add `ResourceAck` message:
+- [x] Add `ResourceAck` message:
   ```protobuf
   message ResourceAck {
     string resource_id      = 1;
@@ -61,19 +61,19 @@ tags:
     bool   port_reachable   = 5;
   }
   ```
-- [ ] Add to `HeartbeatResponse`:
+- [x] Add to `HeartbeatResponse`:
   ```protobuf
   repeated ResourceInstruction resources = 4;  // pending instructions from Controller
   ```
-- [ ] Add to `HeartbeatRequest`:
+- [x] Add to `HeartbeatRequest`:
   ```protobuf
   repeated ResourceAck resource_acks = 5;  // Shield reports back results
   ```
-- [ ] **Never change existing field numbers.** Current HeartbeatRequest max = 4 (lan_ip). Use 5.
+- [x] **Never change existing field numbers.** Current HeartbeatRequest max = 4 (lan_ip). Use 5.
 
 ### 2. Modify `proto/connector/v1/connector.proto`
 
-- [ ] Add `ShieldResourceInstructions` wrapper message:
+- [x] Add `ShieldResourceInstructions` wrapper message:
   ```protobuf
   message ShieldResourceInstructions {
     repeated ResourceInstruction instructions = 1;
@@ -81,20 +81,20 @@ tags:
   ```
   > Re-use `ResourceInstruction` from shield.proto OR define inline — keep in connector.proto for connector-side codegen.
 
-- [ ] Add to `HeartbeatResponse` (Connector ↔ Controller):
+- [x] Add to `HeartbeatResponse` (Connector ↔ Controller):
   ```protobuf
   // keyed by shield_id → list of pending resource instructions for that shield
   map<string, ShieldResourceInstructions> shield_resources = N;
   ```
   > Check current max field number in HeartbeatResponse and use next available.
 
-- [ ] Add to `HeartbeatRequest` (Connector → Controller):
+- [x] Add to `HeartbeatRequest` (Connector → Controller):
   ```protobuf
   repeated ResourceAck resource_acks = N;  // forwarded from all shields
   ```
   > Check current max field in HeartbeatRequest (currently: connector_id=1, status=2, version=3, hostname=4, public_ip=5, lan_addr=6, shields=7 — use 8).
 
-- [ ] **Never change or reuse existing field numbers.**
+- [x] **Never change or reuse existing field numbers.**
 
 ### 3. Create `controller/migrations/007_resources.sql`
 
@@ -133,10 +133,10 @@ CREATE INDEX idx_resources_managing
   WHERE status IN ('managing','removing') AND deleted_at IS NULL;
 ```
 
-- [ ] File created at `controller/migrations/007_resources.sql`
-- [ ] `UNIQUE (shield_id, name)` constraint present
-- [ ] Both partial indexes created
-- [ ] `last_verified_at` column present (updated every heartbeat port check)
+- [x] File created at `controller/migrations/007_resources.sql`
+- [x] `UNIQUE (shield_id, name)` constraint present
+- [x] Both partial indexes created
+- [x] `last_verified_at` column present (updated every heartbeat port check)
 
 ### 4. Create `controller/graph/resource.graphqls`
 
@@ -181,9 +181,9 @@ extend type Mutation {
 }
 ```
 
-- [ ] File created at `controller/graph/resource.graphqls`
-- [ ] `shield` field is nullable (null when no shield on host)
-- [ ] `createResource` input has no `shieldId` — auto-matched by Controller
+- [x] File created at `controller/graph/resource.graphqls`
+- [x] `shield` field is nullable (null when no shield on host)
+- [x] `createResource` input has no `shieldId` — auto-matched by Controller
 
 ### 5. Run codegen (team step)
 
@@ -195,9 +195,9 @@ buf generate
 go generate ./graph/...
 ```
 
-- [ ] `buf generate` runs cleanly
-- [ ] `cd controller && go build ./...` passes (new stubs compile)
-- [ ] gqlgen `generated.go` regenerated with Resource resolvers
+- [x] `buf generate` runs cleanly
+- [x] `cd controller && go build ./...` passes (new stubs compile)
+- [x] gqlgen `generated.go` regenerated with Resource resolvers
 
 ---
 

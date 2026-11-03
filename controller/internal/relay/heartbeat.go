@@ -31,15 +31,26 @@ const (
 )
 
 type heartbeatStore interface {
-	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
+	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
-	InsertProvisionedRelay(ctx context.Context, id, name string, dnsAllowlist, ipAllowlist []string, certSerial string, certNotAfter time.Time, version, hostname string) error
-	ListWorkspacesForRelay(ctx context.Context, relayID string) ([]string, error)
+	// LoadRelayByID lets Provision validate the operator-registered row
+	// (status + SAN allowlists) before the provisioning token is burned.
+	LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
+	// RelayCertStatus and RecordRenewedCert back RenewCert (D-19).
+	RelayCertStatus(ctx context.Context, relayID, serial string) (known, revoked bool, err error)
+	RecordRenewedCert(ctx context.Context, relayID, presentedSerial, newSerial string, notAfter time.Time) (int, error)
+	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
+	// RevokedConnectorSPIFFEIDs answers Phase D: which of the relay's
+	// registered connector identities are revoked.
+	RevokedConnectorSPIFFEIDs(ctx context.Context, spiffeIDs []string) ([]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
 
-type policyChangeNotifier interface {
-	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+// topologyChangeNotifier is the transport-plane notifier (ADR-017). A relay
+// metadata/eviction event is a topology change, NOT a policy change: it updates
+// connectivity for the connectors on that relay without recompiling the ACL.
+type topologyChangeNotifier interface {
+	NotifyTopologyChange(ctx context.Context, workspaceID string, connectorIDs []string) error
 }
 
 type relayAddressObservation struct {
@@ -53,25 +64,18 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	if spiffe.Role(ctx) != appmeta.SPIFFERoleRelay ||
-		spiffe.TrustDomain(ctx) != appmeta.SPIFFEGlobalTrustDomain {
-		return nil, status.Error(codes.PermissionDenied, "authenticated Relay identity required")
-	}
-	relayID, err := canonicalRelayID(spiffe.EntityID(ctx))
+	// When the relay's connection count was measured: it reads its counter while
+	// building the request, so the receive time is off by one RPC's transit.
+	// Taken before any cache or DB work (Sprint 22 Phase D).
+	receivedAt := time.Now().UTC()
+	relayID, leaf, err := authenticatedRelay(ctx)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "authenticated Relay ID is invalid")
-	}
-	leaf, err := authenticatedLeaf(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != appmeta.RelaySPIFFEID(relayID) {
-		return nil, status.Error(codes.Unauthenticated, "authenticated Relay certificate identity mismatch")
+		return nil, err
 	}
 	if s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Relay heartbeat store is not configured")
 	}
-	addr := observeRelayPeerAddress(ctx, req.ListenPort)
+	addr := observeRelayPeerAddress(ctx, req.ListenPort, s.allowPrivateAddrs)
 	log.Printf("relay heartbeat: received from relay=%s version=%s hostname=%s cert_serial=%s cert_not_after=%s",
 		relayID, req.Version, req.Hostname, leaf.SerialNumber.Text(16), leaf.NotAfter.Format(time.RFC3339))
 
@@ -96,10 +100,14 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	} else {
 		metadataChanged = true // no cache: always notify
 	}
+	// Connector-revocation Phase D: on every heartbeat — throttled or not —
+	// tell the relay which of its registered connectors are revoked.
+	revoked := s.revokedConnectorSubset(ctx, relayID, req.RegisteredConnectorSpiffeIds)
 	if !shouldWriteDB {
 		return &relaypb.HeartbeatResponse{
-			ServerTimeUnix:       time.Now().UTC().Unix(),
-			NextHeartbeatSeconds: uint32(defaultHeartbeatInterval / time.Second),
+			ServerTimeUnix:            time.Now().UTC().Unix(),
+			NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
+			RevokedConnectorSpiffeIds: revoked,
 		}, nil
 	}
 
@@ -116,6 +124,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		addr.PublicAddr,
 		req.ConnectionCount,
 		req.MaxConnections,
+		receivedAt,
 	); err != nil {
 		log.Printf("relay heartbeat: record %s: %v", relayID, err)
 		if errors.Is(err, ErrRelayNotFound) {
@@ -139,7 +148,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 			relayID, transition.PreviousLabel, transition.NewLabel)
 	}
 	if metadataChanged || transition.Promoted {
-		s.notifyRelayWorkspaces(ctx, relayID)
+		s.notifyRelayTopology(ctx, relayID)
 		// ADR-016 C5: pool change → push fresh LabelledRelayList to all
 		// connected connectors. metadataChanged catches address/SPIFFE shifts
 		// and first-time eligibility; Promoted catches tier transitions.
@@ -148,23 +157,47 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		}
 	}
 	return &relaypb.HeartbeatResponse{
-		ServerTimeUnix:       time.Now().UTC().Unix(),
-		NextHeartbeatSeconds: uint32(defaultHeartbeatInterval / time.Second),
+		ServerTimeUnix:            time.Now().UTC().Unix(),
+		NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
+		RevokedConnectorSpiffeIds: revoked,
 	}, nil
 }
 
-func (s *Service) notifyRelayWorkspaces(ctx context.Context, relayID string) {
+// revokedConnectorSubset looks up which registered connector identities are
+// revoked. A lookup failure is logged and answered with an empty list: the
+// relay's revoked set is sticky (D20), so an empty answer unblocks nothing,
+// and failing the RPC would only make the relay reconnect.
+func (s *Service) revokedConnectorSubset(ctx context.Context, relayID string, registered []string) []string {
+	if len(registered) == 0 {
+		return nil
+	}
+	revoked, err := s.store.RevokedConnectorSPIFFEIDs(ctx, registered)
+	if err != nil {
+		log.Printf("relay heartbeat: revoked connector lookup %s: %v — answering none (relay keeps its last list)", relayID, err)
+		return nil
+	}
+	if len(revoked) > 0 {
+		log.Printf("relay heartbeat: relay %s holds %d revoked connector(s)", relayID, len(revoked))
+	}
+	return revoked
+}
+
+// notifyRelayTopology fires a transport-plane topology change for every
+// workspace with connectors on this relay, targeting only those connectors. It
+// deliberately does NOT recompile the ACL — a relay metadata change is
+// connectivity, not authorization (the Track B decoupling invariant).
+func (s *Service) notifyRelayTopology(ctx context.Context, relayID string) {
 	if s.notifier == nil {
 		return
 	}
-	workspaceIDs, err := s.store.ListWorkspacesForRelay(ctx, relayID)
+	byWorkspace, err := s.store.ListConnectorsForRelay(ctx, relayID)
 	if err != nil {
-		log.Printf("relay heartbeat: list workspaces for relay %s: %v", relayID, err)
+		log.Printf("relay heartbeat: list connectors for relay %s: %v", relayID, err)
 		return
 	}
-	for _, wsID := range workspaceIDs {
-		if err := s.notifier.NotifyPolicyChange(ctx, wsID); err != nil {
-			log.Printf("relay heartbeat: notify workspace %s: %v", wsID, err)
+	for wsID, connectorIDs := range byWorkspace {
+		if err := s.notifier.NotifyTopologyChange(ctx, wsID, connectorIDs); err != nil {
+			log.Printf("relay heartbeat: notify topology workspace %s: %v", wsID, err)
 		}
 	}
 }
@@ -194,6 +227,15 @@ func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial s
 		return true, true, fmt.Errorf("get db-write marker: %w", err)
 	}
 	dbWriteDue := err == valkeycompat.Nil
+	// A draining relay persists every heartbeat, so the console sees a fresh
+	// connection count (Sprint 22 Phase D). A failed flag read counts as due.
+	if !dbWriteDue {
+		draining, flagErr := s.drainingFlagSet(ctx, relayID)
+		if flagErr != nil {
+			log.Printf("relay heartbeat: read draining flag %s: %v", relayID, flagErr)
+		}
+		dbWriteDue = draining || flagErr != nil
+	}
 
 	if err := s.redis.Set(ctx, metadataKey, metadataValue, livenessTTL).Err(); err != nil {
 		return true, true, fmt.Errorf("set metadata key: %w", err)
@@ -213,6 +255,49 @@ func (s *Service) markRelayHeartbeatDBWritten(ctx context.Context, relayID strin
 	return s.redis.Set(ctx, relayHeartbeatDBWritePrefix+relayID, strconv.FormatInt(time.Now().UTC().Unix(), 10), interval).Err()
 }
 
+// LastHeartbeat reads the Valkey liveness key written on EVERY heartbeat
+// (relay:heartbeat:last:<id>). ok=false means no liveness signal: the key is
+// absent, or no cache is configured (then every heartbeat writes Postgres, so
+// the persisted timestamp is authoritative).
+func (s *Service) LastHeartbeat(ctx context.Context, relayID string) (time.Time, bool, error) {
+	if s.redis == nil {
+		return time.Time{}, false, nil
+	}
+	raw, err := s.redis.Get(ctx, relayHeartbeatLastPrefix+relayID).Result()
+	if err == valkeycompat.Nil {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("get liveness key: %w", err)
+	}
+	unix, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse liveness key %q: %w", raw, err)
+	}
+	return time.Unix(unix, 0).UTC(), true, nil
+}
+
+// ClearHeartbeatThrottle deletes the write-throttling markers for an evicted
+// relay so its next heartbeat persists to Postgres (RecordHeartbeat re-activates
+// it) and is treated as a metadata change (the relay list is re-broadcast so
+// connectors see the relay again). The liveness key is deliberately left alone.
+func (s *Service) ClearHeartbeatThrottle(ctx context.Context, relayID string) error {
+	if s.redis == nil {
+		return nil
+	}
+	// One DEL per key: valkey-go rejects (panics on) a multi-key command whose
+	// keys hash to different cluster slots.
+	for _, key := range []string{
+		relayHeartbeatDBWritePrefix + relayID,
+		relayHeartbeatMetadataPrefix + relayID,
+	} {
+		if err := s.redis.Del(ctx, key).Err(); err != nil {
+			return fmt.Errorf("clear heartbeat throttle marker %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
 func relayHeartbeatMetadataValue(certSerial string, certNotAfter time.Time, version, hostname string, addr relayAddressObservation) string {
 	parts := []string{
 		certSerial,
@@ -227,6 +312,30 @@ func relayHeartbeatMetadataValue(certSerial string, certNotAfter time.Time, vers
 	return strings.Join(parts, "\x00")
 }
 
+// authenticatedRelay returns the relay ID and presented leaf for an mTLS relay
+// call (Heartbeat, RenewCert). The SPIFFE interceptor has already verified the
+// chain to the Platform Intermediate and the relay revocation list; this
+// re-checks role, trust domain, canonical ID and that the leaf's single URI SAN
+// is exactly this relay's SPIFFE ID. Errors are gRPC status errors.
+func authenticatedRelay(ctx context.Context) (string, *x509.Certificate, error) {
+	if spiffe.Role(ctx) != appmeta.SPIFFERoleRelay ||
+		spiffe.TrustDomain(ctx) != appmeta.SPIFFEGlobalTrustDomain {
+		return "", nil, status.Error(codes.PermissionDenied, "authenticated Relay identity required")
+	}
+	relayID, err := canonicalRelayID(spiffe.EntityID(ctx))
+	if err != nil {
+		return "", nil, status.Error(codes.Unauthenticated, "authenticated Relay ID is invalid")
+	}
+	leaf, err := authenticatedLeaf(ctx)
+	if err != nil {
+		return "", nil, status.Error(codes.Unauthenticated, err.Error())
+	}
+	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != appmeta.RelaySPIFFEID(relayID) {
+		return "", nil, status.Error(codes.Unauthenticated, "authenticated Relay certificate identity mismatch")
+	}
+	return relayID, leaf, nil
+}
+
 func authenticatedLeaf(ctx context.Context) (*x509.Certificate, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -239,7 +348,7 @@ func authenticatedLeaf(ctx context.Context) (*x509.Certificate, error) {
 	return tlsInfo.State.PeerCertificates[0], nil
 }
 
-func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddressObservation {
+func observeRelayPeerAddress(ctx context.Context, listenPort uint32, allowPrivate bool) relayAddressObservation {
 	observation := relayAddressObservation{Scope: "unknown"}
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.Addr == nil {
@@ -260,20 +369,28 @@ func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddres
 		observation.ObservedPort = port
 	}
 
+	advertise := func() string {
+		port := defaultRelayPublicPort
+		if listenPort > 0 && listenPort <= 65535 {
+			port = strconv.FormatUint(uint64(listenPort), 10)
+		}
+		return net.JoinHostPort(ip.String(), port)
+	}
 	switch {
 	case ip.IsLoopback():
 		observation.Scope = "loopback"
 	case ip.IsPrivate():
 		observation.Scope = "private"
+		// Development labs only (WithPrivateRelayAddrs): a LAN relay is
+		// advertised at its private address. The scope stays "private".
+		if allowPrivate {
+			observation.PublicAddr = advertise()
+		}
 	case ip.IsLinkLocalUnicast():
 		observation.Scope = "link_local"
 	case ip.IsGlobalUnicast():
 		observation.Scope = "public"
-		port := defaultRelayPublicPort
-		if listenPort > 0 && listenPort <= 65535 {
-			port = strconv.FormatUint(uint64(listenPort), 10)
-		}
-		observation.PublicAddr = net.JoinHostPort(ip.String(), port)
+		observation.PublicAddr = advertise()
 	default:
 		observation.Scope = "unknown"
 	}

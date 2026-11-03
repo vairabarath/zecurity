@@ -1,0 +1,252 @@
+---
+type: phase
+member: M2
+person: Barath
+sprint: 20
+phase: 3
+execution: F
+title: Relay In-Band Certificate Renewal (D-19)
+status: implemented   # F-1 + F-2 done; live acceptance PENDING
+depends_on: [2]
+tags:
+  - go
+  - rust
+  - relay
+  - pki
+  - proto
+  - renewal
+  - provider-dashboard
+---
+
+# Phase 3 (F) — Relay In-Band Certificate Renewal (D-19)
+
+> Depends on Phase 2 (C): renewal applies the same stored-allowlist SAN rule.
+> Implements **D-19** exactly: in-band `RelayService.RenewCert` over the existing mTLS channel, same
+> key, CSR proof of possession, scheduled by the relay before expiry, recorded in `relay_certificates`.
+> **D-20** applies: an already-expired or lost-key relay is replaced, not recovered.
+
+## Problem (verified)
+
+- `proto/relay/v1/relay.proto` has only `Provision` and `Heartbeat`.
+- The relay loads its cert once (`relay/src/main.rs:43-54`) and skips provisioning whenever cert files exist (`provision.rs:26-57`).
+- `RELAY_CERT_TTL` defaults to 30 d (`main.go:212`). After that, heartbeats and every peer handshake fail.
+- `Store.RecordIssuedCert` (`store.go:155`) exists with no callers.
+- `relay.Service` embeds `relaypb.UnimplementedRelayServiceServer` (`provision.go:21`), so adding the RPC is build-safe before the handler exists.
+
+## Goal
+
+A relay renews its certificate automatically, well before expiry, with the **same private key**.
+The new serial is tracked in `relay_certificates`, and revoking the relay revokes every serial it
+ever held, including one issued concurrently with the revoke.
+
+## Files
+
+| File | Change |
+|------|--------|
+| `proto/relay/v1/relay.proto` | **Additive**: `rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);` + two new messages |
+| `controller/internal/relay/renew.go` (new) | `Service.RenewCert` handler |
+| `controller/internal/relay/heartbeat.go` | Factor the relay-identity checks (role, trust domain, canonical ID, single URI SAN) into a shared helper used by `Heartbeat` and `RenewCert` |
+| `controller/internal/relay/store.go` | `RecordRenewedCert` (transactional); reuse/retire `RecordIssuedCert` |
+| `controller/internal/relay/renew_test.go` (new), `store_renew_integration_test.go` (new) | Tests |
+| `relay/src/renewal.rs` (new) | Scheduler + RPC call + atomic file write |
+| `relay/src/csr.rs` | Build a CSR from the **existing** key (today `generate_relay_csr` generates a new key) |
+| `relay/src/tls.rs`, `relay/src/listener.rs` | Swappable server certificate via a rustls `ResolvesServerCert` holding an `ArcSwap<CertifiedKey>` (or equivalent) |
+| `relay/src/heartbeat.rs` | Take the identity from the shared holder so the next (re)connect uses the renewed cert; reconnect promptly after a swap |
+| `relay/src/main.rs` | Construct the shared holder; spawn the renewal task |
+
+## Proto (additive only)
+
+```proto
+service RelayService {
+  rpc Provision(ProvisionRequest) returns (ProvisionResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Renews the Relay's own certificate over mTLS. Same key pair (CSR proof of
+  // possession); SANs must stay within the relay's registered allowlist.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+}
+
+message RenewCertRequest {
+  bytes csr_der = 1;            // PKCS#10 CSR signed by the relay's CURRENT private key
+}
+
+message RenewCertResponse {
+  bytes certificate_pem      = 1;
+  bytes intermediate_ca_pem  = 2;
+  int64 cert_not_after_unix  = 3;
+  int64 cert_not_before_unix = 4;
+}
+```
+
+New messages, new field numbers. No existing field is touched. Run `buf generate` from the repo root.
+
+## Controller handler (`Service.RenewCert`)
+
+The call is **not** added to the interceptor skip list: `UnarySPIFFEInterceptor` already verifies
+the relay chain to the Intermediate and consults `RelayRevocationChecker`.
+
+1. Relay identity (shared helper with `Heartbeat`): role `relay`, trust domain `zecurity.in`, canonical UUID, leaf with exactly one URI SAN = `RelaySPIFFEID(id)`. On failure → `Unauthenticated` / `PermissionDenied`.
+2. Load the row (`LoadRelayByID`). `status` must be `active` or `inactive`. `pending`, `revoked` or `deleted` → `FailedPrecondition`.
+3. **Presented serial must be known and unrevoked** in `relay_certificates` (defense in depth over the 60 s revocation-checker refresh). Otherwise → `PermissionDenied`.
+   *Edge case:* a relay provisioned before migration 027 has no `relay_certificates` row and is refused here. Its cert is ≤ 30 d old by construction, so it reaches expiry and is replaced (D-20). Check the dev/staging DBs for such rows before shipping, and record the finding in Post-Phase Fixes.
+4. Parse CSR, `CheckSignature()`. The CSR public key must **equal** the presented leaf's public key (D-19: same key). Otherwise → `PermissionDenied`.
+5. SANs: CSR DNS/IP SANs ⊆ stored `dns_allowlist` / `ip_allowlist` (Phase C rule); URI SAN checked by `SignRelayCert`.
+6. `pki.SignRelayCert(ctx, relayID, csr, storedDNS, storedIPs, s.certTTL)` (unchanged function).
+7. `store.RecordRenewedCert(...)`; see below. On `ErrRelayRevoked` / not found → `PermissionDenied` and **do not return the cert**.
+8. Respond with cert PEM, Intermediate PEM, not_before / not_after.
+9. Log `relay cert renewed relay=<id> old_serial=<> new_serial=<> not_after=<>`.
+
+### `RecordRenewedCert` (one transaction; closes the renew-vs-revoke race)
+
+```sql
+BEGIN;
+SELECT status FROM relays WHERE id = $1 FOR UPDATE;            -- same lock RevokeRelay takes
+-- abort with ErrRelayRevoked unless status IN ('active','inactive')
+INSERT INTO relay_certificates (relay_id, serial, not_after) VALUES ($1, $2, $3);
+UPDATE relays SET cert_serial = $2, cert_not_after = $3, updated_at = NOW() WHERE id = $1;
+COMMIT;
+```
+
+`RevokeRelay` (`store.go:231-281`) locks the same row `FOR UPDATE`, then revokes every unrevoked
+`relay_certificates` row. With both sides locking the row, a renewal committed first is revoked by
+the later revoke, and a renewal attempted after revoke aborts.
+
+## Relay side (Rust)
+
+### Scheduler (`renewal.rs`)
+
+- Renew when remaining lifetime ≤ **2/5** of total lifetime (same ratio as the client's `RENEWAL_WINDOW_SECS`, `client/src/daemon.rs:1629`), plus a one-time random jitter. For 30 d certs this is ~12 d before expiry.
+- On failure: retry with capped backoff (e.g. 1 min → 30 min). Log at `warn`, and at `error` once < 24 h remain.
+- If the cert is **already expired**: don't call `RenewCert`. Log an `error` that the relay must be replaced (D-20) and keep running (the listener will fail handshakes, which is the existing behaviour).
+- Steps: build CSR from the existing key (same SPIFFE URI + configured `RELAY_DNS_SANS`/`RELAY_IP_SANS`) → `RenewCert` over the current mTLS identity → verify the response (leaf parses; URI SAN = own SPIFFE ID; public key equals own key; Intermediate fingerprint equals the pinned one) → **atomically** write `relay.crt` (write temp file, fsync, rename) → swap into the holder.
+
+### Hot swap
+
+- **QUIC listener:** `build_server_config` uses a resolver backed by the shared holder instead of a fixed `with_single_cert`. New handshakes get the new cert; existing connections continue.
+- **Heartbeat:** `run()` / `run_connected()` read the identity from the holder on each (re)connect. After a swap, end the current channel so the next connect uses the new identity. The existing reconnect delay is fine.
+- The key file is never rewritten.
+
+## Invariants
+
+- **I1** Same key: the renewed cert's public key equals the previous cert's public key.
+- **I2** Every issued relay serial is recorded in `relay_certificates`; `relays.cert_serial` mirrors the newest.
+- **I3** Revoking a relay revokes all of its serials, including one issued concurrently (row lock on both sides).
+- **I4** A revoked, deleted or pending relay can never renew.
+- **I5** Renewed SANs ⊆ stored allowlist.
+- **I6** The old cert is **not** revoked on renewal; it expires naturally, so in-flight sessions and make-before-break are unaffected.
+- **I7** No token re-issue path is added (D-20). No new CA (D-22).
+- **I8** Proto change is additive; no field renumbering.
+
+## Tests
+
+Go (`renew_test.go`, fakes):
+- Happy path: active relay, same-key CSR → cert returned; `RecordRenewedCert` called with the new serial.
+- CSR signed by a different key → `PermissionDenied`.
+- CSR SAN outside stored allowlist → rejected.
+- Row `revoked` / `deleted` / `pending` → `FailedPrecondition`.
+- Presented serial unknown or revoked in `relay_certificates` → `PermissionDenied`.
+- Wrong role / trust domain / URI SAN → rejected (shared helper, same cases as `heartbeat_test.go`).
+
+Go (`store_renew_integration_test.go`, same DB env as `store_revoke_integration_test.go`):
+- `RecordRenewedCert` inserts the row and updates `relays.cert_*`.
+- Race: run `RevokeRelay` and `RecordRenewedCert` concurrently many times. Afterwards **no** unrevoked `relay_certificates` row exists for the relay.
+- `RecordRenewedCert` on a revoked relay → `ErrRelayRevoked`, nothing inserted.
+- `ListRevokedRelaySerials` includes the renewed serial after revoke (so `/relay.crl` lists it).
+
+Rust (`cargo test` in `relay/`):
+- Schedule computation (renew-at from not_before/not_after, jitter bounds, already-expired branch).
+- CSR from existing key has the same public key.
+- Atomic write leaves either the old or the new file, never a partial one (simulate failure before rename).
+- Resolver swap: build a server config, swap the holder, and a new handshake sees the new serial.
+- Response validation rejects mismatched SPIFFE ID / key / Intermediate fingerprint.
+
+## Acceptance Criteria
+
+- [ ] **PENDING / NOT YET RUN** — Dev stack with `RELAY_CERT_TTL=15m`: the relay renews by itself around the 9-minute mark, the `relays.cert_serial` changes, `relay_certificates` has two rows, and the relay keeps serving connectors and clients past the first cert's `NotAfter` **without a restart**.
+- [ ] **PENDING / NOT YET RUN** — Revoke that relay → both serials revoked; `/relay.crl` lists both; connectors drop it (existing CRL monitor).
+- [x] `buf generate` diff for `relay.proto` is additive only (verified in F-1: no removed or changed lines).
+
+## Build Check
+
+```bash
+buf generate                                   # repo root
+cd controller && go build ./...
+cd controller && go test ./internal/relay/... ./internal/connector/...
+cd relay && cargo build && cargo test
+cd connector && cargo build                    # proto consumer; must still build
+```
+
+## Implementation Checklist
+
+**F-1 — controller half (done)**
+
+- [x] **M2-F1** Proto: additive `RenewCert` + `RenewCertRequest{csr_der}` / `RenewCertResponse{certificate_pem, intermediate_ca_pem, cert_not_after_unix, cert_not_before_unix}`; `buf generate`
+- [x] **M2-F2** `renew.go`: handler (identity via shared `authenticatedRelay`, expiry → replace (D-20), same key (D-19), status active/inactive, presented serial known + unrevoked, Phase C `newRelaySANAllowlist` + `precheckRelayCSR` reused, signer gets stored allowlists)
+- [x] **M2-F3** `store.go`: transactional `RecordRenewedCert` (`FOR UPDATE` on the relay row, the same lock `RevokeRelay` takes) + `RelayCertStatus`; typed errors `ErrRelayNotRenewable`, `ErrPresentedCertInvalid`
+- [x] **M2-F6 (Go)** Tests:
+  - `renew_test.go` (12): happy path, inactive, different key, expired, pending/revoked/deleted, unknown/revoked presented cert, Phase C rules, wrong identity, idempotent retry, revoked cached renewal not replayed, concurrent attempt aborted, revoked mid-renewal returns no cert
+  - `store_renew_integration_test.go`: record, retry supersede (exactly 2 unrevoked certs), renewal chain, refused states, renew-vs-revoke race (25 iterations; both lock orderings observed across 3 runs; never a live cert for a revoked relay; renewed serial on the revoked list)
+- [x] **F-1 build gate:** `buf generate`, `go build ./...`, `go vet`, `go test ./internal/relay/... ./internal/pki/...` (0 skips with `PKI_TEST_DATABASE_URL`), `go test ./...`, relay `cargo build` with the additive proto
+
+**F-2 — relay Rust runtime (done)**
+
+- [x] **M2-F4** `relay/src/renewal.rs`: scheduler (renew at ≤ 2/5 remaining; jitter ±min(15 min, 5% of lifetime); exponential backoff 1 min → 30 min capped at ¼ of remaining; `Aborted` retried after 5 s; single instance via `CertManager::claim_scheduler`), CSR from existing key (`csr::relay_csr_from_key`), reply verification (`verify_reply`). `relay/src/cert_manager.rs`: single owner of the current certificate; `install_renewed` = verify → atomic persist → publish
+- [x] **M2-F5** Relay hot swap: `listener::spawn_server_config_updates` calls `quinn::Endpoint::set_server_config()` on publish (new handshakes only; established connections keep running); `heartbeat::run_with` reconnects immediately with the renewed identity
+- [x] **M2-F6 (Rust)** Tests (65 relay tests pass, stable over 5 runs): `plan_*`, `jitter_*`, `backoff_*`, `scheduler_renews_in_window_and_rejects_second_instance`, `renewal_csr_reuses_the_existing_key`, `already_expired_certificate_never_calls_renewcert`, `expired_scheduler_run_stops_without_calling_renewcert`, `aborted_is_reported_as_retryable`, `bad_replies_are_rejected_and_nothing_changes`, `write_atomic_*`, `install_*`, `restart_after_crash_between_rename_and_swap_uses_persisted_certificate`, `only_one_scheduler_can_be_claimed`, `heartbeat_reconnects_with_renewed_certificate`, `listener_swap_serves_new_cert_without_dropping_existing_connections` (real QUIC)
+- [x] **Full build gate:** `cd relay && cargo build && cargo test`; controller regression `go build ./... && go test ./...`; clippy clean for F-2 code; F-2 files rustfmt-clean (legacy `main.rs` / `provision.rs` not reformatted)
+- [ ] **Live acceptance — NOT YET RUN:** 15-minute self-renewal without restart (see Acceptance Criteria)
+- [ ] **Operational CRL verification — NOT YET RUN:** revoke after renewal → both serials on `/relay.crl`
+
+## F-1 → F-2 Contract (binding for the relay runtime)
+
+The controller's retry guarantees depend on the relay behaving as follows:
+
+0. **Save before publish.** A renewed certificate is published to runtime consumers only after it has been atomically persisted; the runtime never presents a certificate that is not on disk.
+1. **Never keep presenting the old certificate after persisting the renewed one.** Once the renewed certificate is atomically written to disk, every consumer must switch to it: the QUIC listener, the heartbeat channel, and subsequent `RenewCert` calls.
+2. **Why:** `RecordRenewedCert` revokes any unrevoked successor issued *after* the presented certificate (reason `superseded by renewal retry`). That is only safe because a relay still presenting certificate *P* has, by contract, not put P's successor into use.
+3. **Retries are cheap and safe.** Retrying `RenewCert` while still presenting *P*, e.g. after a lost response, returns the **same** certificate for up to 1 h (Valkey result cache keyed by relay + presented serial). After that, the retry supersedes the unused successor and issues a new one. `codes.Aborted` means an identical attempt is in flight: back off and retry.
+4. **Same key only (D-19).** The CSR must be signed by the relay's existing private key. The key file is never rewritten.
+5. **Expired means replace (D-20).** If the certificate has already expired, don't call `RenewCert`. The relay must be replaced.
+
+### How F-2 implements the contract
+
+| Contract point | Where |
+|---|---|
+| 0. Save before publish | `CertManager::install_renewed` → `persist_renewed` (atomic write) **then** `send_replace` |
+| 1. Switch every consumer | publish over a `watch` channel: listener `set_server_config`, heartbeat reconnect, next `RenewCert` uses `CertManager::current()` |
+| 3. `Aborted` = retry | `RenewError::Aborted` → retry after 5 s; other failures → exponential backoff |
+| 4. Same key only | `relay_csr_from_key` loads `relay.key`; `verify_reply` + `install_renewed` both require the cert's SPKI to equal the key's SPKI |
+| 5. Expired → replace | `plan()` returns `Expired` and `renew_once` returns `RenewError::Expired` **before** any RPC |
+
+Atomic write (`cert_manager::write_atomic`): temp file (`create_new`) → `fsync(file)` → `rename` → `fsync(parent directory)`; the temp file is removed on any failure.
+
+## Implementation Notes (F-1)
+
+- The idempotency cache and lock are optimizations. If Valkey is unavailable the lock fails open, and the database rule (at most one live successor) still holds.
+- The signed certificate is discarded, never returned or cached, if the locked write refuses it (relay revoked or deleted between the pre-checks and the write).
+- There is no server-side "too early" renewal window. Scheduling is the relay's job (D-19); every renewal is recorded and revocable.
+
+## Known Issues (not fixed)
+
+### KI-1: short-TTL renewal loop (found 2026-09-25 while preparing live acceptance)
+**Issue:** At `RELAY_CERT_TTL` ≤ 40 min the relay renews immediately after every install, in a continuous `RenewCert` loop.
+
+**Root Cause:** `controller/internal/pki/relay.go:61` issues with `NotBefore = now − 1h`. `relay/src/renewal.rs` `plan()` computes `lifetime = not_after − not_before` and renews when 2/5 of it remains, so `renew_at = issue + 0.6·TTL − 24 min`. The unit test at `renewal.rs` (the ~9 min case) assumes no backdate.
+
+**Impact:** Dev and test only. The 30 d default renews at about 18 d. AT-F.8 is run with `RELAY_CERT_TTL=1h` (renewal 6–18 min after issue).
+
+**Candidate fix (next sprint):** measure the lifetime from the relay's install/receipt time (like PF-1's `issuedAt` in the controller rotator), or stop backdating relay certs.
+
+## Post-Phase Fixes
+
+### Live finding (no fix found as of 2026-10-17): a revoked relay retries its heartbeat every 5 s forever (Finding 32)
+**Issue:** live run F5–F7 (2026-09-28). After revoke, the relay process stayed `active` and reconnected its heartbeat every 5 s, each attempt refused.
+
+**Suggested fix (from the run sheet):** treat revoked / `PermissionDenied` as terminal (exit, or a long backoff) and log it clearly. Low severity.
+
+**Fix applied (2026-10-27, Sprint 20 Fix 17, `d89c0310`):** not a plain `PermissionDenied` check, because a superseded renewal revokes a serial while the relay stays active.
+- The controller interceptor (`controller/internal/connector/spiffe.go`) adds the trailer `zecurity-relay-state: revoked` only when `relays.status` is `revoked` or `deleted`.
+- `relay/src/heartbeat.rs` ends the heartbeat loop on `PermissionDenied` with that marker and keeps the 5 s retry for everything else (incl. `Unavailable`).
+- The process does not exit.
+- Details: [[Sprint20/Fixes/Fix17-Revoked-Relay-Stops-Heartbeat]].
+
+**Also:** AT-F.8 was accepted at `RELAY_CERT_TTL=1h` (F1–F4 PASS), because of KI-1. KI-1 itself is fixed in Sprint 21 K1 (`7fb0fb7`); the 15m live check is Sprint 21 AT-K.1.

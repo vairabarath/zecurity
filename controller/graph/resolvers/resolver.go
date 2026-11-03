@@ -6,10 +6,18 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/outbox"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
 // Resolver holds shared dependencies for all resolvers.
@@ -18,6 +26,13 @@ type Resolver struct {
 	AuthService       auth.Service
 	ConnectorCfg      connector.Config
 	ConnectorRegistry *connector.ConnectorRegistry
+	// ShieldRevocations is woken after a shield revocation commits
+	// (certificate audit bug 3); nil-safe.
+	ShieldRevocations *connector.ShieldRevocationDispatcher
+	// Outbox records durable work in the caller's transaction — here the
+	// policy invalidation for identity-connection lifecycle changes
+	// (certificate audit bugs 4/5).
+	Outbox            *outbox.Outbox
 	ShieldSvc         shield.Service
 	ResourceCfg       resource.Config
 	Redis             valkeycompat.Cmdable
@@ -26,4 +41,34 @@ type Resolver struct {
 	InvitationEmailer *invitation.Emailer
 	PolicyStore       *policy.Store
 	PolicyNotifier    *policy.Notifier
+	PostureStore      *posture.Store
+	PostureEvaluator  *posture.Evaluator
+	TransportNotifier *transport.Notifier
+
+	// Roles is the live workspace role check (PENDING-19 §5). setMemberRole
+	// and the SCIM/IdP disable paths drop its cache entries after commit.
+	// Nil-safe for invalidation.
+	Roles *rbac.Checker
+
+	// IdpStore backs the identity-provider admin API (PENDING-04 Phase 6).
+	IdpStore *idp.Store
+	// ScimStore backs the SCIM bearer-token API (Sprint 17 / ADR-025).
+	ScimStore *scim.Store
+	// PermissionStore backs the explicit fine-grained permission primitive
+	// (Sprint 17 / ADR-025 Phase 3, e.g. identity.mapping.break_glass).
+	PermissionStore *permission.Store
+	// Revoker performs session-generation revocation when a connection is
+	// disabled/deleted (every user of that connection loses their login path).
+	Revoker *identity.Revoker
+	// BreakGlassEmails are admins who may always authenticate via the platform
+	// IdP, so a workspace can never lock itself out. Consulted by the no-lockout
+	// guard; from IDP_BREAK_GLASS_EMAILS. See ADR-024 §5.
+	BreakGlassEmails map[string]bool
+	// OIDCRedirectURI is the callback URL sent with the client-credential
+	// verification probe (verifyOIDCCredentials). It is the SAME value the login
+	// path uses (auth.Config.RedirectURI / GOOGLE_REDIRECT_URI): sending the real
+	// registered URI keeps the probe from tripping a redirect_uri check on IdPs
+	// that evaluate one before client authentication, which would otherwise read
+	// as "not invalid_client" and wrongly pass.
+	OIDCRedirectURI string
 }

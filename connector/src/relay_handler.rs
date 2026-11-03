@@ -7,23 +7,29 @@ use quinn::{Connection, RecvStream, SendStream};
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use rustls_pemfile::{certs, private_key};
+use rustls_pemfile::certs;
 use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::agent_tunnel::AgentTunnelHub;
+use crate::authorization::AuthzGate;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
-use crate::tls::cert_store::CertStore;
+use crate::session_registry::{SessionRegistry, SessionTransport};
+use crate::tls::cert_holder::{CertHolder, HolderCertResolver};
 use crate::ControlMessage;
 
 const INNER_TUNNEL_ALPN: &[u8] = b"ztna-tunnel-v1";
 const CLIENT_ROLE: &str = "client";
+
+/// QUIC application close code when a migrated-away relay connection is cut
+/// at the drain timeout (FU-14). "DRNT".
+pub const DRAIN_TIMEOUT_CODE: u32 = 0x4452_4E54;
 
 #[derive(Clone, Debug, Default)]
 pub struct RelayDrainTracker {
@@ -34,6 +40,8 @@ pub struct RelayDrainTracker {
 struct RelayDrainTrackerInner {
     active_streams: AtomicUsize,
     idle_notify: Notify,
+    /// The relay connection these streams run on, for cut().
+    connection: std::sync::Mutex<Option<Connection>>,
 }
 
 impl RelayDrainTracker {
@@ -49,6 +57,23 @@ impl RelayDrainTracker {
         self.inner.active_streams.fetch_add(1, Ordering::AcqRel);
         RelayStreamGuard {
             tracker: self.clone(),
+        }
+    }
+
+    /// Remembers the relay connection the tracked streams run on.
+    pub fn attach_connection(&self, connection: Connection) {
+        *self.inner.connection.lock().unwrap() = Some(connection);
+    }
+
+    /// Ends every stream still on the relay connection by closing it (FU-14).
+    /// Stream tasks are detached and keep the connection alive on their own, so
+    /// aborting the session task alone never cut them. No-op without one.
+    pub fn cut(&self) {
+        if let Some(connection) = self.inner.connection.lock().unwrap().take() {
+            connection.close(
+                quinn::VarInt::from_u32(DRAIN_TIMEOUT_CODE),
+                b"relay drain timeout",
+            );
         }
     }
 
@@ -88,37 +113,44 @@ pub struct RelayHandler {
     acceptor: TlsAcceptor,
     workspace_trust_domain: String,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
     handshake_timeout: Duration,
     stream_permits: Arc<Semaphore>,
+    /// Connector serving state (connector-revocation B1).
+    gate: AuthzGate,
 }
 
 impl RelayHandler {
     pub fn new(
-        store: &CertStore,
+        certs: Arc<CertHolder>,
         acl: Arc<PolicyCache>,
+        registry: Arc<SessionRegistry>,
         tunnel_hub: AgentTunnelHub,
         crl_manager: CrlManager,
         connector_id: String,
         control_tx: mpsc::Sender<ControlMessage>,
         handshake_timeout_secs: u64,
         max_tunnel_streams: usize,
+        gate: AuthzGate,
     ) -> Result<Self> {
         validate_runtime_limits(handshake_timeout_secs, max_tunnel_streams)?;
-        let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(store)?;
+        let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(certs)?;
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(tls_config)),
             workspace_trust_domain,
             acl,
+            registry,
             tunnel_hub,
             crl_manager,
             connector_id,
             control_tx,
             handshake_timeout: Duration::from_secs(handshake_timeout_secs),
             stream_permits: Arc::new(Semaphore::new(max_tunnel_streams)),
+            gate,
         })
     }
 
@@ -128,11 +160,23 @@ impl RelayHandler {
         connection: Connection,
         drain_tracker: RelayDrainTracker,
     ) -> Result<()> {
+        // If this relay is migrated away from, the drain timeout cuts the
+        // streams still running here by closing this connection (FU-14).
+        drain_tracker.attach_connection(connection.clone());
         loop {
             let (send, recv) = connection
                 .accept_bi()
                 .await
                 .context("accept Relay-opened Connector stream")?;
+            // Connector-revocation B1 (§7 step 2): reset, no TunnelResponse.
+            if !self.gate.admits_now() {
+                debug!(
+                    state = ?self.gate.snapshot().state(),
+                    "Relay tunnel stream reset: connector not authorized to serve"
+                );
+                reject_stream(send, recv);
+                continue;
+            }
             let permit = match self.stream_permits.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -185,10 +229,13 @@ impl RelayHandler {
             client_spiffe_id,
             cert_serial,
             self.acl.clone(),
+            self.registry.clone(),
+            SessionTransport::Relay,
             self.tunnel_hub.clone(),
             self.crl_manager.clone(),
             &self.connector_id,
             &self.control_tx,
+            &self.gate,
         )
         .await
     }
@@ -206,7 +253,16 @@ fn validate_runtime_limits(handshake_timeout_secs: u64, max_tunnel_streams: usiz
     Ok(())
 }
 
-fn build_inner_tls_server_config(store: &CertStore) -> Result<(ServerConfig, String)> {
+/// Inner Client-to-Connector mTLS config. The server certificate is resolved
+/// from the CertHolder on every handshake (Sprint 20 G-2a), so relayed
+/// streams opened after a renewal get the renewed certificate while streams
+/// already established keep theirs. The trust domain and Workspace CA are
+/// pinned across renewals by the holder, so they are read once.
+pub(crate) fn build_inner_tls_server_config(
+    certs: Arc<CertHolder>,
+) -> Result<(ServerConfig, String)> {
+    let material = certs.current();
+    let store = &material.store;
     let server_certs = parse_certificates(&store.cert_pem, "Connector certificate")?;
     let connector_leaf = server_certs
         .first()
@@ -227,13 +283,9 @@ fn build_inner_tls_server_config(store: &CertStore) -> Result<(ServerConfig, Str
         .build()
         .context("build inner mTLS Client verifier")?;
 
-    let server_key = private_key(&mut store.key_pem.as_slice())
-        .context("parse Connector private key PEM")?
-        .context("Connector private key PEM contains no private key")?;
     let mut config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_client_cert_verifier(client_verifier)
-        .with_single_cert(server_certs, server_key)
-        .context("build inner mTLS server config; Connector certificate and key may not match")?;
+        .with_cert_resolver(HolderCertResolver::new(certs.clone()));
     config.alpn_protocols = vec![INNER_TUNNEL_ALPN.to_vec()];
     Ok((config, workspace_trust_domain))
 }
@@ -394,5 +446,72 @@ mod tests {
         validate_runtime_limits(10, 256).unwrap();
         assert!(validate_runtime_limits(0, 256).is_err());
         assert!(validate_runtime_limits(10, 0).is_err());
+    }
+
+    /// FU-14: cut() closes the old relay connection, ending every stream still
+    /// on it at once (detached stream tasks can't keep it alive).
+    #[tokio::test]
+    async fn cut_closes_the_attached_connection_and_its_streams() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side.clone());
+        let _stream = tracker.track_stream();
+        // A long-lived stream from the relay side, mid-transfer.
+        let (mut send, mut recv) = relay_side.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        let (_csend, mut crecv) = connector_side.accept_bi().await.unwrap();
+        let mut one = [0u8; 1];
+        crecv.read_exact(&mut one).await.unwrap();
+
+        tracker.cut();
+
+        let reason = tokio::time::timeout(Duration::from_secs(2), relay_side.closed())
+            .await
+            .expect("the relay must see the connection close");
+        assert!(
+            matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+                if c.error_code == quinn::VarInt::from_u32(DRAIN_TIMEOUT_CODE)),
+            "relay saw {reason:?}"
+        );
+        let mut buf = [0u8; 16];
+        assert!(
+            recv.read(&mut buf).await.is_err(),
+            "the open stream must fail, not finish"
+        );
+    }
+
+    #[test]
+    fn cut_without_a_connection_is_a_no_op() {
+        RelayDrainTracker::new().cut();
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+    use crate::test_support::{tls_handshake_serial, TestPki};
+
+    /// The Relay inner-TLS acceptor serves the renewed certificate to streams
+    /// opened after the renewal (TLS 1.3 only, as in production).
+    #[tokio::test]
+    async fn relay_inner_tls_serves_renewed_certificate() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let (config, trust_domain) = build_inner_tls_server_config(holder.clone()).unwrap();
+        assert_eq!(trust_domain, "ws-test.zecurity.in");
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let client = pki.client_tls_config(true);
+
+        let before = holder.current().serial_hex.clone();
+        assert_eq!(
+            tls_handshake_serial(&acceptor, client.clone()).await,
+            before
+        );
+
+        let renewed = pki.renew(&holder, 7200);
+        assert_eq!(
+            tls_handshake_serial(&acceptor, client).await,
+            renewed.serial_hex
+        );
     }
 }

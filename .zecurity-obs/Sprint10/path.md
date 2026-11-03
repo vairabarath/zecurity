@@ -97,7 +97,7 @@ This is a **two-member sprint** (M2 + M3 only). M1 (Frontend) and M4 (Client/Shi
   ```
 - [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
 - [x] **TEAM** Run `cd controller && go build ./...` — passes (new fields default to zero/empty)
-- [ ] **TEAM** Run `cd admin && npm run codegen`
+- [x] **TEAM** Run `cd admin && npm run codegen`
 
 > After Day 1: M2 continues with controller/DB changes. M3 starts `relay/` scaffold and connector relay client.
 
@@ -212,17 +212,17 @@ This is a **two-member sprint** (M2 + M3 only). M1 (Frontend) and M4 (Client/Shi
 - [x] `cd relay && cargo build` — clean
 - [x] `cd connector && cargo build` — clean
 - [x] `cd client && cargo build` — clean
-- [ ] `cd admin && npm run build` — clean
+- [x] `cd admin && npm run build` — clean
 
 ## Acceptance Criteria
 
-- [ ] Connector on server A registers with relay — `RelayState` shows connector entry
-- [ ] Client on server B (different network, no direct path to A) connects via relay — traffic flows
-- [ ] End-to-end mTLS intact — Wireshark on relay shows ciphertext only
-- [ ] Client on same LAN as connector takes direct path — relay not used
-- [ ] Connector disconnects → `RelayState` removes entry → client lookup returns error
-- [ ] Client with wrong trust domain (different workspace) → relay rejects with SPIFFE mismatch
-- [ ] `RELAY_ADDR` unset → `relay_addr` in ACL snapshot is empty → client never attempts relay fallback
+- [x] Connector on server A registers with relay — `RelayState` shows connector entry
+- [x] Client on server B (different network, no direct path to A) connects via relay — traffic flows
+- [x] End-to-end mTLS intact — Wireshark on relay shows ciphertext only
+- [x] Client on same LAN as connector takes direct path — relay not used
+- [x] Connector disconnects → `RelayState` removes entry → client lookup returns error
+- [x] Client with wrong trust domain (different workspace) → relay rejects with SPIFFE mismatch
+- [x] `RELAY_ADDR` unset → `relay_addr` in ACL snapshot is empty → client never attempts relay fallback
 
 ---
 

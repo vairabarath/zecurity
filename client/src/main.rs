@@ -1,6 +1,8 @@
 mod appmeta;
 mod auth;
+mod change_watch;
 mod config;
+mod crl;
 mod daemon;
 #[cfg(test)]
 mod daemon_tests;
@@ -13,8 +15,12 @@ mod relay_pool;
 mod runtime;
 mod state_store;
 mod transport;
+mod trust;
 mod tun;
 mod tunnel_pool;
+#[cfg(target_os = "linux")]
+mod tpm;
+
 mod cmd {
     pub mod down;
     pub mod login;
@@ -25,6 +31,18 @@ mod cmd {
     pub mod sync;
     pub mod up;
 }
+
+mod posture;
+#[cfg(test)]
+mod posture_tests;
+
+// Certificate audit bug 1 (client): bootstrap-trust tests and their fixtures.
+#[cfg(test)]
+mod bootstrap_tests;
+#[cfg(test)]
+mod test_controller;
+#[cfg(test)]
+mod test_pki;
 
 use clap::{Parser, Subcommand};
 

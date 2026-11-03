@@ -3,11 +3,13 @@ import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
   ChevronDown,
+  Download,
   Laptop,
   LayoutDashboard,
   Network,
   Plug,
   Radar,
+  KeyRound,
   ScrollText,
   Settings,
   Shield,
@@ -17,6 +19,7 @@ import {
   Waypoints,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
+import { canUseConsole, roleLabel } from '@/lib/capabilities'
 import { cn } from '@/lib/utils'
 
 const mainItems = [
@@ -28,13 +31,15 @@ const mainItems = [
   { to: '/shields', label: 'Shields', icon: Shield },
   { to: '/resources', label: 'Resources', icon: Box },
   { to: '/settings', label: 'Settings', icon: Settings },
-  { to: '/access-log', label: 'Access Log', icon: ScrollText },
-  { to: '/devices', label: 'Devices', icon: Laptop },
 ]
 
 const teamItems = [
   { to: '/users', label: 'Users', icon: UserCircle2 },
   { to: '/groups', label: 'Groups', icon: Users },
+]
+
+const policyItems = [
+  { to: '/policies', label: 'Device Policies', icon: ShieldCheck },
 ]
 
 function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: React.ElementType }) {
@@ -110,6 +115,39 @@ function TeamSection() {
   )
 }
 
+function PoliciesSection() {
+  const location = useLocation()
+  const isPoliciesActive = location.pathname.startsWith('/policies')
+  const [open, setOpen] = useState(isPoliciesActive)
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          'flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-[13.5px] font-medium transition-colors',
+          isPoliciesActive && !open
+            ? 'bg-primary/10 text-primary'
+            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+        )}
+      >
+        <ShieldCheck className="h-4 w-4 shrink-0" />
+        <span className="flex-1 text-left">Policies</span>
+        <ChevronDown
+          className={cn('h-3.5 w-3.5 shrink-0 transition-transform', open && 'rotate-180')}
+        />
+      </button>
+      {open && (
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          {policyItems.map((item) => (
+            <SubNavItem key={item.to} {...item} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function Sidebar() {
   const user = useAuthStore((state) => state.user)
   const initials = user?.email?.slice(0, 2).toUpperCase() ?? 'ZT'
@@ -135,6 +173,17 @@ export function Sidebar() {
           <NavItem key={item.to} {...item} />
         ))}
         <TeamSection />
+        {/* Every console role (CONSOLE_READ) reads these pages; their write
+            controls are gated per capability on the page (PENDING-19). */}
+        {canUseConsole(user) && (
+          <>
+            <NavItem to="/idp-connections" label="Identity Providers" icon={KeyRound} />
+            <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
+            <NavItem to="/devices"        label="Devices"        icon={Laptop} />
+            <PoliciesSection />
+            <NavItem to="/install"        label="Install Client" icon={Download} />
+          </>
+        )}
       </nav>
 
       <div className="mx-1 mt-3 rounded-[14px] border border-border bg-secondary/70 p-3">
@@ -144,7 +193,7 @@ export function Sidebar() {
           </div>
           <div className="min-w-0">
             <div className="truncate text-[12.5px] font-semibold">{user?.email ?? 'Workspace user'}</div>
-            <div className="text-[10.5px] capitalize text-muted-foreground">{user?.role ?? 'admin'}</div>
+            <div className="text-[10.5px] text-muted-foreground">{roleLabel(user?.role)}</div>
           </div>
         </div>
       </div>

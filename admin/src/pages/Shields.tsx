@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ChevronDown, ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
@@ -13,6 +14,7 @@ import {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { DiscoveredServicesPanel } from '@/components/DiscoveredServicesPanel'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
@@ -32,6 +34,7 @@ function truncateId(id: string | null | undefined) {
 export default function Shields() {
   const { id } = useParams<{ id: string }>()
   const [showInstall, setShowInstall] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   function toggleExpanded(shieldId: string) {
@@ -55,9 +58,11 @@ export default function Shields() {
   })
 
   const [revokeShield] = useMutation(RevokeShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: id ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: id } }] : [],
   })
   const [deleteShield] = useMutation(DeleteShieldDocument, {
+    onError: toastMutationError,
     refetchQueries: id ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: id } }] : [],
   })
 
@@ -89,10 +94,12 @@ export default function Shields() {
           <h2 className="page-title">Shields</h2>
           <p className="page-subtitle">Shield agents currently assigned to {networkName}.</p>
         </div>
+        {canWrite && (
         <Button onClick={() => setShowInstall(true)} className="gap-2">
           <Plus className="h-4 w-4" />
           Add Shield
         </Button>
+        )}
       </div>
 
       {id ? (
@@ -117,7 +124,7 @@ export default function Shields() {
             <EmptyState
               title="No shields for this network"
               description="Generate the first shield install command to bring a host under protection."
-              action={<Button onClick={() => setShowInstall(true)}>Add Shield</Button>}
+              action={canWrite ? <Button onClick={() => setShowInstall(true)}>Add Shield</Button> : undefined}
             />
           ) : (
             <div className="min-w-[980px]">
@@ -158,7 +165,7 @@ export default function Shields() {
                     <div className="text-sm text-muted-foreground">{shield.version ?? '—'}</div>
                     <div className="flex items-center justify-end gap-2">
                       <Link to={`/shields/${shield.id}`} className="text-sm font-semibold text-primary">Manage</Link>
-                      {canRevoke ? (
+                      {canRevoke && canWrite ? (
                         <button
                           onClick={() => handleRevoke(shield.id, shield.name)}
                           className="rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] p-2 text-[oklch(0.85_0.13_80)]"
@@ -166,7 +173,7 @@ export default function Shields() {
                           <ShieldOff className="h-4 w-4" />
                         </button>
                       ) : null}
-                      {canDelete ? (
+                      {canDelete && canWrite ? (
                         <button
                           onClick={() => handleDelete(shield.id, shield.name)}
                           className="rounded-xl border border-[oklch(0.75_0.16_25/0.28)] bg-[oklch(0.75_0.16_25/0.12)] p-2 text-[oklch(0.75_0.16_25)]"

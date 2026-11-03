@@ -42,26 +42,26 @@ func TestSetAndGetPKCEState(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	if err := rc.SetPKCEState(ctx, "state-abc", "verifier-xyz", nil); err != nil {
+	if err := rc.SetPKCEState(ctx, "state-abc", PKCEState{CodeVerifier: "verifier-xyz"}); err != nil {
 		t.Fatalf("SetPKCEState: %v", err)
 	}
 
-	val, workspaceName, found, err := rc.GetAndDeletePKCEState(ctx, "state-abc")
+	st, found, err := rc.GetAndDeletePKCEState(ctx, "state-abc")
 	if err != nil {
 		t.Fatalf("GetAndDeletePKCEState: %v", err)
 	}
 	if !found {
 		t.Fatal("expected found=true")
 	}
-	if val != "verifier-xyz" {
-		t.Fatalf("expected verifier-xyz, got %s", val)
+	if st.CodeVerifier != "verifier-xyz" {
+		t.Fatalf("expected verifier-xyz, got %s", st.CodeVerifier)
 	}
-	if workspaceName != "" {
-		t.Fatalf("expected empty workspace name, got %q", workspaceName)
+	if st.WorkspaceName != "" {
+		t.Fatalf("expected empty workspace name, got %q", st.WorkspaceName)
 	}
 
 	// Second retrieval — should be gone (single-use).
-	_, _, found, err = rc.GetAndDeletePKCEState(ctx, "state-abc")
+	_, found, err = rc.GetAndDeletePKCEState(ctx, "state-abc")
 	if err != nil {
 		t.Fatalf("second GetAndDeletePKCEState: %v", err)
 	}
@@ -74,14 +74,14 @@ func TestGetAndDeletePKCEState_Expired(t *testing.T) {
 	rc, mr := newTestValkey(t)
 	ctx := context.Background()
 
-	if err := rc.SetPKCEState(ctx, "state-exp", "verifier-exp", nil); err != nil {
+	if err := rc.SetPKCEState(ctx, "state-exp", PKCEState{CodeVerifier: "verifier-exp"}); err != nil {
 		t.Fatalf("SetPKCEState: %v", err)
 	}
 
 	// Fast-forward miniredis past the 5-minute TTL.
 	mr.FastForward(6 * time.Minute)
 
-	_, _, found, err := rc.GetAndDeletePKCEState(ctx, "state-exp")
+	_, found, err := rc.GetAndDeletePKCEState(ctx, "state-exp")
 	if err != nil {
 		t.Fatalf("GetAndDeletePKCEState: %v", err)
 	}
@@ -95,22 +95,22 @@ func TestSetAndGetPKCEState_WithWorkspaceName(t *testing.T) {
 	ctx := context.Background()
 	workspaceName := "Acme Workspace"
 
-	if err := rc.SetPKCEState(ctx, "state-json", "verifier-json", &workspaceName); err != nil {
+	if err := rc.SetPKCEState(ctx, "state-json", PKCEState{CodeVerifier: "verifier-json", WorkspaceName: workspaceName}); err != nil {
 		t.Fatalf("SetPKCEState with workspaceName: %v", err)
 	}
 
-	val, gotWorkspaceName, found, err := rc.GetAndDeletePKCEState(ctx, "state-json")
+	st, found, err := rc.GetAndDeletePKCEState(ctx, "state-json")
 	if err != nil {
 		t.Fatalf("GetAndDeletePKCEState with workspaceName: %v", err)
 	}
 	if !found {
 		t.Fatal("expected found=true")
 	}
-	if val != "verifier-json" {
-		t.Fatalf("expected verifier-json, got %s", val)
+	if st.CodeVerifier != "verifier-json" {
+		t.Fatalf("expected verifier-json, got %s", st.CodeVerifier)
 	}
-	if gotWorkspaceName != workspaceName {
-		t.Fatalf("expected workspaceName %q, got %q", workspaceName, gotWorkspaceName)
+	if st.WorkspaceName != workspaceName {
+		t.Fatalf("expected workspaceName %q, got %q", workspaceName, st.WorkspaceName)
 	}
 }
 
@@ -119,11 +119,11 @@ func TestSetAndGetRefreshSession(t *testing.T) {
 	ctx := context.Background()
 
 	want := RefreshSession{Token: "token-abc", OriginalIAT: 1700000000, MaxLifetimeAt: 1700000000 + 30*24*3600}
-	if err := rc.SetRefreshSession(ctx, "user-1", want, 7*24*time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-1", testSID, want, 7*24*time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
-	got, found, err := rc.GetRefreshSession(ctx, "user-1")
+	got, found, err := rc.GetRefreshSession(ctx, "user-1", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestGetRefreshSession_NotFound(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	_, found, err := rc.GetRefreshSession(ctx, "nonexistent-user")
+	_, found, err := rc.GetRefreshSession(ctx, "nonexistent-user", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -148,20 +148,20 @@ func TestGetRefreshSession_NotFound(t *testing.T) {
 	}
 }
 
-func TestDeleteRefreshToken(t *testing.T) {
+func TestDeleteRefreshSession(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
 	sess := RefreshSession{Token: "token-del"}
-	if err := rc.SetRefreshSession(ctx, "user-del", sess, time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-del", testSID, sess, time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
-	if err := rc.DeleteRefreshToken(ctx, "user-del"); err != nil {
-		t.Fatalf("DeleteRefreshToken: %v", err)
+	if err := rc.DeleteRefreshSession(ctx, "user-del", testSID); err != nil {
+		t.Fatalf("DeleteRefreshSession: %v", err)
 	}
 
-	_, found, err := rc.GetRefreshSession(ctx, "user-del")
+	_, found, err := rc.GetRefreshSession(ctx, "user-del", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession after delete: %v", err)
 	}
@@ -175,14 +175,14 @@ func TestRefreshToken_Expired(t *testing.T) {
 	ctx := context.Background()
 
 	sess := RefreshSession{Token: "token-ttl"}
-	if err := rc.SetRefreshSession(ctx, "user-ttl", sess, time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-ttl", testSID, sess, time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
 	// Fast-forward past the TTL.
 	mr.FastForward(2 * time.Hour)
 
-	_, found, err := rc.GetRefreshSession(ctx, "user-ttl")
+	_, found, err := rc.GetRefreshSession(ctx, "user-ttl", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}

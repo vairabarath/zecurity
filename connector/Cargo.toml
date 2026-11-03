@@ -5,6 +5,8 @@ edition = "2021"
 description = "ZECURITY connector — enrollment, control streaming, and auto-update agent"
 
 [dependencies]
+dashmap            = "6"
+tokio-util         = "0.7"
 tokio              = { version = "1", features = ["full"] }
 tonic              = { version = "0.14", features = ["tls-ring", "tls-webpki-roots", "transport"] }
 prost              = "0.14"
@@ -13,7 +15,7 @@ rcgen              = "0.14"
 tokio-rustls       = "0.26"
 rustls             = { version = "0.23", features = ["ring"] }
 rustls-pemfile     = "2"
-x509-parser        = "0.18"
+x509-parser        = { version = "0.18", features = ["verify"] }
 sha2               = "0.11"
 hex                = "0.4"
 anyhow             = "1"
@@ -39,6 +41,10 @@ tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock tests (connector-revocation B2); `full` excludes test-util.
+tokio = { version = "1", features = ["full", "test-util"] }
+# Bootstrap-pinning tests: the fake controller signs the connector's real CSR.
+rcgen = { version = "0.14", features = ["x509-parser"] }
 
 [features]
 # Exposes a broadcast::Sender<SelectorEvent> on relay_selector so integration

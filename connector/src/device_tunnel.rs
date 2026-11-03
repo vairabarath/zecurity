@@ -3,6 +3,7 @@
 // The core of the RDE: connection handler that enforces ACL and routes
 // either direct or via Shield relay.
 
+use crate::authorization::AuthzGate;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,10 +17,10 @@ use tokio::sync::mpsc;
 use x509_parser::prelude::*;
 
 use crate::agent_tunnel::AgentTunnelHub;
-use crate::crl::CrlManager;
+use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
-use crate::tls::cert_store::CertStore;
-use crate::tls::server_cfg::build_device_tunnel_tls;
+use crate::session_registry::{SessionRegistry, SessionTransport};
+use crate::tls::server_cfg::build_device_tunnel_tls_dynamic;
 use crate::ControlMessage;
 
 const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
@@ -39,7 +40,6 @@ pub fn quic_advertise_addr() -> Option<&'static str> {
 
 #[derive(Deserialize)]
 struct TunnelRequest {
-    token: String,
     destination: String,
     port: u16,
     #[serde(default = "default_tcp")]
@@ -61,18 +61,22 @@ struct TunnelResponse {
 
 pub async fn listen(
     addr: &str,
-    store: CertStore,
+    certs: std::sync::Arc<crate::tls::cert_holder::CertHolder>,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    gate: AuthzGate,
 ) -> Result<()> {
     use std::sync::Arc as StdArc;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
-    let tls_config = build_device_tunnel_tls(&store)?;
+    // Server certificate resolved from the CertHolder per handshake, so a
+    // renewal is served to new connections without dropping live ones.
+    let tls_config = build_device_tunnel_tls_dynamic(certs)?;
     let acceptor = TlsAcceptor::from(StdArc::new(tls_config));
 
     let listener = TcpListener::bind(addr).await?;
@@ -80,7 +84,16 @@ pub async fn listen(
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        // Connector-revocation B1 (§7 step 2): refuse at the transport level
+        // — drop the socket before the TLS handshake, no TunnelResponse.
+        if !gate.admits_now() {
+            tracing::debug!(peer = %peer_addr, state = ?gate.snapshot().state(), "device tunnel (TLS) connection refused: connector not authorized to serve");
+            drop(stream);
+            continue;
+        }
+        let gate_clone = gate.clone();
         let acl_clone = acl.clone();
+        let registry_clone = registry.clone();
         let hub_clone = tunnel_hub.clone();
         let crl_clone = crl_manager.clone();
         let conn_id_clone = connector_id.clone();
@@ -118,10 +131,13 @@ pub async fn listen(
                 spiffe_id,
                 cert_serial,
                 acl_clone,
+                registry_clone,
+                SessionTransport::Tcp,
                 hub_clone,
                 crl_clone,
                 &conn_id_clone,
                 &tx_clone,
+                &gate_clone,
             )
             .await
             {
@@ -131,32 +147,58 @@ pub async fn listen(
     }
 }
 
+/// Pure fail-closed revocation decision for the inner client mTLS stream: only
+/// `NotRevoked` may proceed. `Revoked` and `Unavailable` are both rejected — an
+/// unknown revocation state is never treated as "allow by default".
+/// Ok(()) = allow; Err(message) = reject with this error message.
+fn revocation_action(status: RevocationStatus) -> Result<(), &'static str> {
+    match status {
+        RevocationStatus::NotRevoked => Ok(()),
+        RevocationStatus::Unavailable => Err("certificate revocation state unavailable"),
+        RevocationStatus::Revoked => Err("certificate revoked"),
+    }
+}
+
 pub async fn handle_stream<S>(
     mut stream: S,
     client_spiffe_id: String,
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
+    accept_transport: SessionTransport,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
+    gate: &AuthzGate,
 ) -> Result<()>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: tokio::io::AsyncRead
+        + tokio::io::AsyncWrite
+        + crate::abort_stream::AbortStream
+        + Unpin
+        + Send
+        + 'static,
 {
-    if crl_manager.is_revoked(&cert_serial) {
+    // Connector-revocation B1 (§7 step 2): the funnel for every transport.
+    // Checked first, before anything is written: a refusal sends no
+    // TunnelResponse (never ok:false, which would stop the client's
+    // fallback); dropping the stream is a transport failure to the client.
+    if !gate.admits_now() {
+        return Err(anyhow!(
+            "connector not authorized to serve (state {:?}) — stream refused",
+            gate.snapshot().state()
+        ));
+    }
+    if let Err(message) = revocation_action(crl_manager.check(&cert_serial)) {
         let response = TunnelResponse {
             ok: false,
-            error: Some("certificate revoked".to_string()),
+            error: Some(message.to_string()),
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        return Err(anyhow!(
-            "certificate revoked for spiffe_id={}",
-            client_spiffe_id
-        ));
+        return Err(anyhow!("{} for spiffe_id={}", message, client_spiffe_id));
     }
-
     let req: TunnelRequest = read_framed_json(&mut stream)
         .await
         .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
@@ -220,8 +262,36 @@ where
         .await;
         return Err(anyhow!("access denied"));
     }
+   let acl_entry = decision.unwrap();
 
-    let acl_entry = decision.unwrap();
+    let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
+    // Shield-relay sessions take the `RelaySession`/d2s child-task path — label
+    // them `relay` regardless of how the device reached the connector so
+    // cancellations are observable per data path. Everything else keeps the
+    // accept-path transport (tcp/quic).
+    let session_transport = if acl_entry.route_type == "shield" {
+        SessionTransport::Relay
+    } else {
+        accept_transport
+    };
+    let (cancel_token, _session_guard) = registry.register(session_key, session_transport);
+
+    // Closes the window where a diff-and-cancel pass may have already scanned
+    // the registry before this session finished registering. Unconditional —
+    // no ACL-version gating, since policy versions are process-local and can
+    // miss a real content change across a controller restart.
+    if !acl.is_allowed(&acl_entry.resource_id, &client_spiffe_id) {
+        cancel_token.cancel();
+    }
+    // Same window for the serving state: a stream that passed the first
+    // check just before the connector closed is refused here, still without
+    // a TunnelResponse.
+    if !gate.admits_now() {
+        return Err(anyhow!(
+            "connector not authorized to serve (state {:?}) — stream refused after registration",
+            gate.snapshot().state()
+        ));
+    }
 
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
@@ -315,7 +385,22 @@ where
                     quic_addr: quic_advertise_addr().map(String::from),
                 };
                 send_response(&mut stream, &response).await?;
-                relay.relay_stream(stream).await?;
+                // FU-15: relay_stream watches the token itself and aborts the
+                // device stream on a cancel (dropping it here would end it
+                // normally and deliver everything still queued).
+                relay
+                    .with_cancel_token(cancel_token.clone())
+                    .relay_stream(stream)
+                    .await?;
+                if cancel_token.is_cancelled() {
+                    tracing::info!(
+                        spiffe_id = %client_spiffe_id,
+                        resource_id = %acl_entry.resource_id,
+                        transport = session_transport.as_str(),
+                        reason = "acl_diff",
+                        "session cancelled — authorization revoked mid-session",
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!(shield = %shield_id,
@@ -432,7 +517,20 @@ where
         )
         .await;
 
-        relay_udp(&mut stream, &req.destination, req.port).await?;
+       tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!(
+                    spiffe_id = %client_spiffe_id,
+                    resource_id = %acl_entry.resource_id,
+                    transport = session_transport.as_str(),
+                    reason = "acl_diff",
+                    "session cancelled — authorization revoked mid-session",
+                );
+                // FU-15: abort, so nothing still queued reaches the client.
+                stream.abort();
+            }
+            result = relay_udp(&mut stream, &req.destination, req.port) => { result?; }
+        }
         return Ok(());
     }
 
@@ -495,7 +593,37 @@ where
     )
     .await;
 
-    tokio::io::copy_bidirectional(&mut stream, &mut resource_conn).await?;
+      tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tracing::info!(
+                spiffe_id = %client_spiffe_id,
+                resource_id = %acl_entry.resource_id,
+                transport = session_transport.as_str(),
+                reason = "acl_diff",
+                "session cancelled — authorization revoked mid-session",
+            );
+            // FU-15: abort, so nothing still queued reaches the client.
+            stream.abort();
+        }
+        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => {
+            // Logged (live E2E run 2026-10-30, F-7): an error here used to
+            // return silently, dropping the stream without a clean shutdown.
+            match &result {
+                Ok((up, down)) => tracing::debug!(
+                    transport = session_transport.as_str(),
+                    bytes_up = up,
+                    bytes_down = down,
+                    "tunnel stream finished"
+                ),
+                Err(error) => tracing::warn!(
+                    transport = session_transport.as_str(),
+                    error = %error,
+                    "tunnel stream ended with error"
+                ),
+            }
+            result?;
+        }
+    }
     Ok(())
 }
 
@@ -645,4 +773,30 @@ fn extract_peer_info(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
     }
 
     Err(anyhow!("peer certificate has no SPIFFE URI in SAN"))
+}
+
+#[cfg(test)]
+mod revocation_action_tests {
+    use super::*;
+
+    #[test]
+    fn allows_not_revoked() {
+        assert!(revocation_action(RevocationStatus::NotRevoked).is_ok());
+    }
+
+    #[test]
+    fn rejects_revoked() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Revoked),
+            Err("certificate revoked"),
+        );
+    }
+
+    #[test]
+    fn fails_closed_on_unavailable() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Unavailable),
+            Err("certificate revocation state unavailable"),
+        );
+    }
 }

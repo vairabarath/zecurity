@@ -30,6 +30,7 @@ const CardHeader = React.forwardRef<
     {...props}
   >
     <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-primary/20 to-transparent" />
+    {props.children}
   </div>
 ))
 CardHeader.displayName = "CardHeader"

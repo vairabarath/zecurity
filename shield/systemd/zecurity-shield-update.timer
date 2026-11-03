@@ -2,11 +2,15 @@
 #
 # Runs zecurity-shield-update.service once per week with up to 1 hour
 # of random jitter. This matches the Shield updater's startup delay logic.
+#
+# No Requires= on the service (Sprint 20 Fix 11): it made enabling or
+# starting the timer run an update immediately. The timer activates its
+# same-named service on schedule without it. The installers enable this
+# timer only when AUTO_UPDATE_ENABLED=true.
 
 [Unit]
 Description=Weekly ZECURITY Shield update check
 Documentation=https://github.com/vairabarath/zecurity
-Requires=zecurity-shield-update.service
 
 [Timer]
 OnCalendar=weekly

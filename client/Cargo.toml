@@ -7,6 +7,18 @@ edition = "2021"
 name = "zecurity-client"
 path = "src/main.rs"
 
+
+[dev-dependencies]
+tempfile = "3"
+# Paused-clock tests (tokio::test(start_paused = true)) for the FU-8 hint
+# stream's reconnect backoff and idle limit. Test builds only.
+tokio = { version = "1", features = ["test-util"] }
+# Independent signature verification in the TPM tests: proves a TPM-produced
+# signature validates against the TPM's public key under the exact algorithm
+# rustls uses (ECDSA P-256 / SHA-256, ASN.1 DER signature). Already in the
+# tree via rustls' "ring" feature.
+ring = "0.17"
+
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
 serde      = { version = "1", features = ["derive"] }
@@ -16,6 +28,7 @@ tokio      = { version = "1", features = ["full"] }
 anyhow     = "1"
 thiserror  = "1"
 async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 # Phase 2 — add now so they compile clean:
 tonic      = { version = "0.12", features = ["tls"] }
@@ -34,7 +47,8 @@ libc               = "0.2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm     = "0.10"
-x509-parser = "0.16"
+x509-parser = { version = "0.18", features = ["verify"] }
+parking_lot = "0.12"
 
 # Phase 5 — add now so they compile clean:
 tun         = { version = "0.6", features = ["async"] }
@@ -50,5 +64,18 @@ rtnetlink          = "0.14"
 netlink-packet-route = "0.19"
 futures            = "0.3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# PENDING-17: hardware-backed device keys. Linux-only — never attempted on a
+# hypothetical future non-Linux target.
+tss-esapi = "7"
+# DER-encode the TPM's raw ECDSA r/s components into an ECDSA-Sig-Value
+# SEQUENCE — already in the dependency tree transitively via tss-esapi, this
+# just makes them directly usable. Versions pinned to what tss-esapi already
+# resolves to avoid a duplicate second copy in the build.
+picky-asn1 = "0.10"
+picky-asn1-der = "0.5"
+
 [build-dependencies]
 tonic-build = "0.12"
+# Validates the embedded platform root CA at build time (certificate audit bug 1).
+x509-parser = { version = "0.18", features = ["verify"] }

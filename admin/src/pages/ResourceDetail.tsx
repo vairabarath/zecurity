@@ -7,10 +7,13 @@ import {
   UnprotectResourceDocument,
   DeleteResourceDocument,
   ForceDeleteResourceDocument,
-  ShieldStatus,
+  GetShieldsDocument,
 } from '@/generated/graphql'
+import { protectTargetShield, hostShield, type ShieldLike } from '@/lib/protectShield'
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
+import { Capability, useCan } from '@/lib/capabilities'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { StatusPill, relativeTime } from '@/lib/console'
 import { cn } from '@/lib/utils'
 import {
@@ -74,6 +77,9 @@ export default function ResourceDetail() {
   const { resourceId } = useParams<{ resourceId: string }>()
   const navigate = useNavigate()
   const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const canWrite = useCan(Capability.NetworkWrite)
+  const canAccessWrite = useCan(Capability.AccessWrite)
 
   const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
@@ -81,6 +87,16 @@ export default function ResourceDetail() {
   })
 
   const resource = data?.allResources.find((r) => r.id === resourceId)
+
+  // Shields of the resource's remote network: the protect target is chosen the
+  // way the controller's MarkProtecting chooses it (Fix 10), not from the
+  // bound shield alone.
+  const { data: shieldsData } = useQuery(GetShieldsDocument, {
+    variables: { remoteNetworkId: resource?.remoteNetwork.id ?? '' },
+    skip: !resource,
+    fetchPolicy: 'cache-and-network',
+    pollInterval: 10000,
+  })
 
   useEffect(() => {
     if (!resource) return
@@ -131,9 +147,11 @@ export default function ResourceDetail() {
     void unprotectResource({ variables: { id: resourceId } })
   }
 
+  // Sprint 20 F25: deleting a resource also deletes its group access rules, so
+  // the dialog names the groups that lose access and offers Edit instead.
   function handleDelete() {
     if (!resourceId) return
-    if (!window.confirm('Delete this resource? This cannot be undone.')) return
+    setDeleteOpen(false)
     void deleteResource({ variables: { id: resourceId } })
   }
 
@@ -182,10 +200,15 @@ export default function ResourceDetail() {
 
   const isProtected = resource.status === 'protected'
   const isDeleting = resource.status === 'deleting'
-  const shield = resource.shield
-  // Mirror the backend gate: MarkProtecting requires the bound shield to be 'active'
-  // (controller maps DB status → enum verbatim, so 'active' ⇔ ShieldStatus.Active).
-  const canProtect = shield?.status === ShieldStatus.Active
+  const boundShield: ShieldLike | null = resource.shield ?? null
+  const rnShields: readonly ShieldLike[] = shieldsData?.shields ?? []
+  // Mirror the backend gate (MarkProtecting): an ACTIVE shield in this remote
+  // network on the resource host, the bound one preferred. A resource created
+  // before its shield has no bound shield but is still protectable.
+  const protectTarget = protectTargetShield(resource.host, boundShield, rnShields)
+  const shield = protectTarget ?? hostShield(resource.host, boundShield, rnShields)
+  const canProtect = protectTarget !== null
+  const targetIsBound = protectTarget !== null && protectTarget.id === boundShield?.id
   const transitional = ['protecting', 'deleting'].includes(resource.status)
 
   return (
@@ -213,12 +236,12 @@ export default function ResourceDetail() {
                 <Globe className="h-3 w-3" />
                 {resource.remoteNetwork.name}
               </div>
-              {shield && (
+              {boundShield && (
                 <>
                   <span className="opacity-40">→</span>
                   <div className="flex items-center gap-1.5 rounded-lg bg-secondary px-2 py-0.5 text-xs font-bold">
                     <Shield className="h-3 w-3" />
-                    {shield.name}
+                    {boundShield.name}
                   </div>
                 </>
               )}
@@ -227,7 +250,7 @@ export default function ResourceDetail() {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {!isProtected && !transitional && (
+          {!isProtected && !transitional && canWrite && (
             <Button
               onClick={handleProtect}
               disabled={protecting || !canProtect}
@@ -238,7 +261,7 @@ export default function ResourceDetail() {
               Protect this resource
             </Button>
           )}
-          {isProtected && (
+          {isProtected && canWrite && (
             <Button
               onClick={handleUnprotect}
               disabled={unprotecting}
@@ -249,24 +272,28 @@ export default function ResourceDetail() {
               Unprotect
             </Button>
           )}
+          {canWrite && (
           <Button variant="ghost" size="sm" onClick={() => setEditOpen(true)} className="gap-2">
             <Pencil className="h-4 w-4" />
             Edit
           </Button>
+          )}
+          {canWrite && (
           <Button
             variant="ghost"
             size="sm"
-            onClick={handleDelete}
+            onClick={() => setDeleteOpen(true)}
             disabled={deleting || transitional}
             className="gap-2 text-destructive/80 hover:bg-destructive/5 hover:text-destructive"
           >
             {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             Delete
           </Button>
+          )}
           {/* Break-glass: only when the resource is stuck mid-operation, where the
               normal Delete is blocked. Erases the record even though it can't be
               confirmed-safe — audited server-side. */}
-          {transitional && (
+          {transitional && canWrite && (
             <Button
               variant="ghost"
               size="sm"
@@ -336,7 +363,7 @@ export default function ResourceDetail() {
               <div className="text-sm text-muted-foreground">
                 {canProtect ? (
                   <>
-                    A shield is available on{' '}
+                    The shield <strong>{protectTarget.name}</strong> is available on{' '}
                     <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code>
                     . Click <strong>Protect this resource</strong> above to enable enforcement.
                   </>
@@ -356,7 +383,7 @@ export default function ResourceDetail() {
                 )}
               </div>
             </div>
-            {canProtect && (
+            {canProtect && canWrite && (
               <Button onClick={handleProtect} disabled={protecting} className="shrink-0 gap-2">
                 {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                 Protect
@@ -566,18 +593,20 @@ export default function ResourceDetail() {
                   {canProtect ? (
                     <>
                       <p className="mb-3 mt-3 text-xs text-muted-foreground">
-                        This resource is bound to the shield on{' '}
+                        {targetIsBound ? 'This resource is bound to the shield on' : 'Protecting binds this resource to the shield on'}{' '}
                         <code className="rounded bg-secondary px-1 font-mono">{resource.host}</code>. Click{' '}
                         <strong>Protect this resource</strong> to enable enforcement.
                       </p>
+                      {canWrite && (
                       <Button onClick={handleProtect} disabled={protecting} className="w-full gap-2">
                         {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                         Protect this resource
                       </Button>
+                      )}
                     </>
                   ) : (
                     <p className="mt-3 text-xs text-muted-foreground">
-                      The bound shield is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect
+                      The shield is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect
                       before this resource can be protected.
                     </p>
                   )}
@@ -594,6 +623,7 @@ export default function ResourceDetail() {
             </div>
           </div>
 
+          {canAccessWrite && (
           <div className="surface-card overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
@@ -609,8 +639,56 @@ export default function ResourceDetail() {
               <p className="text-sm text-muted-foreground">Define a policy to control who can reach this resource.</p>
             </div>
           </div>
+          )}
         </div>
       </div>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete resource “{resource.name}”?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            {resource.groups.length > 0 ? (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                <p className="font-semibold">
+                  {resource.groups.length === 1 ? '1 group loses' : `${resource.groups.length} groups lose`} access:
+                </p>
+                <p className="mt-1">{resource.groups.map((g) => g.name).join(', ')}</p>
+                <p className="mt-2">
+                  Deleting removes these access rules too. Creating the resource again does not bring them back.
+                </p>
+              </div>
+            ) : (
+              <p>No group has access to this resource.</p>
+            )}
+            <p className="text-muted-foreground">
+              To change its host, port or protocol, edit it instead — its group access is kept.
+            </p>
+            <p className="text-muted-foreground">This cannot be undone.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteOpen(false)
+                setEditOpen(true)
+              }}
+              className="gap-2"
+            >
+              <Pencil className="h-4 w-4" />
+              Edit instead
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting} className="gap-2">
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <EditResourceModal
         resource={resource}

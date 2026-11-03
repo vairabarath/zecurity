@@ -10,6 +10,9 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      # Schema files run ONCE, only when ztna_pgdata is first created; nothing upgrades an
+      # existing DB. After any schema change: docker compose down -v && docker compose up -d.
+      # See docs/database-development.md.
       - ./migrations:/docker-entrypoint-initdb.d
       - ztna_pgdata:/var/lib/postgresql/data
     healthcheck:

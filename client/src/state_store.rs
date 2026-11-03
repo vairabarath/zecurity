@@ -19,7 +19,7 @@ use std::{
 use crate::{
     appmeta,
     login::LoginResult,
-    runtime::{DeviceInfo, Resource, SessionInfo, UserInfo, WorkspaceInfo},
+    runtime::{DeviceInfo, SessionInfo, UserInfo, WorkspaceInfo},
 };
 
 const ENC_PREFIX: &str = "enc1:";
@@ -37,6 +37,12 @@ pub struct StoredWorkspaceState {
     pub resources: Vec<StoredResource>,
     #[serde(default)]
     pub last_sync_at: i64,
+    /// FU-10: whether the user last left the tunnel up (`up` or `login`) rather
+    /// than down (`down`). A daemon restart or reboot brings the tunnel back
+    /// only when this is set. Defaults to false, so state written before this
+    /// field existed starts down, as it always did.
+    #[serde(default)]
+    pub tunnel_wanted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,13 +85,31 @@ pub struct StoredDevice {
     pub ca_cert_pem: String,
     #[serde(default)]
     pub cert_expires_at: i64,
-    /// Plaintext in memory after load; encrypted before it is written to disk.
+    /// Software-backed private key: plaintext in memory after load, encrypted
+    /// before it is written to disk. Empty when this device is TPM-backed —
+    /// see `tpm_key_material`, of which exactly one of the two is populated.
     #[serde(default)]
     pub private_key_pem: String,
+    /// TPM-backed key material (PENDING-17): an opaque, TPM-sealed
+    /// public+private blob pair, serialized by `tpm::serialize_key_material`.
+    /// `None` for software-backed devices — including every device enrolled
+    /// before this field existed, which is exactly why this is additive
+    /// rather than a tagged enum: old state files deserialize unchanged, with
+    /// `private_key_pem` populated and this left `None`.
+    ///
+    /// Stored as an opaque string, never a `tss_esapi` type — that crate is
+    /// Linux-only and this struct is not.
+    #[serde(default)]
+    pub tpm_key_material: Option<String>,
     #[serde(default)]
     pub hostname: String,
     #[serde(default)]
     pub os: String,
+    /// Sprint 19 Track 2 (PENDING-13): "" (active) / "re_enroll_required" /
+    /// "revoked" — mirrors runtime::DeviceState. Set only via mark_device_state,
+    /// which also wipes certificate_pem/private_key_pem in the same write.
+    #[serde(default)]
+    pub device_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -124,7 +148,7 @@ struct JwtClaims {
 
 impl StoredWorkspaceState {
     pub fn from_login(result: LoginResult) -> Self {
-        let claims = decode_claims(&result.session.access_token).unwrap_or_default();
+        let claims = decode_claims(&result.session.access_token).unwrap_or_default(); // comes from the login result
         Self {
             schema_version: appmeta::SCHEMA_VERSION,
             workspace: StoredWorkspace {
@@ -145,8 +169,12 @@ impl StoredWorkspaceState {
                 ca_cert_pem: result.device.ca_cert_pem,
                 cert_expires_at: result.device.cert_expires_at,
                 private_key_pem: result.device.private_key_pem,
+                tpm_key_material: result.device.tpm_key_material,
                 hostname: result.device.hostname,
                 os: result.device.os,
+                // A fresh login always re-enrolls; any prior revoke/re-enroll
+                // marker is stale.
+                device_state: String::new(),
             },
             session: StoredSession {
                 access_token: result.session.access_token,
@@ -155,6 +183,8 @@ impl StoredWorkspaceState {
             },
             resources: Vec::new(),
             last_sync_at: now_unix(),
+            // Set once the tunnel actually comes up after login.
+            tunnel_wanted: false,
         }
     }
 }
@@ -187,6 +217,7 @@ impl From<&StoredWorkspaceState> for DeviceInfo {
             spiffe_id: state.device.spiffe_id.clone(),
             certificate_pem: state.device.certificate_pem.clone(),
             private_key_pem: state.device.private_key_pem.clone(),
+            tpm_key_material: state.device.tpm_key_material.clone(),
             ca_cert_pem: state.device.ca_cert_pem.clone(),
             cert_expires_at: state.device.cert_expires_at,
             hostname: state.device.hostname.clone(),
@@ -204,20 +235,12 @@ impl From<&StoredWorkspaceState> for SessionInfo {
         }
     }
 }
-
-impl From<&StoredResource> for Resource {
-    fn from(resource: &StoredResource) -> Self {
-        Self {
-            id: resource.id.clone(),
-            name: resource.name.clone(),
-            host: resource.host.clone(),
-            port: resource.port,
-            protocol: resource.protocol.clone(),
-        }
-    }
-}
-
 pub fn state_dir() -> PathBuf {
+    // Override for tests — mirrors ipc::ipc_socket_path's ZECURITY_DAEMON_SOCKET
+    // pattern, so tests never touch the real user's XDG state directory.
+    if let Ok(p) = std::env::var("ZECURITY_STATE_DIR") {
+        return PathBuf::from(p);
+    }
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -289,6 +312,78 @@ pub fn save_rotated_tokens(
     state.session.expires_at = expires_at;
     save_workspace_state(workspace_slug, &state)?;
     Ok(())
+}
+
+/// Persists a renewed device cert after a successful RenewCert (Sprint 19
+/// Track 3 / PENDING-13, ADR-028 D1). Load -> mutate -> save, same idiom as
+/// save_rotated_tokens. Touches only certificate_pem/ca_cert_pem/
+/// cert_expires_at — private_key_pem is untouched because renewal reuses the
+/// existing key (that's the whole point of the fingerprint-pinning check on
+/// the controller side).
+pub fn save_renewed_cert(
+    workspace_slug: &str,
+    certificate_pem: String,
+    ca_cert_pem: String,
+    cert_expires_at: i64,
+) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.device.certificate_pem = certificate_pem;
+    state.device.ca_cert_pem = ca_cert_pem;
+    state.device.cert_expires_at = cert_expires_at;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
+/// Records whether the user wants the tunnel up (FU-10). Load -> mutate ->
+/// save, same idiom as save_rotated_tokens.
+pub fn save_tunnel_wanted(workspace_slug: &str, wanted: bool) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.tunnel_wanted = wanted;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
+/// Sets the device_state marker (Sprint 19 Track 2 / PENDING-13) and wipes the
+/// on-disk cert + key material — both REVOKED and RE_ENROLL_REQUIRED mean the
+/// cert is dead server-side, so there is nothing to gain by keeping it on disk
+/// and real security value in not doing so. id/spiffe_id are preserved:
+/// RE_ENROLL_REQUIRED reuses the same device row on recovery (D-C).
+///
+/// Load -> mutate -> save, mirroring save_rotated_tokens. Same known failure
+/// window: a crash between the server-side change and this save leaves a
+/// stale marker on disk until the next successful poll.
+pub fn mark_device_state(workspace_slug: &str, device_state: &str) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.device.device_state = device_state.to_string();
+    state.device.certificate_pem.clear();
+    state.device.private_key_pem.clear();
+    // A TPM-backed device's key material is discarded the same way
+    // (PENDING-17). The sealed blob is useless to an attacker without this
+    // exact chip, but a revoked device has no business keeping a loadable
+    // key handle around either.
+    state.device.tpm_key_material = None;
+    state.device.cert_expires_at = 0;
+    // A revoked or disabled device must not bring a tunnel back after a
+    // restart (FU-10); the next login sets this again.
+    if !device_state.is_empty() {
+        state.tunnel_wanted = false;
+    }
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
+/// Removes the workspace state when it belongs to a device the controller
+/// revoked (its key is already wiped; only the marker is left). Returns
+/// whether it did. A revoked device can't be used again, and while its state
+/// is on disk every daemon start re-checks it and exits, so `login` (a new
+/// device) could never reach the daemon (live run 2026-10-29, F-4).
+pub fn clear_revoked_state(workspace_slug: &str) -> Result<bool> {
+    match load_workspace_state(workspace_slug) {
+        Ok(state) if state.device.device_state == "revoked" => {
+            clear_workspace_state(workspace_slug)
+        }
+        _ => Ok(false),
+    }
 }
 
 pub fn clear_workspace_state(workspace_slug: &str) -> Result<bool> {

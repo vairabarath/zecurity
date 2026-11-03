@@ -3,11 +3,8 @@ package resource
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestMarkUnprotectingResolvesDeadShield exercises Finding 7 against a real
@@ -17,23 +14,15 @@ import (
 // merely-disconnected shield must still take the normal 'protecting'/remove path,
 // because it can still apply the removal and ack it (disconnected acks on reconnect).
 //
-// Self-provisioning: creates its own workspace/network/connector/shields/resources
-// and tears them all down via the workspace CASCADE. Set RESOURCE_TEST_DATABASE_URL
-// to run; skipped otherwise.
+// Self-provisioning: runs in its own throwaway database (newResourceTestDB applies
+// every schema file) and creates its own workspace/network/connector/shields/
+// resources. Set RESOURCE_TEST_DATABASE_URL (admin DSN) to run; skipped otherwise.
 //
 //	RESOURCE_TEST_DATABASE_URL=postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform \
 //	  go test ./internal/resource/ -run TestMarkUnprotectingResolvesDeadShield -v
 func TestMarkUnprotectingResolvesDeadShield(t *testing.T) {
-	dsn := os.Getenv("RESOURCE_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("RESOURCE_TEST_DATABASE_URL not set")
-	}
+	db := newResourceTestDB(t)
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
 
 	slug := fmt.Sprintf("f7-test-%d", time.Now().UnixNano())
 

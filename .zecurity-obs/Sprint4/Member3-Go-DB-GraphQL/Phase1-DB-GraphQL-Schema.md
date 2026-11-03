@@ -39,7 +39,7 @@ tags:
 
 ### 003_shield_schema.sql
 
-- [ ] Create `shields` table with columns:
+- [x] Create `shields` table with columns:
   - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - `tenant_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE`
   - `remote_network_id UUID NOT NULL REFERENCES remote_networks(id) ON DELETE CASCADE`
@@ -57,32 +57,34 @@ tags:
   - `public_ip TEXT`
   - `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
   - `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
-- [ ] Create indexes:
+- [x] Create indexes:
   - `idx_shields_tenant ON shields (tenant_id)`
   - `idx_shields_remote_network ON shields (remote_network_id, tenant_id)`
   - `idx_shields_connector ON shields (connector_id)`
   - `idx_shields_token_jti ON shields (enrollment_token_jti)`
   - `idx_shields_trust_domain ON shields (trust_domain)`
   - `UNIQUE INDEX idx_shields_interface_addr ON shields (tenant_id, interface_addr) WHERE interface_addr IS NOT NULL`
-- [ ] Test: `psql $DATABASE_URL -f migrations/003_shield_schema.sql` on clean DB — no errors
+- [x] Test: `psql $DATABASE_URL -f migrations/003_shield_schema.sql` on clean DB — no errors
 
 ### shield.graphqls (NEW)
 
-- [ ] Create `controller/graph/shield.graphqls`
+- [x] Create `controller/graph/shield.graphqls`
 - [ ] Define `Shield` type with all fields: `id`, `name`, `status`, `remoteNetworkId`, `connectorId`, `lastSeenAt`, `version`, `hostname`, `publicIp`, `interfaceAddr`, `certNotAfter`, `createdAt`
-- [ ] Define `ShieldStatus` enum: `PENDING`, `ACTIVE`, `DISCONNECTED`, `REVOKED`
+  <!-- PARTIAL: uses `lanIp` instead of `publicIp` -->
+- [x] Define `ShieldStatus` enum: `PENDING`, `ACTIVE`, `DISCONNECTED`, `REVOKED`
 - [ ] Define `ShieldToken` type: `shieldId`, `installCommand`
-- [ ] Extend `Mutation` type:
+  <!-- PARTIAL: only `shieldId` present; `installCommand` field missing from schema -->
+- [x] Extend `Mutation` type:
   - `generateShieldToken(remoteNetworkId: ID!, shieldName: String!): ShieldToken!`
   - `revokeShield(id: ID!): Boolean!`
   - `deleteShield(id: ID!): Boolean!`
-- [ ] Extend `Query` type:
+- [x] Extend `Query` type:
   - `shields(remoteNetworkId: ID!): [Shield!]!`
   - `shield(id: ID!): Shield`
 
 ### connector.graphqls (MODIFY)
 
-- [ ] Add `NetworkHealth` enum:
+- [x] Add `NetworkHealth` enum:
   ```graphql
   enum NetworkHealth {
     ONLINE     # ≥1 connector ACTIVE
@@ -90,17 +92,17 @@ tags:
     OFFLINE    # no connectors at all
   }
   ```
-- [ ] Modify `RemoteNetwork` type — add two fields:
+- [x] Modify `RemoteNetwork` type — add two fields:
   - `networkHealth: NetworkHealth!`
   - `shields: [Shield!]!`
-- [ ] **Do NOT remove existing fields** on `RemoteNetwork`
+- [x] **Do NOT remove existing fields** on `RemoteNetwork`
 
 ### Run Go codegen
 
-- [ ] Run: `cd controller && go generate ./graph/...`
-- [ ] Verify `controller/graph/generated.go` updated without errors
-- [ ] Stub resolver methods generated for Shield mutations/queries
-- [ ] `cd controller && go build ./...` must pass (even with empty resolver stubs)
+- [x] Run: `cd controller && go generate ./graph/...`
+- [x] Verify `controller/graph/generated.go` updated without errors
+- [x] Stub resolver methods generated for Shield mutations/queries
+- [x] `cd controller && go build ./...` must pass (even with empty resolver stubs)
 
 ---
 

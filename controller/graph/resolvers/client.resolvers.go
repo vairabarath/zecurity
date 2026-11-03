@@ -13,6 +13,7 @@ import (
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -30,6 +31,7 @@ func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (
 		return nil, fmt.Errorf("create invitation: %w", err)
 	}
 
+	r.auditAdmin(ctx, "invitation.create", "invitation", inv.ID, map[string]any{"email": email})
 	var workspaceName string
 	r.Pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id = $1`, tc.TenantID).Scan(&workspaceName) //nolint:errcheck
 	if workspaceName == "" {
@@ -59,15 +61,26 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("revoke device: device not found or already revoked")
+			return false, apperr.UserErrorf("revoke device: device not found or already revoked")
 		}
 		return false, fmt.Errorf("revoke device: %w", err)
 	}
+	r.auditAdmin(ctx, "device.revoke", "device", deviceID, nil)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("revoke device: refresh policy: %w", err)
 	}
 
 	return true, nil
+}
+
+// ApproveDevice is the resolver for the approveDevice field.
+func (r *mutationResolver) ApproveDevice(ctx context.Context, deviceID string) (*graph.ClientDevice, error) {
+	return r.setDeviceApproval(ctx, deviceID, true)
+}
+
+// UnapproveDevice is the resolver for the unapproveDevice field.
+func (r *mutationResolver) UnapproveDevice(ctx context.Context, deviceID string) (*graph.ClientDevice, error) {
+	return r.setDeviceApproval(ctx, deviceID, false)
 }
 
 // MyDevices is the resolver for the myDevices field.
@@ -78,11 +91,13 @@ func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, e
 	}
 
 	rows, err := r.Pool.Query(ctx,
-		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
-		   FROM client_devices
-		  WHERE user_id = $1
-		    AND workspace_id = $2
-		  ORDER BY created_at DESC`,
+		`SELECT `+clientDeviceColumns+`
+		   FROM client_devices d
+		   LEFT JOIN users u ON u.id = d.approved_by
+		   LEFT JOIN device_network_observations n ON n.device_id = d.id AND n.workspace_id = d.workspace_id
+		  WHERE d.user_id = $1
+		    AND d.workspace_id = $2
+		  ORDER BY d.created_at DESC`,
 		tc.UserID, tc.TenantID,
 	)
 	if err != nil {
@@ -113,10 +128,12 @@ func (r *queryResolver) ClientDevices(ctx context.Context) ([]*graph.ClientDevic
 	}
 
 	rows, err := r.Pool.Query(ctx,
-		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
-		   FROM client_devices
-		  WHERE workspace_id = $1
-		  ORDER BY created_at DESC`,
+		`SELECT `+clientDeviceColumns+`
+		   FROM client_devices d
+		   LEFT JOIN users u ON u.id = d.approved_by
+		   LEFT JOIN device_network_observations n ON n.device_id = d.id AND n.workspace_id = d.workspace_id
+		  WHERE d.workspace_id = $1
+		  ORDER BY d.created_at DESC`,
 		tc.TenantID,
 	)
 	if err != nil {

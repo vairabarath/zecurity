@@ -43,7 +43,7 @@ Wire `ShieldConfig`, `shield.NewService()`, and `ShieldServiceServer` registrati
 
 ### main.go — Shield config
 
-- [ ] Add `shieldCfg` construction alongside existing `connectorCfg`:
+- [x] Add `shieldCfg` construction alongside existing `connectorCfg`:
   ```go
   shieldCfg := shield.Config{
       CertTTL:             mustDuration("SHIELD_CERT_TTL",             7*24*time.Hour),
@@ -53,27 +53,27 @@ Wire `ShieldConfig`, `shield.NewService()`, and `ShieldServiceServer` registrati
       JWTSecret:           mustEnv("JWT_SECRET"),
   }
   ```
-- [ ] Add `shieldSvc := shield.NewService(shieldCfg, db, pkiSvc, redisClient)`
+- [x] Add `shieldSvc := shield.NewService(shieldCfg, db, pkiSvc, redisClient)`
 
 ### main.go — gRPC registration
 
-- [ ] Register Shield service on same gRPC server as Connector:
+- [x] Register Shield service on same gRPC server as Connector:
   ```go
   shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
   ```
-- [ ] Import path: `shieldpb "github.com/vairabarath/zecurity/gen/go/proto/shield/v1"`
+- [x] Import path: `shieldpb "github.com/vairabarath/zecurity/gen/go/proto/shield/v1"`
 
 ### main.go — disconnect watcher
 
-- [ ] Start disconnect watcher goroutine:
+- [x] Start disconnect watcher goroutine:
   ```go
   go shieldSvc.RunDisconnectWatcher(ctx)
   ```
-- [ ] Place alongside existing `go connectorSvc.RunDisconnectWatcher(ctx)` call
+- [x] Place alongside existing `go connectorSvc.RunDisconnectWatcher(ctx)` call
 
 ### .env files
 
-- [ ] Add to `controller/.env`:
+- [x] Add to `controller/.env`:
   ```env
   # ── Shield (Sprint 4) ────────────────────────────────────────────────────────
   SHIELD_CERT_TTL=168h
@@ -81,7 +81,7 @@ Wire `ShieldConfig`, `shield.NewService()`, and `ShieldServiceServer` registrati
   SHIELD_ENROLLMENT_TOKEN_TTL=24h
   SHIELD_DISCONNECT_THRESHOLD=120s
   ```
-- [ ] Mirror same additions to `.env.example`
+- [x] Mirror same additions to `.env.example`
 
 ---
 

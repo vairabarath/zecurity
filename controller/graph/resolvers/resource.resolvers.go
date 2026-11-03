@@ -8,6 +8,7 @@ package resolvers
 import (
 	"context"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/audit"
@@ -32,6 +33,7 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 	if err != nil {
 		return nil, fmt.Errorf("createResource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.create", "resource", row.ID, resourceAuditDetails(row))
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("createResource: notify policy change: %w", err)
 	}
@@ -47,29 +49,44 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
+		Host:            input.Host,
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,
 	}
-	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
+	res, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return nil, fmt.Errorf("updateResource: notify policy change: %w", err)
-	}
 
+	r.auditAdmin(ctx, "resource.update", "resource", id, resourceAuditDetails(res.Row))
+	// Sprint 20 Fix 02 (F35): this is the one notify for an update. An extra
+	// unconditional notify from a parallel branch (49c4732, merged with 391b28b
+	// in df5a041) fired twice for every relevant change and once for irrelevant
+	// ones.
+	//
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
-	// compiler-visible field (name/protocol/port_from). description/port_to/
-	// remote_network_id are invisible to the compiler, so changing only those
-	// must not churn the ACL version or trigger a fan-out push.
+	// compiler-visible field (name/protocol/port_from/remote_network_id — the
+	// compiler routes through the resource's remote network). description/port_to
+	// are invisible to the compiler, so changing only those must not churn the
+	// ACL version or trigger a fan-out push.
 	if resource.ACLRelevantUpdate(updIn) {
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return nil, fmt.Errorf("updateResource notify: %w", err)
 		}
 	}
 
-	return toResourceGQL(row), nil
+	// Sprint 20 Fix 18 (F24): the shields enforcing this resource get its new
+	// host/port at once — the new shield first on a move, then the old one, which
+	// drops the rule from its snapshot (never a remove instruction).
+	if res.Moved {
+		r.ConnectorRegistry.PushInstruction(res.Row)
+	}
+	for _, p := range res.ShieldPushes {
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, p.ConnectorID, p.ShieldID)
+	}
+
+	return toResourceGQL(res.Row), nil
 }
 
 // ProtectResource is the resolver for the protectResource field.
@@ -80,6 +97,7 @@ func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*gra
 	if err != nil {
 		return nil, fmt.Errorf("protectResource: %w", err)
 	}
+	r.auditAdmin(ctx, "resource.protect", "resource", id, nil)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("protectResource: notify policy change: %w", err)
 	}
@@ -98,6 +116,7 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 		return nil, fmt.Errorf("unprotectResource: %w", err)
 	}
 
+	r.auditAdmin(ctx, "resource.unprotect", "resource", id, nil)
 	// Only instruct a shield when there is one to instruct. If the bound shield was
 	// revoked/gone, MarkUnprotecting resolved straight to 'unprotected' (Finding 7):
 	// no shield to remove the rule or ack, so there is nothing to push.
@@ -119,9 +138,29 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		return false, fmt.Errorf("deleteResource: %w", err)
 	}
 
+	// Sprint 20 Fix 16 (F50): a resource whose shield is revoked or gone can
+	// never have its rule removal acked, so it is deleted at once (including a
+	// tombstone already stuck in 'deleting'). Its rule, if any, belongs to a
+	// shield that no longer takes instructions.
+	if row.Status == "protected" || row.Status == "failed" || row.Status == "deleting" {
+		deleted, err := resource.DeleteIfShieldGone(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+		if err != nil {
+			return false, fmt.Errorf("deleteResource: %w", err)
+		}
+		if deleted {
+			r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
+			if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+				return false, fmt.Errorf("deleteResource notify: %w", err)
+			}
+			return true, nil
+		}
+	}
+
 	switch row.Status {
 	case "protecting", "deleting":
-		return false, fmt.Errorf("deleteResource: resource is mid-operation; wait for it to finish")
+		// A 'deleting' tombstone without an ack is reaped within seconds by the
+		// tombstone sweeper (F50).
+		return false, apperr.UserErrorf("deleteResource: resource is mid-operation; wait for it to finish")
 	case "protected", "failed":
 		// May hold a shield rule → tombstone + tell the shield to remove it.
 		// The row is reaped by RecordAck once the shield acks removal.
@@ -129,6 +168,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		if err != nil {
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
+		r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
 		r.ConnectorRegistry.PushInstruction(delRow)
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
@@ -139,6 +179,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
+		r.auditAdmin(ctx, "resource.delete", "resource", id, map[string]any{"name": row.Name})
 		// The row left the ACL compiler's output — invalidate the workspace snapshot.
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return false, fmt.Errorf("deleteResource notify: %w", err)
@@ -167,7 +208,7 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 		return false, fmt.Errorf("forceDeleteResource: %w", err)
 	}
 	if !deleted {
-		return false, fmt.Errorf("forceDeleteResource: resource not found")
+		return false, apperr.UserErrorf("forceDeleteResource: resource not found")
 	}
 
 	// Durable audit trail — this bypassed the safety model, so it MUST leave a
@@ -195,11 +236,9 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("forceDeleteResource: notify policy change: %w", err)
-	}
 
-	// The row left the ACL compiler's output — invalidate the workspace snapshot.
+	// The row left the ACL compiler's output — invalidate the workspace snapshot
+	// (once; Fix 02 removed the duplicate from the same merge).
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("forceDeleteResource notify: %w", err)
 	}
@@ -220,6 +259,9 @@ func (r *queryResolver) Resources(ctx context.Context, remoteNetworkID string) (
 	for i, row := range rows {
 		result[i] = toResourceGQL(row)
 	}
+	if err := r.attachResourceGroups(ctx, tc.TenantID, result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -235,6 +277,9 @@ func (r *queryResolver) AllResources(ctx context.Context) ([]*graph.Resource, er
 	result := make([]*graph.Resource, len(rows))
 	for i, row := range rows {
 		result[i] = toResourceGQL(row)
+	}
+	if err := r.attachResourceGroups(ctx, tc.TenantID, result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

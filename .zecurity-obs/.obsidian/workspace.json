@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "56956b4f0c5e677e",
+        "id": "5eedd96af4ae4282",
         "type": "tabs",
         "children": [
           {
-            "id": "1bd27bd99f8f8cf3",
+            "id": "425b55c268a3ec00",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Relay-E2E-Flow-and-Security-Review.md",
+                "file": "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Relay-E2E-Flow-and-Security-Review"
+              "title": "Phase2-Policies-Trusted-Linux-Profile"
             }
           }
         ]
@@ -41,7 +41,9 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical",
-                "autoReveal": false
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
               },
               "icon": "lucide-folder-closed",
               "title": "Files"
@@ -53,7 +55,7 @@
             "state": {
               "type": "search",
               "state": {
-                "query": "",
+                "query": "tag:admin-ui",
                 "matchingCase": false,
                 "explainSearch": false,
                 "collapseAll": false,
@@ -74,11 +76,12 @@
               "title": "Bookmarks"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "horizontal",
-    "width": 348.5
+    "width": 263.5
   },
   "right": {
     "id": "right-split",
@@ -183,8 +186,21 @@
       "bases:Create new base": false
     }
   },
-  "active": "1bd27bd99f8f8cf3",
+  "active": "search-leaf",
   "lastOpenFiles": [
+    "Sprint15/Member4-Frontend/Phase1-Device-Profile-Admin-UI.md",
+    "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md",
+    "Sprint15/path.md.tmp.8205.4c5340342908",
+    "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md.tmp.8205.c09e1123492e",
+    "pending/PENDING-09-Continuous-Authorization.md",
+    "Sprint15/Member3-Rust-Connector/Phase2-ACL-Diff-Teardown.md",
+    "Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry.md",
+    "Sprint15/Member3-Rust-Connector/Phase3-Posture-Aware-Auth-and-Metrics.md",
+    "Sprint15/Member2-Rust-Client/Phase2-Daemon-Collection-Scheduler.md",
+    "Sprint15/Member2-Rust-Client/Phase1-Proto-and-Linux-Collectors.md",
+    "Sprint15/path.md",
+    "Sprint15.zip",
+    "Relay-E2E-Flow-and-Security-Review.md",
     "Decisions/ADR-015-Transport-Control-Plane.md",
     "Decisions/ADR-018-Migration-Strategy.md",
     "Decisions/ADR-017-Transport-Propagation.md",
@@ -204,25 +220,11 @@
     "Planning/Session Log.md",
     "Home.md",
     "Planning/Roadmap.md",
-    "redis-to-valkey-migration/Overview.md",
-    "redis-to-valkey-migration/Commit3-Client-Swap.md",
-    "redis-to-valkey-migration/Commit2-EnvVar-Rename.md",
-    "redis-to-valkey-migration/Commit1-Infrastructure.md",
-    "redis-to-valkey-migration/Checklist.md",
-    "improvements.md",
-    "2026-04-27.md",
-    "Study-Plan.md",
     "Untitled.base",
     "Untitled.canvas",
     "Untitled 1.canvas",
-    "CodeStudy/04-Connector-Enrollment-Flow.md",
     "CodeStudy/04-Connector-Enrollment-Flow.md.tmp.6889.711d97c8d652",
     "CodeStudy/04-Connector-Enrollment-Flow.md.tmp.6889.011091e38944",
-    "Decisions/ADR-010-Server-Owned-Public-Operation-Routing.md.tmp.6889.4a2e1193e457",
-    "Decisions/ADR-010-Server-Owned-Public-Operation-Routing.md",
-    "Decisions/ADR-010-Server-Owned-Public-Operation-Routing.md.tmp.6889.6d4dae3bf2c4",
-    "CodeStudy/04-Connector-Enrollment-Flow.md.tmp.6889.3c9c9311a53a",
-    "Decisions/ADR-009-GraphQL-DoS-Hardening.md",
     "Architecture/Connector Lifecycle.canvas",
     "Architecture/System Overview.canvas"
   ]

@@ -1,6 +1,6 @@
 # ADR-017: Transport Propagation
 
-**Status:** Proposed
+**Status:** Accepted — implemented by Sprint 13
 **Track:** B — Architecture
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-26
@@ -265,6 +265,9 @@ maintains a separate `transport_snapshot` field in `SharedState`, populated via 
 | Relay expiry (90s heartbeat gap) → snapshot recompiled | < 95s total |
 | Client polling interval | 60s (same as ACL) |
 | Max convergence window (client) | 120s (2 × poll interval) |
+| Client convergence with a live WatchChanges stream (FU-8, 2026-11-02) | typically ~1 s (hint + one sync); advisory, not guaranteed |
+
+**Amendment 2026-11-02 (FU-8, see ADR-018):** the transport notifier now also wakes the clients' `WatchChanges` streams, so a connected client usually picks up a topology change (including a connector moving off a drained relay) within about a second. The 120 s maximum is unchanged: it is what applies when the stream is down (a controller restart, a network break, an older controller), because then the 60 s poll is all the client has. Anything sized against the worst case, such as `RELAY_DRAIN_TIMEOUT_SECS`, keeps using 120 s.
 
 **Observable:** Each connector includes `transport_version` in its heartbeat. The controller exposes a metric:
 `transport_convergence{workspace=X}` = fraction of connected connectors whose
@@ -283,18 +286,22 @@ reported `transport_version` equals the current compiled version.
 
 ## Implementation Checklist
 
-- [ ] `proto/connector/v1/connector.proto` — add `TransportSnapshot`, `TransportRemoteNetwork`, `TransportConnector` messages; add field 16 to `ConnectorControlMessage`
-- [ ] `proto/client/v1/client.proto` — add `GetTransportSnapshot` RPC + request/response messages
-- [ ] `buf generate` — regenerate Go stubs
-- [ ] `controller/internal/transport/` — new package: `Notifier`, `SnapshotCache`, `Store`, `CompileTransportSnapshot`
-- [ ] `relay/heartbeat.go` — replace `NotifyPolicyChange` calls with `TransportNotifier.NotifyTopologyChange` (query affected connectors from `connector_relay_placement`)
-- [ ] `relay/expiry.go` — replace `NotifyPolicyChange` calls with `TransportNotifier.NotifyTopologyChange`
-- [ ] `connector/control_stream.go` — push `TransportSnapshot` on stream open; register stream in transport push registry
-- [ ] `controller/internal/connector/acl_push.go` — add parallel `transport_push.go` for topology-scoped push
-- [ ] `controller/graph/resolvers/` — wire `GetTransportSnapshot` resolver
-- [ ] `client/src/daemon.rs` — add `transport_snapshot` to `SharedState`; add `fetch_and_store_transport`; join ACL + Transport on `remote_network_id` in `build_transports_by_resource`
-- [ ] Build gate: `cd controller && go build ./...` and `cd client && cargo build`
-- [ ] Unit tests: `TransportNotifier`, `SnapshotCache`, `CompileTransportSnapshot`
+> **Sprint 13 reconciliation:** the accepted implementation serves the sole transport-snapshot
+> consumer directly through version-aware client polling. The earlier connector stream-push items
+> below are superseded; connector control-message field 16 is reserved rather than populated.
+
+- [x] **Architecture correction:** transport messages live in `client.proto`; obsolete connector field 16 is reserved
+- [x] `proto/client/v1/client.proto` — add `GetTransportSnapshot` RPC + request/response messages
+- [x] `buf generate` — regenerate Go stubs
+- [x] `controller/internal/transport/` — new package: `Notifier`, `SnapshotCache`, `Store`, `CompileTransportSnapshot`
+- [x] `relay/heartbeat.go` — replace `NotifyPolicyChange` calls with `TransportNotifier.NotifyTopologyChange` (affected connector IDs are advisory under polling)
+- [x] `relay/expiry.go` — replace `NotifyPolicyChange` calls with `TransportNotifier.NotifyTopologyChange`
+- [x] **Architecture correction:** connector stream push is superseded by version-aware client polling
+- [x] **Architecture correction:** no parallel connector push registry is needed for the sole client consumer
+- [x] `controller/graph/resolvers/` — wire `GetTransportSnapshot` resolver
+- [x] `client/src/daemon.rs` — add `transport_snapshot` to `SharedState`; add version-aware transport sync; join ACL + Transport on `remote_network_id` in routing
+- [x] Build gate: `cd controller && go build ./...` and `cd client && cargo build`
+- [x] Unit tests: `TransportNotifier`, `SnapshotCache`, `CompileTransportSnapshot`
 - [ ] Integration test: topology change → correct connectors notified, correct snapshot version
 
 ---

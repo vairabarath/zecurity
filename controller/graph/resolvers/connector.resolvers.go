@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -32,6 +34,7 @@ func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string,
 		return nil, fmt.Errorf("create remote network: %w", err)
 	}
 
+	r.auditAdmin(ctx, "remote_network.create", "remote_network", rn.ID, map[string]any{"name": rn.Name, "location": strings.ToLower(string(location))})
 	return rn, nil
 }
 
@@ -57,11 +60,12 @@ func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("delete remote network: network not found, already deleted, or has active connectors")
+			return false, apperr.UserErrorf("delete remote network: network not found, already deleted, or has active connectors")
 		}
 		return false, fmt.Errorf("delete remote network: %w", err)
 	}
 
+	r.auditAdmin(ctx, "remote_network.delete", "remote_network", id, nil)
 	return true, nil
 }
 
@@ -101,6 +105,7 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 		return nil, fmt.Errorf("generate connector token: insert connector: %w", err)
 	}
 
+	r.auditAdmin(ctx, "connector.create", "connector", connectorID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})
 	// Token minting is lazy: the create path only reserves the pending row.
 	// The enrollment token (JWT + Redis jti + install command) is issued on
 	// demand by the REST endpoint POST /api/connectors/{id}/token when the
@@ -110,24 +115,91 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 }
 
 // RevokeConnector is the resolver for the revokeConnector field.
-func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool, error) {
+func (r *mutationResolver) RevokeConnector(ctx context.Context, id string, alsoRevokeShields *bool) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	// Sprint 20 Fix 16 (F46): the last connector of a remote network that still
+	// has enrolled shields attached is not revoked silently: those shields would
+	// be stranded (a shield learns connectors only from connectors, so it could
+	// never re-attach and would redial the revoked one). The admin either adds
+	// another connector first or revokes the shields too (alsoRevokeShields).
+	stranded, err := connector.StrandedShields(ctx, r.TenantDB, tc.TenantID, id)
+	if err != nil {
+		return false, fmt.Errorf("revoke connector: %w", err)
+	}
+	revokeShields := alsoRevokeShields != nil && *alsoRevokeShields
+	if len(stranded) > 0 && !revokeShields {
+		names := make([]string, len(stranded))
+		for i, s := range stranded {
+			names[i] = s.Name
+		}
+		return false, fmt.Errorf(
+			"revoke connector: it is the last connector of its remote network and %d enrolled shield(s) are attached (%s); "+
+				"they would be stranded — add another connector first, or revoke them too with alsoRevokeShields: true",
+			len(stranded), strings.Join(names, ", "))
+	}
+
 	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
+	err = r.TenantDB.QueryRow(ctx,
 		`UPDATE connectors
-		    SET status = 'revoked', updated_at = NOW()
+		    SET status            = 'revoked',
+		        revoked_at        = NOW(),
+		        revocation_reason = 'revoked via admin API',
+		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND tenant_id = $2
 		    AND status IN ('active', 'disconnected')
+		    AND revoked_at IS NULL
 		 RETURNING id`,
 		id, tc.TenantID,
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("revoke connector: connector not found or not in revocable status")
+			return false, apperr.UserErrorf("revoke connector: connector not found or not in revocable status")
 		}
 		return false, fmt.Errorf("revoke connector: %w", err)
+	}
+
+	r.auditAdmin(ctx, "connector.revoke", "connector", id, map[string]any{"also_revoke_shields": revokeShields})
+	// The UPDATE has committed: deliver the explicit terminal ConnectorRevoked
+	// on every live Control stream of this connector (including a stream
+	// superseded by a make-before-break renewal). Done before the notifies so
+	// a notify error can't skip it. A disconnected connector gets the revoked
+	// marker when it next opens Control.
+	if r.ConnectorRegistry != nil {
+		r.ConnectorRegistry.SignalRevoked(id)
+	}
+
+	// Drop the revoked connector from BOTH planes immediately: the ACL
+	// (availability) and the transport (connectivity) snapshots. Without this,
+	// the connector lingers in the cached snapshots until they happen to be
+	// invalidated. The guarded heartbeat UPDATE (control_stream) prevents the
+	// connector from resurrecting itself and closes any live stream that missed
+	// ConnectorRevoked on its next heartbeat (defence in depth).
+	if r.PolicyNotifier != nil {
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("revoke connector: notify policy change: %w", err)
+		}
+	}
+	if r.TransportNotifier != nil {
+		if err := r.TransportNotifier.NotifyTopologyChange(ctx, tc.TenantID, []string{id}); err != nil {
+			return false, fmt.Errorf("revoke connector: notify topology change: %w", err)
+		}
+	}
+	// D21-R (a2): the network's shields get a signed peer list without it.
+	connector.PushPeerListsForNetworkOf(ctx, r.Pool, r.ConnectorRegistry, id)
+
+	// F46: the connector is revoked; now the shields it stranded, each through
+	// the normal shield revocation (tombstone + propagation, bug 3).
+	if revokeShields && len(stranded) > 0 {
+		for _, s := range stranded {
+			if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, s.ID); err != nil && !errors.Is(err, shield.ErrNotRevocable) {
+				return false, fmt.Errorf("revoke connector: revoked, but revoking shield %s failed: %w", s.Name, err)
+			}
+		}
+		if r.ShieldRevocations != nil {
+			r.ShieldRevocations.Wake()
+		}
 	}
 
 	return true, nil
@@ -137,22 +209,42 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	// Connector-revocation Phase F (finding A): the delete cascades to the
+	// shields rows attached to this connector without revoking them, which
+	// would leave enrolled shields with valid, unrevoked certificates and no
+	// row. So it is refused while an enrolled, non-revoked shield is attached
+	// (pending shields have no certificate; revoked ones keep their
+	// tombstone). One statement: a revoked connector gains no shields.
 	var discardedID string
 	err := r.TenantDB.QueryRow(ctx,
 		`DELETE FROM connectors
 		  WHERE id = $1
 		    AND tenant_id = $2
 		    AND status IN ('pending', 'revoked')
+		    AND NOT EXISTS (
+		          SELECT 1 FROM shields s
+		           WHERE s.connector_id = connectors.id
+		             AND s.status IN ('active', 'disconnected'))
 		 RETURNING id`,
 		id, tc.TenantID,
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("delete connector: connector not found or must be revoked before deletion")
+			var attached int
+			if qErr := r.TenantDB.QueryRow(ctx,
+				`SELECT count(*) FROM shields
+				  WHERE connector_id = $1 AND tenant_id = $2
+				    AND status IN ('active', 'disconnected')`,
+				id, tc.TenantID,
+			).Scan(&attached); qErr == nil && attached > 0 {
+				return false, fmt.Errorf("delete connector: %d shield(s) still attached; let them fail over to another connector or revoke them first", attached)
+			}
+			return false, apperr.UserErrorf("delete connector: connector not found or must be revoked before deletion")
 		}
 		return false, fmt.Errorf("delete connector: %w", err)
 	}
 
+	r.auditAdmin(ctx, "connector.delete", "connector", id, nil)
 	return true, nil
 }
 

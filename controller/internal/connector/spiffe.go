@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"strings"
 
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -54,7 +56,26 @@ type WorkspaceStore interface {
 	// GetIntermediateCA loads the platform intermediate CA certificate used to
 	// verify workspace CA chains and the controller server certificate.
 	GetIntermediateCA(ctx context.Context) (*x509.Certificate, error)
+
+	// GetConnectorStanding loads the authoritative revocation state of the
+	// connector connectorID in trustDomain. Returns (nil, nil) if no such
+	// connector exists and (nil, err) if the state cannot be read.
+	GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error)
+
+	// GetRelayStatus loads relays.status for relayID. Returns ("", nil) if no
+	// such relay exists and ("", err) if the status cannot be read.
+	GetRelayStatus(ctx context.Context, relayID string) (string, error)
 }
+
+// RelayStateMarkerKey is the gRPC trailer key on a refused relay RPC that
+// carries the relay's authoritative state (Sprint 20 F32). It is attached only
+// when the relay row itself is terminal; a revoked serial alone (a superseded
+// renewal) gets no marker. gRPC metadata keys are lower-case ASCII.
+const RelayStateMarkerKey = "zecurity-relay-state"
+
+// RelayStateRevoked is the only marker value: the relay is revoked or
+// deleted, both terminal. The relay stops its heartbeat on it.
+const RelayStateRevoked = "revoked"
 
 // WorkspaceLookup is the minimal workspace info needed by the trust domain validator.
 // We define our own type instead of importing models.Workspace to avoid coupling.
@@ -147,7 +168,7 @@ func parseSPIFFEID(cert *x509.Certificate) (trustDomain, role, id string, err er
 //   - spiffeRoleKey{}     — "connector", "agent", or "controller"
 //   - spiffeEntityIDKey{} — the entity-specific ID (e.g. connector UUID)
 //   - trustDomainKey{}    — the trust domain from the SPIFFE URI
-func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.UnaryServerInterceptor {
+func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore, revChecker *RelayRevocationChecker) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
 		req any,
@@ -155,8 +176,8 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		handler grpc.UnaryHandler,
 	) (any, error) {
 		// Skip bootstrap RPCs because the caller has no certificate yet.
-		// Connector and Shield authenticate with JWTs. Relay Provision currently
-		// uses server-authenticated TLS only; token authentication is deferred.
+		// Connector, Shield, and Relay bootstrap RPCs authenticate with enrollment
+		// tokens in their handlers because callers do not have certificates yet.
 		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
 			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName ||
 			info.FullMethod == relaypb.RelayService_Provision_FullMethodName {
@@ -206,10 +227,24 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 			if err := verifyConnectorCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return nil, status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
 			}
+			// Certificate audit bug 7: reject a revoked connector on every
+			// unary RPC, including the shield RPCs it proxies.
+			if err := requireConnectorNotRevoked(ctx, store, trustDomain, entityID); err != nil {
+				return nil, err
+			}
 		}
 		if role == appmeta.SPIFFERoleRelay {
 			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return nil, status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+			// PENDING-02: reject a revoked relay. Fail closed if revocation state
+			// is unavailable — an unknown relay is not trusted.
+			if revChecker == nil || !revChecker.Ready() {
+				return nil, status.Error(codes.Unavailable, "relay revocation state unavailable")
+			}
+			if revChecker.IsRevoked(leaf.SerialNumber.Text(16)) {
+				markTerminalRelay(ctx, store, entityID)
+				return nil, status.Error(codes.PermissionDenied, "relay certificate revoked")
 			}
 		}
 
@@ -221,6 +256,41 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 
 		return handler(ctx, req)
 	}
+}
+
+// markTerminalRelay attaches the revoked marker trailer when the relay row is
+// revoked or deleted (Sprint 20 F32). A failed lookup or a live relay gets no
+// marker: the call is still refused, but the relay keeps retrying.
+func markTerminalRelay(ctx context.Context, store WorkspaceStore, relayID string) {
+	relayStatus, err := store.GetRelayStatus(ctx, relayID)
+	if err != nil {
+		log.Printf("relay %s: revoked serial; relay status unavailable, no marker: %v", relayID, err)
+		return
+	}
+	if relayStatus != "revoked" && relayStatus != "deleted" {
+		return
+	}
+	if err := grpc.SetTrailer(ctx, metadata.Pairs(RelayStateMarkerKey, RelayStateRevoked)); err != nil {
+		log.Printf("relay %s: set revoked marker: %v", relayID, err)
+	}
+}
+
+// requireConnectorNotRevoked refuses a connector that is revoked or unknown in
+// its trust domain. Revocation does not shorten a certificate's lifetime, so
+// a verified chain is not enough. It fails closed: if the standing cannot be
+// read, the call is refused as Unavailable.
+func requireConnectorNotRevoked(ctx context.Context, store WorkspaceStore, trustDomain, connectorID string) error {
+	standing, err := store.GetConnectorStanding(ctx, trustDomain, connectorID)
+	if err != nil {
+		return status.Error(codes.Unavailable, "connector revocation state unavailable")
+	}
+	if standing == nil {
+		return status.Error(codes.PermissionDenied, "connector not found")
+	}
+	if standing.Revoked() {
+		return status.Error(codes.PermissionDenied, "connector revoked")
+	}
+	return nil
 }
 
 func verifyRelayCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {

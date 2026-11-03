@@ -8,15 +8,32 @@ import (
 	"log"
 	"net"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	connectorpb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 )
 
 var ErrRelayNotFound = errors.New("relay not found")
+
+// Renewal (D-19) errors returned by RecordRenewedCert.
+var (
+	// ErrRelayNotRenewable: the relay is not active/inactive (pending, revoked, deleted).
+	ErrRelayNotRenewable = errors.New("relay is not in a renewable state")
+	// ErrPresentedCertInvalid: the certificate presented on the renewal call is
+	// not a known, unrevoked certificate of this relay.
+	ErrPresentedCertInvalid = errors.New("presented relay certificate is unknown or revoked")
+)
+
+// supersededRenewalReason marks a renewed certificate that was replaced by a
+// later renewal attempt made while the relay still presented its previous
+// certificate (the earlier successor was never put into use).
+const supersededRenewalReason = "superseded by renewal retry"
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -43,9 +60,8 @@ type RelayRow struct {
 	LastHeartbeatAt    *time.Time
 }
 
-// CreateRelay inserts a new relay row with status='pending'.
-// The enrollment_token_jti is attached separately via AttachJTI once the
-// caller has issued the JWT (the JWT's sub claim is the just-minted relay id).
+// CreateRelay inserts a new relay row with status='pending' and no token.
+// The admin API uses CreateRelayAudited; this is for fixtures and tooling.
 func (s *Store) CreateRelay(ctx context.Context, name string, dnsAllowlist, ipAllowlist []string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx,
@@ -60,19 +76,51 @@ func (s *Store) CreateRelay(ctx context.Context, name string, dnsAllowlist, ipAl
 	return id, nil
 }
 
-// AttachJTI records the issued provisioning-token jti on the relay row.
-func (s *Store) AttachJTI(ctx context.Context, id, jti string) error {
-	tag, err := s.pool.Exec(ctx,
+// CreateRelayAudited creates a pending relay with its provisioning token and
+// audit row in one transaction (D-14, Sprint 22 FU-1): insert the row, call
+// issue with the new id (it mints the token and returns its jti), attach the
+// jti, run audit in the same transaction, commit. Any failure rolls back the
+// row, the jti and the audit together; side effects issue made outside the
+// database are the caller's to undo.
+func (s *Store) CreateRelayAudited(
+	ctx context.Context,
+	name string,
+	dnsAllowlist, ipAllowlist []string,
+	issue func(ctx context.Context, relayID string) (jti string, err error),
+	audit func(ctx context.Context, tx pgx.Tx, relayID string) error,
+) (string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin create relay: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var id string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO relays (name, dns_allowlist, ip_allowlist)
+		 VALUES ($1, $2, $3)
+		 RETURNING id`,
+		name, dnsAllowlist, ipAllowlist,
+	).Scan(&id); err != nil {
+		return "", fmt.Errorf("insert relay: %w", err)
+	}
+	jti, err := issue(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("issue provisioning token: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
 		`UPDATE relays SET enrollment_token_jti = $2, updated_at = NOW() WHERE id = $1`,
 		id, jti,
-	)
-	if err != nil {
-		return fmt.Errorf("attach jti: %w", err)
+	); err != nil {
+		return "", fmt.Errorf("attach jti: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrRelayNotFound
+	if err := audit(ctx, tx, id); err != nil {
+		return "", fmt.Errorf("audit relay create: %w", err)
 	}
-	return nil
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit create relay: %w", err)
+	}
+	return id, nil
 }
 
 // LoadRelayByID returns the relay row or ErrRelayNotFound.
@@ -101,7 +149,13 @@ func (s *Store) LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
 // MarkProvisioned burns the jti, flips status to active, and records cert
 // metadata. The Provision RPC calls this after pki.SignRelayCert succeeds.
 func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mark provisioned: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE relays
 		    SET enrollment_token_jti = NULL,
 		        status               = 'active',
@@ -110,7 +164,8 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 		        version              = NULLIF($4, ''),
 		        hostname             = NULLIF($5, ''),
 		        updated_at           = NOW()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		    AND status NOT IN ('revoked', 'deleted')`,
 		id, certSerial, certNotAfter, version, hostname,
 	)
 	if err != nil {
@@ -119,39 +174,274 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 	if tag.RowsAffected() == 0 {
 		return ErrRelayNotFound
 	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (serial) DO NOTHING`,
+		id, certSerial, certNotAfter,
+	); err != nil {
+		return fmt.Errorf("record provisioned relay cert: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mark provisioned: %w", err)
+	}
 	return nil
 }
 
-// InsertProvisionedRelay creates a relays row for a self-provisioning relay
-// (one that arrived at Provision without a pre-existing POST /api/relays).
-// Status lands directly at 'active' since the cert has already been signed.
-// ON CONFLICT keeps it race-safe if two Provision calls land in parallel.
-func (s *Store) InsertProvisionedRelay(ctx context.Context, id, name string, dnsAllowlist, ipAllowlist []string, certSerial string, certNotAfter time.Time, version, hostname string) error {
-	if name == "" {
-		name = "relay-" + id
-	}
+// RevokedSerial is one revoked, still-unexpired relay certificate serial.
+// Consumed by the relay CRL generator (Phase 3) and the controller checker (Phase 4).
+type RevokedSerial struct {
+	Serial    string
+	RevokedAt time.Time
+}
+
+// RecordIssuedCert appends one issued relay certificate to the history table.
+// Called inside MarkProvisioned (and future renewal) so every serial a relay has
+// held is tracked. serial is the canonical SerialNumber.Text(16) form.
+func (s *Store) RecordIssuedCert(ctx context.Context, relayID, serial string, notAfter time.Time) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO relays
-		     (id, name, status, dns_allowlist, ip_allowlist,
-		      cert_serial, cert_not_after, version, hostname, updated_at)
-		 VALUES ($1, $2, 'active', $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NOW())
-		 ON CONFLICT (id) DO UPDATE
-		    SET status         = 'active',
-		        cert_serial    = EXCLUDED.cert_serial,
-		        cert_not_after = EXCLUDED.cert_not_after,
-		        version        = EXCLUDED.version,
-		        hostname       = EXCLUDED.hostname,
-		        updated_at     = NOW()`,
-		id, name, dnsAllowlist, ipAllowlist, certSerial, certNotAfter, version, hostname,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (serial) DO NOTHING`,
+		relayID, serial, notAfter,
 	)
 	if err != nil {
-		return fmt.Errorf("insert provisioned relay: %w", err)
+		return fmt.Errorf("record issued relay cert: %w", err)
 	}
 	return nil
 }
 
-// RecordHeartbeat marks an authenticated Relay healthy and refreshes its
-// runtime and certificate metadata.
+// RelayCertStatus reports whether serial is a certificate issued to relayID
+// and, if so, whether it has been revoked.
+func (s *Store) RelayCertStatus(ctx context.Context, relayID, serial string) (known, revoked bool, err error) {
+	var revokedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT revoked_at FROM relay_certificates WHERE relay_id = $1 AND serial = $2`,
+		relayID, serial,
+	).Scan(&revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("relay cert status: %w", err)
+	}
+	return true, revokedAt != nil, nil
+}
+
+// RecordRenewedCert atomically records a certificate renewed (D-19) from the
+// certificate the relay presented on the renewal call.
+//
+// It locks the relay row FOR UPDATE — the same lock RevokeRelay takes — so a
+// renewal and a revoke of the same relay serialize: a renewal committed first
+// is revoked by the later revoke; a renewal attempted after a revoke is refused
+// (ErrRelayNotRenewable). A revoked relay can never end up holding a valid cert.
+//
+// Retry safety: any unrevoked certificate issued AFTER the presented one is a
+// successor from an earlier renewal attempt that the relay never put into use
+// (it is still presenting its previous certificate). Such successors are
+// revoked as superseded before the new one is inserted, so repeated renewal
+// attempts leave at most one live successor. Returns how many were superseded.
+func (s *Store) RecordRenewedCert(ctx context.Context, relayID, presentedSerial, newSerial string, notAfter time.Time) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin record renewed cert: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
+	).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrRelayNotFound
+		}
+		return 0, fmt.Errorf("lock relay for renewal: %w", err)
+	}
+	if status != "active" && status != "inactive" {
+		return 0, ErrRelayNotRenewable
+	}
+
+	var presentedIssuedAt time.Time
+	var presentedRevokedAt *time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT issued_at, revoked_at FROM relay_certificates WHERE relay_id = $1 AND serial = $2`,
+		relayID, presentedSerial,
+	).Scan(&presentedIssuedAt, &presentedRevokedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrPresentedCertInvalid
+		}
+		return 0, fmt.Errorf("load presented relay cert: %w", err)
+	}
+	if presentedRevokedAt != nil {
+		return 0, ErrPresentedCertInvalid
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = $4
+		  WHERE relay_id = $1
+		    AND serial <> $2
+		    AND revoked_at IS NULL
+		    AND issued_at > $3`,
+		relayID, presentedSerial, presentedIssuedAt, supersededRenewalReason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("supersede earlier renewal: %w", err)
+	}
+	superseded := int(tag.RowsAffected())
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after) VALUES ($1, $2, $3)`,
+		relayID, newSerial, notAfter,
+	); err != nil {
+		return 0, fmt.Errorf("record renewed relay cert: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE relays SET cert_serial = $2, cert_not_after = $3, updated_at = NOW() WHERE id = $1`,
+		relayID, newSerial, notAfter,
+	); err != nil {
+		return 0, fmt.Errorf("update relay cert: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit record renewed cert: %w", err)
+	}
+	return superseded, nil
+}
+
+// RevokeAllForRelay marks every not-yet-revoked certificate of a relay revoked.
+// Returns how many serials were revoked. Idempotent: a second call revokes 0.
+func (s *Store) RevokeAllForRelay(ctx context.Context, relayID, reason string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = NULLIF($2, '')
+		  WHERE relay_id = $1 AND revoked_at IS NULL`,
+		relayID, reason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke relay certs: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// ListRevokedRelaySerials returns every revoked, still-unexpired relay serial.
+// Expired serials are omitted — a CRL need not carry an already-invalid cert.
+func (s *Store) ListRevokedRelaySerials(ctx context.Context) ([]RevokedSerial, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT serial, revoked_at
+		   FROM relay_certificates
+		  WHERE revoked_at IS NOT NULL AND not_after > NOW()
+		  ORDER BY revoked_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list revoked relay serials: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RevokedSerial
+	for rows.Next() {
+		var r RevokedSerial
+		if err := rows.Scan(&r.Serial, &r.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan revoked relay serial: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// MarkDeleted soft-deletes a relay (status='deleted') so it stops being served
+// to connectors — BuildLabelledRelayList and RecordHeartbeat both reject
+// 'deleted'. It does NOT revoke the relay certificate: CRL revocation is the
+// PENDING-02 seam. Returns ErrRelayNotFound if no matching non-deleted row.
+func (s *Store) MarkDeleted(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relays SET status = 'deleted', updated_at = NOW()
+                WHERE id = $1 AND status <> 'deleted'`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("mark relay deleted: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRelayNotFound
+	}
+	return nil
+}
+
+// RevokeRelay atomically revokes every unexpired certificate of a relay and marks
+// the relay 'revoked' (a terminal, heartbeat-safe status). Returns the number of
+// certificate serials revoked. FOR UPDATE serializes against MarkProvisioned so a
+// concurrent provision cannot undo the revoke. Rows are never deleted — the CRL
+// needs the serial until not_after. Returns ErrRelayNotFound if the relay is gone.
+func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string,
+	inTx func(ctx context.Context, tx pgx.Tx, revoked int) error) (int, error) {
+	return s.RevokeRelayGuarded(ctx, relayID, reason, nil, inTx)
+}
+
+// RevokeRelayGuarded is RevokeRelay with a guard that sees the relay's stored
+// name and status under the row lock, before anything changes (Sprint 22
+// Phase A, D-17). A guard error aborts the transaction with nothing written;
+// the admin handler uses it for the typed-name confirmation and to refuse a
+// repeat revoke or any action on a deleted relay. A nil guard is RevokeRelay.
+func (s *Store) RevokeRelayGuarded(ctx context.Context, relayID, reason string,
+	guard func(name, status string) error,
+	inTx func(ctx context.Context, tx pgx.Tx, revoked int) error) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin revoke relay: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var name, status string
+	if err := tx.QueryRow(ctx,
+		`SELECT name, status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
+	).Scan(&name, &status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrRelayNotFound
+		}
+		return 0, fmt.Errorf("lock relay for revoke: %w", err)
+	}
+	if guard != nil {
+		if err := guard(name, status); err != nil {
+			return 0, err
+		}
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = NULLIF($2, '')
+		  WHERE relay_id = $1 AND revoked_at IS NULL`,
+		relayID, reason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke relay certs: %w", err)
+	}
+	revoked := int(tag.RowsAffected())
+
+	// Don't downgrade an already-deleted relay; 'deleted' is the more terminal state.
+	if status != "deleted" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE relays SET status = 'revoked', updated_at = NOW() WHERE id = $1`,
+			relayID,
+		); err != nil {
+			return 0, fmt.Errorf("mark relay revoked: %w", err)
+		}
+	}
+	// In-tx hook (audit row, and for Delete the 'deleted' status flip). A hook error
+	// returns here → the deferred tx.Rollback reverts the whole revoke, so revocation
+	// rows + status + audit commit atomically or not at all.
+	if inTx != nil {
+		if err := inTx(ctx, tx, revoked); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit revoke relay: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // UpsertPlacement inserts or updates a connector_relay_placement row.
 // Returns true when the relay_id actually changed (new attachment or different relay)
 // so the caller can decide whether to invalidate the policy cache.
@@ -244,28 +534,175 @@ func (s *Store) ListWorkspacesForRelay(ctx context.Context, relayID string) ([]s
 	return ids, rows.Err()
 }
 
-// EvictExpiredRelays marks active relays whose last heartbeat is older than
-// before as inactive. Returns the IDs of relays that were evicted so the
-// caller can notify affected workspaces.
-func (s *Store) EvictExpiredRelays(ctx context.Context, before time.Time) ([]string, error) {
+// ListConnectorsForRelay returns the connectors currently placed on a relay,
+// grouped by workspace (tenant) ID. Used by the transport-plane triggers
+// (ADR-017): a relay online/metadata/eviction event affects only the connectors
+// on that relay, so the caller notifies exactly those via NotifyTopologyChange
+// rather than recompiling the whole workspace ACL.
+// RevokedConnectorSPIFFEIDs returns which of `spiffeIDs` (connector SPIFFE
+// ids, any workspace) belong to a revoked connector identity — row revoked,
+// or revoked then deleted — while any of its certificates is still valid
+// (connector-revocation Phase D; the Phase C rule, design D19). Malformed
+// ids are ignored. Results are canonical `appmeta.ConnectorSPIFFEID` strings.
+func (s *Store) RevokedConnectorSPIFFEIDs(ctx context.Context, spiffeIDs []string) ([]string, error) {
+	var tds, ids []string
+	for _, raw := range spiffeIDs {
+		if td, id, ok := parseConnectorSPIFFEID(raw); ok {
+			tds = append(tds, td)
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx,
-		`UPDATE relays
-		    SET status     = 'inactive',
-		        updated_at = NOW()
+		`SELECT DISTINCT r.td, r.cid::text
+		   FROM unnest($1::text[], $2::uuid[]) AS r(td, cid)
+		   JOIN workspaces w ON w.trust_domain = r.td
+		   JOIN connector_certificates cc ON cc.tenant_id = w.id AND cc.connector_id = r.cid
+		   LEFT JOIN connectors c ON c.id = cc.connector_id
+		  WHERE cc.not_after > NOW()
+		    AND (c.id IS NULL OR c.status = 'revoked' OR c.revoked_at IS NOT NULL)`,
+		tds, ids)
+	if err != nil {
+		return nil, fmt.Errorf("revoked connector spiffe ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var td, id string
+		if err := rows.Scan(&td, &id); err != nil {
+			return nil, fmt.Errorf("scan revoked connector: %w", err)
+		}
+		out = append(out, appmeta.ConnectorSPIFFEID(td, id))
+	}
+	sort.Strings(out)
+	return out, rows.Err()
+}
+
+// parseConnectorSPIFFEID splits spiffe://<td>/connector/<uuid> into its
+// trust domain and canonical (lower-case) connector id.
+func parseConnectorSPIFFEID(raw string) (trustDomain, connectorID string, ok bool) {
+	const scheme = "spiffe://"
+	if !strings.HasPrefix(raw, scheme) {
+		return "", "", false
+	}
+	td, path, found := strings.Cut(strings.TrimPrefix(raw, scheme), "/")
+	if !found || td == "" {
+		return "", "", false
+	}
+	role, id, found := strings.Cut(path, "/")
+	if !found || role != appmeta.SPIFFERoleConnector || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return "", "", false
+	}
+	return td, u.String(), true
+}
+
+func (s *Store) ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT c.tenant_id::text, c.id::text
+		   FROM connector_relay_placement crp
+		   JOIN connectors c ON c.id = crp.connector_id
+		  WHERE crp.relay_id = $1`,
+		relayID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list connectors for relay: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][]string)
+	for rows.Next() {
+		var wsID, connID string
+		if err := rows.Scan(&wsID, &connID); err != nil {
+			return nil, fmt.Errorf("scan relay connector row: %w", err)
+		}
+		out[wsID] = append(out[wsID], connID)
+	}
+	return out, rows.Err()
+}
+
+// ListEvictionCandidates returns active relays whose persisted heartbeat is
+// older than before. Postgres writes are throttled (RELAY_HEARTBEAT_DB_WRITE_INTERVAL),
+// so a candidate is not necessarily dead — the expiry loop confirms against the
+// Valkey liveness key before evicting.
+func (s *Store) ListEvictionCandidates(ctx context.Context, before time.Time) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id::text
+		   FROM relays
 		  WHERE status = 'active'
-		    AND last_heartbeat_at < $1
-		 RETURNING id::text`,
+		    AND last_heartbeat_at < $1`,
 		before,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("evict expired relays: %w", err)
+		return nil, fmt.Errorf("list relay eviction candidates: %w", err)
 	}
 	defer rows.Close()
+	return scanRelayIDs(rows)
+}
+
+// RefreshLastHeartbeat advances an active relay's persisted heartbeat to seenAt
+// (the Valkey liveness timestamp). It never moves the timestamp backwards and
+// never touches a relay that is not active.
+func (s *Store) RefreshLastHeartbeat(ctx context.Context, relayID string, seenAt time.Time) error {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE relays
+		    SET last_heartbeat_at = $2,
+		        updated_at        = NOW()
+		  WHERE id = $1
+		    AND status = 'active'
+		    AND last_heartbeat_at < $2`,
+		relayID, seenAt,
+	); err != nil {
+		return fmt.Errorf("refresh relay heartbeat: %w", err)
+	}
+	return nil
+}
+
+// EvictRelays marks the given relays inactive. The predicate is re-checked
+// (still active, heartbeat still older than before) so a heartbeat DB write
+// that lands between candidate selection and eviction wins. Returns the IDs
+// actually evicted so the caller can notify affected workspaces.
+//
+// The rows are locked in id order first (FU-7): DrainRelay locks its rows in
+// the same order, so the two can't deadlock.
+func (s *Store) EvictRelays(ctx context.Context, relayIDs []string, before time.Time) ([]string, error) {
+	if len(relayIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`WITH locked AS (
+		     SELECT id FROM relays
+		      WHERE id = ANY($1::uuid[])
+		        AND status = 'active'
+		        AND last_heartbeat_at < $2
+		      ORDER BY id
+		        FOR UPDATE
+		 )
+		 UPDATE relays r
+		    SET status     = 'inactive',
+		        updated_at = NOW()
+		   FROM locked
+		  WHERE r.id = locked.id
+		 RETURNING r.id::text`,
+		relayIDs, before,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("evict relays: %w", err)
+	}
+	defer rows.Close()
+	return scanRelayIDs(rows)
+}
+
+func scanRelayIDs(rows pgx.Rows) ([]string, error) {
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan evicted relay id: %w", err)
+			return nil, fmt.Errorf("scan relay id: %w", err)
 		}
 		ids = append(ids, id)
 	}
@@ -288,9 +725,10 @@ type CapacityLabelTransition struct {
 const labelledRelayDefaultPort = "9093"
 
 // BuildLabelledRelayList assembles the current ADR-016 eligibility list for
-// connector control-stream push. Includes only active relays whose published
-// capacity_label is high or medium and that have a routable address (either
-// an explicit public_addr or an observed public IP). The version field is
+// connector control-stream push. Includes only the relays eligible.Where
+// accepts: active, published capacity_label high or medium, not draining
+// (Sprint 22 Phase D), and with a routable address (an explicit public_addr or
+// an observed public IP). The drain guard uses the same predicate. The version field is
 // the latest last_label_changed_at observed across those rows, expressed as
 // epoch seconds — monotonic across promotions so the connector can skip a
 // re-probe when nothing has changed.
@@ -302,9 +740,7 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 		       COALESCE(address_scope, ''),
 		       capacity_label
 		  FROM relays
-		 WHERE status = 'active'
-		   AND capacity_label IN ('high', 'medium')
-		   AND (public_addr IS NOT NULL OR address_scope = 'public')`)
+		 WHERE `+eligible.Where)
 	if err != nil {
 		return nil, fmt.Errorf("list labelled relays: %w", err)
 	}
@@ -321,6 +757,7 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 			addr = net.JoinHostPort(observedIP, labelledRelayDefaultPort)
 		}
 		if addr == "" {
+			// eligible.Where already requires an address; defensive only.
 			continue
 		}
 		var lbl connectorpb.RelayCapacityLabel
@@ -450,7 +887,11 @@ func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdD
 	}, nil
 }
 
-func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
+// RecordHeartbeat marks an authenticated Relay healthy and refreshes its
+// runtime and certificate metadata. measuredAt is when the heartbeat carrying
+// connectionCount arrived; it is stored as connection_count_at, so a reader can
+// tell how old the count is (Sprint 22 Phase D).
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
 		    SET status            = 'active',
@@ -462,13 +903,15 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        observed_port     = NULLIF($7, 0),
 		        address_scope     = NULLIF($8, ''),
 		        public_addr       = NULLIF($9, ''),
-		        connection_count  = $10,
+		        connection_count  = CASE WHEN connection_count_at IS NULL OR connection_count_at <= $12
+		                                 THEN $10 ELSE connection_count END,
 		        max_connections   = $11,
+		        connection_count_at = GREATEST(connection_count_at, $12),
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
-		    AND status <> 'deleted'`,
-		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections,
+		    AND status NOT IN ('deleted', 'revoked')`,
+		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt,
 	)
 	if err != nil {
 		return fmt.Errorf("record relay heartbeat: %w", err)

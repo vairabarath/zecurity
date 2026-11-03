@@ -64,6 +64,30 @@ type Service interface {
 	// by the workspace CA for tenantID. It includes all client_devices rows with a
 	// non-null revoked_at. Returns the raw DER bytes ready to be served at /ca.crl.
 	GenerateClientCRL(ctx context.Context, tenantID string) ([]byte, error)
+	// GenerateRelayCRL produces a DER-encoded CRL signed by the platform
+	// Intermediate CA for the given revoked relay serials. Relay leaf certs chain
+	// to the Intermediate CA (not a workspace CA), so relay revocation needs this
+	// separate CRL. Serials are canonical hex (SerialNumber.Text(16)). Pure: the
+	// caller supplies the serials, so the PKI service needs no relay-store handle.
+	GenerateRelayCRL(ctx context.Context, revoked []RevokedEntry) ([]byte, error)
+
+	// SignShieldPeerList signs a serialized shield PeerListPayload with the
+	// tenant's Workspace CA key, domain-separated by ShieldPeerListContext
+	// (D21-R a2). Returns an ASN.1 DER ECDSA signature.
+	SignShieldPeerList(ctx context.Context, tenantID string, payload []byte) ([]byte, error)
+
+	// SignShieldResourceSet signs a serialized shield ResourceSetPayload the
+	// same way, domain-separated by ShieldResourceSetContext (D21-R S).
+	SignShieldResourceSet(ctx context.Context, tenantID string, payload []byte) ([]byte, error)
+
+	// EncryptSecret / DecryptSecret encrypt arbitrary secrets at rest (e.g. a
+	// per-workspace OIDC client secret, PENDING-04) reusing the CA key-storage
+	// primitive (AES-256-GCM + HKDF-SHA256) under the PKI master secret. context
+	// must be a caller-unique, domain-separated label, e.g.
+	// "idp-client-secret:"+tenantID. Same rotation caveat as CA keys: changing
+	// PKI_MASTER_SECRET renders stored ciphertext undecryptable.
+	EncryptSecret(plaintext []byte, context string) (ciphertextB64, nonceB64 string, err error)
+	DecryptSecret(ciphertextB64, nonceB64, context string) ([]byte, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.

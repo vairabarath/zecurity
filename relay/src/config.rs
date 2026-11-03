@@ -35,6 +35,7 @@ pub struct RuntimeLimits {
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
     pub relay_id: String,
+    pub provisioning_token: Option<String>,
     pub controller_addr: String,
     pub controller_http_addr: String,
     pub bind_addr: SocketAddr,
@@ -50,6 +51,7 @@ pub struct RelayConfig {
 impl RelayConfig {
     pub fn load() -> Result<Self> {
         let relay_id = required_env("RELAY_ID")?;
+        let provisioning_token = load_provisioning_token()?;
         let parsed_id = Uuid::parse_str(&relay_id).context("RELAY_ID must be a UUID")?;
         if parsed_id.hyphenated().to_string() != relay_id {
             bail!("RELAY_ID must be a canonical lowercase UUID");
@@ -68,6 +70,7 @@ impl RelayConfig {
 
         Ok(Self {
             relay_id,
+            provisioning_token,
             controller_addr,
             controller_http_addr,
             bind_addr: env::var("RELAY_BIND")
@@ -158,6 +161,45 @@ impl RelayConfig {
             heartbeat_interval: 30s,
         } */
     }
+}
+
+fn load_provisioning_token() -> Result<Option<String>> {
+    provisioning_token_from(
+        env::var("RELAY_PROVISIONING_TOKEN").ok(),
+        env::var("RELAY_PROVISIONING_TOKEN_FILE").ok(),
+    )
+}
+
+fn provisioning_token_from(
+    direct_token: Option<String>,
+    token_file: Option<String>,
+) -> Result<Option<String>> {
+    if let Some(token) = direct_token {
+        let token = token.trim();
+        if token.is_empty() {
+            bail!("RELAY_PROVISIONING_TOKEN must not be empty");
+        }
+        return Ok(Some(token.to_owned()));
+    }
+
+    if let Some(path) = token_file {
+        let token = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read provisioning token from \
+                     RELAY_PROVISIONING_TOKEN_FILE={path}"
+            )
+        })?;
+
+        let token = token.trim();
+
+        if token.is_empty() {
+            bail!("provisioning token file is empty: {path}");
+        }
+
+        return Ok(Some(token.to_owned()));
+    }
+
+    Ok(None)
 }
 
 fn required_env(name: &str) -> Result<String> {
@@ -253,5 +295,47 @@ mod tests {
         assert_eq!(parse_positive("LIMIT", Some("7"), 10usize).unwrap(), 7);
         assert!(parse_positive("LIMIT", Some("0"), 10usize).is_err());
         assert!(parse_positive("LIMIT", Some("invalid"), 10usize).is_err());
+    }
+
+    #[test]
+    fn provisioning_token_prefers_and_trims_direct_value() {
+        let token = provisioning_token_from(
+            Some("  direct-token  ".to_owned()),
+            Some("/path/that/must/not-be-read".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(token.as_deref(), Some("direct-token"));
+    }
+
+    #[test]
+    fn provisioning_token_rejects_empty_direct_value() {
+        assert!(provisioning_token_from(Some("  ".to_owned()), None).is_err());
+    }
+
+    #[test]
+    fn provisioning_token_reads_and_trims_file() {
+        let path = std::env::temp_dir().join(format!("zecurity-relay-token-{}", Uuid::new_v4()));
+        std::fs::write(&path, "  file-token\n").unwrap();
+
+        let token = provisioning_token_from(None, Some(path.display().to_string())).unwrap();
+
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(token.as_deref(), Some("file-token"));
+    }
+
+    #[test]
+    fn provisioning_token_rejects_empty_file() {
+        let path = std::env::temp_dir().join(format!("zecurity-relay-token-{}", Uuid::new_v4()));
+        std::fs::write(&path, "  \n").unwrap();
+
+        let result = provisioning_token_from(None, Some(path.display().to_string()));
+
+        std::fs::remove_file(path).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn provisioning_token_is_optional_at_config_load() {
+        assert_eq!(provisioning_token_from(None, None).unwrap(), None);
     }
 }

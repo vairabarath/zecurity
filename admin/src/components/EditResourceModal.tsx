@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
   UpdateResourceDocument,
@@ -19,10 +19,13 @@ interface EditResourceModalProps {
     id: string
     name: string
     description?: string | null
+    host: string
+    status: string
     protocol: string
     portFrom: number
     portTo: number
     remoteNetwork?: { id: string; name: string } | null
+    shield?: { name: string; status: string } | null
   } | null
   onSuccess?: () => void
 }
@@ -30,32 +33,47 @@ interface EditResourceModalProps {
 export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: EditResourceModalProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [host, setHost] = useState('')
   const [protocol, setProtocol] = useState('tcp')
   const [portFrom, setPortFrom] = useState('')
   const [portTo, setPortTo] = useState('')
   const [remoteNetworkId, setRemoteNetworkId] = useState('')
   const [error, setError] = useState<string | null>(null)
+  // A protected resource's rule changes only after the admin confirms (Fix 18).
+  const [confirming, setConfirming] = useState(false)
 
   const { data: networksData, loading: networksLoading } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
     skip: !open,
   })
 
-  useEffect(() => {
-    if (resource) {
+  // Load the form when the dialog opens (or shows another resource), not on
+  // every new `resource` object: the detail page polls every 3–10 s, and
+  // reloading on each poll threw away whatever the admin had typed.
+  const formFor = open && resource ? resource.id : null
+  const [loadedFor, setLoadedFor] = useState<string | null>(null)
+  if (formFor !== loadedFor) {
+    setLoadedFor(formFor)
+    if (resource && formFor) {
       setName(resource.name)
       setDescription(resource.description ?? '')
+      setHost(resource.host)
       setProtocol(resource.protocol)
       setPortFrom(resource.portFrom.toString())
       setPortTo(resource.portTo.toString())
       setRemoteNetworkId(resource.remoteNetwork?.id ?? '')
       setError(null)
+      setConfirming(false)
     }
-  }, [resource])
+  }
 
   const [updateResource, { loading }] = useMutation(UpdateResourceDocument, {
     onCompleted: (data) => {
-      toast.success(`Resource "${data.updateResource.name}" updated`)
+      if (shieldOffline && confirming) {
+        toast.success(`Resource "${data.updateResource.name}" saved — applied when the shield reconnects`)
+      } else {
+        toast.success(`Resource "${data.updateResource.name}" updated`)
+      }
       onSuccess?.()
       onOpenChange(false)
     },
@@ -67,8 +85,8 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
     e.preventDefault()
     setError(null)
 
-    if (!name.trim() || !portFrom || !remoteNetworkId) {
-      setError('Name, Remote Network and Port From are required')
+    if (!name.trim() || !host.trim() || !portFrom || !remoteNetworkId) {
+      setError('Name, Host, Remote Network and Port From are required')
       return
     }
 
@@ -84,6 +102,17 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
       return
     }
 
+    const ruleChanged =
+      host.trim() !== resource!.host ||
+      remoteNetworkId !== (resource!.remoteNetwork?.id ?? '') ||
+      protocol !== resource!.protocol ||
+      pFrom !== resource!.portFrom ||
+      pTo !== resource!.portTo
+    if (shieldBound && ruleChanged && !confirming) {
+      setConfirming(true)
+      return
+    }
+
     await updateResource({
       variables: {
         id: resource!.id,
@@ -91,6 +120,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
           remoteNetworkId,
           name: name.trim(),
           description: description.trim() || null,
+          host: host.trim(),
           protocol,
           portFrom: pFrom,
           portTo: pTo,
@@ -102,13 +132,20 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
   function handleClose() {
     setName('')
     setDescription('')
+    setHost('')
     setProtocol('tcp')
     setPortFrom('')
     setPortTo('')
     setRemoteNetworkId('')
     setError(null)
+    setConfirming(false)
     onOpenChange(false)
   }
+
+  const shieldBound = !!resource && ['protected', 'failed', 'protecting'].includes(resource.status.toLowerCase())
+  const shieldName = resource?.shield?.name ?? 'its shield'
+  const shieldOffline = shieldBound && resource?.shield?.status !== 'ACTIVE'
+  const hostChanged = !!resource && host.trim() !== resource.host
 
   if (!open || !resource) return null
 
@@ -129,7 +166,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
             <div className="flex-1">
               <h2 className="text-lg font-semibold">Edit Resource</h2>
               <p className="text-sm text-muted-foreground">
-                Update resource details. Host IP cannot be changed.
+                Update resource details.
               </p>
             </div>
             <button
@@ -173,6 +210,24 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                   placeholder="e.g. prod-web-01"
                   className="h-11 font-medium"
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-semibold">
+                  Host <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder="e.g. 192.168.1.10"
+                  className="h-11 font-mono text-sm"
+                />
+                {shieldBound && host.trim() !== resource.host && (
+                  <p className="text-xs text-muted-foreground">
+                    This resource is protected: the new host must be the LAN IP of an active shield in its
+                    remote network. The resource moves to that shield.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -228,6 +283,24 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                 </div>
               </div>
 
+              {confirming && (
+                <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                  <p className="font-semibold">This resource is protected by {shieldName}.</p>
+                  <p>
+                    Saving removes its current firewall rule and protects it again with the new settings
+                    {hostChanged ? `, on the shield installed on ${host.trim()}` : ''}. The shield swaps the rules
+                    in one step, so the resource is never left unprotected; it shows Protecting until the shield
+                    confirms.
+                  </p>
+                  {shieldOffline && (
+                    <p className="font-medium text-amber-600 dark:text-amber-400">
+                      {shieldName} is offline. The change is saved now and applied when the shield reconnects.
+                      Until then the old rule stays in place and the new settings are NOT protected by the shield.
+                    </p>
+                  )}
+                </div>
+              )}
+
               {error && (
                 <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
@@ -241,10 +314,10 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
             <Button
               type="button"
               variant="outline"
-              onClick={handleClose}
+              onClick={confirming ? () => setConfirming(false) : handleClose}
               className="h-11 flex-1"
             >
-              Cancel
+              {confirming ? 'Back' : 'Cancel'}
             </Button>
             <Button
               onClick={handleSubmit}
@@ -256,6 +329,8 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Saving...
                 </>
+              ) : confirming ? (
+                'Unprotect & re-protect'
               ) : (
                 'Save Changes'
               )}

@@ -48,8 +48,8 @@ All new files in `controller/internal/shield/`:
 
 ### config.go
 
-- [ ] Package `shield`
-- [ ] `ShieldConfig` struct:
+- [x] Package `shield`
+- [x] `ShieldConfig` struct:
   ```go
   type Config struct {
       CertTTL             time.Duration  // SHIELD_CERT_TTL, default 168h
@@ -62,18 +62,18 @@ All new files in `controller/internal/shield/`:
 
 ### token.go
 
-- [ ] `GenerateShieldToken(ctx, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (jwt string, installCommand string, err error)`
-- [ ] JWT payload includes: `jti`, `shield_id`, `remote_network_id`, `workspace_id`, `trust_domain`, `ca_fingerprint`, `connector_id`, `connector_addr`, `interface_addr`, `iss`, `exp`
-- [ ] Store JTI in Redis with TTL = `EnrollmentTokenTTL`
-- [ ] Connector selection: `selectConnector()` — query ACTIVE connectors for remote_network, sort by fewest shields (tiebreaker: most recent heartbeat)
-- [ ] IP assignment: `assignInterfaceAddr()` — find next unused /32 from 100.64.0.0/10 for this tenant
-- [ ] `installCommand` format: `curl -fsSL https://<controller>/shield-install.sh | sudo ENROLLMENT_TOKEN=<jwt> bash`
-- [ ] `BurnShieldJTI(ctx, jti)` — atomic GET+DEL from Redis
+- [x] `GenerateShieldToken(ctx, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (jwt string, installCommand string, err error)`
+- [x] JWT payload includes: `jti`, `shield_id`, `remote_network_id`, `workspace_id`, `trust_domain`, `ca_fingerprint`, `connector_id`, `connector_addr`, `interface_addr`, `iss`, `exp`
+- [x] Store JTI in Redis with TTL = `EnrollmentTokenTTL`
+- [x] Connector selection: `selectConnector()` — query ACTIVE connectors for remote_network, sort by fewest shields (tiebreaker: most recent heartbeat)
+- [x] IP assignment: `assignInterfaceAddr()` — find next unused /32 from 100.64.0.0/10 for this tenant
+- [x] `installCommand` format: `curl -fsSL https://<controller>/shield-install.sh | sudo ENROLLMENT_TOKEN=<jwt> bash`
+- [x] `BurnShieldJTI(ctx, jti)` — atomic GET+DEL from Redis
 
 ### enrollment.go
 
-- [ ] Implement `Enroll(ctx, req *shieldpb.EnrollRequest) (*shieldpb.EnrollResponse, error)`
-- [ ] 12-step flow (see sprint4-shield-plan.md Enrollment section):
+- [x] Implement `Enroll(ctx, req *shieldpb.EnrollRequest) (*shieldpb.EnrollResponse, error)`
+- [x] 12-step flow (see sprint4-shield-plan.md Enrollment section):
   1. Verify JWT signature + exp + iss
   2. Extract all claims (jti, shield_id, workspace_id, trust_domain, connector_id, interface_addr)
   3. GET+DEL JTI from Redis (atomic) — return `PERMISSION_DENIED` if not found
@@ -86,26 +86,27 @@ All new files in `controller/internal/shield/`:
   10. Call `pki.SignShieldCert(...)`
   11. `UPDATE shields SET status='active', cert_serial=..., cert_not_after=..., hostname=..., version=..., last_heartbeat_at=NOW(), enrollment_token_jti=NULL`
   12. Return `EnrollResponse` with cert chain + interface_addr + connector_addr + connector_id
-- [ ] Return proper gRPC status codes: `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `INTERNAL`
+- [x] Return proper gRPC status codes: `PERMISSION_DENIED`, `FAILED_PRECONDITION`, `INTERNAL`
 
 ### heartbeat.go (disconnect watcher only)
 
-- [ ] `RunDisconnectWatcher(ctx context.Context)` — exported method on service
-- [ ] Ticker: fires every `DisconnectThreshold / 2`
-- [ ] SQL: `UPDATE shields SET status='disconnected' WHERE status='active' AND last_heartbeat_at < NOW() - $1 AND tenant_id IN (SELECT id FROM workspaces WHERE status='active')`
-- [ ] Logs disconnected count each tick at `info` level
+- [x] `RunDisconnectWatcher(ctx context.Context)` — exported method on service
+- [x] Ticker: fires every `DisconnectThreshold / 2`
+- [x] SQL: `UPDATE shields SET status='disconnected' WHERE status='active' AND last_heartbeat_at < NOW() - $1 AND tenant_id IN (SELECT id FROM workspaces WHERE status='active')`
+- [x] Logs disconnected count each tick at `info` level
 
 ### spiffe.go
 
-- [ ] `ParseShieldSPIFFEID(uri string) (trustDomain, shieldID string, err error)`
-- [ ] Validates format: `spiffe://<trust_domain>/shield/<id>`
-- [ ] Returns `PERMISSION_DENIED` if role != "shield"
+- [x] `ParseShieldSPIFFEID(uri string) (trustDomain, shieldID string, err error)`
+- [x] Validates format: `spiffe://<trust_domain>/shield/<id>`
+- [x] Returns `PERMISSION_DENIED` if role != "shield"
 
 ### Service struct
 
 - [ ] `service` struct with: `cfg Config`, `db *pgxpool.Pool`, `pki pki.Service`, `redis *redis.Client`
-- [ ] `NewService(cfg Config, db, pki, redis) *service`
-- [ ] Implement `shieldpb.ShieldServiceServer` interface
+  <!-- DIFFERS: redis field typed as `valkeycompat.Cmdable`, not `*redis.Client` -->
+- [x] `NewService(cfg Config, db, pki, redis) *service`
+- [x] Implement `shieldpb.ShieldServiceServer` interface
 
 ---
 

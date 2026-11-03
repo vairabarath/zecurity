@@ -7,7 +7,7 @@ priority: P1
 created: 2026-07-03
 related:
   - PENDING-07-Provider-Dashboard-Vision
-  - PENDING-07a-Provider-Identity-and-Authorization
+  - ADR-021-Provider-Identity-and-Authorization
 tags: [pending, adr, operator, provider, frontend, deployment]
 ---
 

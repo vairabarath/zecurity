@@ -25,13 +25,6 @@ impl ClientConf {
         }
     }
 
-    pub fn connector(&self) -> &str {
-        if self.connector_address.is_empty() {
-            crate::appmeta::DEFAULT_CONNECTOR_ADDRESS
-        } else {
-            &self.connector_address
-        }
-    }
 
     pub fn http_base(&self) -> String {
         if !self.http_base_url.is_empty() {

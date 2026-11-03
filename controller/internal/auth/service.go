@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/yourorg/ztna/controller/graph/model"
 )
@@ -16,13 +17,21 @@ type Service interface {
 	// InitiateAuth builds the IdP redirect URL with PKCE.
 	// Called by the initiateAuth GraphQL mutation resolver.
 	// workspaceName is optional — set during signup flow, empty during normal login.
-	InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error)
+	// connectionID is optional — the discovery-API connection id; when set it
+	// selects that exact connection (the only selector), else the platform IdP
+	// for `provider` is resolved.
+	InitiateAuth(ctx context.Context, provider string, workspaceName, connectionID *string) (*model.AuthInitPayload, error)
 
 	// CallbackHandler handles GET /auth/callback.
 	// Google redirects here after user authenticates.
 	// Verifies state, exchanges code, calls Bootstrap,
 	// issues JWT, sets refresh cookie, redirects React.
 	CallbackHandler() http.Handler
+
+	// DiscoveryHandler handles GET /workspaces/{slug}/auth — the public,
+	// read-only login-discovery endpoint. Returns the IdPs a workspace can use
+	// (Enterprise first, Bootstrap fallback). PENDING-04 / ADR-024.
+	DiscoveryHandler() http.Handler
 
 	// RefreshHandler handles POST /auth/refresh.
 	// Reads httpOnly refresh cookie, issues new JWT.
@@ -34,27 +43,38 @@ type Service interface {
 	// browser doesn't keep re-presenting a dead token.
 	LogoutHandler() http.Handler
 
+	// RefreshSession exchanges an access token (expired is fine; signature
+	// verified) plus the single-use refresh token for a fresh pair, rotating
+	// the refresh token. The core of /auth/refresh, also behind the
+	// ClientService.RefreshSession RPC the Rust client uses over its pinned
+	// TLS channel. Errors are *SessionError; Dead() means sign in again.
+	RefreshSession(ctx context.Context, accessToken, refreshToken string) (newAccessToken, newRefreshToken string, err error)
+
+	// EndSession deletes the session the access token names. Idempotent and
+	// silent. The core of /auth/logout and of ClientService.Logout.
+	EndSession(ctx context.Context, accessToken string)
+
 	// ── Sprint 7: ClientService primitives ──────────────────────────────────
 	// These power the Rust CLI's TokenExchange / EnrollDevice gRPC handlers,
 	// which run their own PKCE flow against a localhost redirect URI rather
 	// than the controller's web callback.
 
-	// ExchangeCode performs the server-to-server Google OAuth code exchange.
-	// redirectURI overrides the configured web RedirectURI — required because
-	// the CLI registers its own loopback URI per login attempt.
-	ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*GoogleTokenResponse, error)
+	// (Login now flows through provider adapters selected per connection —
+	// see idp_adapter.go / providers.IdentityProvider — rather than a single
+	// service method.)
 
-	// VerifyIDToken validates a Google ID token (signature, aud, iss, exp,
-	// email_verified) and returns the embedded claims.
-	VerifyIDToken(ctx context.Context, idToken string) (*GoogleClaims, error)
+	// IssueSession starts one login: it stores a new refresh session and
+	// returns an access JWT bound to it (sid claim), the access TTL in seconds
+	// (so callers can populate expires_in) and the raw refresh token.
+	// generation is stamped as the "gen" claim for session-generation revocation
+	// (PENDING-04 Phase 5). Sessions are per login: a new one never displaces
+	// the user's other sessions (admin UI, client daemon).
+	IssueSession(ctx context.Context, userID, tenantID, role, email string, generation int) (accessToken string, expiresIn int64, refreshToken string, err error)
 
-	// IssueAccessToken signs and returns a Zecurity access JWT for the given
-	// user, plus its TTL in seconds (so callers can populate expires_in).
-	IssueAccessToken(userID, tenantID, role, email string) (token string, expiresIn int64, err error)
-
-	// IssueRefreshToken generates a fresh refresh token, stores it in Redis,
-	// and returns the raw value.
-	IssueRefreshToken(ctx context.Context, userID string) (string, error)
+	// InvalidateUserSessions deletes all of the user's server-side refresh sessions so a
+	// generation bump (identity.Revoker) takes effect immediately rather than at
+	// the current access token's expiry. Satisfies identity.SessionInvalidator.
+	InvalidateUserSessions(ctx context.Context, userID string) error
 
 	// VerifyAccessToken parses and verifies a Zecurity JWT and returns the
 	// embedded identity claims. Returns an error if the token is invalid,
@@ -70,4 +90,13 @@ type AccessTokenClaims struct {
 	TenantID string
 	Role     string
 	Email    string
+	// Generation is the users.identity_generation the token was minted under
+	// (the "gen" claim; 0 for tokens that predate generations). Compared with
+	// the current value before issuing device certificates (certificate audit
+	// bugs 4/5), as /auth/refresh does.
+	Generation int
+	// ExpiresAt is the token's exp claim (zero if absent). Long-lived calls
+	// (the WatchChanges hint stream, FU-8) end when it passes, so a stream is
+	// never authorized beyond its token.
+	ExpiresAt time.Time
 }

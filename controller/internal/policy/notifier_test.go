@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestNotify_FiresHookWithWorkspace: the hook receives the mutated workspaceID.
@@ -38,7 +39,7 @@ func TestNotify_NilHookSafe(t *testing.T) {
 func TestNotify_OrderingBumpInvalidateThenHook(t *testing.T) {
 	cache := NewSnapshotCache()
 	n := NewNotifier(cache)
-	cache.set("ws-1", snap("ws-1", 1)) // pre-seed so we can observe invalidation
+	cache.set("ws-1", snap("ws-1", 1), time.Time{}) // pre-seed so we can observe invalidation
 
 	var sawVersion uint64
 	var cachePresent bool

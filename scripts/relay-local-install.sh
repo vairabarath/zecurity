@@ -15,18 +15,22 @@
 #   CONTROLLER_ADDR        — controller gRPC address, e.g. "localhost:9090"
 #   CONTROLLER_HTTP_ADDR   — controller HTTP address, e.g. "localhost:8080"
 #   RELAY_ID               — canonical lowercase UUID; must match the row
-#                            created by POST /api/relays on the controller
+#                            created by POST /provider/relays on the controller
 #   RELAY_CA_FINGERPRINT   — 64-char SHA-256 hex of the controller
 #                            intermediate CA (operator pre-pins; relay
 #                            verifies after fetching /ca.crt)
 #
 # Optional environment variables (forwarded into relay.conf if set):
 #   RELAY_BIND                       (default 0.0.0.0:9093)
-#   RELAY_DNS_SANS                   (comma-separated, e.g. relay.example.com)
+#   RELAY_DNS_SANS                   (comma-separated, lowercase, e.g. relay.example.com)
 #   RELAY_IP_SANS                    (comma-separated, e.g. 10.0.0.50)
+#                                     Both must be a subset of the dns_allowlist /
+#                                     ip_allowlist registered at POST /provider/relays;
+#                                     otherwise provisioning is rejected (the token
+#                                     is NOT consumed, so fix the SANs and retry).
 #   RELAY_STATE_DIR                  (default /var/lib/zecurity-relay/pki)
-#   RELAY_PROVISIONING_TOKEN         (forward-compat; ignored until controller
-#                                     enforces token auth on Provision)
+#   RELAY_PROVISIONING_TOKEN         single-use token returned by
+#                                     POST /provider/relays; required on first boot
 #   LOG_LEVEL                        (default info)
 #   RELAY_MAX_CONNECTIONS
 #   RELAY_MAX_LOOKUP_BRIDGES
@@ -35,6 +39,12 @@
 #   RELAY_HANDSHAKE_TIMEOUT_SECS
 #   RELAY_MESSAGE_TIMEOUT_SECS
 #   RELAY_HEARTBEAT_INTERVAL_SECS
+#   RELAY_RESET_STATE=1              the state dir holds ANOTHER relay's
+#                                     certificate: move it aside (kept in
+#                                     <state dir>.replaced-<timestamp>, never
+#                                     deleted) so this relay can provision.
+#                                     Without it the installer stops: the relay
+#                                     would refuse to start on a mismatched ID.
 
 set -euo pipefail
 
@@ -61,16 +71,60 @@ Installs the ZECURITY relay locally.
 Required env vars:
   CONTROLLER_ADDR        gRPC host:port for provisioning + heartbeat (e.g. localhost:9090)
   CONTROLLER_HTTP_ADDR   HTTP host:port for /ca.crt fetch              (e.g. localhost:8080)
-  RELAY_ID               Canonical lowercase UUID; must match POST /api/relays response
+  RELAY_ID               Canonical lowercase UUID; must match POST /provider/relays response
   RELAY_CA_FINGERPRINT   64-char SHA-256 hex of the controller intermediate CA
 
 Optional env vars (passed through to /etc/zecurity/relay.conf if set):
   RELAY_BIND, RELAY_DNS_SANS, RELAY_IP_SANS, RELAY_STATE_DIR, LOG_LEVEL,
-  RELAY_PROVISIONING_TOKEN,
+  RELAY_PROVISIONING_TOKEN, RELAY_PROVISIONING_TOKEN_FILE,
   RELAY_MAX_CONNECTIONS, RELAY_MAX_LOOKUP_BRIDGES, RELAY_MAX_BIDI_STREAMS,
   RELAY_IDLE_TIMEOUT_SECS, RELAY_HANDSHAKE_TIMEOUT_SECS,
   RELAY_MESSAGE_TIMEOUT_SECS, RELAY_HEARTBEAT_INTERVAL_SECS
+
+  RELAY_RESET_STATE=1    replace state left by a different relay (moved aside,
+                         not deleted); see check_existing_state
 EOF
+}
+
+# check_existing_state DIR — state left by ANOTHER relay (this host was a relay
+# before, under a different RELAY_ID) makes the relay refuse to start
+# ("Relay certificate ID … does not match configured Relay ID …"), and the new
+# provisioning token is never used. Detect that before installing anything:
+#   - same relay ID: a reinstall, keep the state;
+#   - another or unreadable certificate: stop, unless RELAY_RESET_STATE=1, which
+#     stops a running relay and moves the old files to DIR.replaced-<timestamp>
+#     (root-only). A relay key is never deleted here.
+check_existing_state() {
+    local dir="$1" existing="" label backup
+    [[ -e "$dir/relay.crt" ]] || return 0
+    if ! command -v openssl >/dev/null 2>&1; then
+        label="an unreadable relay certificate (openssl is not installed)"
+    else
+        existing="$(openssl x509 -in "$dir/relay.crt" -noout -ext subjectAltName 2>/dev/null \
+            | grep -oE 'spiffe://[^/,[:space:]]+/relay/[0-9a-f-]{36}' | head -n 1 | sed 's#.*/relay/##' || true)"
+        if [[ "$existing" == "$RELAY_ID" ]]; then
+            log "existing certificate for relay $RELAY_ID found in $dir; keeping it"
+            return 0
+        fi
+        if [[ -n "$existing" ]]; then
+            label="the certificate of relay $existing"
+        else
+            label="an unreadable relay certificate"
+        fi
+    fi
+    if [[ "${RELAY_RESET_STATE:-}" != "1" ]]; then
+        err "$dir holds $label, not one for relay $RELAY_ID: the relay would refuse to start.
+         To replace it, re-run with RELAY_RESET_STATE=1 (the old files are moved to
+         $dir.replaced-<timestamp>, not deleted), or move them away yourself."
+    fi
+    if systemctl is-active --quiet zecurity-relay.service 2>/dev/null; then
+        log "stopping zecurity-relay.service before replacing its state"
+        systemctl stop zecurity-relay.service
+    fi
+    backup="${dir}.replaced-$(date +%Y%m%d%H%M%S)"
+    install -d -m 0700 "$backup"
+    find "$dir" -mindepth 1 -maxdepth 1 -exec mv -t "$backup" {} +
+    warn "moved $label from $dir to $backup"
 }
 
 # ── Checks ──────────────────────────────────────────────────────────────────
@@ -98,6 +152,9 @@ if [[ ! "$RELAY_CA_FINGERPRINT" =~ ^[0-9a-fA-F]{64}$ ]]; then
 fi
 
 command -v systemctl >/dev/null || err "systemctl is required"
+
+# ── Existing relay state ────────────────────────────────────────────────────
+check_existing_state "${RELAY_STATE_DIR:-$PKI_DIR}"
 
 # ── Create system user ──────────────────────────────────────────────────────
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -144,7 +201,7 @@ log "writing $CONFIG_FILE"
 
     # Optional pass-throughs — only emitted if the operator set them.
     for var in RELAY_BIND RELAY_DNS_SANS RELAY_IP_SANS \
-               RELAY_PROVISIONING_TOKEN \
+               RELAY_PROVISIONING_TOKEN RELAY_PROVISIONING_TOKEN_FILE \
                RELAY_MAX_CONNECTIONS RELAY_MAX_LOOKUP_BRIDGES \
                RELAY_MAX_BIDI_STREAMS RELAY_IDLE_TIMEOUT_SECS \
                RELAY_HANDSHAKE_TIMEOUT_SECS RELAY_MESSAGE_TIMEOUT_SECS \

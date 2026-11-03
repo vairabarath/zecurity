@@ -25,9 +25,14 @@ import GroupDetail from '@/pages/GroupDetail'
 import TeamUsers from '@/pages/TeamUsers'
 import AccessLog from '@/pages/AccessLog'
 import DeviceManagement from '@/pages/DeviceManagement'
+import Policies from '@/pages/Policies'
+import IdpConnections from '@/pages/IdpConnections'
+import IdpConnectionDetail from '@/pages/IdpConnectionDetail'
+import ScimConflicts from '@/pages/ScimConflicts'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 import { useAuthStore } from '@/store/auth'
+import { canUseConsole } from '@/lib/capabilities'
 
 // Verifies authentication. Renders children directly with no chrome.
 // Used for member-accessible pages like /install.
@@ -37,17 +42,18 @@ function ProtectedLayout() {
   return <Outlet />
 }
 
-// Verifies authentication AND admin role.
-// Non-admins are redirected to /install (their landing page).
-// Renders the full AppShell (sidebar + header) for admin pages.
+// Verifies authentication AND console access (CONSOLE_READ: every role but
+// Member, PENDING-19). Members are redirected to /install (their landing page).
+// Renders the full AppShell (sidebar + header). Write controls inside are
+// shown per capability; the server checks every call regardless.
 function AdminLayout() {
   const { isReady } = useRequireAuth()
   const { user } = useAuthStore()
   if (!isReady) return null
-  // Default-deny: redirect unless we have a confirmed ADMIN user. A null/roleless
-  // user must NOT fall through to the admin shell, even though useRequireAuth
-  // populates user before isReady today — don't rely on that invariant here.
-  if (!user || user.role !== 'ADMIN') return <Navigate to="/install" replace />
+  // Default-deny: redirect unless the user holds CONSOLE_READ. A null user or
+  // one without capabilities must NOT fall through to the console shell, even
+  // though useRequireAuth populates user before isReady today.
+  if (!canUseConsole(user)) return <Navigate to="/install" replace />
   return <AppShell />
 }
 
@@ -69,7 +75,7 @@ export default function App() {
         <Route path="/install" element={<ClientInstall />} />
       </Route>
 
-      {/* Admin-only routes — full AppShell with sidebar */}
+      {/* Console routes (CONSOLE_READ) — full AppShell with sidebar */}
       <Route element={<AdminLayout />}>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
@@ -85,12 +91,16 @@ export default function App() {
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
-        <Route path="/topology" element={<TopologyPage />} />
-        <Route path="/users" element={<TeamUsers />} />
-        <Route path="/groups" element={<Groups />} />
-        <Route path="/groups/:id" element={<GroupDetail />} />
-        <Route path="/access-log" element={<AccessLog />} />
-        <Route path="/devices" element={<DeviceManagement />} />
+        <Route path="/topology"          element={<TopologyPage />} />
+        <Route path="/users"             element={<TeamUsers />} />
+        <Route path="/groups"            element={<Groups />} />
+        <Route path="/groups/:id"        element={<GroupDetail />} />
+        <Route path="/access-log"        element={<AccessLog />} />
+        <Route path="/devices"           element={<DeviceManagement />} />
+        <Route path="/policies"          element={<Policies />} />
+        <Route path="/idp-connections"     element={<IdpConnections />} />
+        <Route path="/idp-connections/:id" element={<IdpConnectionDetail />} />
+        <Route path="/scim-conflicts" element={<ScimConflicts />} />
       </Route>
     </Routes>
   )

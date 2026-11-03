@@ -2,12 +2,14 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +17,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 )
 
 func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
@@ -34,8 +40,22 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
-	valkeyClient.FlushDB(ctx)
+	// The database env var is set, so this test is meant to run: an
+	// unparseable URL or unreachable Valkey FAILS it rather than skipping
+	// (CI once reported "ok" here for months without running it).
+	valkeyOpts, valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
+
+	// Never FlushDB: this may be a developer's shared Valkey. The service only
+	// writes pkce:<random state> (consumed at callback) and refresh:{<user id>}:<sid>
+	// (a fresh UUID in this run's throwaway database); the test deletes exactly
+	// its own keys, and a sentinel under a unique prefix proves nothing else
+	// in the database was touched.
+	keyPrefix := fmt.Sprintf("authtest:%d:%d:", os.Getpid(), time.Now().UnixNano())
+	sentinel := keyPrefix + "sentinel"
+	if err := valkeyClient.Set(ctx, sentinel, "keep", 10*time.Minute).Err(); err != nil {
+		t.Fatalf("set sentinel: %v", err)
+	}
+	t.Cleanup(func() { _ = valkeyClient.Del(context.Background(), sentinel).Err() })
 
 	dbName := uniqueAuthTestDatabaseName(t)
 	adminPool := mustConnectAuthTestPool(t, ctx, adminDSN)
@@ -74,9 +94,17 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		PKIService: pkiSvc,
 	}
 
+	// Real identity pipeline over the real connection store: the seeded Google
+	// platform connection (migration 031) is a genuine identity_connections row,
+	// so the external_identities.connection_id FK the pipeline writes resolves.
+	// NopPublisher keeps this test focused on login/JWT (audit is covered separately).
+	identitySvc := identity.NewService(pool, identity.NewLinker(bootstrapSvc), identity.NopPublisher{})
+	idpStore := idp.NewStore(pool, pkiSvc)
+
 	authSvcIface, err := NewService(Config{
 		Pool:               pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
+		IdpStore:           idpStore,
 		JWTSecret:          "phase-7-auth-jwt-secret-32-bytes!!",
 		JWTIssuer:          "zecurity-controller",
 		GoogleClientID:     "test-google-client-id",
@@ -92,42 +120,21 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 
 	svc := authSvcIface.(*serviceImpl)
 
-	origExchangeHook := exchangeCodeForTokensHook
-	origVerifyHook := verifyGoogleIDTokenHook
-	t.Cleanup(func() {
-		exchangeCodeForTokensHook = origExchangeHook
-		verifyGoogleIDTokenHook = origVerifyHook
-	})
-
-	exchangeCodeForTokensHook = func(_ *serviceImpl, _ context.Context, code, codeVerifier string) (*GoogleTokenResponse, error) {
-		if code != "code-1" && code != "code-2" {
-			return nil, fmt.Errorf("unexpected code: %s", code)
-		}
-		if codeVerifier == "" {
-			return nil, fmt.Errorf("missing code verifier")
-		}
-
-		return &GoogleTokenResponse{
-			IDToken:     "fake-google-id-token",
-			AccessToken: "fake-google-access-token",
-			ExpiresIn:   3600,
-			TokenType:   "Bearer",
-		}, nil
-	}
-	verifyGoogleIDTokenHook = func(_ context.Context, idToken, clientID string) (*GoogleClaims, error) {
-		if idToken != "fake-google-id-token" {
-			return nil, fmt.Errorf("unexpected id token: %s", idToken)
-		}
-		if clientID != "test-google-client-id" {
-			return nil, fmt.Errorf("unexpected client id: %s", clientID)
-		}
-
-		return &GoogleClaims{
+	// Override the adapter-selection seam with a fake provider that returns a
+	// canned AuthenticationContext — no real Google network calls. This mirrors
+	// what the (Chunk A) OIDC/Google adapters produce, so the callback → Bootstrap
+	// → JWT flow is exercised end-to-end against the real DB.
+	origProviderFor := providerForFn
+	t.Cleanup(func() { providerForFn = origProviderFor })
+	providerForFn = func(_ *idp.Connection, _ GoogleCreds) (providers.IdentityProvider, error) {
+		return &fakeProvider{result: &providers.AuthenticationContext{
+			Provider:      "google",
+			Issuer:        "https://accounts.google.com",
+			Subject:       "google-sub-123",
 			Email:         "alice@example.com",
-			EmailVerified: true,
 			Name:          "Alice Example",
-			Sub:           "google-sub-123",
-		}, nil
+			EmailVerified: true,
+		}}, nil
 	}
 
 	firstToken, firstRefreshCookie := runAuthRoundTrip(t, svc, "code-1")
@@ -178,7 +185,12 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected first callback to create user without last_login_at")
 	}
 
-	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID)
+	refreshSID := sidOf(t, firstRefreshCookie.Value)
+	t.Cleanup(func() {
+		_ = svc.redisClient.DeleteAllRefreshSessions(context.Background(), userID)
+	})
+
+	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID, refreshSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -187,6 +199,19 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	}
 	if storedRefresh.Token != firstRefreshCookie.Value {
 		t.Fatalf("expected refresh cookie to match Redis refresh token")
+	}
+
+	// The URL's database index is honoured: the service wrote the refresh key
+	// into that database (read here through the test's own client, which
+	// selected the same index), and not into database 0.
+	if n, err := valkeyClient.Exists(ctx, refreshKey(userID, refreshSID)).Result(); err != nil || n != 1 {
+		t.Fatalf("refresh key not found in db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
+	}
+	if valkeyOpts.DB != 0 {
+		db0 := mustConnectAuthTestValkeyDB(t, ctx, valkeyOpts.Addr, 0)
+		if n, err := db0.Exists(ctx, refreshKey(userID, refreshSID)).Result(); err != nil || n != 0 {
+			t.Fatalf("refresh key leaked into db 0 although the URL selects db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
+		}
 	}
 
 	secondToken, _ := runAuthRoundTrip(t, svc, "code-2")
@@ -199,15 +224,25 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected returning login to reuse existing identity")
 	}
 
-	if err := pool.QueryRow(
-		ctx,
-		`SELECT last_login_at FROM users WHERE id = $1`,
-		userID,
-	).Scan(&lastLoginAt); err != nil {
-		t.Fatalf("query last_login_at after second callback: %v", err)
+	// identity.Service.touchLastLogin writes last_login_at in a background
+	// goroutine (so login latency is unaffected); wait for it instead of
+	// reading once, which raced the write under load.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := pool.QueryRow(
+			ctx,
+			`SELECT last_login_at FROM users WHERE id = $1`,
+			userID,
+		).Scan(&lastLoginAt); err != nil {
+			t.Fatalf("query last_login_at after second callback: %v", err)
+		}
+		if lastLoginAt != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if lastLoginAt == nil {
-		t.Fatalf("expected returning login to update last_login_at")
+		t.Fatalf("expected returning login to update last_login_at within 5s")
 	}
 
 	var workspaceCountAfter int
@@ -226,6 +261,37 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected returning login to avoid duplicate rows; got workspaces=%d users=%d keys=%d",
 			workspaceCountAfter, userCountAfter, keyCountAfter)
 	}
+
+	// PENDING-19: /auth/refresh re-stamps the CURRENT role. The claim is
+	// display-only (authorization reads users.role live), but a refreshed
+	// token must not keep showing a role the user no longer has.
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'devops' WHERE id = $1`, userID); err != nil {
+		t.Fatalf("change role: %v", err)
+	}
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.AddCookie(firstRefreshCookie)
+	refreshReq.Header.Set("Authorization", "Bearer "+firstToken)
+	refreshRec := httptest.NewRecorder()
+	svc.RefreshHandler().ServeHTTP(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh: status %d body %s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshed map[string]string
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshed); err != nil {
+		t.Fatalf("decode refresh: %v", err)
+	}
+	refreshedClaims, err := svc.verifyAccessToken(refreshed["access_token"])
+	if err != nil {
+		t.Fatalf("verify refreshed token: %v", err)
+	}
+	if refreshedClaims.Role != "devops" {
+		t.Fatalf("refreshed token role = %q, want devops (current users.role)", refreshedClaims.Role)
+	}
+
+	// Nothing outside this run's keys was disturbed.
+	if v, err := valkeyClient.Get(ctx, sentinel).Result(); err != nil || v != "keep" {
+		t.Fatalf("sentinel key %s was removed or changed (value=%q, err=%v)", sentinel, v, err)
+	}
 }
 
 func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *http.Cookie) {
@@ -233,7 +299,7 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 
 	ctx := context.Background()
 
-	initPayload, err := svc.InitiateAuth(ctx, "google", nil)
+	initPayload, err := svc.InitiateAuth(ctx, "google", nil, nil)
 	if err != nil {
 		t.Fatalf("InitiateAuth: %v", err)
 	}
@@ -284,28 +350,30 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 	return token, refreshCookie
 }
 
-func mustConnectAuthTestValkey(t *testing.T, ctx context.Context, valkeyURL string) valkeycompat.Cmdable {
+// mustConnectAuthTestValkey parses the URL with the production parser and
+// connects to the database it names. Any failure is fatal: the caller only
+// gets here when the database env var says this test should run.
+func mustConnectAuthTestValkey(t *testing.T, ctx context.Context, valkeyURL string) (valkeyurl.Options, valkeycompat.Cmdable) {
 	t.Helper()
-
-	addr, err := parseValkeyAddr(valkeyURL)
+	opts, err := valkeyurl.Parse(valkeyURL)
 	if err != nil {
-		t.Skipf("valkey: bad URL %s: %v", valkeyURL, err)
+		t.Fatalf("AUTH_TEST_VALKEY_URL %q: %v", valkeyURL, err)
 	}
+	return opts, mustConnectAuthTestValkeyDB(t, ctx, opts.Addr, opts.DB)
+}
 
-	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{addr},
-	})
+func mustConnectAuthTestValkeyDB(t *testing.T, ctx context.Context, addr string, db int) valkeycompat.Cmdable {
+	t.Helper()
+	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{addr}, SelectDB: db})
 	if err != nil {
-		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
+		t.Fatalf("valkey not available at %s (db %d): %v", addr, db, err)
 	}
-
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := client.Do(pingCtx, client.B().Ping().Build()).Error(); err != nil {
 		client.Close()
-		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
+		t.Fatalf("valkey not available at %s (db %d): %v", addr, db, err)
 	}
-
 	t.Cleanup(client.Close)
 	return valkeycompat.NewAdapter(client)
 }
@@ -326,26 +394,28 @@ func mustConnectAuthTestPool(t *testing.T, ctx context.Context, dsn string) *pgx
 	return pool
 }
 
+// applyAuthMigration applies every schema file in lexical order, like the
+// other DB-backed suites. A hand-picked list went stale (it missed the file
+// adding subject_claim) and the test failed whenever it actually ran.
 func applyAuthMigration(ctx context.Context, pool *pgxpool.Pool) error {
-	migrationPath, err := authMigrationPath()
+	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
 	if err != nil {
 		return err
 	}
-
-	sqlBytes, err := os.ReadFile(migrationPath)
-	if err != nil {
-		return fmt.Errorf("read migration file: %w", err)
+	if len(files) == 0 {
+		return fmt.Errorf("no migrations found")
 	}
-
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		return fmt.Errorf("execute migration SQL: %w", err)
+	sort.Strings(files)
+	for _, f := range files {
+		sqlBytes, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", filepath.Base(f), err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("execute migration %s: %w", filepath.Base(f), err)
+		}
 	}
-
 	return nil
-}
-
-func authMigrationPath() (string, error) {
-	return filepath.Abs(filepath.Join("..", "..", "migrations", "001_schema.sql"))
 }
 
 func withAuthTestDatabaseName(dsn, dbName string) (string, error) {

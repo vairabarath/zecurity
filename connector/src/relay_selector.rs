@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant as TokioInstant};
 use tracing::{debug, info, warn};
 
+use crate::authorization::{AuthzGate, AuthzSnapshot};
 use crate::proto::connector_control_message;
 use crate::proto::{
     ConnectorControlMessage, ConnectorRelayState, LabelledRelayInfo, LabelledRelayList,
@@ -42,6 +43,7 @@ use crate::relay_client;
 use crate::relay_handler::{RelayDrainTracker, RelayHandler};
 use crate::relay_probe::{probe_relays, RelayProbeResult};
 use crate::relay_ranking::{now_unix_seconds, RankedEntry, RelayRanking};
+use crate::tls::cert_holder::CertHolder;
 
 const MIGRATION_IMPROVEMENT_RATIO: f64 = 0.15;
 const MIGRATION_IMPROVEMENT_MIN_MS: u64 = 10;
@@ -53,10 +55,11 @@ pub struct RelaySelectorConfig {
     pub state_dir: PathBuf,
     pub connector_id: String,
     pub connector_spiffe_id: String,
-    pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
-    pub workspace_ca_pem: Vec<u8>,
-    pub intermediate_ca_pem: Vec<u8>,
+    /// Single owner of the Connector certificate (Sprint 20 G-2a). Every probe
+    /// and session dial reads the CURRENT identity from here, so dials after
+    /// a renewal present the renewed certificate.
+    pub certs: Arc<CertHolder>,
+    pub relay_crl_manager: crate::crl::CrlManager,
     pub max_incoming_bidi_streams: u32,
     pub idle_timeout: Duration,
     pub reprobe_interval: Duration,
@@ -66,6 +69,29 @@ pub struct RelaySelectorConfig {
     pub reconnect_max: Duration,
     pub reconnect_backoff_factor: f64,
     pub drain_timeout: Duration,
+}
+
+/// Connector mTLS identity used for Relay dials and probes.
+pub struct RelayIdentity {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+    pub workspace_ca_pem: Vec<u8>,
+    pub intermediate_ca_pem: Vec<u8>,
+}
+
+impl RelaySelectorConfig {
+    /// The CURRENT identity from the CertHolder. `workspace_ca.crt` holds the
+    /// Workspace CA + Platform Intermediate bundle; relay_client picks the
+    /// right anchor from it for each role.
+    pub fn current_identity(&self) -> RelayIdentity {
+        let material = self.certs.current();
+        RelayIdentity {
+            cert_pem: material.store.cert_pem.clone(),
+            key_pem: material.store.key_pem.clone(),
+            workspace_ca_pem: material.store.workspace_ca_pem.clone(),
+            intermediate_ca_pem: material.store.workspace_ca_pem.clone(),
+        }
+    }
 }
 
 /// In-flight relay session: which relay we're attached to, the spawned
@@ -82,9 +108,13 @@ enum State {
     /// `next_backoff` is the delay to use if this bootstrap attempt fails and
     /// we fall into `Backoff`. It grows across consecutive failed cycles and
     /// resets to `reconnect_base` after a healthy connection (see `failover`).
-    Disconnected { next_backoff: Duration },
+    Disconnected {
+        next_backoff: Duration,
+    },
     Connected(ActiveRelay),
-    Backoff { delay: Duration },
+    Backoff {
+        delay: Duration,
+    },
 }
 
 /// Compute the next exponential-backoff delay: `current * factor`, capped at
@@ -99,20 +129,55 @@ pub async fn run(
     cfg: RelaySelectorConfig,
     relay_handler: Arc<RelayHandler>,
     attachment_slot: RelayAttachmentSlot,
+    relay_list_rx: watch::Receiver<Option<LabelledRelayList>>,
+    ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
+    gate: AuthzGate,
+) -> ! {
+    run_until_terminal(
+        cfg,
+        relay_handler,
+        attachment_slot,
+        relay_list_rx,
+        ctrl_tx,
+        gate,
+    )
+    .await;
+    // Terminal is never left within the process: nothing to resume.
+    std::future::pending().await
+}
+
+/// The selector loop. Returns only once the connector is terminal (revoked
+/// or unknown to the controller), after stopping its relay session (Sprint 20
+/// Fix 13, F38): every relay refuses a revoked connector, so dialling on
+/// would only repeat refused registrations.
+async fn run_until_terminal(
+    cfg: RelaySelectorConfig,
+    relay_handler: Arc<RelayHandler>,
+    attachment_slot: RelayAttachmentSlot,
     mut relay_list_rx: watch::Receiver<Option<LabelledRelayList>>,
     ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
-) -> ! {
+    gate: AuthzGate,
+) {
     info!("Relay selector starting");
+    let mut gate_rx = gate.subscribe();
     let mut state = State::Disconnected {
         next_backoff: cfg.reconnect_base,
     };
     let mut current_list = relay_list_rx.borrow_and_update().clone();
 
     loop {
+        if gate_rx.borrow().state().is_terminal() {
+            stop_on_terminal(state, &attachment_slot).await;
+            return;
+        }
+
         // Block on first list arrival if we haven't seen one yet.
         if current_list.is_none() {
             info!("Relay selector waiting for first LabelledRelayList push");
-            let _ = relay_list_rx.changed().await;
+            tokio::select! {
+                _ = relay_list_rx.changed() => {}
+                _ = wait_terminal(&mut gate_rx) => continue,
+            }
             current_list = relay_list_rx.borrow_and_update().clone();
             continue;
         }
@@ -140,6 +205,7 @@ pub async fn run(
                     &ctrl_tx,
                     &mut relay_list_rx,
                     &mut current_list,
+                    &mut gate_rx,
                 )
                 .await
             }
@@ -147,12 +213,85 @@ pub async fn run(
                 emit_event(SelectorEvent::EnteredBackoff {
                     delay_ms: delay.as_millis() as u64,
                 });
-                tokio::time::sleep(delay).await;
+                match wait_backoff(delay, &mut relay_list_rx, &mut current_list, &mut gate_rx).await
+                {
+                    BackoffWake::ListChanged => {
+                        info!("New LabelledRelayList during backoff; retrying now")
+                    }
+                    // The loop top stops the selector.
+                    BackoffWake::Terminal => continue,
+                    BackoffWake::Elapsed => {}
+                }
+                // The backoff keeps growing either way, so a controller that
+                // keeps pushing lists of unreachable relays can't make the
+                // selector dial in a tight loop.
                 let next_backoff =
                     next_backoff_delay(delay, cfg.reconnect_backoff_factor, cfg.reconnect_max);
                 State::Disconnected { next_backoff }
             }
         };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BackoffWake {
+    Elapsed,
+    ListChanged,
+    /// The connector became terminal (F38).
+    Terminal,
+}
+
+/// Resolves once the published serving state is terminal; never otherwise
+/// (also not when the tracker is gone). Cancel-safe.
+async fn wait_terminal(gate_rx: &mut watch::Receiver<AuthzSnapshot>) {
+    loop {
+        if gate_rx.borrow_and_update().state().is_terminal() {
+            return;
+        }
+        if gate_rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// F38: end the active relay session (aborting a `JoinHandle` stops the task;
+/// dropping it would only detach it) and stop reporting a relay attachment.
+async fn stop_on_terminal(state: State, attachment_slot: &RelayAttachmentSlot) {
+    if let State::Connected(active) = state {
+        active.handle.abort();
+        info!(relay_id = %active.info.relay_id, "relay session ended: connector is terminal");
+    }
+    attachment_slot.set_active(None).await;
+    warn!("relay selector stopped: connector is revoked or unknown to the controller");
+    emit_event(SelectorEvent::StoppedTerminal);
+}
+
+/// Sleep out a backoff `delay`, ending early when the controller pushes a new
+/// LabelledRelayList. The new list replaces `current_list`, so the next
+/// bootstrap dials it. Without this, a list pushed while the selector is
+/// disconnected (e.g. the first relay coming up after an empty list) was never
+/// read: `current_list` only refreshed inside `connected_step`, so the
+/// selector retried the stale list until the process restarted.
+async fn wait_backoff(
+    delay: Duration,
+    relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
+    current_list: &mut Option<LabelledRelayList>,
+    gate_rx: &mut watch::Receiver<AuthzSnapshot>,
+) -> BackoffWake {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => BackoffWake::Elapsed,
+        _ = wait_terminal(gate_rx) => BackoffWake::Terminal,
+        changed = relay_list_rx.changed() => {
+            if changed.is_err() {
+                // Sender gone (shutdown): no list will ever arrive; finish the delay.
+                tokio::time::sleep(delay).await;
+                return BackoffWake::Elapsed;
+            }
+            if let Some(list) = relay_list_rx.borrow_and_update().clone() {
+                *current_list = Some(list);
+            }
+            BackoffWake::ListChanged
+        }
     }
 }
 
@@ -230,6 +369,7 @@ async fn connected_step(
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
     relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
     current_list: &mut Option<LabelledRelayList>,
+    gate_rx: &mut watch::Receiver<AuthzSnapshot>,
 ) -> State {
     let reprobe_at = TokioInstant::now() + cfg.reprobe_interval;
 
@@ -245,6 +385,9 @@ async fn connected_step(
             }
             failover(cfg, list, relay_handler, attachment_slot, ctrl_tx).await
         }
+
+        // Terminal (F38): back to the loop top, which stops the session.
+        _ = wait_terminal(gate_rx) => State::Connected(active),
 
         // New LabelledRelayList push.
         changed = relay_list_rx.changed() => {
@@ -304,13 +447,15 @@ async fn reprobe_and_maybe_migrate(
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
 ) -> State {
+    let identity = cfg.current_identity();
     let results = probe_relays(
         &list.relays,
         &cfg.connector_id,
-        &cfg.cert_pem,
-        &cfg.key_pem,
-        &cfg.workspace_ca_pem,
-        &cfg.intermediate_ca_pem,
+        &identity.cert_pem,
+        &identity.key_pem,
+        &identity.workspace_ca_pem,
+        &identity.intermediate_ca_pem,
+        cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
     )
@@ -411,6 +556,33 @@ fn build_migration_candidates(
         .collect()
 }
 
+/// Waits up to `drain_timeout` for the streams on a migrated-away relay to
+/// end by themselves. Those still open at the timeout are cut: the old relay
+/// connection is closed (FU-14). Before, only the session task was aborted and
+/// detached stream tasks kept the connection, and the drained relay, in use
+/// until they finished. Returns true when the drain completed in time.
+async fn drain_old_relay(
+    tracker: &RelayDrainTracker,
+    drain_timeout: Duration,
+    relay_id: &str,
+) -> bool {
+    if tokio::time::timeout(drain_timeout, tracker.wait_for_idle())
+        .await
+        .is_ok()
+    {
+        info!(relay_id = %relay_id, "old relay drain completed after active streams reached zero");
+        return true;
+    }
+    emit_event(SelectorEvent::DrainTimeoutFired);
+    warn!(
+        relay_id = %relay_id,
+        active_streams = tracker.active_streams(),
+        "old relay drain timed out; cutting the streams still open"
+    );
+    tracker.cut();
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn migrate(
     cfg: &RelaySelectorConfig,
@@ -427,7 +599,8 @@ async fn migrate(
     //   3. any remaining listed relays.
     // Without this, migration would connect to whatever is first in the
     // controller's list, discarding the probe result entirely.
-    let candidates = build_migration_candidates(&cfg.state_dir, list, &old.info.relay_id, preferred);
+    let candidates =
+        build_migration_candidates(&cfg.state_dir, list, &old.info.relay_id, preferred);
 
     for target in candidates {
         let (tx, rx) = oneshot::channel();
@@ -438,7 +611,6 @@ async fn migrate(
             attachment_slot.clone(),
             ctrl_tx.clone(),
             Some(tx),
-           
         );
 
         // Wait for register-OK on the new connection, or for the new session
@@ -467,22 +639,7 @@ async fn migrate(
                     })
                     .await;
 
-                if tokio::time::timeout(cfg.drain_timeout, old.drain_tracker.wait_for_idle())
-                    .await
-                    .is_err()
-                {
-                    emit_event(SelectorEvent::DrainTimeoutFired);
-                    warn!(
-                        relay_id = %old.info.relay_id,
-                        active_streams = old.drain_tracker.active_streams(),
-                        "old relay drain timed out with active streams still open"
-                    );
-                } else {
-                    info!(
-                        relay_id = %old.info.relay_id,
-                        "old relay drain completed after active streams reached zero"
-                    );
-                }
+                drain_old_relay(&old.drain_tracker, cfg.drain_timeout, &old.info.relay_id).await;
 
                 old.handle.abort();
 
@@ -562,13 +719,15 @@ async fn failover(
     }
 
     // No ranked entry worked — re-probe and use the best result.
+    let identity = cfg.current_identity();
     let results = probe_relays(
         &list.relays,
         &cfg.connector_id,
-        &cfg.cert_pem,
-        &cfg.key_pem,
-        &cfg.workspace_ca_pem,
-        &cfg.intermediate_ca_pem,
+        &identity.cert_pem,
+        &identity.key_pem,
+        &identity.workspace_ca_pem,
+        &identity.intermediate_ca_pem,
+        cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
     )
@@ -663,10 +822,15 @@ fn spawn_session(
     let relay_spiffe_id = info.spiffe_id;
     let connector_id = cfg_owned.connector_id.clone();
     let connector_spiffe_id = cfg_owned.connector_spiffe_id.clone();
-    let cert_pem = cfg_owned.cert_pem.clone();
-    let key_pem = cfg_owned.key_pem.clone();
-    let workspace_ca_pem = cfg_owned.workspace_ca_pem.clone();
-    let intermediate_ca_pem = cfg_owned.intermediate_ca_pem.clone();
+    // Identity read at dial time: a session started after a renewal presents
+    // the renewed certificate; an established session keeps the one it used.
+    let RelayIdentity {
+        cert_pem,
+        key_pem,
+        workspace_ca_pem,
+        intermediate_ca_pem,
+    } = cfg_owned.current_identity();
+    let relay_crl_manager = cfg_owned.relay_crl_manager.clone();
     let max_streams = cfg_owned.max_incoming_bidi_streams;
     let idle_timeout = cfg_owned.idle_timeout;
     let drain_tracker = RelayDrainTracker::new();
@@ -681,6 +845,7 @@ fn spawn_session(
             &key_pem,
             &workspace_ca_pem,
             &intermediate_ca_pem,
+            relay_crl_manager,
             relay_handler,
             max_streams,
             idle_timeout,
@@ -775,14 +940,27 @@ fn rotate<T: Clone>(items: Vec<&T>, offset: usize) -> Vec<T> {
 
 #[derive(Clone, Debug)]
 pub enum SelectorEvent {
-    EnteredConnected { relay_id: String },
+    EnteredConnected {
+        relay_id: String,
+    },
     EnteredFailover,
-    EnteredBackoff { delay_ms: u64 },
-    ProbeSweepCompleted { results: Vec<RelayProbeResult> },
-    RankingPersisted { entries: usize },
-    MigrationStarted { from: String, to: String },
+    EnteredBackoff {
+        delay_ms: u64,
+    },
+    ProbeSweepCompleted {
+        results: Vec<RelayProbeResult>,
+    },
+    RankingPersisted {
+        entries: usize,
+    },
+    MigrationStarted {
+        from: String,
+        to: String,
+    },
     MigrationCompleted,
     DrainTimeoutFired,
+    /// F38: the connector became terminal; the selector stopped for good.
+    StoppedTerminal,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -828,6 +1006,51 @@ fn emit_event(event: SelectorEvent) {
 mod tests {
     use super::*;
     use crate::proto::{LabelledRelayInfo, RelayCapacityLabel};
+
+    /// FU-14: streams still open when the drain timeout fires are cut: the
+    /// old relay connection is closed, so they end at ~drain_timeout instead
+    /// of running on until they finish by themselves.
+    #[tokio::test]
+    async fn drain_timeout_cuts_the_streams_still_open() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side);
+        let _long_download = tracker.track_stream();
+
+        let drained = drain_old_relay(&tracker, Duration::from_millis(100), "old-relay").await;
+
+        assert!(!drained, "a stream was still open at the timeout");
+        let reason = tokio::time::timeout(Duration::from_secs(2), relay_side.closed())
+            .await
+            .expect("the old relay connection must be closed at the timeout");
+        assert!(
+            matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+                if c.error_code == quinn::VarInt::from_u32(crate::relay_handler::DRAIN_TIMEOUT_CODE)),
+            "relay saw {reason:?}"
+        );
+    }
+
+    /// A drain that completes in time closes nothing early.
+    #[tokio::test]
+    async fn a_completed_drain_does_not_cut() {
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side);
+        let stream = tracker.track_stream();
+        let t = tracker.clone();
+        let drain =
+            tokio::spawn(
+                async move { drain_old_relay(&t, Duration::from_secs(5), "old-relay").await },
+            );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(stream); // the last stream ends on its own
+        assert!(drain.await.unwrap(), "the drain completed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            relay_side.close_reason().is_none(),
+            "nothing may be cut after a completed drain"
+        );
+    }
 
     fn info(id: &str, tier: RelayCapacityLabel) -> LabelledRelayInfo {
         LabelledRelayInfo {
@@ -909,6 +1132,116 @@ mod tests {
         assert_eq!(order[0].relay_id, "t2-a");
     }
 
+    // ---- Disconnected selector re-reads pushed relay lists (B2 finding 3) ----
+
+    /// A gate that stays Serving (its sender is gone: never terminal).
+    fn open_gate() -> watch::Receiver<AuthzSnapshot> {
+        AuthzGate::open_for_tests().subscribe()
+    }
+
+    fn one_relay_list(version: u64) -> LabelledRelayList {
+        LabelledRelayList {
+            relays: vec![info("r1", RelayCapacityLabel::RelayCapacityHigh)],
+            version,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_ends_early_and_adopts_a_pushed_list() {
+        let (tx, mut rx) = watch::channel(Some(LabelledRelayList {
+            relays: vec![],
+            version: 1,
+        }));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tx.send(Some(one_relay_list(2))).unwrap();
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        });
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(120),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
+
+        assert_eq!(wake, BackoffWake::ListChanged);
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(1),
+            "woke at the push, not after 120s"
+        );
+        let list = current.expect("list adopted");
+        assert_eq!((list.version, list.relays.len()), (2, 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn list_pushed_before_backoff_is_seen_immediately() {
+        // A push that landed while bootstrap was dialing must not wait a full delay.
+        let (tx, mut rx) = watch::channel(None);
+        let mut current = None;
+        tx.send(Some(one_relay_list(7))).unwrap();
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(60),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
+
+        assert_eq!(wake, BackoffWake::ListChanged);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(current.map(|l| l.version), Some(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_without_push_runs_full_delay_and_keeps_list() {
+        let (_tx, mut rx) = watch::channel(Some(one_relay_list(3)));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(20),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
+
+        assert_eq!(wake, BackoffWake::Elapsed);
+        assert_eq!(start.elapsed(), Duration::from_secs(20));
+        assert_eq!(current.map(|l| l.version), Some(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_list_channel_still_waits_out_the_delay() {
+        // No busy loop when the control-stream side is gone.
+        let (tx, mut rx) = watch::channel(Some(one_relay_list(4)));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+        drop(tx);
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(30),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
+
+        assert_eq!(wake, BackoffWake::Elapsed);
+        assert_eq!(start.elapsed(), Duration::from_secs(30));
+        assert_eq!(current.map(|l| l.version), Some(4));
+    }
+
     #[test]
     fn random_pick_order_empty() {
         let list = LabelledRelayList {
@@ -988,7 +1321,10 @@ mod tests {
     // ---- Bug 1: migration target ordering ----
 
     fn temp_state_dir(label: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("zecurity-migtargets-{label}-{}", uuid::Uuid::new_v4()));
+        let p = std::env::temp_dir().join(format!(
+            "zecurity-migtargets-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -1005,9 +1341,20 @@ mod tests {
             ],
             version: 1,
         };
-        let order = build_migration_candidates(&dir, &list, "a", Some(info("c", RelayCapacityLabel::RelayCapacityHigh)));
+        let order = build_migration_candidates(
+            &dir,
+            &list,
+            "a",
+            Some(info("c", RelayCapacityLabel::RelayCapacityHigh)),
+        );
         // c (preferred) first, then b from list order; a (old) excluded, c de-duped.
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1027,13 +1374,31 @@ mod tests {
             &dir,
             1,
             &[
-                RelayProbeResult { relay_id: "c".into(), relay_addr: "c:9093".into(), spiffe_id: "s".into(), rtt_ms: 10, score: 10 },
-                RelayProbeResult { relay_id: "b".into(), relay_addr: "b:9093".into(), spiffe_id: "s".into(), rtt_ms: 20, score: 20 },
+                RelayProbeResult {
+                    relay_id: "c".into(),
+                    relay_addr: "c:9093".into(),
+                    spiffe_id: "s".into(),
+                    rtt_ms: 10,
+                    score: 10,
+                },
+                RelayProbeResult {
+                    relay_id: "b".into(),
+                    relay_addr: "b:9093".into(),
+                    spiffe_id: "s".into(),
+                    rtt_ms: 20,
+                    score: 20,
+                },
             ],
         );
         let order = build_migration_candidates(&dir, &list, "a", None);
         // Ranking best-first: c then b; list adds nothing new; a excluded.
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1048,8 +1413,328 @@ mod tests {
             ],
             version: 1,
         };
-        let order = build_migration_candidates(&dir, &list, "a", Some(info("z", RelayCapacityLabel::RelayCapacityHigh)));
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        let order = build_migration_candidates(
+            &dir,
+            &list,
+            "a",
+            Some(info("z", RelayCapacityLabel::RelayCapacityHigh)),
+        );
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use crate::test_support::{leaf_serial, selector_config, TestPki};
+
+    fn first_cert_serial(pem: &[u8]) -> String {
+        let chain: Vec<_> = rustls_pemfile::certs(&mut &pem[..])
+            .collect::<Result<_, _>>()
+            .unwrap();
+        leaf_serial(&chain[0])
+    }
+
+    /// Relay probes and session dials read the identity at dial time: after a
+    /// renewal is published, the next dial presents the renewed certificate
+    /// (same key), not a copy captured at startup.
+    #[test]
+    fn relay_dials_use_the_renewed_identity() {
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let cfg = selector_config(holder.clone(), dir.path());
+
+        let before = cfg.current_identity();
+        assert_eq!(
+            first_cert_serial(&before.cert_pem),
+            holder.current().serial_hex
+        );
+
+        let renewed = pki.renew(&holder, 7200);
+        let after = cfg.current_identity();
+        assert_eq!(
+            first_cert_serial(&after.cert_pem),
+            renewed.serial_hex,
+            "dial must present the renewed certificate"
+        );
+        assert_ne!(
+            first_cert_serial(&after.cert_pem),
+            first_cert_serial(&before.cert_pem)
+        );
+        assert_eq!(after.key_pem, before.key_pem, "renewal keeps the key pair");
+        assert_eq!(
+            after.workspace_ca_pem, before.workspace_ca_pem,
+            "CA bundle is pinned across renewals"
+        );
+    }
+}
+
+/// Sprint 20 Fix 13 (F38): a terminal connector stops dialling relays.
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::agent_tunnel::AgentTunnelHub;
+    use crate::authorization::ServingState;
+    use crate::crl::CrlManager;
+    use crate::policy::PolicyCache;
+    use crate::relay_attachment::RelayAttachment;
+    use crate::session_registry::SessionRegistry;
+    use crate::test_support::{selector_config, TestPki, CONNECTOR_ID};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Fx {
+        _dir: tempfile::TempDir,
+        cfg: RelaySelectorConfig,
+        handler: Arc<RelayHandler>,
+        slot: RelayAttachmentSlot,
+        ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
+        _ctrl_rx: mpsc::Receiver<ConnectorControlMessage>,
+    }
+
+    fn fx() -> Fx {
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
+        let handler = Arc::new(
+            RelayHandler::new(
+                holder.clone(),
+                Arc::new(PolicyCache::new()),
+                Arc::new(SessionRegistry::new()),
+                AgentTunnelHub::new(),
+                CrlManager::new(),
+                CONNECTOR_ID.to_string(),
+                ctrl_tx.clone(),
+                5,
+                16,
+                AuthzGate::open_for_tests(),
+            )
+            .unwrap(),
+        );
+        Fx {
+            cfg: selector_config(holder, dir.path()),
+            _dir: dir,
+            handler,
+            slot: RelayAttachmentSlot::new(),
+            ctrl_tx,
+            _ctrl_rx: ctrl_rx,
+        }
+    }
+
+    fn attachment(relay_id: &str) -> RelayAttachment {
+        RelayAttachment {
+            relay_id: relay_id.into(),
+            relay_spiffe_id: format!("spiffe://zecurity.in/relay/{relay_id}"),
+            attached_at: 0,
+        }
+    }
+
+    /// A stand-in relay session: runs until aborted; `ended` is set when its
+    /// future is dropped (abort), not when the handle is merely dropped.
+    fn session() -> (ActiveRelay, Arc<AtomicBool>) {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let ended = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(ended.clone());
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<anyhow::Result<()>>().await
+        });
+        let active = ActiveRelay {
+            info: LabelledRelayInfo {
+                relay_id: "r1".into(),
+                relay_addr: "127.0.0.1:1".into(),
+                spiffe_id: "spiffe://zecurity.in/relay/r1".into(),
+                label: RelayCapacityLabel::RelayCapacityHigh as i32,
+            },
+            handle,
+            drain_tracker: RelayDrainTracker::new(),
+            last_score: None,
+        };
+        (active, ended)
+    }
+
+    fn set_after(ctl: crate::authorization::TestGateControl, after: Duration, state: ServingState) {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            ctl.set(state);
+            // Keep the sender alive: a closed channel must not be what wakes anyone.
+            std::future::pending::<()>().await;
+        });
+    }
+
+    fn empty_list() -> watch::Receiver<Option<LabelledRelayList>> {
+        let (tx, rx) = watch::channel(Some(LabelledRelayList {
+            relays: vec![],
+            version: 1,
+        }));
+        std::mem::forget(tx);
+        rx
+    }
+
+    /// AF13-2: a terminal state ends the backoff at once.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_ends_backoff_at_once() {
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::UnknownIdentity);
+        let mut rx = empty_list();
+        let mut current = rx.borrow_and_update().clone();
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(120),
+            &mut rx,
+            &mut current,
+            &mut gate.subscribe(),
+        )
+        .await;
+        assert_eq!(wake, BackoffWake::Terminal);
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    /// AF13-3: a recoverable loss doesn't end the backoff early.
+    #[tokio::test(start_paused = true)]
+    async fn a_recoverable_state_does_not_end_backoff() {
+        for state in [ServingState::Disabled, ServingState::Recovering] {
+            let (gate, ctl) = AuthzGate::controllable_for_tests();
+            set_after(ctl, Duration::from_secs(1), state);
+            let mut rx = empty_list();
+            let mut current = rx.borrow_and_update().clone();
+            let start = TokioInstant::now();
+            let wake = wait_backoff(
+                Duration::from_secs(20),
+                &mut rx,
+                &mut current,
+                &mut gate.subscribe(),
+            )
+            .await;
+            assert_eq!(wake, BackoffWake::Elapsed, "{state:?}");
+            assert_eq!(start.elapsed(), Duration::from_secs(20), "{state:?}");
+        }
+    }
+
+    /// AF13-1: stopping aborts the session task and clears the attachment.
+    #[tokio::test]
+    async fn stopping_aborts_the_session_and_clears_the_attachment() {
+        let slot = RelayAttachmentSlot::new();
+        slot.set_active(Some(attachment("r1"))).await;
+        let (active, ended) = session();
+        stop_on_terminal(State::Connected(active), &slot).await;
+        for _ in 0..100 {
+            if ended.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "the session task must be aborted, not detached"
+        );
+        assert!(
+            slot.active().await.is_none(),
+            "no relay is reported once terminal"
+        );
+    }
+
+    /// AF13-1: a connected selector notices the terminal state at once, not
+    /// at the next re-probe (300 s here).
+    #[tokio::test(start_paused = true)]
+    async fn terminal_wakes_a_connected_selector() {
+        let f = fx();
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::Revoked);
+        let mut rx = empty_list();
+        let mut current = rx.borrow_and_update().clone();
+        let list = current.clone().unwrap();
+        let (active, ended) = session();
+        let start = TokioInstant::now();
+        let next = connected_step(
+            &f.cfg,
+            &list,
+            active,
+            &f.handler,
+            &f.slot,
+            &f.ctrl_tx,
+            &mut rx,
+            &mut current,
+            &mut gate.subscribe(),
+        )
+        .await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert!(
+            matches!(next, State::Connected(_)),
+            "handed back to the loop top"
+        );
+        stop_on_terminal(next, &f.slot).await;
+        tokio::task::yield_now().await;
+        assert!(ended.load(Ordering::SeqCst));
+    }
+
+    /// AF13-1/2/3: the selector loop runs on through a recoverable loss and
+    /// returns (stopped) as soon as the connector is terminal.
+    #[tokio::test(start_paused = true)]
+    async fn the_selector_stops_on_terminal_only() {
+        let f = fx();
+        f.slot.set_active(Some(attachment("stale"))).await;
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        let ctl = Arc::new(ctl);
+        let task = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            empty_list(),
+            f.ctrl_tx.clone(),
+            gate,
+        ));
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        ctl.set(ServingState::Disabled);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            !task.is_finished(),
+            "Disabled is recoverable: the selector keeps running"
+        );
+
+        let at = TokioInstant::now();
+        ctl.set(ServingState::Revoked);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stops at once on terminal, not after the backoff")
+            .unwrap();
+        assert!(at.elapsed() < Duration::from_secs(1));
+        assert!(f.slot.active().await.is_none());
+    }
+
+    /// A selector still waiting for its first relay list stops too.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_stops_a_selector_waiting_for_its_first_list() {
+        let f = fx();
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::Revoked);
+        let (tx, rx) = watch::channel(None);
+        let start = TokioInstant::now();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_until_terminal(
+                f.cfg.clone(),
+                f.handler.clone(),
+                f.slot.clone(),
+                rx,
+                f.ctrl_tx.clone(),
+                gate,
+            ),
+        )
+        .await
+        .expect("stops without a list ever arriving");
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        drop(tx);
     }
 }

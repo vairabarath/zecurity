@@ -6,6 +6,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use rustls_pemfile::{certs, private_key};
+use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
 use crate::spiffe::{extract_spiffe_uri, parse_spiffe, validate_relay_spiffe, ParsedSpiffe};
 
@@ -73,7 +75,98 @@ pub fn build_server_config(
     server_config.transport_config(Arc::new(transport));
     Ok(server_config)
 }
+pub struct PeerRevocation {
+    pub workspace_id: String, // tenant id from the Workspace CA (chain[1])
+    pub leaf_serial: Vec<u8>, // raw DER serial of the peer leaf
+    pub workspace_ca_der: Vec<u8>,
+}
 
+/// Pull the revocation inputs from an already-authenticated peer connection.
+/// `intermediate_ca_pem` is the relay's pinned Platform Intermediate (its
+/// handshake trust anchor).
+pub fn peer_revocation(
+    connection: &Connection,
+    intermediate_ca_pem: &[u8],
+) -> Result<PeerRevocation> {
+    let chain = connection
+        .peer_identity()
+        .context("peer did not present a certificate")?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| anyhow::anyhow!("unexpected QUIC peer identity type"))?;
+    let anchors = parse_certificates(intermediate_ca_pem, "Platform Intermediate CA")?;
+    let [intermediate] = anchors.as_slice() else {
+        bail!("Intermediate CA PEM must contain exactly one certificate");
+    };
+    revocation_from_chain(&chain, intermediate)
+}
+
+/// Revocation inputs from the peer's presented chain `[leaf, Workspace CA, ..]`.
+///
+/// The handshake validated SOME path from the leaf to the Platform
+/// Intermediate, but rustls/webpki may have built it through a different
+/// certificate than chain[1] (an unrelated extra CA is skipped). chain[1]
+/// selects the workspace and the CA the CRL is verified against, so it must be
+/// proven to be the leaf's issuer — name AND signature — or a revoked leaf
+/// could be checked against another workspace's CRL (audit finding S1).
+///
+/// chain[1] must also be issued by the Platform Intermediate — name AND
+/// signature — before its `tenant:` label is trusted (audit finding S1b): a
+/// CA's name and public key are public, so without this anyone could mint a
+/// copy of the issuer that claims another tenant. Anything else is an error,
+/// which the listener treats as fail-closed; no other peer-supplied CA is
+/// tried.
+fn revocation_from_chain(
+    chain: &[CertificateDer<'_>],
+    intermediate: &CertificateDer<'_>,
+) -> Result<PeerRevocation> {
+    if chain.len() < 2 {
+        bail!("peer must present leaf certificate plus Workspace CA");
+    }
+    let (_, leaf) = X509Certificate::from_der(chain[0].as_ref())
+        .map_err(|e| anyhow::anyhow!("parse peer leaf: {e:?}"))?;
+    let leaf_serial = leaf.raw_serial().to_vec();
+    let workspace_ca_der = chain[1].as_ref().to_vec();
+
+    let (_, ca) = X509Certificate::from_der(&workspace_ca_der)
+        .map_err(|e| anyhow::anyhow!("parse Workspace CA: {e:?}"))?;
+    if leaf.issuer() != ca.subject() {
+        bail!("chain[1] is not the issuer of the peer leaf (issuer name mismatch)");
+    }
+    leaf.verify_signature(Some(ca.public_key())).map_err(|e| {
+        anyhow::anyhow!("chain[1] is not the issuer of the peer leaf (signature: {e:?})")
+    })?;
+    let (_, anchor) = X509Certificate::from_der(intermediate.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse Platform Intermediate CA: {e:?}"))?;
+    if ca.issuer() != anchor.subject() {
+        bail!("chain[1] was not issued by the Platform Intermediate (issuer name mismatch)");
+    }
+    ca.verify_signature(Some(anchor.public_key()))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "chain[1] was not issued by the Platform Intermediate (signature: {e:?})"
+            )
+        })?;
+    let workspace_id = tenant_id_from_ca(&ca).context("Workspace CA has no tenant URI SAN")?;
+
+    Ok(PeerRevocation {
+        workspace_id,
+        leaf_serial,
+        workspace_ca_der,
+    })
+}
+
+fn tenant_id_from_ca(ca: &X509Certificate<'_>) -> Option<String> {
+    let san = ca.subject_alternative_name().ok()??;
+    for name in &san.value.general_names {
+        if let x509_parser::extensions::GeneralName::URI(uri) = name {
+            if let Some(id) = uri.strip_prefix("tenant:") {
+                // controller sets `tenant:<id>`
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
 /// Extract the authenticated Connector or Client identity after a QUIC
 /// handshake. The TLS verifier has already validated the certificate chain.
 pub fn authenticated_peer_identity(connection: &Connection) -> Result<ParsedSpiffe> {
@@ -104,7 +197,10 @@ fn authenticated_identity_from_chain(chain: &[CertificateDer<'_>]) -> Result<Par
     Ok(identity)
 }
 
-fn validate_relay_certificate(cert: &CertificateDer<'_>, expected_relay_id: &str) -> Result<()> {
+pub(crate) fn validate_relay_certificate(
+    cert: &CertificateDer<'_>,
+    expected_relay_id: &str,
+) -> Result<()> {
     let spiffe_uri =
         extract_spiffe_uri(cert.as_ref()).context("Relay certificate has no exact SPIFFE URI")?;
     let identity =
@@ -147,9 +243,9 @@ mod tests {
     fn install_crypto_provider() {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .unwrap();
+            // Tolerate an already-installed provider: other test modules (e.g. crl)
+            // may have installed the process-wide default first.
+            let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
 
@@ -251,5 +347,138 @@ mod tests {
             "workspace-a.zecurity.in"
         ))
         .is_err());
+    }
+
+    // ---- revocation_from_chain: chain[1] must be the leaf's issuer (S1) ----
+
+    const TENANT_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const TENANT_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const SERIAL: &[u8] = &[0x51, 0x01, 0x01, 0x01];
+
+    /// The relay's pinned Platform Intermediate for a test PKI.
+    fn anchor(pki: &crate::test_support::TestPki) -> CertificateDer<'static> {
+        parse_certificates(pki.ca_pem.as_bytes(), "test intermediate")
+            .unwrap()
+            .remove(0)
+    }
+
+    #[test]
+    fn revocation_uses_the_issuing_workspace_ca() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        let pr = revocation_from_chain(&[leaf, ca_a.der()], &anchor(&pki)).unwrap();
+        assert_eq!(pr.workspace_id, TENANT_A);
+        assert_eq!(pr.leaf_serial, SERIAL);
+        assert_eq!(pr.workspace_ca_der, ca_a.der().as_ref());
+    }
+
+    #[test]
+    fn foreign_workspace_ca_at_chain_1_is_refused() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let ca_b = pki.workspace_ca(TENANT_B);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        // The real issuer later in the chain is not used as a fallback.
+        let err = revocation_from_chain(&[leaf, ca_b.der(), ca_a.der()], &anchor(&pki))
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("issuer name mismatch"), "{err}");
+    }
+
+    #[test]
+    fn impostor_ca_with_the_issuers_name_is_refused() {
+        // Same subject and tenant SAN as the real issuer, different key: the
+        // name check passes, the signature check must not.
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let impostor = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        let err = revocation_from_chain(&[leaf, impostor.der(), ca_a.der()], &anchor(&pki))
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("signature"), "{err}");
+    }
+
+    #[test]
+    fn malformed_or_missing_issuer_is_refused() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        assert!(revocation_from_chain(std::slice::from_ref(&leaf), &anchor(&pki)).is_err());
+        assert!(revocation_from_chain(
+            &[leaf.clone(), CertificateDer::from(b"not a cert".to_vec())],
+            &anchor(&pki)
+        )
+        .is_err());
+        // A leaf at chain[1] (not a CA, not the issuer).
+        let (other_leaf, _) = ca_a.client_leaf(&[0x52, 0x02]);
+        assert!(revocation_from_chain(&[leaf, other_leaf], &anchor(&pki)).is_err());
+    }
+
+    /// S1b: a forged chain[1] with the issuer's name and public key but a
+    /// different `tenant:` label must not choose the workspace for the CRL.
+    #[test]
+    fn s1b_forged_issuer_copy_does_not_choose_the_workspace() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+        let forged = ca_a.forged_copy_claiming(TENANT_B);
+
+        match revocation_from_chain(&[leaf, forged, ca_a.der()], &anchor(&pki)) {
+            Err(_) => {} // refused: fine
+            Ok(pr) => assert_eq!(
+                pr.workspace_id, TENANT_A,
+                "a forged chain[1] chose the workspace (and so the CRL) for the revocation check"
+            ),
+        }
+    }
+
+    // ---- chain[1] must be issued by the Platform Intermediate (S1b) ---------
+
+    #[test]
+    fn forged_issuer_copy_is_refused_even_for_its_own_tenant() {
+        // Right name and key, claims its real tenant, but not issued by the
+        // Platform Intermediate: refused before its label is used.
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+        let forged = ca_a.forged_copy_claiming(TENANT_A);
+
+        let err = revocation_from_chain(&[leaf, forged, ca_a.der()], &anchor(&pki))
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("Platform Intermediate"), "{err}");
+    }
+
+    #[test]
+    fn forged_issuer_signed_by_a_ca_named_like_the_intermediate_is_refused() {
+        // The attacker even names their signing CA exactly like the Platform
+        // Intermediate: the name check passes, the signature check must not.
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+        let forged = ca_a.forged_copy_claiming_signed_as(TENANT_B, "Test Platform Intermediate");
+
+        let err = revocation_from_chain(&[leaf, forged, ca_a.der()], &anchor(&pki))
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("signature"), "{err}");
+    }
+
+    #[test]
+    fn workspace_ca_from_another_platform_is_refused() {
+        // A genuine workspace CA, but under a different (same-named) platform
+        // intermediate than the one this relay pins.
+        let ours = crate::test_support::TestPki::new();
+        let other = crate::test_support::TestPki::new();
+        let foreign_ca = other.workspace_ca(TENANT_A);
+        let (leaf, _) = foreign_ca.client_leaf(SERIAL);
+
+        assert!(revocation_from_chain(&[leaf, foreign_ca.der()], &anchor(&ours)).is_err());
     }
 }

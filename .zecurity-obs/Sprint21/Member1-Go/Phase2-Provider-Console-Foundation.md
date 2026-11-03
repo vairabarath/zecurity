@@ -1,0 +1,325 @@
+---
+type: phase
+member: M1
+person: Barath   # reassigned 2026-09-28 (Sathiya on testing, Phase V)
+sprint: 21
+phase: 2
+execution: C
+title: Provider Console Foundation (dedicated app, local login, roles, operator management UI)
+status: done   # C-a (C1–C4) 2026-10-02, PR #108; C-b (C5, C6) 2026-10-05
+depends_on: ["M2-Phase1"]   # C1–C4 need M2-H (local auth endpoints); C5 also needs M2-U (operator API)
+schema_change: false
+tags:
+  - react
+  - typescript
+  - vite
+  - provider-console
+  - rbac
+  - provider-dashboard
+---
+
+# Phase 2 (C) — Provider Console Foundation
+
+> **Decision Record:** D-18 (separate React app, own build and domain, network-locked, may share components with `admin/`); amendment **2026-09-26**:
+> - **D-24:** local email + password login;
+> - **D-25:** provider JWT, `session_generation`;
+> - **D-26:** forced first password change;
+> - **D-27:** operator lifecycle.
+>
+> **Needs:** M2-H (`/provider/auth/login`, `/provider/auth/password`, `/provider/auth/logout`) for C1–C4; M2-U (operator API) for C5.
+> **Why this comes before the read pages:** the provider console is its **own dedicated Vite + React project**, and its first job is **login with roles**: who can get in, and what each role sees. The fleet pages (relays, tenants, audit, certificates) are added to this same app in Phase P, once the read APIs (Phase R) exist.
+
+## Problem (verified)
+
+- **There is no provider UI anywhere.** `admin/` is the tenant app:
+  - every route in `admin/src/App.tsx` is a tenant page;
+  - its roles are tenant roles (`ADMIN` / `MEMBER` / `VIEWER`, `controller/graph/schema.graphqls:92`; `App.tsx:54`, `Sidebar.tsx:175`).
+  - No branch has provider code in `admin/`, so there is nothing to split out of it. The provider console is a new project.
+- **What's combined today is the backend.** Provider login uses Google through the controller's shared auth service, with the tenant `JWT_SECRET` and issuer. Phase H replaces this with local accounts and a provider-only token.
+- **Operators can't be managed.** Provider roles exist only in the backend, and until Phase U there's no way to manage operators.
+
+## Goal
+
+A dedicated `provider-console/` app where provider operators:
+- sign in with **email and password**;
+- change their temporary password when required;
+- see only what their role allows;
+- log out.
+
+Super-admins also manage operators: add, change role, disable, re-enable, reset password.
+
+## Stack and reuse (implementation choice; reviewable)
+
+- **New top-level directory `provider-console/`:** its own `package.json`, same toolchain versions as `admin/` (Vite 8, React 19, TypeScript 6, Tailwind 4, Radix, `lucide-react`, `react-router-dom` 7, `zustand`, Vitest + Testing Library).
+- **No Apollo and no GraphQL codegen:** a small typed `fetch` client for REST `/provider/*` (D-04).
+- **Reuse:** copy the needed UI primitives (button, card, table, badge, dialog, select, input, toast) and Tailwind theme tokens from `admin/src/components/ui/`.
+  - **`admin/` is not modified**, and the repo isn't restructured into npm workspaces in this sprint.
+- **Dev:** port **5174**; Vite proxy `/provider` → `http://localhost:8080` (same-origin in dev, so no CORS).
+  - In production the console is on its own origin, and the controller sets `PROVIDER_CONSOLE_ORIGIN` for CORS (Phase H8).
+- **No OAuth:** there is no redirect or callback route. Login is a JSON POST (D-24).
+
+## Files
+
+| Path | Purpose |
+|------|---------|
+| `provider-console/package.json`, `vite.config.ts`, `tsconfig*.json`, `eslint.config.js`, `index.html` | Scaffold |
+| `src/api/client.ts` | `fetch` wrapper: bearer header; 401 → clear token and go to Login; 403 `password_change_required` → Change password; other 403 → Forbidden |
+| `src/api/types.ts` | DTO types (`LoginResponse`, `Me`, `ProviderUser`, error codes) |
+| `src/auth/store.ts` | zustand token store (memory + `sessionStorage`), expiry, `passwordChangeRequired`, current user (`/provider/me`) |
+| `src/auth/roles.ts` | The single role matrix: section → allowed roles |
+| `src/auth/RequireRole.tsx` | Route guard: not signed in → Login; password change pending → Change password; wrong role → Forbidden |
+| `src/pages/Login.tsx` | Email + password form |
+| `src/pages/ChangePassword.tsx` | Forced first change **and** voluntary change from the account menu |
+| `src/pages/Forbidden.tsx`, `Home.tsx` | Forbidden page; landing page with the signed-in identity and role |
+| `src/pages/ProviderUsers.tsx` | **C5:** operator management (super-admin only) |
+| `src/components/Layout.tsx` | Shell: role-aware nav, user email + role badge, session countdown, account menu (change password, logout) |
+| `src/components/ui/*` | Copied primitives |
+| `README.md` | Dev, build, env, deployment and network-lock notes |
+
+## Steps
+
+### C1 — Scaffold
+
+Create the app, copy the primitives and theme, and add a router with public routes (`/login`, `/change-password`) and a guarded layout. Check that `npm run dev`, `lint`, `test` and `build` all work.
+
+### C2 — Login and session
+
+1. **Login:** the form posts `POST /provider/auth/login {email, password}`.
+   - **200 with `password_change_required: true`** → store the password-change-only token and go to **Change password**. No other route is reachable.
+   - **200 otherwise** → store the token and expiry, load `GET /provider/me`, go to Home.
+   - **401 `invalid_credentials`** → a generic "email or password is incorrect". Never say which one.
+   - **429 `too_many_attempts`** → "too many attempts, try again in N minutes" (from `Retry-After`).
+   - **503** → "login unavailable".
+2. **Change password:** `POST /provider/auth/password {current_password, new_password}`.
+   - Check the policy on the client (12–128 characters, not the email), but the **server decides**.
+   - On success, store the **new** token returned, then load `/provider/me` and go to Home. The old token is dead (generation bump).
+3. **Every request** sends `Authorization: Bearer <token>`.
+   - **401** (expired, logged out, disabled, role changed or password reset: Phase H/U generation bumps) → clear the token and show Login with a notice.
+   - **403 `password_change_required`** → Change password.
+   - Any other **403** → Forbidden.
+4. **Logout:** `POST /provider/auth/logout`, then clear the token. This ends the user's sessions in every tab.
+5. **Expiry:** show a session countdown; at expiry go to Login. There is no refresh token (15 min TTL, D-28).
+6. **Passwords** exist only in form state. They're cleared right after submit and never stored, logged or kept in the URL.
+
+### C3 — Roles in the UI
+
+- The role comes from `/provider/me.role`:
+  - `super-admin` sees every section (**Provider users** now; Relays, Tenants, Audit, Certificates arrive in Phase P);
+  - `relay-ops` sees **Relays** only (Phase P).
+- Each route is wrapped in `RequireRole([...])`. The nav shows only permitted sections. **The server still enforces access** (`decide()`); the UI only hides what would be refused.
+- All entries live in `src/auth/roles.ts`, so Phase P adds pages by adding entries there.
+
+### C4 — Home
+
+A landing page showing the signed-in email, role, last login time, and when the session expires. Until Phase P lands, this is the default page for `relay-ops`.
+
+### C5 — Provider users page (needs M2-U merged)
+
+This page is super-admin only.
+- **List:** email, role badge, status (active/disabled), last login, "must change password" badge.
+- **Add operator:** a dialog with an email and a role select → `POST /provider/users`.
+  - The response's `temporary_password` is shown **once**, in a dialog with a copy button and the warning "shown once — share it securely; they must change it at first login".
+  - Closing the dialog discards it from memory. It's never stored or re-fetchable.
+- **Change role:** a select → `PATCH /provider/users/{id}`, after a confirmation dialog that names the email and both roles.
+- **Disable / enable:** buttons → `POST …/disable` / `…/enable`, after a confirmation dialog. **Enable clears the operator's password** (Phase U): it returns 204 with no password, and the row then shows `has_password: false`. The page should offer **Reset password** straight away, because the operator can't sign in until a reset. Reset on a disabled row returns `409 account_disabled`, so show "enable first".
+- **Reset password:** a button → `POST …/reset-password`, after a confirmation dialog. The temporary password is shown once, the same way as on add.
+- **Guard UX:** mirror the server guards, but always rely on the server's answer.
+  - Your own row has no disable, demote or reset controls (use Change password instead).
+  - Show the API's `409` code as a readable message (`last_super_admin`, `cannot_modify_self`, `already_exists`, `exists_disabled`).
+- **If another admin changes your role, disables you or resets your password,** your next request returns 401 and you land on Login.
+
+### C6 — Tests and README
+
+- **Vitest + Testing Library:**
+  - login success; `password_change_required` routes to Change password and blocks other routes;
+  - the generic 401 message; the 429 message uses `Retry-After`;
+  - a successful change password stores the new token;
+  - a 401 clears the token and redirects; a 403 shows Forbidden;
+  - `RequireRole` blocks relay-ops from `/users`; the nav matches the role matrix;
+  - the Provider users page lists fixtures and submits add, change-role, disable, enable and reset with the right method and path;
+  - the temporary password is shown once and gone after the dialog closes;
+  - 409 codes show as messages; your own row has no destructive controls.
+- **API-surface test:** the only non-GET calls in the client are the three auth calls (`login`, `password`, `logout`) and the five operator mutations.
+- **No-persistence test:** passwords and tokens never reach `localStorage`. Tokens are in `sessionStorage` only.
+- **`README.md`:** dev setup (bootstrap env from `docs/database-development.md`); production build (`dist/` on a static host, **own domain**); the console origin must be **network-locked** (VPN or IP allowlist, D-18); and `PROVIDER_CONSOLE_ORIGIN` must equal the deployed origin.
+
+## Invariants
+
+1. **A dedicated app:** `provider-console/` builds and deploys independently, and `admin/` is unchanged.
+2. **Allowed writes:** the console's only non-GET calls are the auth calls (login, change password, logout) and operator management (super-admin). Every other view is read-only.
+3. Passwords are never persisted, logged or put in the URL. Tokens are never written to `localStorage`. A temporary password is displayed once and then discarded.
+4. The console never calls tenant endpoints (`/graphql`, tenant `/auth/*`).
+5. The UI never grants access the server wouldn't. It hides controls, and the server decides.
+
+## Acceptance Criteria
+
+- [x] AT-C.1 … AT-C.7 in [[Sprint21/Acceptance-Test-Plan]] pass. *(Verified in development: unit tests plus browser checks; see "C-a closeout" and "C-b closeout" above. Formal acceptance testing is M1's; AT-C.7's network capture is left to it.)*
+
+## Build Check
+
+```bash
+cd provider-console && npm ci && npm run lint && npm test && npm run build
+cd admin && npm run build     # unchanged; must still build
+```
+
+## Implementation Checklist
+
+- [x] C1 scaffold + primitives copied
+- [x] C2 login form, forced change password, 401/403/429 handling, logout, expiry
+- [x] C3 role matrix (`roles.ts`), `RequireRole`, role-aware nav
+- [x] C4 Home
+- [x] C5 Provider users page (after M2-U merged), incl. show-once temporary passwords
+- [x] C6 tests; README with deployment and network-lock notes; build gate
+
+## C-a implementation notes (2026-10-02)
+
+Branch `sprint21/c-a-provider-console-foundation`, 5 commits: `/provider/me` + `last_login_at`; scaffold; API client, session store, guards, roles; pages, layout and wiring; README and closeout. These are implementation choices within the spec, not new architectural decisions.
+
+- **`/provider/me` adds `last_login_at`.** H stamps it at the login that starts the session, so Home labels it **"Signed in at"**, not "last login". A true previous-login time would need an H change.
+- **401 handling depends on the call.**
+  - `401 invalid_credentials` from login or change password is a form error. A wrong *current* password must not sign the operator out.
+  - Every other 401 ends the session.
+  - `403 not a provider user` (disabled) ends the session.
+  - `403 password_change_required` opens Change password.
+  - Any other 403 shows Forbidden and keeps the session. All of this lives in `src/api/client.ts`.
+- **Refresh:** a token restored from `sessionStorage` is trusted only after `GET /provider/me` accepts it. If the controller rejects it or can't be reached, the session is dropped (end reason `unverified`).
+- **Failures right after a token is issued:** if `/provider/me` fails for a non-session reason right after login or a password change, the page ends the session as `unverified` rather than leaving it stuck in loading.
+- **Change password** checks the session itself rather than sitting under `RequireToken`. `RequireToken` would unmount the page during the `/me` reload after a successful change, and the redirect to Home would be lost. `RequireToken` is kept, and tested, for future use.
+- **Token lifetimes:** a password-change-only token lasts 10 minutes (`PasswordChangeTokenTTL`) and a full session 15. The console always uses `expires_in` from the response.
+- **Allowed writes:** the API-surface test pins the non-GET calls to the three auth writes. C-b adds the five operator calls to `ALLOWED_WRITES`.
+- **Source guards** (`src/test/static-guards.test.ts`): only the client calls `fetch`; there is no `localStorage`, no console output and no tenant endpoints; only the session store touches `sessionStorage`.
+- **Tests:** `vitest.config.ts` passes `--no-experimental-webstorage`, because Node 22+'s own `localStorage` global hides jsdom's.
+- **Live check (2026-10-02):** throwaway DB, controller on `:8080`, `npm run dev`, all calls through the `:5174` proxy.
+  - The SPA was served, and a bad login returned `401 invalid_credentials`.
+  - The bootstrap login returned `password_change_required`, and `/me` with that token returned `403 password_change_required`.
+  - A wrong current password returned a form-error 401. A successful change made the old token `401 provider session revoked`, and `/me` with the new token returned 200 with `last_login_at`.
+  - Logout returned 204, and the token then returned 401.
+  - The DB and the limiter keys were cleaned up afterwards.
+- **Browser check (2026-10-05, Orca's embedded browser, throwaway DB):** every step passed.
+  - An anonymous visit to `/` redirected to Login, and a wrong password showed the generic message.
+  - The bootstrap sign-in went to "Set a new password". A full navigation to `/` stayed there, which exercises `rehydrate()` with a password-change-only token.
+  - After the change, Home showed the email, the Super-admin badge, "Signed in at", the expiry and a 15-minute countdown. Storage held only `zecurity.provider.session` in `sessionStorage`, with no password; `localStorage` was empty and there were no cookies.
+  - A reload kept the session. After the token was revoked server-side, a reload went to Login with "Your session has ended" and storage was cleared, which proves `rehydrate()` checks `/provider/me`.
+  - Signing in with the new password, then account menu → Sign out, led to Login with "You have signed out", and storage was empty.
+  - The DB and the limiter keys were cleaned up afterwards.
+
+### C-a closeout (2026-10-05)
+
+**Final gates (branch head before this docs commit, `7a24888`):**
+
+| Gate | Result |
+|---|---|
+| `provider-console`: `npm ci` | Pass, 0 vulnerabilities |
+| `provider-console`: `npm run lint` | 0 problems |
+| `provider-console`: `npm test` | 12 files, 116 tests, all passing |
+| `provider-console`: `npm run build` | Pass (`tsc -b` + Vite) |
+| `controller`: `go build ./...` and `go vet ./...` | Pass (after `buf generate`) |
+| `controller`: `go test -count=1 ./...`, CI-style | 24 packages pass; 932 PASS, 0 FAIL, 33 SKIP |
+| `admin/` | No changes on the branch; `npm run build` passes |
+
+- **CI-style setup:** the CI test env vars point at an empty `ci_empty_admin` database (each test makes its own throwaway DB), with an isolated Valkey on `:6390/15`.
+- **The 33 skips are pre-existing and outside C-a:**
+  - 31 resolver/resource tests need `RESOURCE_TEST_SHIELD_ID`, which CI doesn't set either;
+  - `TestAuthIntegration_LoginBootstrapAndJWTIssue` is K6;
+  - one connector enrollment test also skips.
+- **`TestMe_IncludesCurrentSignInTime` and `TestMe_ResponseShape` ran.**
+- **H and U:** C-a's only controller change is `Me` in `handler.go`, plus `me_e2e_test.go`. No H or U files changed.
+- **Pre-existing test-hygiene defect, not fixed (outside C-a scope):** `graph/resolvers/idp_update_scim_config_enable_test.go` `teardown()` runs `DROP DATABASE` through a pool connected to that same database. The drop always fails and the error is ignored, so each run leaks 15 `resolvers_updsc_*` databases on the test server. The fix is to drop from the admin pool after closing `h.pool`. A candidate for K.
+
+**`/provider/me` semantics:** `last_login_at` is stamped by H at the successful login that starts the current session. By the time `/me` runs, it is the current sign-in time, so the console labels it **"Signed in at"**. A true "previous login" would need an H change, and is deliberately not done.
+
+**Session rehydration and revocation (validated in the browser, 2026-10-05):**
+- A stored token is trusted only after `GET /provider/me` accepts it.
+- With a valid token, a reload stays signed in.
+- After the token was revoked server-side (logout from another client), a reload went to Login with "Your session has ended. Sign in again." and `sessionStorage` was cleared. The stored session is validated, not trusted blindly.
+- Reloading with a password-change-only token stays on Change password.
+
+**Acceptance status for C-a.** Formal acceptance is M1's (Sathiya). "Live" means the browser check or the live API check; "unit" means Vitest.
+
+| Case | C-a status |
+|---|---|
+| AT-C.1 Dedicated app | **Met.** Own Vite project; gates pass; `admin/` unchanged and builds; dev on :5174; no OAuth or callback route |
+| AT-C.2 Login | **Met.** Home shows email, role, "Signed in at" and expiry (live); generic wrong-password message (live); 429 wait time (unit) |
+| AT-C.3 Forced change | **Met** (live). No other page is reachable until the change succeeds; the new token is used afterwards |
+| AT-C.4 Session end | **Partly live.** Logout and server-side revocation → Login with a notice (live). Expiry and 401 / disabled-403 handling (unit). The role-change, disable and reset triggers come from U and are exercised end to end with C-b |
+| AT-C.5 Role guard | **Mechanism done.** `RequireRole` sends relay-ops to Forbidden and the nav follows `roles.ts` (unit, with a Phase-P-shaped matrix). `/users` itself arrives in C-b |
+| AT-C.6 Provider users page | **C-b** |
+| AT-C.7 No leaks, no tenant calls | **Met** for storage and URL: only the token in `sessionStorage`, no password, empty `localStorage`, no cookies (live), plus the source guards. No tenant endpoints exist in the source (static guard). A formal network capture is left to acceptance testing |
+
+**Next phase: C-b.**
+- C5, the Provider users page: list, add operator, change role, disable/enable, reset password, show-once temporary passwords, confirmations, 409 messages.
+- The rest of C6: C5 tests, and the five operator calls added to `ALLOWED_WRITES`.
+- New primitives: Dialog, Table, Select.
+
+## C-b implementation notes and closeout (2026-10-05)
+
+Branch `sprint21/c-b-provider-users`, 5 commits: operator API module; dialog, table and select primitives; Provider users page; narrow-screen layout fix; closeout docs. No controller changes, and no H, U or `admin/` changes. These are implementation choices within the spec, not new architectural decisions.
+
+- **API (`src/api/operators.ts`):** list, create, change role, disable, enable, reset password. Ids are path-encoded. `ALLOWED_WRITES` in the API-surface test is now the three auth calls plus these five mutations.
+- **List 403 body:** `GET /provider/users` answers 403 with `"provider action forbidden: …"`, while the mutations answer `"forbidden"`. The page matches on status 403, so the backend needed no change.
+- **Page behaviour:**
+  - every mutation is confirmed in a dialog;
+  - after a success the list is re-read from the controller (no optimistic edits);
+  - errors keep the dialog open with a readable message; `not_found` also refreshes the list.
+- **Row actions:**
+  - your own row has no controls ("Use the account menu");
+  - active rows: Change role, Reset password, Disable;
+  - disabled rows: Change role, Enable. The controller allows role changes on disabled accounts; reset on a disabled account would be `account_disabled`.
+- **Change role:** the dialog shows the email, the current role and a new-role select (super-admin / relay-ops only). Confirming is disabled while the selection equals the current role.
+- **Enable vs reset:** Enable warns that the password is cleared. On success it reloads and shows an "Operator enabled" dialog offering **Reset password now** or **Later**. It never resets by itself; the reset is a separate, explicit call.
+- **Temporary password dialog:**
+  - shown once;
+  - Copy only on click (Clipboard API, no dependency), with a brief "Copied";
+  - if the clipboard fails, the password stays visible for manual copy;
+  - clicking outside doesn't dismiss it (so it isn't lost by accident), but Close and Escape do;
+  - closing drops it from React state;
+  - never stored, logged or put in the URL;
+  - the OS clipboard is not touched afterwards.
+- **Source guard:** only `TemporaryPasswordDialog.tsx` references the clipboard.
+- **Test environment:** `setup.ts` stubs the jsdom-missing pointer-capture and `scrollIntoView` APIs that Radix Select calls (tests only).
+- **Layout fix (found in the browser check):** below 1024px the header pushed the page wider than the screen. That was a C-a issue made worse by the second nav entry. Labels and badges also wrapped mid-word.
+  - Now the nav gets its own row below md, labels and badges don't wrap, the header countdown hides on phones (Home still shows it), and the table scrolls inside its container.
+  - Measured afterwards at 375/640/768/1024px: no page-level horizontal scroll, no header overflow, no wrapped labels. Dialogs fit at 375px.
+
+**Browser check (2026-10-05, Orca's embedded browser, throwaway DB):** everything passed, using two tabs (super-admin and a new operator).
+- **Add:** the role defaults to Relay ops. The temporary password was shown once; after closing it was absent from the DOM, storage and the URL. Copy showed "Copied", and reading the clipboard back matched the password.
+- **New operator:** first sign-in forced a password change. As relay-ops: no nav entry, `/users` → Forbidden, and direct API calls with that token returned 403 for both list and disable.
+- **Change role:** the confirm button was disabled while the role was unchanged. After promoting, the operator's other tab went to Login with "Your session has ended".
+- **Disable:** the operator's sign-in then got the generic error.
+- **Enable:** warned the password is cleared, then offered Reset password now. There was no automatic reset, the old password no longer worked, and the row showed "No password".
+- **Reset password now:** issued a working temporary password. A later reset from the menu ended the operator's session in the other tab.
+- **Self-protection:** your own row had no controls; a direct self-disable via the API returned `409 cannot_modify_self`.
+- **Storage:** `localStorage` was empty and there were no cookies in either tab.
+- **Not reachable in the UI:** the `last_super_admin` message (it needs acting on yourself, and your own row has no controls). Unit tests cover the message; Phase U tests cover the server rule.
+- **Cleanup:** the DB and the limiter keys were cleaned up afterwards.
+
+**Final gates (C-b branch):**
+- `provider-console`: `npm ci` (0 vulnerabilities), lint (0 problems), `npm test` (15 files, 169 tests), `npm run build` all pass.
+- `admin/` is unchanged and builds.
+- No files outside `provider-console/` changed on the branch, so the controller gates are unaffected; the C-a run stands.
+- **Mutation checks**, each caught by the suite:
+  - no reload after an action;
+  - controls on your own row;
+  - auto-reset after enable;
+  - auto-copy on open;
+  - password kept after close;
+  - confirming the same role;
+  - `/users` without its role guard.
+
+**Acceptance status (Phase C complete, verified in development):**
+
+| Case | Status |
+|---|---|
+| AT-C.1 Dedicated app | Met |
+| AT-C.2 Login | Met |
+| AT-C.3 Forced change | Met |
+| AT-C.4 Session end | Met. Logout, revocation, role change, disable and reset all end the session (live); expiry (unit) |
+| AT-C.5 Role guard | Met. relay-ops → Forbidden on `/users`, no nav entry (live and unit) |
+| AT-C.6 Provider users page | Met (live and unit) |
+| AT-C.7 No leaks, no tenant calls | Met for storage and the URL (live) and by the source guards. The formal network capture is left to M1's acceptance run |
+
+**Next:** Phase R, the provider read APIs. OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
+
+## Post-Phase Fixes
+
+_None yet._

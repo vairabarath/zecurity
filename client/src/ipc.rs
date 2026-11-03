@@ -37,6 +37,11 @@ pub enum IpcRequest {
         spiffe_id: String,
         certificate_pem: String,
         private_key_pem: String,
+        /// PENDING-17: set instead of `private_key_pem` when the device
+        /// enrolled with a TPM-backed key. Opaque here — the daemon just
+        /// persists whichever of the two the CLI produced.
+        #[serde(default)]
+        tpm_key_material: Option<String>,
         ca_cert_pem: String,
         cert_expires_at: i64,
         hostname: String,
@@ -81,6 +86,22 @@ pub struct IpcResponse {
     pub synced_resources: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<IpcResource>>,
+    /// Sprint 19 Track 2 (PENDING-13): "re_enroll_required" / "revoked" when
+    /// the controller has sent a device directive. None when active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_state: Option<String>,
+    /// Human-readable reason accompanying device_state. Present whenever
+    /// device_state is present (may be an empty string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
+    /// Status: whether the tunnel is up. "Running" only means the daemon runs
+    /// with a session (live run 2026-10-29, O-5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_up: Option<bool>,
+    /// Status (FU-10): present while the daemon is bringing the tunnel back
+    /// after a restart; the last attempt's error, "" before the first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_restoring: Option<String>,
 }
 
 // ── Socket path ──────────────────────────────────────────────────────────────

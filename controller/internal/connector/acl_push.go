@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	// "github.com/jackc/pgx/v5/pgxpool"
+	// clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 // aclPushTimeout bounds the background context used for a single proactive
@@ -30,11 +31,12 @@ const aclPushTimeout = 10 * time.Second
 type ACLPusher struct {
 	registry *ConnectorRegistry
 	store    *policy.Store
+	postureStore *posture.Store
 	cache    *policy.SnapshotCache
 	notifier *policy.Notifier
 
 	// compile is policy.CompileACLSnapshot in production; overridable in tests.
-	compile func(context.Context, *policy.Store, *policy.Notifier, string) (*clientv1.ACLSnapshot, error)
+	compile func(context.Context, *policy.Store, *posture.Store, *policy.Notifier, string) (*policy.CompiledACL, error)
 
 	mu       sync.Mutex
 	inflight map[string]*wsPushState // workspaceID -> coalescing latch state
@@ -49,10 +51,11 @@ type wsPushState struct {
 }
 
 // NewACLPusher builds a pusher over the live registry and policy subsystem.
-func NewACLPusher(reg *ConnectorRegistry, store *policy.Store, cache *policy.SnapshotCache, notifier *policy.Notifier, pool *pgxpool.Pool) *ACLPusher {
+func NewACLPusher(reg *ConnectorRegistry, policyStore *policy.Store, postureStore *posture.Store, cache *policy.SnapshotCache, notifier *policy.Notifier) *ACLPusher {
 	return &ACLPusher{
 		registry: reg,
-		store:    store,
+		store:    policyStore,
+		postureStore: postureStore,
 		cache:    cache,
 		notifier: notifier,
 		compile:  policy.CompileACLSnapshot,
@@ -117,8 +120,8 @@ func (p *ACLPusher) pushOnce(workspaceID string) {
 	// GetOrCompile captures the cache epoch before compiling and stores via an
 	// epoch CAS, so a snapshot built from a now-superseded view is dropped rather
 	// than poisoning the freshly-invalidated slot (ADR-013).
-	snap, err := p.cache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
-		return p.compile(ctx, p.store, p.notifier, workspaceID)
+	snap, err := p.cache.GetOrCompile(workspaceID, func() (*policy.CompiledACL, error) {
+		return p.compile(ctx, p.store, p.postureStore, p.notifier, workspaceID)
 	})
 	if err != nil {
 		log.Printf("acl push: compile workspace %s: %v", workspaceID, err)

@@ -2,13 +2,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rustls;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::agent_tunnel::AgentTunnelHub;
+use crate::authorization::AuthzGate;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
+use crate::session_registry::{SessionRegistry, SessionTransport};
+use crate::tls::cert_holder::{CertHolder, CertMaterial};
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -21,26 +25,90 @@ use crate::ControlMessage;
 ///
 /// `advertise_addr` is the external address included in every `TunnelResponse`
 /// so clients can pre-warm a QUIC connection for subsequent streams.
+/// QUIC server config for one certificate snapshot.
+pub fn quic_server_config_for(store: &CertStore) -> Result<quinn::ServerConfig> {
+    let tls_config = build_device_tunnel_tls(store)?;
+    let quic_server_cfg = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+        .map_err(|e| anyhow::anyhow!("QUIC server config: {}", e))?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_server_cfg)))
+}
+
+/// Swap the QUIC listener's certificate whenever the CertHolder publishes a
+/// renewal (Sprint 20 G-2a). `set_server_config` affects NEW handshakes only;
+/// established QUIC connections keep running.
+pub fn spawn_quic_config_updates(
+    endpoint: quinn::Endpoint,
+    mut certs: watch::Receiver<Arc<CertMaterial>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while certs.changed().await.is_ok() {
+            let material = certs.borrow_and_update().clone();
+            match quic_server_config_for(&material.store) {
+                Ok(config) => {
+                    endpoint.set_server_config(Some(config));
+                    info!(serial = %material.serial_hex, "device tunnel (QUIC) switched to renewed certificate");
+                }
+                // The holder validated identity + key before publishing, so this
+                // is unexpected; the listener keeps its current certificate.
+                Err(e) => warn!(error = %e, serial = %material.serial_hex, "failed to build QUIC config for renewed certificate"),
+            }
+        }
+    })
+}
+
+/// Connector-revocation fail-closed (design D15, B2): in a terminal state
+/// (`Revoked`/`UnknownIdentity`) close every client QUIC connection and the
+/// endpoint. A recoverable `Disabled` keeps connections; their new streams
+/// are reset by the admission gate (B1).
+pub fn spawn_terminal_close(endpoint: quinn::Endpoint, gate: &AuthzGate) -> JoinHandle<()> {
+    let mut rx = gate.subscribe();
+    tokio::spawn(async move {
+        loop {
+            if rx.borrow_and_update().state().is_terminal() {
+                warn!("fail-closed: terminal state — closing every client QUIC connection");
+                endpoint.close(0u32.into(), b"connector not authorized");
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
 pub async fn listen(
     addr: &str,
     advertise_addr: &str,
-    store: CertStore,
+    certs: Arc<CertHolder>,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    gate: AuthzGate,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let tls_config = build_device_tunnel_tls(&store)?;
-
-    let quic_server_cfg = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
-        .map_err(|e| anyhow::anyhow!("QUIC server config: {}", e))?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_cfg));
+    let server_config = quic_server_config_for(&certs.current().store)?;
 
     let socket_addr: std::net::SocketAddr = addr
         .parse()
         .map_err(|e| anyhow::anyhow!("bad QUIC addr '{}': {}", addr, e))?;
     let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
+    let _config_updates = spawn_quic_config_updates(endpoint.clone(), certs.subscribe());
+    let _terminal_close = spawn_terminal_close(endpoint.clone(), &gate);
+    // Sprint 20 Fix 16 (F51): on process shutdown (SIGTERM / SIGINT) close
+    // every client QUIC connection with a CONNECTION_CLOSE, so clients move on
+    // at once instead of waiting for their idle timeout.
+    {
+        let endpoint = endpoint.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            info!("shutdown: closing every client QUIC connection");
+            endpoint.close(0u32.into(), b"connector shutting down");
+        });
+    }
 
     // Register the QUIC advertise address so device_tunnel includes it in responses.
     device_tunnel::set_quic_advertise_addr(advertise_addr.to_string());
@@ -53,8 +121,21 @@ pub async fn listen(
         let Some(incoming) = endpoint.accept().await else {
             break;
         };
+        if shutdown.is_cancelled() {
+            incoming.refuse();
+            continue;
+        }
+        // Connector-revocation B1 (§7 step 2): refuse new QUIC connections
+        // while the connector isn't authorized to serve.
+        if !gate.admits_now() {
+            tracing::debug!(state = ?gate.snapshot().state(), "device tunnel (QUIC) connection refused: connector not authorized to serve");
+            incoming.refuse();
+            continue;
+        }
+        let gate = gate.clone();
 
         let acl = acl.clone();
+         let registry = registry.clone();
         let tunnel_hub = tunnel_hub.clone();
         let crl = crl_manager.clone();
         let conn_id = connector_id.clone();
@@ -97,8 +178,19 @@ pub async fn listen(
                     }
                 };
 
+                // New streams on an established connection: reset, no
+                // TunnelResponse (dropping a SendStream would finish it).
+                if !gate.admits_now() {
+                    tracing::debug!(state = ?gate.snapshot().state(), "device tunnel (QUIC) stream reset: connector not authorized to serve");
+                    let (mut send, mut recv) = (send, recv);
+                    let _ = send.reset(0u32.into());
+                    let _ = recv.stop(0u32.into());
+                    continue;
+                }
+                let gate = gate.clone();
                 let stream = tokio::io::join(recv, send);
                 let acl = acl.clone();
+                 let registry = registry.clone();
                 let hub = tunnel_hub.clone();
                 let crl = crl.clone();
                 let conn_id = conn_id.clone();
@@ -108,7 +200,17 @@ pub async fn listen(
 
                 tokio::spawn(async move {
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx,
+                        stream,
+                        sid,
+                        serial,
+                        acl,
+                        registry,
+                        SessionTransport::Quic,
+                        hub,
+                        crl,
+                        &conn_id,
+                        &ctrl_tx,
+                        &gate,
                     )
                     .await
                     {
@@ -119,5 +221,77 @@ pub async fn listen(
         });
     }
 
+    // The endpoint was closed (shutdown or terminal state): let the
+    // CONNECTION_CLOSE frames reach the clients before the listener returns.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+    use crate::test_support::{quic_server_serial, TestPki};
+    use std::time::Duration;
+
+    async fn echo(conn: &quinn::Connection, msg: &[u8]) -> Vec<u8> {
+        let (mut send, mut recv) = conn.open_bi().await.expect("open stream");
+        send.write_all(msg).await.unwrap();
+        send.finish().unwrap();
+        recv.read_to_end(1024).await.expect("echo reply")
+    }
+
+    fn spawn_echo_server(endpoint: quinn::Endpoint) {
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                        let data = recv.read_to_end(1024).await.unwrap_or_default();
+                        let _ = send.write_all(&data).await;
+                        let _ = send.finish();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Renewal swaps the QUIC listener certificate via set_server_config: new
+    /// handshakes present the renewed serial, and a connection established
+    /// BEFORE the swap keeps working on its original certificate.
+    #[tokio::test]
+    async fn quic_swap_serves_new_cert_and_preserves_existing_connections() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let original = holder.current().serial_hex.clone();
+
+        let server = quinn::Endpoint::server(
+            quic_server_config_for(&holder.current().store).unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let addr = server.local_addr().unwrap();
+        let _updates = spawn_quic_config_updates(server.clone(), holder.subscribe());
+        spawn_echo_server(server);
+
+        let client = pki.quic_client();
+        let existing = client.connect(addr, "localhost").unwrap().await.expect("initial handshake");
+        assert_eq!(quic_server_serial(&existing), original);
+        assert_eq!(echo(&existing, b"before").await, b"before");
+
+        let renewed = pki.renew(&holder, 7200);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let conn = client.connect(addr, "localhost").unwrap().await.expect("post-swap handshake");
+            if quic_server_serial(&conn) == renewed.serial_hex {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "QUIC listener never presented the renewed certificate");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(existing.close_reason().is_none(), "existing QUIC connection dropped: {:?}", existing.close_reason());
+        assert_eq!(echo(&existing, b"after").await, b"after");
+        assert_eq!(quic_server_serial(&existing), original);
+    }
 }

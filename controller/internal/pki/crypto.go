@@ -71,6 +71,15 @@ func encryptPrivateKey(
 	}
 	defer zeroBytes(keyDER)
 
+	return sealWithDerivedKey(keyDER, masterSecret, context)
+}
+
+// sealWithDerivedKey is the shared AES-256-GCM + HKDF-SHA256 primitive behind
+// both encryptPrivateKey and the exported EncryptSecret (secret.go). It derives
+// a 32-byte AES key from masterSecret + context (HKDF info), then GCM-seals the
+// plaintext. See encryptPrivateKey's doc for the context / key-separation
+// rationale. Returns base64 ciphertext and nonce.
+func sealWithDerivedKey(plaintext []byte, masterSecret, context string) (string, string, error) {
 	encKey, err := hkdf.Key(sha256.New, []byte(masterSecret), nil, context, 32)
 	if err != nil {
 		return "", "", fmt.Errorf("derive encryption key: %w", err)
@@ -92,7 +101,7 @@ func encryptPrivateKey(
 		return "", "", fmt.Errorf("generate nonce: %w", err)
 	}
 
-	ciphertext := gcm.Seal(nil, nonce, keyDER, nil)
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
 
 	return base64.StdEncoding.EncodeToString(ciphertext),
 		base64.StdEncoding.EncodeToString(nonce),
@@ -117,6 +126,25 @@ func encryptPrivateKey(
 func decryptPrivateKey(
 	ciphertextB64, nonceB64, masterSecret, context string,
 ) (*ecdsa.PrivateKey, error) {
+	keyDER, err := openWithDerivedKey(ciphertextB64, nonceB64, masterSecret, context)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(keyDER)
+
+	privKey, err := x509.ParseECPrivateKey(keyDER)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	return privKey, nil
+}
+
+// openWithDerivedKey reverses sealWithDerivedKey: it re-derives the AES key from
+// masterSecret + context and GCM-opens the ciphertext. The same context used at
+// seal time must be supplied here. A wrong secret/context surfaces as
+// "cipher: message authentication failed" (relied on by isSecretMismatchError).
+func openWithDerivedKey(ciphertextB64, nonceB64, masterSecret, context string) ([]byte, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(ciphertextB64)
 	if err != nil {
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
@@ -143,18 +171,12 @@ func decryptPrivateKey(
 		return nil, fmt.Errorf("create GCM: %w", err)
 	}
 
-	keyDER, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt private key: %w", err)
 	}
-	defer zeroBytes(keyDER)
 
-	privKey, err := x509.ParseECPrivateKey(keyDER)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-
-	return privKey, nil
+	return plaintext, nil
 }
 
 // encodeCertToPEM converts a DER certificate into PEM text.
@@ -253,4 +275,19 @@ func certValidity(years int) (time.Time, time.Time) {
 	notAfter := now.AddDate(years, 0, 0)
 
 	return notBefore, notAfter
+}
+
+// crlThisUpdateBackdate is how far before signing a CRL's thisUpdate is set
+// (Sprint 21 B4). Every consumer (relay, connector, client) rejects a CRL whose
+// thisUpdate is after its own clock and then fails closed, so without this a
+// consumer whose clock is even a second behind the controller rejects a fresh
+// CRL. Same reason certificates backdate notBefore (certValidity), with a
+// smaller margin.
+const crlThisUpdateBackdate = 5 * time.Minute
+
+// crlWindow returns thisUpdate and nextUpdate for a CRL signed at now.
+// thisUpdate is backdated by crlThisUpdateBackdate; nextUpdate stays
+// now+validity, so the CRL is fresh for exactly as long as before.
+func crlWindow(now time.Time, validity time.Duration) (thisUpdate, nextUpdate time.Time) {
+	return now.Add(-crlThisUpdateBackdate), now.Add(validity)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 // TestCompileACLSnapshot_RelayDiscovery verifies the five contract bullets
@@ -66,11 +67,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 	t.Run("relay disabled", func(t *testing.T) {
 		// No row in the relays table → ACL snapshot's relay fields stay empty.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-disabled")
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 		if snap.RelayAddr != "" || snap.RelaySpiffeId != "" {
 			t.Fatalf("relay disabled: want both empty, got addr=%q spiffe=%q",
 				snap.RelayAddr, snap.RelaySpiffeId)
@@ -82,11 +86,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		// SPIFFE ID derived from the row's UUID.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-enabled")
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.x:9093", "", "public")
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 		wantSPIFFE := appmeta.RelaySPIFFEID(relayID)
 		if snap.RelayAddr != "relay.x:9093" || snap.RelaySpiffeId != wantSPIFFE {
 			t.Fatalf("relay enabled: want (%q, %q), got (%q, %q)",
@@ -97,11 +104,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 	t.Run("relay enabled via public observed ip", func(t *testing.T) {
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-public-observed")
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "", "8.8.8.8", "public")
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 		wantSPIFFE := appmeta.RelaySPIFFEID(relayID)
 		if snap.RelayAddr != "8.8.8.8:9093" || snap.RelaySpiffeId != wantSPIFFE {
 			t.Fatalf("relay observed public: want (%q, %q), got (%q, %q)",
@@ -112,11 +122,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 	t.Run("relay private observed ip is not discoverable", func(t *testing.T) {
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-private-observed")
 		_ = mustInsertActiveRelay(t, ctx, testPool, "", "192.168.1.71", "private")
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 		if snap.RelayAddr != "" || snap.RelaySpiffeId != "" {
 			t.Fatalf("private observed relay should not be discoverable, got addr=%q spiffe=%q",
 				snap.RelayAddr, snap.RelaySpiffeId)
@@ -141,11 +154,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		mustAssignResourceToGroup(t, ctx, testPool, wsID, r2ID, grpID)
 		_ = devID
 
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 
 		if len(snap.RemoteNetworks) != 2 {
 			t.Fatalf("want 2 remote_networks, got %d", len(snap.RemoteNetworks))
@@ -199,11 +215,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		rID := mustInsertResource(t, ctx, testPool, wsID, rnID, "res-offline", "10.3.0.1", 443)
 		mustAssignResourceToGroup(t, ctx, testPool, wsID, rID, grpID)
 
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
-			t.Fatalf("compile must not fail when connector absent: %v", err)
+			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 
 		if len(snap.RemoteNetworks) != 1 {
 			t.Fatalf("want 1 remote_network, got %d", len(snap.RemoteNetworks))
@@ -240,11 +259,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.per:9093", "", "public")
 		mustInsertConnectorRelayPlacement(t, ctx, testPool, connID, relayID)
 
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 		if len(snap.RemoteNetworks) != 1 || len(snap.RemoteNetworks[0].Connectors) != 1 {
 			t.Fatalf("unexpected remote_networks: %+v", snap.RemoteNetworks)
 		}
@@ -282,11 +304,14 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.mixed:9093", "", "public")
 		mustInsertConnectorRelayPlacement(t, ctx, testPool, connID1, relayID)
 
-		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
+		snap := compiled.Snapshot
 
 		byRN := make(map[string]*clientv1.ACLConnector)
 		for _, rn := range snap.RemoteNetworks {
@@ -326,11 +351,15 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		rID := mustInsertResource(t, ctx, testPool, wsID, rnID, "res-compat", "10.0.0.60", 8080)
 		mustAssignResourceToGroup(t, ctx, testPool, wsID, rID, grpID)
 
-		store := NewStore(testPool)
-		s1, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		policyStore := NewStore(testPool)
+		postureStore := posture.NewStore(testPool)
+		
+		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
+		
 		if err != nil {
 			t.Fatalf("first compile: %v", err)
 		}
+		s1 := compiled.Snapshot
 		if s1.RelayAddr != "" || s1.RelaySpiffeId != "" {
 			t.Fatalf("first compile (no relay): want empty relay fields, got addr=%q spiffe=%q",
 				s1.RelayAddr, s1.RelaySpiffeId)
@@ -338,11 +367,12 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		_ = mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
 
-		s2, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		compiled, err = CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
+		
 		if err != nil {
 			t.Fatalf("second compile: %v", err)
 		}
-
+		s2 := compiled.Snapshot
 		if len(s1.Entries) != len(s2.Entries) {
 			t.Fatalf("Entries len drift: %d vs %d", len(s1.Entries), len(s2.Entries))
 		}

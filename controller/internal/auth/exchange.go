@@ -30,12 +30,18 @@ func (s *serviceImpl) ExchangeCode(ctx context.Context, code, codeVerifier, redi
 	if redirectURI == "" {
 		redirectURI = s.cfg.RedirectURI
 	}
+	return googleTokenExchange(ctx, code, codeVerifier, redirectURI, s.cfg.GoogleClientID, s.cfg.GoogleClientSecret)
+}
 
+// googleTokenExchange is the server-to-server Google OAuth code exchange, taking
+// explicit credentials + redirect URI so it can be reused by the web callback,
+// the CLI flow, and the Google IdentityProvider adapter (google_provider.go).
+func googleTokenExchange(ctx context.Context, code, codeVerifier, redirectURI, clientID, clientSecret string) (*GoogleTokenResponse, error) {
 	body := url.Values{}
 	body.Set("code", code)
 	body.Set("code_verifier", codeVerifier)
-	body.Set("client_id", s.cfg.GoogleClientID)
-	body.Set("client_secret", s.cfg.GoogleClientSecret)
+	body.Set("client_id", clientID)
+	body.Set("client_secret", clientSecret)
 	body.Set("redirect_uri", redirectURI)
 	body.Set("grant_type", "authorization_code")
 
@@ -89,43 +95,5 @@ func (s *serviceImpl) VerifyIDToken(ctx context.Context, idToken string) (*Googl
 // This is the PKCE guarantee: even if the auth code is intercepted,
 // it cannot be exchanged without the verifier that only our server has.
 func (s *serviceImpl) exchangeCodeForTokens(ctx context.Context, code, codeVerifier string) (*GoogleTokenResponse, error) {
-	body := url.Values{}
-	body.Set("code", code)
-	body.Set("code_verifier", codeVerifier)
-	body.Set("client_id", s.cfg.GoogleClientID)
-	body.Set("client_secret", s.cfg.GoogleClientSecret)
-	body.Set("redirect_uri", s.cfg.RedirectURI)
-	body.Set("grant_type", "authorization_code")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		googleTokenURL, strings.NewReader(body.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token exchange request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errBody map[string]any
-		json.NewDecoder(resp.Body).Decode(&errBody)
-		return nil, fmt.Errorf("google token exchange failed: status=%d body=%v",
-			resp.StatusCode, errBody)
-	}
-
-	var tokenResp GoogleTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-
-	if tokenResp.IDToken == "" {
-		return nil, fmt.Errorf("google did not return id_token")
-	}
-
-	return &tokenResp, nil
+	return googleTokenExchange(ctx, code, codeVerifier, s.cfg.RedirectURI, s.cfg.GoogleClientID, s.cfg.GoogleClientSecret)
 }

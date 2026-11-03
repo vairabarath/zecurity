@@ -10,6 +10,224 @@ tags:
 
 ---
 
+## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 2 (D): Disconnect Watcher → Transport Plane + M2-A worktree restoration
+
+**What was done:**
+- Implemented Phase D (depends on Phase B, done) end-to-end via the Antigravity CLI (`agy`) through the Orca terminal, one task at a time, each independently verified before the next; `feat/sprint20-m1-phase1`.
+- **D1 (`disconnect_watcher.go`):** `markDisconnected` now `RETURNING tenant_id::text, id::text` and returns `map[string][]string` (workspace → affected connector IDs), de-duplicated per workspace; `workspaces.status='active'` and `WHERE status='active'` predicates untouched (I3/I5).
+- **D2 (`RunDisconnectWatcher`):** signature `(ctx, pool, cfg, policy PolicyChangeNotifier, topology TransportChangeNotifier)` — reuses the existing `TransportChangeNotifier` from `control_stream.go` (no duplicate interface); per-workspace `NotifyPolicyChange` + `NotifyTopologyChange(ws, connectorIDs)`; both nil-safe, an error from one never skips the other.
+- **D3 (`main.go`):** `connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier, transportNotifier)` — `transportNotifier` in scope from `transport.NewNotifier(transportCache)`.
+- **D4 (tests, `disconnect_watcher_test.go`, DB-backed, none skipped):** `TestDisconnectWatcher_MarksStaleAndNotifiesBothPlanes` (two stale + one fresh in W1, one stale in W2; exact map + DB statuses + both planes notified with exact IDs), `_RevokedUntouchedNoNotify` (I5), `_NonActiveWorkspaceIgnored` (I3 regression, suspended workspace), `_NilTopologyNoPanic`, `_NotifierErrorIndependence` (policy error ⇏ skip topology and vice versa). Thread-safe fakes for the goroutine-run watcher.
+- **Verification:** per-task checks + final gate `cd controller && go build ./... && go test -count=1 ./internal/connector/... ./internal/shield/...` green against live Postgres; `go vet ./cmd/server/...` clean. No bugs → no Post-Phase Fixes entries.
+- **M2-A worktree restoration:** a concurrent process had reverted M2's completed Phase A (relay liveness) to a pre-completion state in this worktree (relay package gutted ~500 lines, `store_evict_integration_test.go` deleted, `relaySvc` arg dropped from the `RunExpiryLoop` call, M2-A checkboxes unticked, Post-Sprint Fixes wiped). Restored all 9 M2 paths from `origin/fixed-pendings` (relay files, `main.go`, `Phase1-Relay-Liveness.md`, `path.md`) — verified zero diff vs origin, relay build OK, full relay suite green incl. `TestRunEviction_FreshLivenessRefreshesInsteadOfEvicting` and the restored DB-backed `TestEvictRelaysIntegration_HeartbeatWinsRace` (ran, not skipped; path.md carries the `ClearHeartbeatThrottle` DEL-panic Post-Sprint Fix). No commit needed: restored content == HEAD tree; regression was working-tree-only.
+- Checkboxes M1-D1…D4 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`.
+
+**Key decisions:**
+- The agy terminal wedged once (spinner with no backing `go` process); superseded its verification with an independent build+test run, interrupted the TUI, and resumed with the next task — same safe-failure discipline as Phase 1.
+- TD3 tests run the infinite watcher loop in a goroutine (50 ms ticker + cancel) so fakes receive each workspace exactly once after the first tick — deterministic without waiting on the 90 s threshold.
+
+**What's next:**
+- Live acceptance (admin/connector process kill): connector `disconnected` within ~90–120 s and the next `GetTransportSnapshot` returns a new version without that connector's coordinates.
+- M1-E (controller gRPC cert rotation) is M1's last phase.
+
+---
+
+## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 1 (B): Connector + Shield Revocation Stickiness
+
+**What was done:**
+- Implemented Phase B (Day-1, independent, no deps) end-to-end on `feat/sprint20-m1-phase1` (created from post-`fixed-pendings` HEAD `e72925d`), with code written by the Google Antigravity CLI (`agy`, Gemini 3.8 Flash Low) driven one small task at a time through an Orca terminal, each verified before the next.
+- **B1/B2 (`control_stream.go`):** `Control` now reads `revoked_at` and rejects (`PermissionDenied "connector is revoked"`) when `status='revoked'` **or** `revoked_at IS NOT NULL`; the activation UPDATE is guarded (`AND status <> 'revoked' AND revoked_at IS NULL`) and moved **before** `Registry.add` — `pgx.ErrNoRows` → deny without registering or arming the disconnect defer. Stream-close defer guarded (`AND status = 'active'`). (A spec-aligned Control revocation reject pre-existed as an uncommitted external edit; kept and folded in.)
+- **B3 (`goodbye.go`):** guarded `AND status = 'active'` + `RETURNING tenant_id`; `ErrNoRows` → no notify, still `Ok:true`; real transition fires `PolicyNotifier` + `TransportNotifier` (both planes).
+- **B4 (`enrollment.go` `RenewCert`):** reject on `status='revoked'` or `revoked_at IS NOT NULL` **before** signing; guarded cert UPDATE; 0 rows → `PermissionDenied`, no signed cert returned.
+- **B5 (`control_stream.go` `handleConnectorHealth`):** guard adds `AND revoked_at IS NULL`; no-match behaviour unchanged (close stream).
+- **B6 (`shield/heartbeat.go` `UpdateShieldHealth`):** `updated` CTE adds `AND sh.status <> 'revoked'`; revoked shield → row untouched, `synced` resource re-point skipped, `(false,false,nil)`, logged "ignored status report for revoked shield".
+- **Tests (DB-backed, all gated on set DSNs; none skipped in the run):**
+  - `controller/internal/connector/revocation_test.go` (new): `TestControl_RejectsRevokedConnector`, `TestControl_RejectsRevokedAtLegacyStatus`, `TestGoodbye_RevokedStaysRevoked`, `TestGoodbye_ActiveGoesDisconnectedAndNotifies`, `TestRenewCert_RevokedStatusDenied`, `TestRenewCert_RevokedAtLegacyDenied`, `TestRenewCert_RaceRevokeReturnsNoCert` (stub PKI revokes mid-sign as a deterministic race), `TestHandleConnectorHealth_RevokedClosesStream`.
+  - `controller/internal/shield/heartbeat_test.go` (extended): `TestUpdateShieldHealth_RevokedShieldIgnored`, `TestUpdateShieldHealth_ActiveShieldStillUpdates` (regression).
+- **Verification:** per-task and final gate `cd controller && go build ./... && go test -count=1 ./internal/connector/... ./internal/shield/...` green against live Postgres (`ENROLLMENT/SHIELD/PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL`); gofmt clean.
+- No bugs required Post-Phase Fixes. Checkboxes M1-B1…B7 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`.
+
+**Key decisions:**
+- Orchestration `worker-start` could not supervise the agy terminal (created via raw `terminal create --command`, so Orca has no registered agent process); fell back to the `terminal send`/`terminal read` supervised loop with independent re-verification after each task (safe-failure route per orchestration skill).
+- `RenewCert` race test made deterministic by a stub `pki.Service` that revokes the row inside `RenewConnectorCert` before returning a dummy result — exercises the guarded-0-rows path exactly.
+- No migrations (Sprint 20 rule); `revoked`/`revoked_at` terminality preserved; `workspaces.status='active'` predicates untouched; no shield CRL/`revoked_at` added (I6).
+
+**What's next:**
+- Live acceptance criteria (admin UI E2E) still outstanding per phase spec: revoke a running connector → stream closes ≤15 s, row stays `revoked` across ≥3 reconnects, UI shows REVOKED; revoke a running shield → UI still shows REVOKED after 2 min of heartbeats.
+- M2-G (connector renewal trigger + cert hot-swap) can now rebase onto M1-B's `control_stream.go` + `RenewCert` guard.
+
+---
+
+## 2026-08-26 — Claude Code (Opus 5) — Sprint 17 audit, tenant-isolation fix, GraphQL exposure
+
+**What was done:**
+- Reviewed the five `Member1-Frontend/Phase*.md` specs against the actual schema. All three "blocked" claims verified accurate; corrected two that were wrong: FE-2 is not standalone-buildable (both files it edits are created by FE-1, and no IdP UI exists in `admin/src/pages/` at all), and FE-4's "no backend gap" understated three real gaps.
+- Audited all ten ADR-025 acceptance criteria against source (previously all unchecked, which read as "unverified" but was being treated as passing). Result: 5 met, 1 partial, 3 not met, 1 not run.
+- **Criterion 9 — tenant isolation, found and fixed.** The deprovision ownership guard was an unscoped `SELECT provisioning_owner FROM users WHERE id = $1`; the scoped status `UPDATE` then matched 0 rows without erroring, and `Revoker.bump` had no tenant predicate at all. A valid SCIM token for workspace A could bump a workspace B user's `identity_generation` and enqueue a device-trust revoke naming the wrong workspace. Guard scoped, 0-row updates → 404, tenant predicate added.
+- Fixed a regression in the in-flight scoped guard: an INNER JOIN on `external_identities` collapsed the JIT/manual collision into a 404, swallowing the `409 identity_conflict` + pending record ADR-025 §4.1 requires. `scopedProvisioningOwner` now reports existence and connection-linkage separately.
+- Landed all nine backend GraphQL follow-ups: connection mapping fields, `updateScimConfig`, `scimProviderProfiles`, `User.provisionedBy`/`provisioningOwner`, `Group.origin`/`externalId`/`connectionId`, `ScimConflict` snapshots (write path included — the columns existed but `ensurePendingConflict` never populated them), `resolution_reason` in migration `034`, `ErrorPresenter` + `apperr` conversions, and the stale `ScimConflict.status` comment.
+- Committed as `b5c1bce` (backend) and `12e6b61` (docs). Verified against live Postgres throughout — `go build`, `go vet`, and the full `internal/...` + `graph/...` suite; `make gqlgen` + `npm run codegen` + admin build green.
+
+**Key decisions:**
+- `updateScimConfig` is deliberately **not** a free `scim_enabled` setter. Disable is always allowed; enable runs the fail-closed `MappingGate`. ADR-025 §3.2 says an ordinary admin confirmation cannot bypass failed mapping validation — a plain boolean behind `@hasRole(ADMIN)` would be exactly that bypass and would make `enableScimBreakGlass` decorative.
+- Editing `subjectClaim`/`scimIdentifier` **force-disables SCIM in the same write**. `resolveScope` re-reads both extractors on every push, so a changed mapping would otherwise apply to the next directory write and silently split or merge accounts (§3.1). Chose force-disable over refusing the edit: fail-closed, and it doesn't strand an admin whose mapping is wrong.
+- `ErrorPresenter` surfaces `serr.Detail`, never `err.Error()` — `Detail` is auditable per construction site, whereas `err.Error()` is whatever intermediate wrappers concatenated. The status set is an explicit **whitelist (400/403/404/409), not a 4xx range**: `Status` is a bare int, so a range would also surface a zero-valued `SCIMError`, and 401 must stay masked to prevent token enumeration. Verified every error-derived `Detail` on the GraphQL-reachable path is a 5xx.
+- A tenant mismatch now reports "not found" rather than "does not belong to this workspace". These messages became client-visible with the `apperr` conversion, so distinguishing them would be an enumeration oracle.
+- `resolution_reason` went into migration `034` rather than a new `036` (per request), with the column in the `CREATE TABLE` **and** a matching `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — `CREATE TABLE IF NOT EXISTS` is a no-op where the table already exists, so the ALTER is what upgrades databases that already ran 034. Both paths verified against Postgres.
+- Reopen clears `resolution_reason`/`resolved_at`/`resolved_by`: a row back in `pending` has no resolution to describe. The reopen reason is not lost — `scim.user.conflict_reopened` carries it in the same transaction.
+
+**What's next:**
+- **Criterion 5 is still not met and is the sprint's real blocker.** `MappingGateResult.WithRoundTrip` has no production caller — the probe-user round-trip M1-4b deferred to Phase 5 was never wired. The only non-test `MappingGate.Evaluate` call site (`TestIdpConnection`) never attaches a round-trip result, so the mapping can never become `proven`, `scimEnabledAllowed` is permanently false, and break-glass is the **only** route to enabling SCIM — inverting §3.1/§3.2's intent.
+- Criterion 10 not run: no SCIM conformance suite exists anywhere in the repo. Live Okta/Entra interop still gated on tenant access.
+- Frontend is unblocked (FE-1/3/4/5). Start with FE-1's page shells + connection queries — FE-2 has nothing to mount until they land.
+- Carried gaps unchanged: `users` has no `name`/`title`/`department` columns; the `unmanaged`→`scim` re-enroll verb is still deferred.
+- Note for future sessions: `go generate ./graph/...` (per CLAUDE.md) is a **no-op** — there are no `go:generate` directives. Use `make gqlgen` from the repo root.
+
+---
+
+## 2026-08-14 — Kilo — Sprint 18 Phase 10 Verification
+
+**What was done:**
+- Verified and completed Sprint 18 Phase 10 (Testing) for the controller outbox.
+- Confirmed all Phase 10 requirements implemented: 20 PostgreSQL integration tests (rollback, commit, concurrent claim, unique lease, stale MarkDone/MarkFailed, abandoned recovery, lease-replacement race, retry exhaustion, unknown-handler terminal, workspace-deletion protection, terminal-recovery authorization) + unit tests (TestTruncateError for 4096-byte truncation, TestHandlerIdempotency, backoff/deterministic-jitter, processor behavior, graceful shutdown) across `store_test.go`, `handler_test.go`, and `store_integration_test.go`.
+- Build gate confirmed passing: `go build ./...`, `go vet ./internal/outbox/...`, `go test ./internal/outbox/...`.
+- Marked Phase 10 complete in `path.md` (all checkboxes) and `Phase10-Testing.md` (`status: done`, all checkboxes).
+
+**Key decisions:**
+- No source code changes — only test files and documentation were committed.
+
+**What's next:**
+- Sprint 18 outbox is fully implemented, tested, and documented. Awaiting push to origin/pending-15-outbox-plan.
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 9 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 9 (Observability) is implemented.
+- `controller/internal/outbox/store.go` logs claim activity with count and event IDs, including `correlation_id`.
+- `controller/internal/outbox/processor.go` logs completion success, terminal failures, processing failures with retry count, and reaper recovery counts, all carrying `event_type`, `workspace_id`, `user_id`, and `correlation_id`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 9 complete in `.zecurity-obs/Sprint18/path.md` and `Phase9-Observability.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 8 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 8 (Terminal Event Recovery) is implemented.
+- `controller/internal/outbox/recover.go` adds `Recover(ctx, eventID, operatorID, reason, resetRetryBudget)` for terminal `failed` events only, with mandatory reason, operator identity validation, optional retry-budget reset, and transactional audit logging.
+- `controller/internal/audit/audit.go` adds `RecordTx(ctx, tx, entry)` to support audited recovery within a caller-owned transaction.
+- `controller/internal/outbox/store_integration_test.go` includes `TestRecoverTerminalEventIntegration`, `TestRecoverTerminalEventResetRetryBudgetIntegration`, `TestRecoverRejectsNonTerminalEventsIntegration`, and `TestRecoverRequiresReasonIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 8 complete in `.zecurity-obs/Sprint18/path.md` and `Phase8-Terminal-Event-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 7 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 7 (Background Processor) is implemented.
+- `controller/internal/outbox/processor.go` adds `Processor`, options, `NewProcessor`, `processEvent`, and `Run(ctx, batchSize)` with claim/dispatch/reap loops and clean shutdown.
+- `controller/cmd/server/main.go` wires `outboxStore`, `outboxProcessor`, and starts `outboxProcessor.Run(ctx, outboxBatchSize)` with graceful shutdown logging.
+- `controller/internal/outbox/store_integration_test.go` includes `TestProcessorRunProcessesEventIntegration`, `TestProcessorRunShutdownIntegration`, and `TestProcessorRunReapsAbandonedIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 7 complete in `.zecurity-obs/Sprint18/path.md` and `Phase7-Background-Processor.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 6 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 6 (Generic Handler Registry) is implemented.
+- `controller/internal/outbox/handler.go` adds `EventHandler` interface, `HandlerRegistry`, `RegisterHandler`, lookup, dispatch, and unknown-event terminal error behavior.
+- `controller/internal/outbox/handler_test.go` covers register/dispatch, handler error propagation, unknown event terminal failure, invalid registration, duplicate registration, and concurrent access.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 6 complete in `.zecurity-obs/Sprint18/path.md` and `Phase6-Generic-Handler-Registry.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 5 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 5 (Crash / Lease Recovery) is implemented.
+- `controller/internal/outbox/store.go` adds `ReapAbandoned(ctx, lockWindow)` with lease-aware expired-lease scanning, `retry_count++`, backoff-based `next_attempt_at`, and lease re-checking in the UPDATE.
+- `controller/internal/outbox/store_integration_test.go` includes `TestReapAbandonedIntegration` and `TestReapAbandonedLeaseReplacementIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 5 complete in `.zecurity-obs/Sprint18/path.md` and `Phase5-Crash-Lease-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 4 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 4 (Retry / Backoff) is implemented.
+- `controller/internal/outbox/backoff.go` implements `RetryPolicy.Backoff()` with `min(5m, 2^retryCount * base)` and injectable jitter interfaces.
+- `controller/internal/outbox/backoff_test.go` covers deterministic backoff values, negative retry counts, policy validation, and jitter behavior.
+- `controller/internal/outbox/store.go` updates `MarkFailed` to compute `next_attempt_at` via backoff, set `NULL` when `retryCount >= maxRetries`, and preserve 4096-byte `last_error` truncation.
+- `controller/internal/outbox/store_integration_test.go` updates `TestMaxRetriesIntegration` to drive two `MarkFailed` calls and assert exhaustion produces `next_attempt_at = NULL`.
+- `gofmt -w cmd/server/main.go` applied; `cd controller && go build ./...` and `go test ./internal/outbox/... -v` pass cleanly.
+- Marked Phase 4 complete in `.zecurity-obs/Sprint18/path.md` and `Phase4-Retry-Backoff.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 3 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 3 (Concurrency-Safe Claiming) is implemented.
+- `controller/internal/outbox/store.go` adds `ClaimEvents(ctx, limit)` with the exact atomic CTE from PENDING-15 §3, `MarkDone`, `MarkFailed`, and `maxRetries` config on `Outbox`.
+- `controller/internal/outbox/event.go` adds `OutboxEvent` for claimed rows.
+- `controller/internal/outbox/store_integration_test.go` adds integration tests for claim, mark done/failed, stale-lease rejection, and concurrent claiming.
+- `cd controller && go build ./...` and `go vet ./internal/outbox/...` pass cleanly.
+- Marked Phase 3 complete in `.zecurity-obs/Sprint18/path.md` and `Phase3-Concurrency-Safe-Claiming.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 2 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 2 (Transactional Enqueue) is implemented.
+- `controller/internal/outbox/event.go` defines the provider-independent `Event` struct with caller-supplied `CorrelationID` and opaque `Payload` (`json.RawMessage`).
+- `controller/internal/outbox/store.go` implements `Enqueue(ctx, tx, evt)` using the caller's `pgx.Tx`, never falling back to the pool; it inserts `status='pending'`, `retry_count=0`, `next_attempt_at=NOW()`, and rejects `nil` transactions with `ErrNilTx`.
+- `controller/internal/outbox/store_integration_test.go` covers COMMIT persistence, ROLLBACK removal, and nil-transaction rejection.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 2 complete in `.zecurity-obs/Sprint18/path.md` and `Phase2-Transactional-Enqueue.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 1 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 1 (Database / Migration) is implemented.
+- `controller/migrations/033_outbox_events.sql` exists with full `outbox_events` schema (four-state `status` CHECK, `workspace_id` FK `ON DELETE RESTRICT`, `user_id` FK `ON DELETE SET NULL`, `correlation_id`, JSONB `payload`, retry/lease columns, `last_error`) and three required indexes (`idx_outbox_claim`, `idx_outbox_workspace_event`, `idx_outbox_processing`).
+- `ON DELETE RESTRICT` on `workspace_id` satisfies M18-1b workspace-deletion handling.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 1 complete in `.zecurity-obs/Sprint18/path.md` and `Phase1-Database-Migration.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-07-11 — Claude Code (Opus 4.8) — Sprint 12 Planning (Provider Tier + Relay Provisioning)
+
+**Member:** M2 (bairava)
+**Branch:** feat/pending-07a-provider-authz
+
+**What was done:**
+- Created `Sprint12/` planning docs: `path.md` + `Member1-Go/` (2 phases) + `Member2-Go-Relay/` (3 phases).
+- Sprint 12 completes two Phase-0 pending items together: PENDING-07a (provider identity/authz tier, alpha slice) and PENDING-01 (authenticated relay provisioning).
+- Detailed engineering plan saved at `~/Documents/PLAN-PENDING-01-and-07a-Provider-Tier-and-Relay-Provisioning.md` (source of truth for phase contents).
+
+**Key decisions:**
+- Split **by feature**, labels **M1 + M2**: M1-Go owns the provider tier (07a); M2-Go+Rust owns relay provisioning enforcement + `/provider` re-home + the Rust client (01).
+- The two ship together — 07a makes token issuance a provider action behind `RequireProvider`; 01 makes the token verified+burned at `Provision`. Neither half alone is sufficient.
+- Separate `provider_users` + `provider_audit_logs` (tenant `audit_logs.tenant_id` is NOT NULL); audience-scoped provider session (`aud=provider`) reusing Google OIDC; single `Authz.decide` chokepoint with actor+target signatures; env-seed bootstrap; flat model (partner scoping deferred).
+- `main.go` flagged as the shared conflict zone — M1 lands provider wiring + `/provider` route group first, M2 rebases.
+
+**What's next:**
+- Execute Sprint 12: start with the two Day-1-independent phases in parallel (M1 Phase 1 provider data model/authz, M2 Phase 1 Provision token enforcement), then M1 Phase 2 → M2 Phase 2/3.
+- On completion, promote PENDING-01 and PENDING-07a to the next free `ADR-0NN` in `Decisions/`.
+
+---
+
 ## 2026-05-14 — Codex (GPT-5) — Connector Lint Diagnostics
 
 **What was done:**
@@ -1729,3 +1947,1676 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Verify on a Linux host with CAP_NET_ADMIN: after `zecurity-client down` then `zecurity-client up`, `ip rule show | grep 'fwmark 0x5a'` should show only `lookup 105` and no `lookup main`.
+
+## 2026-07-13 — Sprint 12 (Provider Identity Tier + Authenticated Relay Provisioning)
+
+**What was done:**
+- **M1 (provider tier):** `provider_users` + `provider_audit_logs` migrations (025/026);
+  `internal/provider` store + single `Authz.decide(actor, action, target)` chokepoint with typed
+  `CanX` wrappers; audience-scoped provider JWT (`aud=provider`) reusing the Google OIDC exchange;
+  `RequireProvider` middleware (allowlist + `disabled_at`, never calls `WorkspaceGuard`); `/provider`
+  route group with `/provider/me` + `/provider/users`; super-admin #0 seeded from
+  `PROVIDER_BOOTSTRAP_EMAILS`.
+- **M2 (relay provisioning):** `Provision` RPC now requires the single-use token — verify → assert
+  `claims.RelayID == req.RelayId` → burn JTI atomically before `SignRelayCert`; anonymous
+  self-insert fallback removed (unregistered relay → `FailedPrecondition`). Relay creation re-homed
+  from tenant `POST /api/relays` to `POST /provider/relays` behind `RequireProvider`, running
+  `CanIssueProvisioningToken` + writing a `relay.create` audit row; `DELETE /provider/relays/{id}`
+  soft-delete seam added for PENDING-02 (cert NOT revoked). Rust relay client sends the real
+  `provisioning_token` (env/file), fails fast when absent.
+- **Docs:** promoted `PENDING-01` → `ADR-020-Authenticated-Relay-Provisioning` and `PENDING-07a` →
+  `ADR-021-Provider-Identity-and-Authorization` (both Option A, `status: accepted`); repointed
+  back-references; fixed a stale `POST /api/relays` comment in migration `019_relays.sql`.
+
+**Verification:**
+- `cd controller && go build ./...` passed.
+- `go test ./internal/relay/... ./internal/provider/... ./internal/middleware/...` passed.
+- No `/api/relays` references remain in `controller/`.
+
+**What's next:**
+- Runtime e2e provisioning check (the one remaining unchecked acceptance box): relay boots with
+  `RELAY_PROVISIONING_TOKEN` and provisions end-to-end against `POST /provider/relays`.
+- PENDING-02 (CRL/OCSP enforcement) can now hang its relay-revoke trigger off the `DELETE
+  /provider/relays/{id}` seam.
+
+## 2026-07-13 — Codex (Sprint 12 completion tracking)
+
+**What was done:**
+- Verified and marked M1 Phase 1 complete: provider data model, audit store, authorization chokepoint, and bootstrap seeding.
+- Verified and marked M1 Phase 2 complete after the protected provider route group, `/provider/me`, and isolation tests landed.
+- Marked M2 Phase 1 complete: single-use Relay provisioning-token enforcement, replay protection, and removal of anonymous self-provisioning.
+- Marked M2 Phase 3 complete: Relay token delivery, environment/file configuration, fail-fast validation, installer support, documentation, and tests.
+- Left M2 Phase 2 unmodified because it is assigned to another member.
+
+**Verification:**
+- Controller Relay tests and build passed for M2 Phase 1.
+- Relay tests (36 passed), build, formatting, and installer shell syntax passed for M2 Phase 3.
+
+**What's next:**
+- The assigned member completes M2 Phase 2 by moving Relay creation to `POST /provider/relays`, enforcing provider authorization, and recording provider audit entries.
+
+## 2026-07-15 — Codex (Sprint 14 M2 Phase 1)
+
+**What was done:**
+- Implemented the hardened Connector CRL manager with signature, issuer, AKI/SKI, `thisUpdate`, and `nextUpdate` verification.
+- Added fail-closed cold-boot and expired-cache behavior, keep-last-good refresh semantics, trailing-data rejection, and a 60-second refresh interval with jitter.
+- Updated the existing workspace `/ca.crl` consumer to deny device tunnels when revocation state is unavailable.
+- Added 12 CRL unit tests covering valid CRLs, wrong issuer/signature/AKI, invalid validity windows, expired cache state, and keep-last-good behavior.
+- Marked Sprint 14 M2 Phase 1 complete in its phase file and dependency path.
+
+**Verification:**
+- `cargo test --manifest-path connector/Cargo.toml --lib crl`: 12 passed.
+- `cargo build --manifest-path connector/Cargo.toml`: passed.
+- Focused Rust formatting and `git diff --check`: passed.
+
+**What's next:**
+- Integrate the latest origin branch containing M1's `/relay.crl` endpoint, then implement Sprint 14 M2 Phase 2 for Connector and Client relay-certificate enforcement and live-connection eviction.
+
+## 2026-07-21 — Codex (Sprint 14 M2 enforcement verification)
+
+**What was done:**
+- Audited the local Sprint 14 M2 implementation against both phase specifications and live relay
+  dial paths.
+- Added verified-DER CRL installation for realistic integration fixtures and repaired all four
+  `probe_relays` test call sites.
+- Added active client relay-connection monitoring so CRL revocation or expiry closes established
+  QUIC connections, matching the existing connector session monitor.
+- Persisted the client's Relay CRL manager across tunnel restarts and made its refresh loop
+  idempotent to prevent duplicate polling tasks.
+- Marked M2-F1, M2-F2, their build gate, and the 60s+jitter acceptance item complete. Kept the
+  Controller-backed stale-list E2E gate open.
+
+**Verification:**
+- Connector library tests: 82 passed.
+- Connector build: passed.
+- Client CRL, RelayPool, and verifier tests: 14 passed.
+- Client build: passed.
+- Full connector/client network suites compile, but local QUIC bind tests cannot execute in the
+  restricted sandbox (`Operation not permitted`).
+- Strict Clippy remains blocked by pre-existing repository-wide warnings; new CRL warnings fixed.
+
+**What's next:**
+- Complete M1 Phase C `/relay.crl`, then run the M2-F3 revocation E2E on a socket-capable host and
+  mark Phase F `done` only after it passes.
+
+## 2026-07-21 — Codex (Sprint 13 implementation audit)
+
+**What was done:**
+- Audited PENDING-03 and every Sprint 13 phase against the current proto, controller transport
+  compiler/notifier, trigger wiring, client transport cache, routing, and recovery code.
+- Marked the implemented Phase 1–3 checklist items complete and set the sprint/phases to
+  `in-progress` because their acceptance gates are not yet fully demonstrated.
+- Reconciled the phase records with commit `90803e4`: the client is the transport-snapshot consumer,
+  so delivery uses `GetTransportSnapshot`; connector control field 16 is retired/reserved and the
+  unused proactive connector-push path was removed.
+- Recorded the later background transport-recovery fix and the remaining validation gaps in each
+  phase's Post-Phase Fixes section.
+
+**Verification:**
+- `cd controller && go build ./...` passed.
+- Focused controller transport, policy, connector, and relay tests passed.
+- `cargo build --manifest-path client/Cargo.toml` passed.
+- Focused client routing and transport tests passed.
+
+**What's next:**
+- Add AT-CORE/AT-CORE-R integration coverage proving policy and transport version isolation.
+- Add client tests for version-change rebuild, relay-resync wake-up, and `up_to_date` cache retention.
+- Run and record socket-capable end-to-end relay failover/convergence and all-component build gates.
+
+## 2026-07-21 — Codex (Sprint 13 Phase 4 planning)
+
+**What was done:**
+- Added Phase 4 for the remaining single-controller client transport recovery hardening.
+- Scoped four fixes: transport-sync serialization, tunnel-restart serialization, cooldown measured
+  from recovery completion, and typed handshake failure classification.
+- Added focused concurrency, recovery-timing, and protocol-classification test requirements.
+- Explicitly excluded persistent/global versions and multi-controller coordination.
+
+**What's next:**
+- Implement Phase 4 in `client/src/runtime.rs`, `client/src/daemon.rs`, and
+  `client/src/net_stack.rs`, then run its formatting, lint, and test gates.
+
+## 2026-07-21 — Codex (Sprint 13 Phase 4 security hardening)
+
+**What was done:**
+- Expanded Phase 4 F4 with the required handshake security classification.
+- Limited transport refresh signals to timeout and connectivity-related I/O failures.
+- Documented fail-closed handling for malformed/oversized authenticated frames, connector/ACL
+  denials, certificate/SPIFFE failures, and unrelated local I/O errors.
+- Added security regression-test and sprint acceptance requirements preventing those failures from
+  notifying `relay_resync`.
+
+**What's next:**
+- Implement F1–F4 and verify both positive refresh cases and negative fail-closed cases.
+
+## 2026-07-22 — Codex (Sprint 14 implementation reconciliation)
+
+**What was done:**
+- Audited every Sprint 14 phase and acceptance criterion against the current controller,
+  connector, and client revocation implementation.
+- Marked M1 Phases A, C, and D complete; retained Phase B as in-progress because relay revoke/delete
+  and the provider audit record are not committed atomically.
+- Confirmed M2 Phase E complete and retained Phase F as in-progress pending its Controller-backed
+  stale-`LabelledRelayList` E2E gate.
+- Updated Sprint 14 path checkboxes to distinguish implemented behavior from the remaining security
+  and verification gaps.
+
+**Verification:**
+- Controller, connector, and client builds passed during the current audit sequence.
+- Client tests passed (38/38), including CRL rejection and live-connection monitoring coverage.
+- Focused controller transport/policy tests passed; Docker-dependent integration coverage remains
+  environment-gated.
+
+**What's next:**
+- Make relay revoke/delete status changes and `provider_audit_logs` insertion one database
+  transaction, with cache refresh and convergence fan-out strictly after commit.
+- Run the socket-capable Controller → connector/client stale-list revocation E2E test.
+- Validate/reject non-canonical relay serials at the storage boundary, then reconcile PENDING-02.
+
+## 2026-07-22 — Codex (Sprint 12 Phase D documentation reconciliation)
+
+**What was done:**
+- Verified the provider-only relay management implementation in the current controller code.
+- Corrected Sprint 12 M2 Phase D from `planned` to `done`.
+- Marked the provider route migration, authorization/audit integration, PENDING-02 delete seam,
+  and controller build gate complete.
+
+**What's next:**
+- The separate live relay provisioning E2E acceptance item in Sprint 12 remains available for a
+  recorded environment-backed verification run.
+
+## 2026-07-22 — Codex (Sprint 12 relay provisioning E2E procedure repair)
+
+**What was done:**
+- Repaired the live relay provisioning runbook to use provider authentication and
+  `POST /provider/relays` instead of the removed tenant-admin `/api/relays` route.
+- Added explicit evidence gates for real relay certificate/key persistence, heartbeat success,
+  and rejection of a replayed single-use provisioning token from a second empty state directory.
+- Corrected local installer, VPS deployment, and WAN validation guidance that still described
+  provisioning tokens as unenforced or anonymous relay self-provisioning as supported.
+
+**Verification:**
+- Confirmed the real relay requires `RELAY_ID`, reads the provisioning token from env/file, calls
+  the Controller Provision RPC, validates the returned identity, and persists all certificate
+  material before starting heartbeat/listener work.
+- The live environment-backed E2E execution is still required before checking Sprint 12 criterion
+  9; documentation repair alone is not recorded as a pass.
+
+**What's next:**
+- Execute the repaired runbook against a live Controller/Postgres/Valkey stack with a provider JWT,
+  attach logs for successful first provisioning and rejected replay, then mark criterion 9 complete.
+
+## 2026-07-22 — Codex (Sprint 15 device-posture plan correction)
+
+**What was done:**
+- Corrected the Sprint 15 compiler/cache contract to carry `CompiledACL{Snapshot, ValidUntil}`
+  from compilation into the cache and all production callers.
+- Added cycle-free expiry-notifier registration, lock-safe notification, and per-workspace
+  singleflight semantics covering both the policy-version bump and recompilation.
+- Added profile/evaluation revisioning so changed requirements fail closed during re-evaluation.
+- Made ingestion limits, report replay behavior, retention defaults, and graceful shutdown
+  lifecycle explicit and consistent across the Sprint 15 path and member phase files.
+
+**Verification:**
+- Swept Sprint 15 documentation for stale unknown-check, report-ID, cache-expiry, retention-owner,
+  and revision rules; corrected the remaining contradictory replay rule.
+- `git diff --check` reports no formatting errors for tracked Sprint 15 changes; the Sprint 15
+  directory is currently untracked as a whole, so no tracked diff is available yet.
+
+**What's next:**
+- Implement Sprint 15 in dependency order, beginning with the migration/store phase, and run each
+  phase's documented build and test gate before marking it done.
+
+## 2026-07-22 — Codex (origin sync and Sprint 13 implementation reconciliation)
+
+**What was done:**
+- Fetched and merged `origin/fixed-pendings` at merge commit `cefdc88`, incorporating the
+  PENDING-03 implementation report from remote commit `6f000f0`.
+- Marked Sprint 13 Phases 1–4 done where the implementation and automated coverage exist.
+- Accepted ADR-015/017/018 with the implemented client-poll architecture correction, and marked
+  PENDING-03 implemented in the pending index.
+- Preserved the deliberately deferred ADR-018 Phase 4 field removal and optional B4 convergence
+  observable as open work.
+
+**Verification:**
+- Controller and Connector builds passed during the implementation audit; Client tests passed
+  38/38 and its build passed.
+- Shield build passed in this reconciliation run with warnings only; its generated `target/`
+  build directory was removed afterward.
+- Live AT-CORE topology-isolation/failover acceptance remains unchecked because it requires a
+  running Controller/database/relay/client environment.
+
+**What's next:**
+- Run the Sprint 13 acceptance plan in a live environment to prove transport-only version bumps,
+  reverse policy isolation, and relay failover propagation without an ACL version bump.
+
+## 2026-07-22 — Codex (Sprint 14 missing-implementation origin sync)
+
+**What was done:**
+- Fetched remote commit `dfb2c65` and merged it into the current branch at `c3e79c1`.
+- Verified relay revoke and delete now commit certificate revocation, terminal status, and provider
+  audit in one database transaction; convergence callbacks run after commit.
+- Marked Sprint 14 Phase B and its atomicity acceptance criteria complete.
+
+**Verification:**
+- Provider and PKI focused Go tests passed.
+- Relay tests are currently blocked by a pre-existing syntax error in the locally modified
+  `controller/internal/relay/heartbeat_test.go`; connector integration tests require Docker socket
+  access unavailable in the sandbox.
+- Canonical serial validation at every store write and the live stale-list E2E gate remain open.
+
+**What's next:**
+- Add centralized validated relay-serial normalization at the store boundary, repair the local
+  heartbeat test syntax, and execute the environment-backed stale-list revocation E2E gate.
+
+## 2026-07-22 — Codex (Sprint 13 completion audit correction)
+
+**What was done:**
+- Rechecked every Sprint 13 production path and test claim against the current source tree.
+- Kept Phases 1 and 3 done, and corrected Phases 2 and 4 to `in-progress` where required
+  acceptance or regression tests do not yet exist.
+- Corrected over-marked Phase 4 checklist entries for I/O-kind classification, security failure
+  signaling, and tunnel-restart serialization coverage.
+
+**Verification:**
+- Controller transport tests/build and the complete client suite/build had passed in the preceding
+  audit; generated build directories were removed afterward as requested.
+- Source inspection confirms the production synchronization, cooldown, routing, and fail-closed
+  paths are implemented. The missing evidence is test coverage and live acceptance, not the core
+  TransportSnapshot data path.
+
+**What's next:**
+- Add the remaining Phase 4 regression tests and connectivity-kind allowlist, then run AT-CORE,
+  AT-CORE-R, and relay-failover acceptance against a live Controller/database/relay/client stack.
+
+## 2026-07-22 — Codex (Sprint 13 Phase 2 completed)
+
+**What was done:**
+- Added executable AT-CORE and AT-CORE-R isolation coverage for the independent transport and ACL
+  notifiers/caches.
+- Added a real relay-heartbeat boundary test and exact connector-scoping assertions for heartbeat,
+  expiry, connection, disconnection, and relay-switch events.
+- Marked Sprint 13 Phase 2 done while retaining live client failover as the sprint-level AT-E1 gate.
+
+**Verification:**
+- Transport and focused relay tests pass; the Connector test binary compiles successfully.
+- The Controller builds and `git diff --check` passes. Connector execution remains dependent on
+  its package-level Docker/Valkey test environment.
+
+**What's next:**
+- Complete Phase 4's connectivity-specific I/O classification and missing security/restart
+  regression tests, then run the live AT-E1 relay-failover scenario.
+
+## 2026-07-22 — Codex (Sprint 13 Phase 4 completed)
+
+**What was done:**
+- Replaced broad framed-stream I/O recovery classification with an explicit connectivity-kind
+  allowlist.
+- Added regression coverage for connectivity and unrelated I/O, typed authentication failures,
+  and shared tunnel-restart serialization.
+- Marked Sprint 13 Phase 4 done while leaving the overall sprint open for live AT-E1 failover.
+
+**Verification:**
+- Focused net-stack and recovery tests pass.
+- The complete Client suite passes 43/43 outside the socket-restricted sandbox; `cargo check` and
+  `git diff --check` pass.
+
+**What's next:**
+- Run the live Controller/relay/connector/client failover scenario and prove transport convergence
+  without an ACL version change before marking Sprint 13 complete.
+
+## 2026-07-22 — Codex (Sprint 13 marked complete)
+
+**What was done:**
+- Marked Sprint 13 complete after all four implementation phases and their automated coverage were
+  completed.
+- Recorded the live AT-E1 deployment run as optional operational validation rather than a sprint
+  completion blocker.
+
+**Verification:**
+- Controller Phase 2 isolation/scoping coverage passes, the Controller builds, and the complete
+  Client suite passes 43/43.
+
+**What's next:**
+- Optionally run AT-E1 in a deployed environment to collect operational failover timing evidence.
+
+## 2026-07-23 — Codex (restart-coalescing documentation correction)
+
+**What was done:**
+- Documented the remaining redundant sequential-restart behavior in Sprint 13 Phase 4.
+- Recorded the approved queued-oneshot batch-coordinator design, failure draining, best-effort
+  panic supervision, exact panic-result semantics, and deterministic test requirements.
+- Kept the separate `tun_slot == None` lifecycle ambiguity explicitly out of scope.
+
+**Verification:**
+- Documentation now distinguishes the implemented non-overlap mutex from the not-yet-implemented
+  restart coalescing follow-up and does not claim unconditional panic/shutdown recovery.
+
+**What's next:**
+- Implement the coordinator in Client runtime/daemon code and run its deterministic concurrency
+  tests plus the complete Client suite.
+
+## 2026-07-23 — Codex (restart coordinator race fixes verified)
+
+**What was done:**
+- Moved restart-work panic handling inside each pass so the worker retains and explicitly fails the
+  active batch.
+- Reset coordinator state and drained stragglers before publishing failure or panic results,
+  removing the fresh-request race against stale `running = true`.
+- Reworked batching tests to use pre-populated queues and explicit pending-queue synchronization
+  instead of scheduler timing.
+- Updated Phase 4 documentation to mark the queued-oneshot coordinator implemented.
+
+**Verification:**
+- All seven deterministic coordinator tests pass.
+- The complete Client suite passes 49/49 outside the socket-restricted sandbox.
+- `cargo build` succeeds without warnings.
+
+**What's next:**
+- The separate explicit tunnel-lifecycle-state follow-up remains optional and out of scope.
+
+## 2026-07-27 — Codex (Sprint 15 M1 Phases 1–2)
+
+**What was done:**
+- Completed the device-posture migration and tenant-safe PostgreSQL store, including
+  profile revisions, bindings, raw observations, evaluation provenance, and batch reads.
+- Implemented and wired `ReportDevicePosture`, validation, profile evaluation, generated
+  Go protobuf stubs, replay-safe ingestion, and policy-transition notification.
+- Added Phase 1 store integration coverage, Phase 2 validation/evaluation unit coverage,
+  and an environment-gated end-to-end gRPC ingestion suite.
+- Marked the M1 Phase 1 and Phase 2 implementation/build checkboxes complete and recorded
+  the migration-number and replay/error-classification fixes in the phase documentation.
+
+**Verification:**
+- `go test ./internal/posture/... ./internal/client/...` passes.
+- `go build ./...` and `git diff --check` pass for the Controller.
+- PostgreSQL-backed suites are present but skip until `PKI_TEST_DATABASE_URL` is set.
+
+**What's next:**
+- Run the PostgreSQL suites in a configured environment, then begin M1 Phase 3 GraphQL
+  administration and posture-aware ACL/cache integration.
+
+## 2026-07-28 — Codex (M1 Sprint 15 Phase 3 start)
+
+**What was done:**
+- Added the initial Device Profile GraphQL schema and regenerated gqlgen output.
+- Wired `PostureStore` into the GraphQL resolver root and server construction.
+- Implemented workspace-scoped profile list/create/mode update and the server-driven
+  supported posture-check query.
+- Added policy notifications for implemented profile mutations and transactionally
+  rejected switching a zero-requirement profile to enforce mode.
+- Added focused posture registry and store integration coverage.
+
+**Key decisions:**
+- Kept this session to the initial GraphQL foundation; requirements, bindings, posture
+  visibility, and ACL compiler/cache enforcement remain in Phase 3.
+
+**What's next:**
+- Complete the remaining GraphQL CRUD/binding/visibility API, then implement the
+  posture-aware ACL compiler and cache-expiry/version-bump contract.
+
+## 2026-07-29 — Codex (M1 Sprint 15 Phase 3 GraphQL hardening)
+
+**What was done:**
+- Added posture-specific GraphQL authorization and binding resolver tests.
+- Converted expected posture mutation failures to client-visible safe user errors.
+- Added profile-name normalization, tenant-scoped batch resource loading, and immediate
+  workspace posture re-evaluation after requirement changes.
+- Wired the posture evaluator into the GraphQL resolver root and documented the fixes.
+
+**Verification:**
+- Focused posture, resource, and resolver tests pass; `go build ./...` passes.
+- The broad internal suite has one unrelated existing Valkey/miniredis `CLIENT TRACKING`
+  incompatibility in `internal/auth`; all posture and resolver packages pass.
+
+**What's next:**
+- Run the database-backed posture resolver cases with the configured resource test DSN,
+  then continue device posture visibility and ACL compiler/cache work.
+
+## 2026-07-31 — Codex (M1 Sprint 15 Phase 3 verification)
+
+**What was done:**
+- Audited the Phase 3 GraphQL schema, generated resolvers, dependency wiring,
+  notification paths, ACL compiler, and snapshot cache against the implementation
+  checklist.
+- Marked M1-E1b, M1-E2, and M1-E4 complete in both Phase 3 documentation and the Sprint
+  15 execution path.
+- Documented that posture visibility, posture-aware ACL compilation, and cache expiry
+  remain open.
+
+**Verification:**
+- `go generate ./graph/...`, focused resolver/posture/policy/resource tests,
+  `go build ./...`, and `git diff --check` pass.
+- The full internal test gate remains open because the existing `internal/auth`
+  miniredis test does not support `CLIENT TRACKING`.
+
+**What's next:**
+- Complete M1-E1 posture visibility, then implement M1-E3 compiler gating and M1-E3b
+  cache expiry before closing the Phase 3 build gate.
+
+## 2026-09-12 — Claude Code (PENDING-05 Break-Glass Grant Surface, FE only)
+
+**What was done:**
+- Surfaced the break-glass self-grant on the FORBIDDEN Accept-link path in the
+  provisioning-conflicts queue (PENDING-05 §5.1). An ADMIN who 403s on Accept can now
+  grant themselves `identity.mapping.break_glass` and re-confirm without leaving the UI
+  or touching the DB.
+- New shared `admin/src/components/scim/GrantBreakGlassButton.tsx` — owns
+  `useMutation(GrantWorkspacePermissionDocument)` + `useAuthStore((s) => s.user)`, keeps
+  the `!currentUser?.id` guard and its toast, keeps local `granted` state, and takes a
+  caller-supplied `onGranted?` + success message. It never refetches itself.
+- `ScimConfigCard.tsx`: extraction only — replaced the inlined grant button with the
+  shared component (`onGranted={onChanged}`, existing toast text); removed the now-dead
+  `grantBreakGlass` hook, `handleGrantBreakGlass`, `breakGlassGranted` state, and the
+  unused `GrantWorkspacePermissionDocument`/`useAuthStore` imports. Behaviour unchanged.
+- `ConflictRow.tsx`: render the grant button inside the still-open dialog beneath the
+  guidance alert, guarded by `dialog === 'accept' && error?.code === 'FORBIDDEN'`. The
+  conflict caller passes no `onGranted`, so the grant never refetches/clears reason/closes
+  the dialog. Confirm stays gated on `busy || !reason.trim()` only.
+- Tests: replaced ConflictRow's single-tuple Apollo mock with a document-dispatching mock
+  (keyed on operation name; second tuple element kept as bare `false` so `busy` stays
+  falsy). Added §10 coverage: FORBIDDEN→grant+guidance, INTERNAL/CONFLICT/NOT_FOUND→no
+  grant, grant-success→accept not auto-retried until 2nd Confirm, grant-failure→error+
+  dialog open, reason persists, Reject/Reopen never render it. New
+  `GrantBreakGlassButton.test.tsx` (success, failure, no-authenticated-user).
+
+**Key decisions:**
+- No permissions read query (spec §5.3/§5.5/§6): no Query field returns
+  `WorkspacePermission`; adding one means schema + resolver + codegen for zero §9 criteria.
+  So no `.graphql`, no codegen, no controller/generated changes.
+- Corrected the stale §5.1 "re-enable Confirm": current Confirm is gated only on
+  `busy || !reason.trim()` — nothing to re-enable. Did NOT build a disable/re-enable
+  state machine; requirement is simply not to add FORBIDDEN-based disabling.
+- Grant must not refetch on the conflict path: `onGranted` omitted there so the row is
+  not remounted and the typed reason survives (§9).
+
+**Verification:**
+- `cd admin && npm run build` — passes (tsc -b + vite, no type errors).
+- `npm run test` — 104 passed / 104 (17 files). Touched SCIM files: ConflictRow 22,
+  GrantBreakGlassButton 3, ScimConfigCard 4. Baseline pre-change ConflictRow was 13
+  `it` blocks; +7 added (one `it.each` over 3 codes → +9 test cases → 22). Note: an
+  unbounded-parallelism run on a loaded box flaked 10 tests via CPU contention
+  (including untouched idp/* tests); capping threads or `--no-file-parallelism` is
+  deterministic 104/104, and bare `npm run test` passed once the box was idle.
+- `npm run lint` — 33 pre-existing problems (27 errors, 6 warnings), all in unrelated
+  files (Topology, signup, ui/*); identical count with my changes stashed. Zero new lint
+  problems in any touched file.
+- `git diff --stat`: 3 modified + 2 new, clean of controller/, *.graphql, generated/,
+  and path.md.
+
+**Post-implementation fix — Apollo Client 4 error shape (PRE-EXISTING FE-4 defect):**
+- **Symptom:** in the real app, an Accept-link 403 rendered "Action failed" (the INTERNAL
+  branch) with the correct server detail, and the new grant affordance never appeared.
+- **Root cause:** `admin/src/lib/conflictError.ts:firstExtensionCode` read
+  `err.graphQLErrors` — the Apollo Client **v3** `ApolloError` field. The project is on
+  `@apollo/client` 4.2.12, where a GraphQL-errors throw is a `CombinedGraphQLErrors` and
+  the array lives on **`.errors`**; `graphQLErrors` no longer exists. The read returned
+  undefined, so every coded error collapsed to INTERNAL and the
+  `error?.code === 'FORBIDDEN'` guard could never be true. The backend was correct
+  throughout: `presenter.go` sets `extensions.code = "FORBIDDEN"` for a 403 SCIMError, and
+  `Message = serr.Detail` only happens in that branch — which is why the right message
+  appeared under the wrong title.
+- **Why the suite did not catch it:** `ConflictRow.test.tsx`'s `codedError` fixture
+  hand-rolled a v3-style `{ graphQLErrors: [...] }` object. All 22 tests validated the
+  mock's contract, not Apollo's. The fixture now constructs a real
+  `CombinedGraphQLErrors`; verified load-bearing by restoring the old read, which fails 5
+  tests (22 → 5 failed / 17 passed).
+- **Fixed:** `conflictError.ts` reads `e?.errors ?? e?.graphQLErrors` (legacy kept as
+  fallback; the whitelist collapse and `conflictGuidance` are unchanged, so §7.7's
+  "unrecognized code stays INTERNAL" still holds).
+- **Same defect, separate bug:** `admin/src/pages/IdpConnectionDetail.tsx:75` had the
+  identical dead `'graphQLErrors' in err` branch. Its `err.message` fallback masked the
+  symptom. Fixed in the same pass.
+- This was a pre-existing FE-4 bug from `79c009f`, not introduced by the PENDING-05 work.
+  `path.md`'s note that `ScimConflicts.tsx` was unfinished was closer to true than §0
+  credited: the page shipped, but its error-classification path never worked.
+- **Status: applied, gates green (build + 104/104 + lint clean on touched files), but NOT
+  yet confirmed in the running app.** Green tests are what failed here; acceptance is an
+  operator seeing "Permission required" plus the grant button on a real 403.
+
+**Follow-on fix — IdP connection could be disabled but never re-enabled (UI gap):**
+- **Symptom:** after Disable, the Danger Zone showed an inert "Disabled" button and the
+  admin had no path back. `handleDisable` hardcoded `status: 'disabled'` and the button
+  carried `disabled={isDisabled || disablePending}`, so the control was one-way.
+- **Not a backend limitation:** `setIdpConnectionStatus` accepts both `'active'` and
+  `'disabled'` (`idp.resolvers.go:184`); only the UI was missing the reverse direction.
+- **Fixed** (`admin/src/pages/IdpConnectionDetail.tsx`): `handleDisable` →
+  `handleSetStatus(status: 'active' | 'disabled')`; the button is now bidirectional with
+  its label/handler derived from `isDisabled`; `disablePending` renamed `statusPending`.
+- **`deleted` separated from `disabled`:** `isDisabled` was `status !== 'active'`, so a
+  soft-deleted connection rendered as "disabled" and would have been offered an Enable
+  button that can only fail (the mutation rejects any status but active/disabled). Now
+  `isDeleted = status === 'deleted'` and `isDisabled = status !== 'active' && !isDeleted`;
+  a deleted connection gets neither control.
+- **Recovery guidance added to the disabled banner**, because re-enabling is deliberately
+  NOT symmetric (`idp.resolvers.go:179-181`): disable sets `status='suspended'` AND
+  `provisioning_owner='unmanaged'`, and re-enable restores neither. Since `Provision`,
+  `Reactivate`, and `Deprovision` all require `owner == 'scim'`, the directory's next push
+  raises one `409 identity_conflict` per affected user; each must be resolved with Accept
+  link (which restores the link and flips owner back to `'scim'`, but does NOT touch
+  `status` — the directory's next reactivate push does that).
+- **Tests** (`IdpConnectionDetail.dangerzone.test.tsx`, 2 → 4): the existing test asserted
+  the one-way behaviour (button flips to an inert "Disabled") and was updated to assert a
+  live "Enable"; added Enable-fires-`status:'active'` (matched on mutation variables) and
+  soft-deleted-offers-neither. Both verified load-bearing: re-hardcoding `'disabled'`
+  fails the first, and `isDeleted = false` fails the second.
+
+**What's next:**
+- Re-run the real flow: provoke a conflict, Accept without the permission, confirm
+  "Permission required" + grant button, grant, re-confirm, check both audit entries.
+- If possession needs to be observable/pre-labelled (§4.2/§5.3), that requires a new
+  ADMIN-scoped read query (schema + resolver + codegen) — deliberately deferred here.
+- path.md's FE-4 checkbox and stale "Also still open" note remain untouched per §0/§12.
+
+---
+
+## 2026-09-25 — Big Pickle — Sprint 20 M1 Phase 3 (E): Controller gRPC Cert Rotation (via Orca orchestration + agy)
+
+**What was done:**
+- Implemented Phase E (depends on Phase D, done) end-to-end through the Orca orchestration run `run_82f529ffcbac`, dispatched **one small task at a time** to the live Antigravity terminal (`term_854e5b6e…`, "agy"), each task verified independently before the next (6 tasks):
+  - **T1 (E1):** new `controller/internal/pki/controller_rotator.go` — `rotatedCert` + `ControllerCertRotator{gen, cur atomic.Pointer, clock}`, `NewControllerCertRotator` (panics on nil/zero → never serves nil after startup, I2), `GetCertificate` (never `(nil,nil)`), `current()`.
+  - **T2 (E2a):** `rotationRatio` (2/3 lifetime), `needsRotation(now)`, `rotate(ctx)` — validates (nil cert / zero NotBefore / NotAfter < now ⇒ error, cur untouched) then atomic swap.
+  - **T3 (E2b):** `Run(ctx)` — rotate at 2/3 lifetime; on failure `log.Printf` loud + capped exponential backoff 30s→10m, keep serving current; success resets; `nextDue()`; all sleeps select on `ctx.Done()`; state kept local.
+  - **T4 (E3):** constructor made main-usable (`cert, notBefore, notAfter` params); `main.go` wiring — same `controllerCertHosts(...)` + `CONNECTOR_CERT_TTL` (I5), `regen` closure, `GetCertificate` in `tls.Config` (I4: ClientAuth/MinVersion/interceptors untouched), removed static `Certificates`, `wg.Add` + goroutine `rotator.Run(ctx)`.
+  - **T5 (E4a):** `controller_rotator_test.go` unit tests — ctor panics, `needsRotation` table (before/at/after threshold, nil), rotate swap + keep-old on all failure modes, `Run` rotates at threshold (fake clock) + keeps current on gen failure + prompt shutdown, 8 readers × 200 swaps under `-race`.
+  - **T6 (E4b):** `TestRotatorHandshakeRotation` — local test CA, leaf with DNS SAN `controller.test` + SPIFFE `spiffe://zecurity.in/controller/global` (I1), `tls.Server{GetCertificate}`, client verifies vs CA: OK before rotation (initial serial), OK with new serial after rotation, **OK past the original `NotAfter`** with the rotated serial (proves sprint acceptance "controller keeps accepting new gRPC handshakes past the original cert's NotAfter").
+- **Verification:** per-task build/vet/race gates; final gate `cd controller && go build ./... && go test -race ./internal/pki/... ./cmd/server/...` green; scope = exactly 3 files (`main.go` M, rotator + test new).
+- **Post-review fix PF-1 (same day):** an independent review found the 2/3 threshold was measured from the backdated `NotBefore` (`GenerateControllerServerTLS` backdates 1 h), so any TTL ≤ 30m was due at issuance and the rotator reissued every `checkInterval` (1 min). The tests missed it because the fakes never backdate. Fixed with `rotatedCert.issuedAt` + `rotationDue()` (`start = max(notBefore, issuedAt)`). Regression test `TestNeedsRotationBackdatedNotBefore` (10m/30m/2h/7d) failed before the fix and passes after; the full `-race` gate is green again. Details in the phase file under Post-Phase Fixes → PF-1.
+- Checkboxes M1-E1…E4 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`; sprint-level acceptance item marked with live-check still PENDING / NOT YET RUN.
+
+**Key decisions:**
+- Orchestration notes: `worker-start` needs `--from <coordinator-handle>` when `ORCA_TERMINAL_HANDLE` is unset (else `consumer_fenced`); `check` identifies the caller via `--terminal`. Long `check --wait` loops were unreliable (aborted / missed prompts) — replaced with a short poll loop reading the terminal preview and answering permission prompts immediately (option 2); prompt detection must match signatures like `No, cancel` / `esc to cancel` / `settings.json` — the preview wraps mid-phrase, so `"Persist to settings.json"` as one string misses prompts.
+- No `worker-release` needed at close: the reused terminal is externally owned (`retainedReason: external_terminal`); `worker-list --terminal-state reclaimable` returned 0.
+
+**What's next:**
+- `git add`/commit/`git push origin feat/sprint20-m1-phase2` (not yet done — awaiting instruction).
+- Live acceptance: `CONNECTOR_CERT_TTL=10m` dev stack → controller runs > 15 min, connectors/relays reconnect after the first cert's `NotAfter`, logs show ~1 rotation per ~6m40s (valid only after PF-1; before it, the stack would have rotated every minute). Also the remaining Phase F live checks and Phase G (M2).
+
+---
+
+## 2026-10-02 — Claude Code (Barath / M2) — Sprint 21 Phase C-a: Provider Console foundation
+
+**What was done:**
+- Branch `sprint21/c-a-provider-console-foundation`, 5 commits; nothing pushed yet:
+  1. `GET /provider/me` returns `last_login_at`, with a new e2e test (`me_e2e_test.go`). H and U are untouched.
+  2. The `provider-console/` scaffold:
+     - Vite 8, React 19, TS, Tailwind 4, Vitest;
+     - port 5174, with a `/provider` proxy to `:8080`;
+     - a subtle violet accent;
+     - primitives copied from `admin/`, with their inherited lint errors fixed in the copies only.
+  3. API client and session:
+     - the API client is the only `fetch`, and handles each 401/403 by the call it came from;
+     - a zustand session store keeps the token in memory and `sessionStorage` only;
+     - flows for sign-in, change password, sign-out, and refresh (validated by `/me`);
+     - guards with same-app return paths only, and the `roles.ts` matrix.
+  4. Pages and wiring:
+     - Login, Change password (forced and voluntary), Home ("Signed in at"), Forbidden, NotFound;
+     - Layout with a role-filtered nav, account menu and countdown;
+     - route wiring, with `rehydrate()` before the first render.
+  5. README (dev, production on its own domain, network lock, `PROVIDER_CONSOLE_ORIGIN`, security model) and closeout docs.
+- **Gate:**
+  - `npm ci`, lint, `npm test` (12 files, 116 tests) and the build all pass, and `admin/` is unchanged.
+  - Mutation checks for the auth classification, storage, refresh and the UI invariants: the suite failed every time.
+- **Live API check through the dev proxy (throwaway DB, controller on `:8080`):** every call matched the client's handling. The DB and limiter keys were cleaned up afterwards.
+
+**Key decisions:**
+- **"Signed in at":** `last_login_at` is the time of the current sign-in, so Home uses that label.
+- **Fail closed:** if `/me` fails right after a token is issued, the session ends as `unverified`.
+- **Change password** checks the session itself, so the page isn't unmounted mid-submit.
+- **Tests:** they run with `--no-experimental-webstorage`, because Node's own `localStorage` hides jsdom's.
+
+**What's next:**
+- ~~Manual browser check~~ done 2026-10-05 in Orca's embedded browser: sign in, forced change, Home and countdown, reload (`rehydrate`), revoked-token reload, sign-out. All passed.
+- Push and open the C-a PR.
+- C-b: C5 Provider users page (dialog, table, select; show-once temporary passwords), plus the rest of C6.
+- Then R (OQ-1/OQ-2 first), P and K.
+
+**Closeout addendum (2026-10-05):**
+- **Final gates:**
+  - `provider-console`: `npm ci`, lint, test (116) and build pass.
+  - `controller`: `go build`, `go vet` and CI-style `go test -count=1 ./...` (24 packages, 932 pass, 0 fail, 33 pre-existing skips) pass.
+  - `admin/` is unchanged and builds.
+- **AT-C status** is recorded in the Phase C file.
+- **Found, not fixed:** a resolver test teardown leaks 15 `resolvers_updsc_*` databases per run (it drops the DB through its own connection). Candidate for K.
+- **Next:** C-b (C5 Provider users page).
+
+---
+
+## 2026-10-05 — Claude Code (Barath / M2) — Sprint 21 Phase C-b: Provider users page
+
+**What was done:**
+- Branch `sprint21/c-b-provider-users` (from `fixed-pendings` after #108), 5 commits; not pushed yet:
+  1. Operator API module and types; the API surface is now 3 auth + 5 operator writes.
+  2. Dialog (copied from admin), table and select primitives; `@radix-ui/react-dialog` and `@radix-ui/react-select`.
+  3. Provider users page at `/users` (super-admin only):
+     - confirmations for every mutation, and a list reload after each success;
+     - change-role dialog with a select;
+     - enable that offers "Reset password now" without resetting by itself;
+     - a show-once temporary password dialog with click-only Copy;
+     - readable 409 messages.
+  4. Narrow-screen layout fix (found in the browser check).
+  5. README and closeout docs.
+- **Gates:**
+  - `npm ci`, lint, `npm test` (169) and the build pass.
+  - `admin/` is unchanged and builds; no controller changes.
+  - Mutation checks for the C-b invariants: the suite failed every time.
+- **Browser check in Orca (throwaway DB, two tabs):** add, show-once password and Copy, the new operator's first sign-in, relay-ops Forbidden (and the backend's 403), role change, disable, enable → reset offer, reset, session revocation in the other tab, self-protection. All passed.
+
+**Key decisions:**
+- The page matches operator 403s by status, because the list and mutation 403 bodies differ.
+- Clicking outside the temporary-password dialog doesn't dismiss it; Close and Escape do.
+- Disabled rows offer Change role and Enable; active rows offer Change role, Reset password and Disable.
+
+**What's next:**
+- Push and open the C-b PR.
+- Phase R (OQ-1/OQ-2 first), then P and K.
+- Formal AT-C acceptance by Sathiya, including the AT-C.7 network capture.
+
+---
+
+## 2026-10-06 — Claude Code (Barath / M2) — Sprint 21 Phase R: Provider read APIs
+
+**What was done:**
+- Branch `sprint21/r-provider-read-apis` (from `fixed-pendings` after #109), 7 commits; not pushed:
+  1. R1 read actions and matrix tests.
+  2. `providerquery` base and relays.
+  3. Tenants.
+  4. Provider audit query.
+  5. Certificate expiry and `CurrentCertInfo()`.
+  6. The six HTTP routes with the fail-closed tenant detail audit.
+  7. Closeout docs.
+- **Decisions:**
+  - OQ-1: tenant detail reads are audited, fail-closed (a single REPEATABLE READ transaction; the response is written only after the audit row commits).
+  - OQ-2: no tenant admin identities.
+- **Gates:**
+  - Full CI-style `go test ./...`: 25 packages, 1,023 pass, 0 fail, 33 pre-existing skips.
+  - R packages: 0 skips.
+  - Mutation checks caught every case, including all the fail-closed ones.
+- **Real-binary live check** (throwaway DB and Valkey): auth matrix (30), relay liveness from Valkey, exact `tenant.read` deltas, no identity or secret leaks, controller cert matching `openssl s_client`, bad-input codes. All passed. Cleaned up afterwards.
+
+**Key decisions:**
+- Detail lists keep deleted/revoked items with their status.
+- Audit time window `[since, until)`; case-insensitive email filter.
+- Client device certificate rows have no name; `controller_grpc` entity id is `"controller"`; serials are lowercase hex.
+- Test-only import cycle fixed with an external test package.
+
+**What's next:**
+- Push and open the Phase R PR.
+- Then Phase P (console read pages).
+- Open question: root/intermediate are outside the 8760h `within` cap, so they show in the summary only.
+
+---
+
+## 2026-10-06 — Claude Code (Barath / M2) — Sprint 21 Phase P: Provider console read pages
+
+**What was done:**
+- Branch `sprint21/p-provider-read-pages` (from `fixed-pendings` after #110), 8 commits; not pushed:
+  1. Read wrappers and types.
+  2. Shared paging/expiry/state pieces.
+  3. Relays.
+  4. Tenants (audited detail).
+  5. Audit.
+  6. Certificates.
+  7. Certificates narrow-screen fix.
+  8. Closeout.
+- **Gates:** `npm ci`, lint, `npm test` (374) and build pass; mutation checks caught everything across P1–P6; `admin/` and the controller are untouched.
+- **Live check in Orca** (real controller, throwaway DB and Valkey, dev build with StrictMode):
+  - nav per role;
+  - Relays, Tenants, Audit and Certificates match the API;
+  - tenant detail wrote exactly 1 audit row per visit, per Refresh and per away-and-back, and 0 for the list, hover or focus;
+  - relay-ops Forbidden;
+  - layout clean at 375–1024px after one fix.
+
+**Key decisions:**
+- Home stays the landing page; tenant detail has the "Refresh (records an audit entry)" button; the platform CA note is shown.
+- `bucketFor()` mirrors the server; URL filters are allowlisted; cursors reset on any filter change or navigation.
+- The certificates API has no current or revoked fields, so none is shown.
+- The paging hook is keyed on the history entry so a reset always refetches.
+
+**What's next:**
+- Push and open the Phase P PR.
+- Then Phase K (Sprint 20 cleanup).
+- Formal AT-C/AT-R/AT-P acceptance by Sathiya.
+
+---
+
+## 2026-10-09 — Claude Code (Barath / M2) — Sprint 21 Phase K: Sprint 20 cleanup, certificate audit, S1 security fix
+
+**What was done:**
+- Branch `sprint21/k-sprint20-cleanup`, 9 commits; local, not pushed:
+  1. `8e55a36` K4/K5: `.env.example` scrubbed, CI JWT guard, CRL comment.
+  2. `411e216` K6: `/db` Valkey URLs (test and production), auth integration test runs in CI.
+  3. `7fb0fb7` K1: relay schedules renewal from install time (`relay.crt.meta`).
+  4. `fd8b6d7` K1 test safety: scheduler tests in a killable subprocess.
+  5. `276fb4f` S1 regression test.
+  6. `735d485` S1 fix: relay revocation uses the leaf's real issuer.
+  7. `2c3dda0` K2: `AgentPolicy` (field 18), connector throttle, shield debounce.
+  8. `657fdd0` K2 tests: debounce across reconnect, throttle after send.
+  9. Closeout docs (this entry).
+- K3 confirmed resolved by Phase H.
+- **Certificate lifecycle audit** (read-only; relay, connector, shield, client, controller cert, CAs): found S1 (fixed) plus five unfixed bugs and the CA-expiry question, listed in `Sprint21/path.md` → Post-Sprint Fixes.
+- **Gates:** controller `go test ./...` CI-style 1047 pass / 32 pre-existing skips; relay 90, connector 132, shield 19, client 157 pass; `buf breaking` clean; build and clippy at baseline; every mutation check caught, apart from one residual noted in the phase file.
+
+**Key decisions:**
+- K1 option A; metadata also written at provisioning; missing or bad metadata falls back to `NotBefore`.
+- K2 option A, refined: the controller sends `min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL)` so the backdated `NotBefore` never matters.
+- Runbook §2 keeps the Sprint 20 workarounds, because the live run is pinned to `46ab87d`.
+
+**What's next:**
+- Push and open the Phase K PR (when Barath says so).
+- Sathiya: Phase V live run, then AT-K acceptance.
+- Schedule the open audit findings; CA rotation needs an architectural decision.
+
+---
+
+## 2026-10-17 — Claude Code (Sathiya / M1) — Sprint 21 local acceptance run (API + headed browser)
+
+**What was done:**
+- Ran the Sprint 21 acceptance cases on the local stack, branch `test/merge-verification`. Results are in `Sprint21/Acceptance-Run-Checklist.md`; tools are listed in `Sprint21/Live-Demo-Notes.md` §4 and `~/Desktop/sprint21-browser-automation-tools.md`.
+- **Gates:**
+  - DB-backed Go `internal/provider`, `internal/providerquery`, `internal/middleware`: 175 pass, 0 skip.
+  - provider-console: `npm ci`, `lint`, `build` OK and `npm test` 374 pass.
+  - Rust renewal tests: relay 22, connector 28 + 8 (window/ReEnroll), shield 3.
+- **Live:** 44 scripted HTTP checks plus 35 + 6 headed-browser checks (puppeteer-core + Chrome 155); screenshots in `~/sprint21-ui/`.
+- **Results:** all AT-CORE, AT-H, AT-U, AT-P and AT-DEV items pass, plus R.1, R.6, R.7 and R.8.
+  - `[~]` because the data or lab is missing: R.2–R.5 (0 relays and 0 workspaces locally; Go tests pass), K.1 and K.2 (unit tests pass, live run needs the lab), and V.*.
+  - Not covered: plan AT-C.4 (the browser notice after another admin ends your session).
+
+**Notes:**
+- AT-H.7 passes only with the **uncommitted** `loginLimiterTimeout` change in `controller/internal/provider/auth_handlers.go`.
+- Throwaway operators were left in the local DB; at-op2-152625 and at-op2-152709 are active super-admins.
+- `/provider/relays?cursor=%%%bad` → 200, because Go drops the invalid query pair. Observation only.
+
+**What's next:**
+- Commit the AT-H.7 fix.
+- Phase V live run and live AT-R/AT-K in the lab.
+- Drive AT-C.4 in the browser.
+
+---
+
+## 2026-10-17 — Claude Code (Sathiya / M1) — Sprint 20 close-out (Sprint 21 Phase V paperwork)
+
+**What was done:**
+- **Code under test:** the Sprint 20 live run (2026-09-26/28) was at `5a4f940`, which is code-identical to the Phase V pin `46ab87d` (2 docs-only commits). So the run counts as Phase V.
+- **Run sheet:**
+  - filled the 5 empty reference values;
+  - G4 recorded as not exercised;
+  - `status: failed` (40 PASS, 1 PASS only under a TEMP patch (U2), 3 FAIL: U5 hold / G9 = Finding 15, R2 = Finding 35, 1 not exercised (G4));
+  - added a dated "Close-out — 2026-10-17" section with follow-up status and clean-up.
+- **`Sprint20/path.md`:**
+  - ticked only the rows the sheet proves: Phase A/C/F live, Phase B build gate, 9 of 10 sprint criteria;
+  - :227 (Phase G live) and "all scenarios pass" stay unticked;
+  - the :206 box was reworded to the 1h AT-F.8 target (KI-1);
+  - findings filed in Post-Sprint Fixes and in the A/B/D/F/G phase files.
+- **Re-checks on current code** (`1c164c7`, contains `origin/fixed-pendings`):
+  - full Go gate: 1161 PASS, 0 FAIL, 32 SKIP;
+  - with a seeded `RESOURCE_TEST_SHIELD_ID` on a throwaway DB (since dropped), Finding 35's **4 ACL-coherence tests still fail**;
+  - Finding 36 is fixed (`411e216`).
+
+**Open after close-out:**
+- **F34 (security): a revoked connector keeps serving tunnels.** Connector revocation is at Phase A only.
+- **F33:** fixed in code (bug 3, PR #123); live end-to-end check still pending.
+- **F35:** Fix02 still planned. 3 real extra notifies; 1 outdated test.
+- **G9 / AT-G.6** passed later on newer code (2026-10-10), not at this commit.
+- **Hygiene:** `.worktrees/s20-live`, `.localdev/s20-relay1`, nft `s20test` (needs sudo), lab-host update timers and test objects, and `zecurity-shield` reporting `activating` on this machine.
+
+**What's next:** Barath: Fix02 (F35) and connector revocation Phase B1 (F34). Sathiya: live end-to-end check of shield revocation (bug 3); Sprint 21 live AT-K.
+
+---
+
+## 2026-10-21 — Claude Code — Connector revocation Phase B1 (F34)
+
+**What was done:**
+- **Decisions recorded (2026-10-20):** O9 accepted as D12 (no persistence of terminal states; idle, don't exit). B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. The B1 acceptance list was signed off.
+- **B1 implemented** (`da5b12f`, connector only):
+  - serving-state machine in `AckTracker`: 7 states, D = sent + H, `lost_at`, `{state, D}` published over `watch`;
+  - admission gate on TLS, QUIC (connection refuse, stream reset), relay streams, the `handle_stream` funnel (also re-checked after registration; never `ok:false`) and the shield `control()`;
+  - terminal states stop the reconnect loop and park forever (`Infallible`).
+- **Tests:**
+  - lib 198 → 217, 5 green runs in a row;
+  - scenario4 4/4;
+  - cross-language test passes;
+  - 18/18 mutants killed;
+  - three Phase A tests tightened to the B1 behaviour.
+- **Record:** `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseB1-Implementation-2026-10-21.md`.
+
+**Confirmed by the user (2026-10-21):** `lost_at` follows design §5.2 (not reset on reconnect); §4.4 wording corrected.
+
+**What's next:**
+- **Do not deploy a B1 build to the lab.**
+- Phase M measurements on the Phase A lab build, then B2 (schedule P, session cancellation and shield close, paused-clock tests). B2 needs O5, O6/O7 and O8.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation: Phase M, decisions D13–D18, Phase B2 (unit level)
+
+**What was done:**
+- **Phase M** on a Phase A base (`measure/phase-m` `08ad699`, not merged): R1 idle 1 h, R2 under about 230 Mbit/s for 30 min, R3 five controller restarts.
+  - B p50 about 4 ms, p99 ≤ 79 ms.
+  - Tail = renewal awaited inline (61–80 ms) plus controller DB spikes.
+  - Backoff ratchet confirmed (16 → 60 s).
+  - Results: `Connector-Revocation-PhaseM-Results-2026-10-21.md`.
+- **Decisions (user):**
+  - D13 backoff 1 → 5 s, ±20 %, reset after an ack;
+  - D14 P = 4.5 s;
+  - D15 `Disabled` keeps connections, shield close after 30 s;
+  - D16 full report every P (lightweight request later);
+  - D17 Phase A contract details approved;
+  - D18 renewal head-of-line fix in B2.
+  - Timing values are build-time (`connector/.env` → `build.rs` → `crate::authz_timing`).
+- **B2 unit level** (`63e9e90`, `4f00448`): request schedule, fail-closed enforcer, terminal QUIC close, D13 backoff, concurrent renewal. 233 lib tests; 15/15 mutants killed.
+- **Lab findings:**
+  - client hot-apply admits only one new resource IP (smoltcp `IFACE_MAX_ADDR_COUNT = 2`);
+  - another agent overwrote the shared `/tmp/lab` controller binary.
+
+**State:** branch `feat/sprint20-m1-phase2` is 10+ commits ahead of origin. **Nothing pushed (user rule).** The lab still runs the Phase M measurement build (controller on this PC, `pm-conn` on inkyank).
+
+**What's next:** B2 live acceptance:
+- coordinated B2 build;
+- shield on udaya (sudo), relay on manojinkyank (sudo);
+- `zecurity-client login`, because the session expired;
+- one resource, or `down`/`up` after each change.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation B2 live acceptance: PASS
+
+**Results:**
+- Live L-1…L-8 PASS on controller (this PC), connector inkyank, shield udaya and relay manojinkyank. L-1 was shortened to 15 min / 3 renewals at the user's request.
+- B p99 8.2 ms (Phase M: 66–79 ms).
+- Cut-off at D within 1 ms; shield close at D + 30.00 s.
+- Restarts recover in about 1 s; after a 90 s outage, `Serving` 3.8 s after the controller returned.
+- Revoke: everything closed within 0.3 ms, the process idles. Delete + restart: `UnknownIdentity`, never serves.
+
+**Code:** `c76c783` dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR` (user decision, so the LAN relay could be tested).
+
+**Findings outside B2:**
+- admin UI can't protect a resource created before its shield;
+- relay selector doesn't refresh its list while not attached;
+- sessions invalid after controller restarts;
+- client hot-apply cap;
+- client direct-retry lag (KI-5).
+
+**Lab state:**
+- `pm-conn` revoked (needs a new connector to continue);
+- the nftables block on this PC is still in place (`~/.cache/zecurity-b2/l7-unblock.sh`).
+
+**Nothing pushed.**
+
+## 2026-10-22 — Sprint 20 Fix 06: sessions per login (B2 finding 4)
+
+- **Live repro** (baseline `bf3abed`, local test identity provider, scripted admin logins + the real client daemon):
+  - a second admin login kills the first (`refresh token mismatch`);
+  - a client login kills the admin session;
+  - an admin login kills the client (12:45:10, `refresh session dead`).
+- **Cause:** one refresh slot per user, `refresh:<userID>`, shared by the admin UI and the client.
+- **Fix:**
+  - token `<sid>.<secret>` at `refresh:{<userID>}:<sid>` + index `refresh_sids:{<userID>}`;
+  - access-JWT `sid` claim; `auth.Service.IssueSession` replaces `IssueAccessToken` + `IssueRefreshToken`;
+  - logout ends only its own session, user revocation ends all; legacy tokens migrate on their next refresh;
+  - ADR-006 amended.
+- **Tests:** 7 new; auth/client/identity with DB + Valkey: 161 PASS, 0 SKIP.
+- **Live on the fixed binary, all PASS:** legacy migration, 4 coexisting sessions, controller restart, logout isolation, client gRPC refresh (12:59:36) with the admin sessions intact.
+- Record: `Sprint20/Fixes/Fix06-Session-Refresh-Per-Login.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 07: connector re-reads relay lists while disconnected (B2 finding 3)
+
+- **Cause:** `connector/src/relay_selector.rs` `run()` never read `relay_list_rx` in `Disconnected`/`Backoff`.
+- **Live repro:**
+  - disposable user-level connector `s3-relaylist` enrolled via the admin API;
+  - relay row set active in the local DB + controller restart (`.49` offline);
+  - the baseline got `relay_count=1` and kept logging "list is empty".
+- **Fix:** `wait_backoff` (sleep vs `changed()`), backoff growth kept. 4 new tests; mutation check: the 2 wake tests fail on the old code.
+- **Gate:** cargo test 237 + 4 PASS.
+- **Live on the fix:** wake + dial of `192.168.1.49:9093` in the same millisecond as the push; the empty push is followed too; backoff 40 s → 120 s.
+- Record: `Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 08: shield re-attach lag after a connector Disabled period (B2 finding 1)
+
+- **Re-diagnosis:** the L-3 client journal shows `shield not attached` until 11:21:19. The lag was the shield's 5 → 60 s backoff against the `Disabled` connector's refusals, not the client's KI-5 cooldown.
+- **Live repro:**
+  - local connector + disposable unprivileged shield `s3-shield` (k2-net);
+  - 90 s controller outage (`outage.sh`);
+  - baseline: connector Serving 09:07:10.959 → shield attached 09:07:48.297 (**37.3 s**).
+- **Fix:** `shield/src/control_stream.rs`, a 2 s fixed retry with backoff reset for the connector's "not serving" `Unavailable`; the mid-stream `Status` is kept. 3 new tests (mutant: all 3 fail); shield tests 35 PASS.
+- **Live on the fix:** 09:10:33.973 → 09:10:34.210 (**0.24 s**).
+- Follow-up: shield failover away from a `Disabled` connector.
+- Record: `Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 09: client AnyIP, no resource-IP capacity (B2 finding 5)
+
+- **Cause:**
+  - smoltcp `IFACE_MAX_ADDR_COUNT=2` with one address per resource IP, so hot-add admitted 1 new IP (H1) and startup silently dropped IPs beyond 2;
+  - also found: port-only listeners misrouted shared-port resources (unit test: `10.0.0.3:80` → `10.0.0.1:80`).
+- **Fix:** `configure_capture_iface` (`100.64.0.1` only, `set_any_ip`, default route) + `listen((ip, port))`; planner capacity, `RemoveAddrs` and `addr_capacity` removed; H1 superseded (5-C docs annotated).
+- **Tests:** 5 new; mutants fail; client 252 PASS.
+- **Live:** user-level connector `s3-luffy` on luffy via Orca (no sudo); resources `s3-r1..r4` = SSH on .75/.41/.49/.40. The user ran the sudo install of the fixed client in an Orca terminal.
+  - Baseline: 3 hot-added IPs pending and **direct over the LAN**; startup .75/.49 captured and dropped.
+  - Fixed: hot-add 3 in one pass, all tunnelled; startup all tunnelled.
+- Also: the client session died after unclean power losses because Valkey is RDB-only (noted in Fix 06, not a Fix 06 defect); lab hosts rebooted ~14:06, udaya is now .41 and nika .40.
+- Record: `Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 10 (admin protect gate) + Fix 07 relay attach addendum
+
+- **Fix 10:**
+  - `ResourceDetail.tsx` gated Protect on the bound shield only. The new `lib/protectShield.ts` mirrors `MarkProtecting` (an active shield in the RN with `lanIp == host`, bound preferred) using `GetShields` (+`lanIp`).
+  - 8 tests (the button tests fail on the old page); admin 114 PASS; lint and build clean.
+  - Live via vite + Orca's browser (local test login): `s3-ui` created while `s3-shield` was inactive. Old page: disabled / "No shield installed". Fixed: enabled, and Protect bound `s3-shield` (nft apply failed only because the test shield is unprivileged).
+  - `admin/` change approved by the user.
+- **Fix 07 addendum:**
+  - `pm-relay-manoj`'s cert expired (B2 `RELAY_CERT_TTL=1h`), so heartbeats were refused. The new relay `s3-relay-manoj` was provisioned (provider password) and installed on .49 (sudo), both typed by the user in Orca tabs.
+  - Connector `s3-luffy` (pid 6321, empty list since 10:36) got the push at 10:51:12.750 and registered with the relay at 10:51:12.790: **no restart**.
+- **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
+- Committed locally, not pushed.
+
+## 2026-10-22 — B2 findings full live retest (final build 2f5f411): 6/6 PASS
+
+- **Preflight:** no component changed since its fix commit; HEAD builds were hash-compared with deployed binaries. The connector differed (its build reads `.env`/env), so it was redeployed from the HEAD build on luffy and locally.
+- **Results:**
+  - F4: two admin sessions + client, logout isolation, 3 controller restarts, client proactive refresh 11:04:26, admin B 200 after it.
+  - F1: shield re-attach 1.67 s after `Serving` (first retry exactly Disabled + 30 s, then ~2.4 s steps).
+  - F6: flag off → luffy `relay_count=0`; on → `relay_count=1`.
+  - F5: non-SSH resources (two web servers sharing :18081 + .75:9092): hot-add 2 in 16 ms, all tunnelled, `s3-ok-omarchy` via the tunnel; restart all tunnelled.
+  - F2: unbound `s3-ui2` → Protect enabled → bound to `s3-shield`.
+  - F3: relay stopped (sudo by the user) → connector empty-list backoff → relay started → registered 36 ms after the push, same pid.
+- **Not covered:** a client flow through a root shield end to end (lab root shields are tied to revoked/disconnected connectors).
+- Report: `Sprint20/Fixes/B2-Findings-Retest-2026-10-22.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase D (relay enforcement): DONE
+
+- **Code** (`c27d733`, `1005c12`, `8e09c18`):
+  - relay heartbeat proto fields 8/3;
+  - the controller answers which registered connectors are revoked (Phase C rule, cross-workspace, both heartbeat paths, empty on DB error);
+  - the relay keeps a sticky revoked set, closes listed registrations, and refuses Register (pre-check + post-insert re-check; the ack is delivered before close).
+- **Tests:** relay 110 → 116; controller full suite + DB integration; connector 237; client 265. Mutants 14/14 killed.
+- **Live AD-L:** Phase A (revocation-ignoring) connector `pd-hostile` on udaya, registered with the upgraded manojinkyank relay (binary installed by the user with sudo). Revoked 04:37:40.70 UTC; the relay closed and removed it at 04:38:06.56 (25.9 s). Reconnects were refused by the existing accept-time CRL check, so the Register refusal is defence in depth live. The connector kept running; stopped afterwards.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseD-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase E (shield pruning): DONE
+
+- **Code** (`c9d9cda`):
+  - `PeerConnectorList.revoked_connector_ids = 2`;
+  - the connector fills it from its ACL, drops revoked peers, and sends it for revoked ids alone;
+  - the shield prunes at once from any connector's list, never re-adds while running, keeps the set in memory only (it survives renewal), and dials none if all peers are revoked (`state.json` stays loadable).
+- **Tests:** shield 35 → 40, connector 237 → 239; controller, client and relay green. Mutants 11/11 killed.
+- **Live AE-L:** new `pe-net` with `pe-honest` + `pe-shield` (HEAD builds, user-level on this PC) and the Phase A `pe-hostile` on udaya. Revoked 04:52:59.466; the honest connector's ACL arrived 8 ms later; the shield pruned at 04:53:08.364 (8.9 s); `state.json` = [pe-honest]. In this topology the existing full-list replacement would also have removed it; the Phase E-only cases are unit/mutation-tested. The D21 hostile-only-attachment limit is documented.
+- **Lab hygiene:** a `cargo fmt` run touched unrelated connector/shield files; that churn was reverted before the commit. Test processes stopped; `pe-*` rows remain in the DB.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseE-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F: check + fixes (A option a, B)
+
+- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`d9d4bb6`).
+- **Live check** (`1a1a82d`):
+  - A: deleting a connector cascaded its shield rows without tombstones; the orphan was accepted by a peer connector, bounded by its 7 d certificate.
+  - B: a shield never failed over away from a revoked connector (same "not serving" refusal, so it waited).
+- **Fixes** (`faa957f`, `4994638`):
+  - `deleteConnector` is refused while an active/disconnected shield is attached (one statement; the count is in the error);
+  - a terminal connector refuses/closes shields with "connector is revoked or unknown to the controller";
+  - the shield rotates that head to the tail and retries after 2 s.
+- **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
+- **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
+- Controller now runs `4994638` from `~/.cache/zecurity-f`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F schema: migration 041 (tombstone + no reuse)
+
+- **`041_connector_revocations.sql`** (`3995af6` **[schema: reset DB]**, tests `b2ad199`):
+  - a `connector_revocations` tombstone written by a trigger on every revocation;
+  - no FK, so it outlives a deleted row;
+  - a trigger refuses reuse of a revoked id (insert or update of id);
+  - backfill from revoked rows plus revoked-then-deleted connectors in the certificate history.
+  - Follows 038. No Go changes.
+- **Tests:** 3 DB tests (including the backfill on a DB seeded under 040); full controller suite green. Mutants 8/8 killed (3 test gaps fixed after the first run).
+- **Live** (user chose option 2: apply only 041 to the lab DB, after a pg_dump backup in `~/.cache/zecurity-f`):
+  - the backfill wrote exactly 8 tombstones (4 rows + 4 deleted);
+  - `pf-c4`: revoke → tombstone the same second; delete → tombstone kept; re-insert refused;
+  - no controller errors.
+- **Teammates:** recreate the local DB after pulling. Committed locally, not pushed.
+- **041 real-time run** (same day): `rt-new` (HEAD) and `rt-old` (old Phase A build) revoked together.
+  - Both tombstoned within 0.22 s (DB watcher), identically.
+  - Both deleted → tombstones kept; reuse of both ids refused.
+  - The relay refused re-registration with "connector is revoked" (Phase D, first live sighting).
+  - Deleted connectors get the `unknown` marker, not `revoked` (unchanged controller behaviour; noted).
+
+## 2026-10-23 — Connector revocation end-to-end live run: PASS
+
+- **Setup:** one revocation of `e2e-d` (manojinkyank, carrying 100 % of the client traffic and holding the shield); peer `e2e-e` on udaya; resource on udaya :18090; installed client on this PC; manojinkyank relay.
+- **Results:**
+  - `e2e-d` failed closed in 7 ms;
+  - all traffic moved to `e2e-e` within 1.2 s, with none through the revoked connector afterwards;
+  - the delete was refused while the shield was attached;
+  - the shield moved to `e2e-e`;
+  - the relay dropped it in 26 s;
+  - the delete then succeeded with the tombstone kept, and reuse was refused.
+- **Earlier runs:** run 1 was invalid (client tunnel down, fixed with `zecurity-client up` and left up); run 2 had a topology loop (peer on the client's host).
+- **Open:** one shield failover took 12.9 s (connect to .49:9091 stalled ~11 s, unexplained); isolated single refusals around client ACL hot-applies.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23.md`. Not pushed.
+
+## 2026-10-23 — Connector revocation records brought up to date; PR to fixed-pendings
+
+- **Design doc:** status set to IMPLEMENTED. Phase A error-handling corrections marked implemented (`classifyRefusal`, tests T2/T3/T20–T22). O11–O13 shown as accepted (D19–D21) and implemented. O14 done (039 + 041). Still open: O10, PENDING-18, same-key connector renewal.
+- **Superseded statuses:** Phase A and B1 intermediates, Phase M plan, two pre-design evidence docs.
+- **Sprint 20:** `path.md` Finding 34 marked closed (end-to-end live PASS); the Phase V run sheet follow-up row updated.
+- **Fix09 and phase records:** "not pushed" statuses replaced by the 2026-10-23 push.
+- **PR:** opened from `feat/sprint20-m1-phase2` to `fixed-pendings`.
+
+## 2026-10-23 — Connector revocation live check on installed systemd services + root shield: PASS, 4 findings
+
+- **Setup:** sd-a (inkyank) and sd-b (manojinkyank) installed with `connector-local-install.sh`; sd-shield (udaya) with `shield-local-install.sh` (root, nftables, protecting `sd-web`).
+- **Results:** revoke sd-a → shield refusal ~0 ms, sd-a fail-closed 16 ms, long-lived HTTP/1.1 flow cut 437 ms, shield on sd-b 2.35 s, client back 2.5–2.8 s, relay drop 22.5 s. Delete refused, then allowed; tombstone kept; reuse refused. **Direct LAN access blocked throughout**, including both systemd restarts. No restart loops.
+- **Findings:**
+  - A = Sprint 20 Finding 7 still open: the installer's update timer replaces local builds with GitHub releases;
+  - B **new**: the client resets concurrent connections to the same resource (one listening socket per ip:port; 19/24 parallel failed vs 0/24 sequential). It explains the "isolated refusals";
+  - C: a terminal connector keeps retrying the relay;
+  - D: the shield's shutdown goodbye uses the startup peer list.
+- The 12.9 s shield failover was not reproduced (2.35 s).
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 (end of day) — findings filed; handoff for 2026-10-24
+
+- **Filed in `Sprint20/path.md` → Post-Sprint Fixes:**
+  - F37 (client resets concurrent connections, High), F38–F41 (Low), F42 (unexplained 12.9 s failover, watch), F43 (5-B leftovers);
+  - F7 updated (reproduced again, still open), F19 marked fixed (delete guard), F34 marked closed.
+- **Handoff:** `Sprint20/Handoff-Connector-Revocation-Next-2026-10-24.md` (lab state, PR #133, order: F7 → F37 → low items → Phase V remainder).
+
+## 2026-10-24 — Sprint 20 Fix 11 (F7: the update timer ignored AUTO_UPDATE_ENABLED): FIXED, live PASS
+
+- **Root cause:** four defects.
+  - `--check-update` never read the flag;
+  - the timers had `Requires=` on their service (so enabling a timer ran an update at once);
+  - the services hard-coded `Environment=AUTO_UPDATE_ENABLED=true`;
+  - all four installers enabled the timer unconditionally.
+- **Fix** (`905989a2`, approved design):
+  - fail-safe gate in the connector and the shield;
+  - `Requires=` and the env override removed;
+  - the release installers enable the timer only for true; the local installers always disable it.
+- **Tests:** connector 244, shield 44, `scripts/test-update-timer-gate.sh` 28/28; mutants 10/10.
+- **Live:** f11-a (inkyank) and f11-shield (udaya) installed with the fixed installers → timers disabled, 0 update runs, binaries unchanged after ≥ 2 min; a manual update-service run logged `auto-update is disabled; skipping update check`.
+- **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
+- Committed locally, not pushed.
+
+## 2026-10-24 — PR #133 CI fixed (infra, not code)
+
+- **Cause:** the connector, shield and relay jobs failed at `Install protoc`. `apt-get install` ran without `apt-get update`, and Ubuntu had replaced protobuf `3.21.12-8.2ubuntu0.3`, so the stale runner index returned 404. The client job already updated first and passed. It would affect every PR, since `ci.yml` is the same on `fixed-pendings`.
+- **Fix:** `2352a390`, `apt-get update && apt-get install -y protobuf-compiler`.
+- **Pre-checked locally, crate by crate:** CI's build `--all-targets`, clippy and test for connector (also without `connector/.env`; build.rs uses its defaults), shield, relay and client, each cleaned afterwards (~20 GiB of `target/` freed plus the Go build cache).
+- **Pushed** with Fix 11 (`905989a2`, `3132935d`) after a clean pre-push scan. CI run 40069658645: **7/7 pass**; PR #133 mergeable.
+- `fixed-pendings` gained docs-only PR #132 meanwhile (no overlap).
+
+## 2026-10-24 — Sprint 20 Fix 12 (F37: client reset concurrent connections): FIXED, live PASS
+
+- **Cause:** one smoltcp listening socket per resource, re-armed only after `iface.poll`, so further SYNs in the same poll got a RST.
+- **Fix** (`d654879`, design approved, D-1 = 16): a pool of 16 listening sockets per resource; every accepted one is promoted and refilled each poll; removal handles the whole pool.
+- **Tests:** client 268 (+3); mutants 6/6.
+- **Live** (installed client, resource on udaya .59:18091):
+  - 3×8 parallel 4/24 → **24/24**;
+  - 3×16 8/48 → **48/48**;
+  - 24 sequential 24/24;
+  - 60 s keep-alive hold, 0 failures during the bursts;
+  - RSS 18.6 → 23.0 MB.
+- **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
+- Committed locally, not pushed at the time; pushed later as PR #134.
+
+
+## 2026-10-26 — Sprint 20 Fix 12 rework after the PR #134 review: SYN gate, live PASS
+- Review (Barath, changes requested): a retransmitted SYN could open a second connection (reproduced in the lab harness: 2 relays for one 4-tuple); 16 listeners per resource cost resident memory and per-packet scans; >16 SYNs per poll still reset.
+- Rework (`e87b0b34`): a SYN gate in front of smoltcp's receive path (drops a bare SYN for an owned 4-tuple; holds SYNs beyond the free listeners for the next poll, never resets them) and back to 1 listener per resource. Client tests 272 pass; mutation checks pass.
+- Live (50 resources): 64/64 ×3 and 128/128 parallel (base 2/64, PR 16/64); RSS 34.8 MB after `up` (base 35.2, PR 47.7); `syn_deferred=316`, 0 RST, 0 duplicates.
+- Docs: Fix 12 record (D-2, corrections, review table, AF12-L2), Sprint 9 Phase 1 Post-Phase Fixes, path.md F37. Not pushed.
+
+## 2026-10-26 — Provider console redesign merged; PR #134 merged; Sprint 22 planned (Barath)
+- **Provider console redesign** (PR #136, merged `18459686`): new theme, role-aware sidebar, Overview from existing read APIs, redesigned pages; 380 console tests (+6). Clicked through against a local mock built from the controller's DTOs, status codes and lock-out rules; a real-controller click-through is still to do.
+- **PR #134** (Fix 12 SYN-gate rework) reviewed against the earlier change request, approved and merged (`a9ff29dd`). Client tests 272 pass; CI green.
+- **Decision Record amendment 2026-10-26** (D-30 … D-34): console may create/revoke/delete/drain/resume relays; revoke/delete super-admin only (amends D-05); drain in scope (amends D-21); super-admin TOTP first; tenant suspension stays a separate epic.
+- **Sprint 22 planned:** `.zecurity-obs/Sprint22/` — path.md (phases T → A → {E, X} → D, checklist, test gates, done criteria), five phase files, Acceptance Test Plan. Open questions OQ-1 … OQ-3 (TOTP reset by another super-admin, relay-ops voluntary TOTP, rollout without grace window) to answer before Phase T. No code changed; docs on local branch `docs/sprint22-relay-management-plan`, not committed.
+
+## 2026-10-26 (later) — Sprint 22 OQ-1…OQ-3 decided; Phase T implemented test-first (Barath)
+- Decisions recorded in `Sprint22/path.md`: OQ-1 yes (super-admin resets another operator's TOTP, reason required); OQ-2 no mandatory relay-ops TOTP (voluntary enrolment deferred); OQ-3 no grace period.
+- Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
+- Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
+
+## 2026-10-26 (later) — Sprint 22 Phase A implemented test-first (Barath)
+- Relay admin API hardening (D-17, D-31):
+  - relay-ops can no longer revoke or delete (server-side `decide()` exception);
+  - revoke/delete require `{reason, confirm_name}`, checked against the stored name under the row lock (`RevokeRelayGuarded`);
+  - JSON error codes, UUID check before queries, `already_revoked` / `already_deleted`;
+  - audit IP without port, forwarding headers ignored;
+  - Create: bounded decoding, name/SAN codes, 201 + `no-store`.
+- Tests written first and confirmed failing (10). Gate: `go test ./...` 872 pass / 0 fail / 32 skip (skips outside Phase A); changed packages 0 skips. Console untouched (395 pass).
+- FU-1 recorded: Create audit not transactional (D-14 gap). Runbook revoke command updated to the JSON body. Not committed; branch `sprint22/phase-a-relay-admin-hardening`.
+
+## 2026-10-26 (later) — Sprint 22 Phase A live acceptance: PASS; Phase A closed (Barath)
+- Live run on an isolated stack: controller from `da0a1613`, throwaway DB, Valkey `:6390`, ports 18080/19090; a real relay provisioned. Dev DB untouched; the throwaway DB was dropped afterwards.
+- AT-CORE-2, AT-A1–A7: 38 checks, 0 failures:
+  - relay-ops 403;
+  - validation codes;
+  - real revoke with the serial on `/relay.crl` and spoofed XFF ignored;
+  - repeat 409s;
+  - concurrent revoke one 204 + one 409;
+  - forced audit failure → exact `server_error` and rollback;
+  - create 201 + `no-store`, with no rows on invalid input.
+- No secrets in the controller log.
+- Not observed: connector migration after a revoke (no connector; AT-X4 later). FU-1 stays open.
+
+## 2026-10-26 (later) — PR #138 merged; CLAUDE.md switched to Sprint 22 (Barath)
+- PR #138 (Phase T, `[schema: reset DB]`) merged as `7621e260` after 7/7 CI jobs passed. Everyone recreates their local DB (`042_`).
+- T8: `CLAUDE.md` now names Sprint 22 as active, with the D-30 console write rule, D-31 relay roles, D-32 drain invariants, the Phase T TOTP rules and next schema `043_`. Live AT-T (Sathiya) still pending.
+
+
+## 2026-10-26 — Sprint 20 Fix 02 (F35): FIXED
+- Branch `sprint20/fix02-resource-acl-notify` (from `fixed-pendings` `7621e260`).
+- Code: duplicate NotifyPolicyChange removed from UpdateResource and ForceDeleteResource; RecordAck reports route-class changes so an unprotect completing re-compiles the ACL (Fix02 design step 3, was missing).
+- Tests: Protect test corrected (want 1); ACL-coherence/posture fixture and two resource tests self-provision a migrated throwaway DB + shield — `RESOURCE_TEST_SHIELD_ID` gone. 5 posture + 1 unprotect failures were artefacts of the borrowed lab workspace.
+- CI: ran-check requires 4 of these tests to run and pass.
+- Red 4 fail → green 35/35, also on an empty DB (CI-like); full controller 1387 pass, 0 fail, 2 intentional skips.
+
+- Committed locally, not pushed.
+
+## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS
+
+- **Design approved;** D-1 = A (a tombstoned identity is reported as revoked). One commit per finding:
+  - F38 `14acdf1`: the connector's relay selector stops on a terminal state (aborts its session, clears the attachment).
+  - F39 `0289eba`: the shield's goodbye uses the live peer list.
+  - F41 `f1412b8`: an empty peer list that carried revoked ids is logged at debug.
+  - F40 `95af83e`: `lookupConnector` checks the 041 tombstone (same trust domain) → `revoked`.
+- **Tests:**
+  - connector 250 (+6), shield 49 (+5), controller +2 DB-backed tests;
+  - Go↔Rust marker harness pass (new case);
+  - client and relay not re-run (untouched by this diff);
+  - mutants: 19, 17 killed, 2 documented survivors (wiring that needs live TLS; an equivalent log-only mutant).
+- **Lab:** the relay on manojinkyank was down since boot (`relay.conf` missing). Re-provisioned as `f13-relay-manoj` on **.53** (manoj's IP changed .49 → .53). Controller runs the Fix 13 build.
+- **Live:**
+  - F38: revoke f11-a → selector stopped in the same ms, 0 relay attempts in 150 s.
+  - F39: shield failed over to sd-b in 2.3 s; its goodbye reached sd-b.
+  - F40: deleted f11-a refused with PermissionDenied + `revoked`.
+  - F41: not reproducible in the lab (sd-net has resources).
+- **Lab after:** f11-a revoked + deleted (to uninstall); f11-shield stopped. Build artifacts cleaned.
+- Committed locally, not pushed.
+
+
+## 2026-10-26 — Sprint 20 Fix 14 (+ Fix 15 / F49): live acceptance PASS
+- Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).
+- Live with Fix 14 connector/shield/client: an 11-min byte-checked stream survived a real shield renewal (245 MB in order, max gap 0.09 s, both sides logged the handover); 200 MB each way intact twice (F48+F49); `kill -9` of the shield and a revocation both ended the session within the same second (no hang).
+- Not run live: expiry without renewal, old/new mix (unit-tested). Observation: a killed connector is noticed by the client only after the 30 s QUIC idle timeout (client↔connector path, not Fix 14).
+
+
+## 2026-10-26 — Sprint 20 Fix 16 (F46, F50, F51; F47 kept by design): FIXED, live PASS
+- On `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): F50 stuck 'deleting' resources (delete when the shield is gone; 2 s tombstone sweeper), F51 connector graceful shutdown (QUIC close, shield streams, Goodbye; plus tracing `log_internal_errors(false)` after a live Ctrl-C-under-tee crash), F46 last-connector revoke (`alsoRevokeShields`) + shield back-off. F47: keep the design.
+- Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
+- Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
+- Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
+
+
+## 2026-10-27 — path.md status pass, F20 closed, Sprint 20 Fix 17 (F32): FIXED in code
+- `path.md` statuses refreshed against the code (branch `sprint20/docs-pathmd-status`, local): F33/F28/F35/F36/F7 closed, F15 fixed in code, cert-audit findings merged (#137). F20 was already fixed by bug 3 (`86a436de`); added the "shield deleted without a revoke" test case (mutation-checked).
+- F32 on `sprint20/fix17-revoked-relay-heartbeat` (local, `d89c0310`):
+  - the interceptor adds `zecurity-relay-state: revoked` only when the relay row is revoked/deleted;
+  - the relay ends its heartbeat on that marker and keeps retrying on anything else.
+- Tests: relay 118, controller 1418 pass, 0 fail; 5/5 mutants killed. Live check pending (needs a super-admin with TOTP to revoke a lab relay).
+- Still open: F24, F25, F30 (runbook), F43, F4/F5 controller half.
+
+
+## 2026-10-27 — docs PR: runbook corrections, gqlgen command
+- Branch `sprint20/docs-runbook-corrections` (on top of #144).
+- `docs/sprint20-live-acceptance-runbook.md` §11: `kill -STOP` instead of `pkill -9` (F30, closed).
+- `docs/certificate-audit-live-runbook.md`:
+  - the six Fix 14 corrections (grpcurl import path, unexpired-only CRL, token messages, LAN relay flag, stage G order + `logout` stops the daemon, `buf generate` exclude);
+  - Sprint 22 provider TOTP login;
+  - Fix 16 / F19 guards on connector revoke and delete.
+- gqlgen command corrected in CLAUDE.md, agent.md, studyplan.md and CodeStudy 01; verified it regenerates with no diff.
+- Live F32 + F20 PASS recorded in #144. PRs #143 and #144 opened.
+
+
+## 2026-10-27 — Sprint 20 Fix 18 (F24 + F52 + F53): FIXED, live PASS
+- Branch `sprint20/fix18-resource-host-edit` (local; merged #143–#145 in for path.md).
+- F24: `updateResource` takes host. A protected resource moves to the active shield on the new host, or is refused. Decision (user): protected too; admin UI Host field as an exception to the admin/ rule.
+- F52 (new): editing a protected resource's port never reached its shield; the new port stayed open on the LAN (reproduced live). Fixed: shield-relevant edits re-push the shield.
+- `RecordAck` takes `unprotected` only for an unprotect.
+- F53 (new): the Edit Resource dialog lost typed values on each poll; fixed.
+- Tests: controller 1426 pass; admin 114 pass; 17 mutants killed.
+- Live: port edit applied on the shield in 20 ms; API host move s1→s2 and UI move back s2→s1 with LAN firewall checks; no-shield host refused.
+
+
+## 2026-10-27 — Sprint 20 Fix 19 (F25 + F54): FIXED, live PASS
+- On the #146 branch (local commit `dfcaed60`).
+- F25: Delete opens a dialog that lists the groups losing access and offers Edit instead (user decision).
+- F54 (new): resource list queries never returned groups; now one batched query.
+- Live: the dialog names `cl-group`; Edit instead opens Edit without deleting; a real delete removes the resource and its rule; the Groups column is filled.
+- Tests: controller 1435 pass; admin 114 pass; ESLint clean.
+
+
+## 2026-10-27 — Fix 18 follow-up: acks name their shield and rule (user-approved)
+- Commit `9a535189` on the #146 branch (local).
+- Proto: `ResourceAck` gains fields 6–10 (additive).
+- The shield echoes the rule in every ack; the connector stamps the verified shield id; the controller's `RecordAck` is strict (current shield only; protected/failed only for the current rule), and ignored acks are logged.
+- A shield LAN-IP change now pushes the shield its snapshot.
+- Tests: controller 1435, connector 269, shield 59; mutants killed (one equivalent).
+- Live with all-new binaries: port edit and two host moves reached `protected`; the old shield's late acks were ignored as "wrong shield"; LAN firewall state correct.
+
+
+## 2026-10-27 — Sprint 20 Fix 20 (F43): FIXED, live old-vs-new PASS
+- Client commit `f8906bb0` on the #146 branch.
+- `relay_pool`: an aged relay connection is retired (closed when its last flow ends) instead of closed with its flows on it.
+- `transport`: after a cooldown expires, flows keep the relay and a single-flight background probe re-checks the direct path; max cooldown 2 h → 2 min.
+- Tests: 3 + 6 new; 11 mutants killed; client 282 pass.
+- Live, with the direct path blocked by nft and a new relay `f43-relay-local`:
+  - held flow at 75 s: old reset → new 200;
+  - the flow at cooldown expiry: 2.09 s → 0.07 s;
+  - 3 min with no stall over 1 s;
+  - unblocked → direct again in 99 s.
+- With this, every Sprint 20 finding is closed apart from the close-out paperwork (F4/F5 status, Phase G boxes).
+
+## 2026-10-27 — Sprint 22 AT-T live acceptance: PASS
+- Isolated stack: throwaway DB with 45 migrations, its own Valkey on :6390, controller on :18080; the provider code matches `fixed-pendings` `fcb7e4eb`.
+- Driver `~/.cache/zecurity-phaset/at_t.py` (local): 40/40 API checks, AT-T1…T12 and AT-CORE-1.
+- Console (Orca browser): forced change → QR + setup key → confirm → dashboard; sign out → verify page → wrong code alert → correct code → dashboard.
+- Note: on the 5-wrong-codes lockout, the 6th attempt gets 429.
+- Recorded in Acceptance-Test-Plan → "Live run — Phase T"; Sprint22 path.md V1 ticked. Branch `sprint22/at-t-live-run` (local).
+
+## 2026-10-27 — Security fix B-1: cross-tenant access rules, groups and memberships
+- Branch `security/b1-cross-tenant-isolation` (worktree `../zecurity-b1`, base `fcb7e4eb` = `fixed-pendings`); not committed. Phase E work untouched on its own branch.
+- Confirmed on a throwaway DB with two fabricated workspaces: foreign group read (member emails, resource hosts), foreign rule delete (delayed denial of access), foreign rule/membership writes, foreign connector LAN addresses in the caller's snapshot. No cross-tenant network access (enforcement at the foreign connector holds).
+- Fix: workspace-scoped store mutations and reads, compiler joins require one workspace, foreign = missing with user-safe messages. No migration (schema constraints tracked as FU-2 in Sprint22/path.md).
+- Tests: 8 new DB-backed tests, all failing before the fix; controller 1420 pass / 0 fail / 2 skip (unconditional stubs).
+- Lab DB not checked (no access from this machine). Read-only queries for M1 — each should return 0:
+  - `SELECT count(*) FROM access_rules ar JOIN resources r ON r.id = ar.resource_id WHERE r.tenant_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM access_rules ar JOIN groups g ON g.id = ar.group_id WHERE g.workspace_id <> ar.workspace_id;`
+  - `SELECT count(*) FROM group_members gm JOIN groups g ON g.id = gm.group_id JOIN users u ON u.id = gm.user_id WHERE u.tenant_id <> g.workspace_id;`
+
+
+## 2026-10-27 — Security fix: resource remote-network ownership (from the B-1 review)
+- Branch `security/resource-network-ownership` (worktree `../zecurity-rn`, base `fcb7e4eb` plus the uncommitted B-1 changes applied as a first layer); not committed.
+- Confirmed: create/update accepted another workspace's remote network and returned its name; pre-B-1, the snapshot routed the resource through the foreign network's connector.
+- Fix: the store's INSERT/UPDATE check the network's tenant in the same statement; read joins hide a foreign network's name; one "remote network not found" for foreign, missing and malformed IDs. No migration.
+- Tests: 6 new DB-backed tests (failing before the fix); controller 1426 pass / 0 fail / 2 skip.
+- Lab check for existing rows (read-only, for M1; should return 0): `SELECT count(*) FROM resources r JOIN remote_networks rn ON rn.id = r.remote_network_id WHERE rn.tenant_id <> r.tenant_id;`
+- Review follow-up: discovered-service lookup now workspace-scoped (`getDiscoveredServices` returned any workspace's services; `promoteDiscoveredService` probe closed); tests strengthened (read error fails, compiler positive control, no false concurrency claim). Controller 1429 pass / 0 fail / 2 skip. New open finding FU-3 (`triggerScan` / `getScanResults` not workspace-scoped, likely High) recorded in Sprint22/path.md; not fixed (needs approval).
+
+## 2026-10-27 — Security fix FU-3: scan dispatch and scan results workspace-scoped
+- Branch `security/fu3-scan-authorization` (worktree `../zecurity-fu3`, base `fcb7e4eb`); not committed. Independent of the B-1 and resource-network branches.
+- Confirmed with fake streams and a throwaway DB: `triggerScan` reached another workspace's connector; `getScanResults` returned another workspace's results.
+- Fix: `PushScanCommand(workspaceID, …)` checks the live stream's authenticated tenant; `GetScanResults` joins the reporting connector's workspace; one user-safe error for any unavailable connector. No migration.
+- Tests: 4 new (1 registry, 3 DB-backed resolver), failing before the fix; controller 1416 pass / 0 fail / 2 skip.
+- Open: result key lacks the connector (theoretical squatting by a connector that knows a foreign request ID; needs a migration); no per-request connector binding within a workspace.
+- Review follow-up: refused scan dispatches are now logged server-side with the real reason (`not_connected` / `foreign_workspace`); client message unchanged. Controller 1417 pass / 0 fail / 2 skip.
+
+## 2026-10-27 — Sprint 22 Phase E (relay enrolment from the console): implemented, live AT-E1…E3 PASS
+- Branch `sprint22/phase-e-relay-enrollment` (local, not committed).
+- Controller: shared `pki.IntermediateFingerprint` (shield + connector token now use it); `POST /provider/relays` adds `ca_fingerprint`, `controller_grpc_addr`, `controller_http_addr` (fingerprint read before any write); optional `PROVIDER_RELAY_CONTROLLER_ADDR` / `_HTTP_ADDR` (validated host:port, fail-fast).
+- Console: Add relay (super-admin, relay-ops), SAN checks mirroring the server, one-time token dialog with installer + direct commands, pending hints (list + detail, D-20); API-surface + clipboard guards updated.
+- Gates: Go 1420 pass / 0 fail / 2 skip (unconditional stubs); console 436 pass, lint/build clean.
+- Live on an isolated stack: console-created relay provisioned with the copied command and went active; token gone after close; not logged or audited. Fixed: Add relay kept the previous values after a create.
+- Open: AT-E4/E5 on the lab (Sathiya); FU-1 unchanged; AddOperatorDialog likely has the same stale-form behaviour (not changed).
+
+## 2026-10-28 — Device posture live test; firewall check false-pass fixed
+- Live test on the dev lab (this PC as the client, connector `pos-conn` on inkyank, resource `pos-web` :8811, LAN path blocked by an nft mark rule):
+  - ENFORCE denies a device whose firewall check fails;
+  - a PASS report restores access at the next sync;
+  - the connector refuses a client with a stale ACL;
+  - AUDIT allows access and records the reason.
+- Found: a forward-only `policy drop` made the firewall check PASS while inbound was open (proven from nika). Fixed in `client/src/posture.rs` (`c7d812cb`, branch `fix/posture-firewall-input-chain`, local): the check reads `nft -j` and requires an IPv4 input-hook drop/reject chain. Live re-check: forward-only now FAILs, a real input drop PASSes.
+- Open: `manualTrust` is stored, but no access decision reads it. Also, posture changes take up to 5 min (the report interval).
+
+## 2026-10-28 — ADR-030: admin device approval (per-resource "company device" requirement)
+- Branch `feat/device-approval` (base `84a06023` = main); pushed 2026-10-29. **`[schema: reset DB]`**: new `044_device_approval.sql` (`043_` stays reserved for Phase D).
+- Why: OAuth proves the user, not the machine; posture proves a healthy machine, not ours. `manualTrust` (Sprint 15) was stored but never enforced. Team approved ADR-030 the same day.
+- Controller:
+  - `client_devices.approved_at` / `approved_by`; `approveDevice` / `unapproveDevice` (admin, workspace-scoped, revoked refused, no-op when unchanged), audited as `device.approve` / `device.unapprove` in the same transaction; the device is re-evaluated at once.
+  - Server-side check `zecurity.device.approved`: a profile may require it; a client report of it is dropped, and the evaluator always sets it from `client_devices`.
+  - Evaluations of one device are serialized (process-local lock, D-02), so an in-flight evaluation can't store a stale PASS after an un-approve (from the automated security review).
+- Admin UI: Devices page Approval column + Approve / Remove approval; the profile panels replace the locked Manual Trust switch with "Approved by an admin" (BYOD when off).
+- Tests: controller 1460 pass / 0 fail / 2 skip (unconditional stubs), all DB variables set; 9 mutants killed (overlay, revoked, workspace scope, client self-report, re-evaluation, revoked approvable, resolver scope, no-op re-audit, evaluation lock). Admin 119 tests pass, build green, eslint clean on changed files.
+- **Live test PASS (2026-10-28):**
+  - Setup: controller `822a038b` (this branch; `044` applied by hand to the lab DB), connector on inkyank .75, client `c5e0c5eb` on .164. `appr-company` (:8811) was bound to an ENFORCE profile requiring `zecurity.device.approved`; `appr-byod` (:8812) had no profile. A local nft rule dropped untunnelled traffic to both ports.
+  - Unapproved: :8811 dropped, :8812 200.
+  - First approve (06:45:10): the device's last report was 90 min old (the lab controller had been down), so the immediate re-evaluation stayed FAIL ("posture report is stale"), which is fail-closed as designed. Access came with the next report: the connector got ACL v11 at 06:45:26, the client polled it at 06:46:26, and :8811 returned 200 76.6 s after the approve.
+  - With a fresh report:
+    - remove approval (06:46:49.715): connector ACL v12 in 46 ms; :8811 denied at once (`tunnel denied: access denied`, session ended);
+    - re-approve (06:46:51.934): ACL v13 in 56 ms; :8811 200 at once.
+  - :8812 (BYOD) returned 200 throughout. Audit: `device.approve`, `device.unapprove`, `device.approve`.
+  - Cleaned up: approval removed; profile, resources and connector deleted or revoked; web servers and nft table removed; controller stopped. The lab DB keeps the nullable `044` columns.
+
+## 2026-10-28 — M1: Sprint 22 T-gate PASS, FU-4 fixed, SCIM test DB leak fixed
+- Branch `fix/m1-tgate-fu4` (base `fixed-pendings` `84a06023`); local fixed-pendings fast-forwarded (was 94 behind, 0 ahead).
+- **T-gate PASS** in a worktree at `84a06023` with a CI-style env (empty `ci_empty_admin`, throwaway Valkey `:6390/15`):
+  - Go: gate packages 338 pass, 0 skip; whole controller 1457 / 0 / 2 (unconditional stubs).
+  - Console: 395 pass, lint and build ok.
+  - Schema: scratch-volume init, 45 files, 0 errors; controller starts; TOTP columns present.
+  - Ticked in `Sprint22/path.md`.
+- **FU-4:** `promoteDiscoveredService` creates the resource in the shield's network and notifies the policy; 2 mutants killed.
+- **Test hygiene:** the SCIM harness leaked one dev-Postgres database per test (6 per run, 315 accumulated). The drop now goes through the admin DSN in `t.Cleanup`, and the leaked databases are removed.
+- Controller after both fixes: 1457 pass / 0 fail / 2 skip, no databases left behind.
+
+## 2026-10-28 — M1: Sprint 20 G4 live PASS, FU-1 fixed, TTL/window warning
+- **G4 / AT-G.1 PASS live**, the last open Sprint 20 scenario:
+  - Setup: `CONNECTOR_CERT_TTL=15m` and `CONNECTOR_RENEWAL_WINDOW=20m` force a duplicate ReEnroll right after each renewal.
+  - The connector ignored both duplicates (`renewed moments ago`) and renewed only on the 10-min resend (07:34:31 → 07:44:34). The DB had 3 certificates, with no double renewal.
+  - Sprint 20 "all scenarios pass" is ticked.
+- **FU-1:** relay create is now transactionally audited (row + JTI + audit in one transaction; Valkey JTI written inside and removed on failure). 2 new DB tests; 4 mutants killed.
+- **Startup warning** when `CONNECTOR_CERT_TTL` ≤ `CONNECTOR_RENEWAL_WINDOW`; behaviour unchanged.
+- **Controller suite** (isolated env): 1459 pass / 1 fail / 2 skip. The fail is the outbox reap test, flaky under load: it passes alone 3/3 and is unrelated. Recorded in Sprint22/path.md, not fixed.
+- **Cleanup:** connector revoked; lab, scratch Valkey and test DBs cleaned; no controller left running.
+
+## 2026-10-28 — M1: FU-2 schema workspace consistency (`045_`, `[schema: reset DB]`)
+- Branch `fix/fu2-schema-workspace-constraints` (base `fixed-pendings` `2a09dbbd`).
+- `045_workspace_consistency.sql`:
+  - composite foreign keys for resource → network and rule → resource/group;
+  - `group_members.workspace_id`, filled by a trigger from the group, with keys to groups and users;
+  - scan-result key includes the connector.
+- Go: only `discovery.UpsertScanResults` `ON CONFLICT`; the policy and SCIM writers are unchanged.
+- Tests:
+  - new schema test (7 refusals, cascades, trigger fill);
+  - 5 planted-row tests drop the constraints on their own DB first;
+  - the scan late-report test rewritten for one row per connector;
+  - 7/7 mutants killed.
+- Gate: controller 1485 / 0 / 2; fresh-volume init of 47 files with 0 errors; controller starts on it.
+- Lab check from B-1: the dev DB had no mixed rows before the reset.
+- **Everyone recreates their local DB after this merges.**
+
+## 2026-10-28 — M1: FU-5 workspace keys everywhere (`046_`), scan requests bound to their connector, outbox flake
+- Same branch as FU-2 (`fix/fu2-schema-workspace-constraints`); one DB reset covers `045_` and `046_`.
+- **Catalogue audit:** 28 more single-column keys between workspace-scoped tables. The dev DB had 0 mismatches. 23 are now composite; the 5 to `identity_connections` are excluded (platform connections, ADR-024).
+- **Scan:** `scan_requests` binds each request to its connector; unsolicited reports are dropped; results go with their request and connector.
+- `resources.shield_id` was not a live bug (defence in depth only).
+- **Outbox flake:** not reproduced (55 runs). A transient reaped state was confirmed and made deterministic with a 5 s poll delay; test-only fix.
+- **Gate:** 10/10 FU-5 mutants; controller 1500 / 0 / 2; fresh-volume init of 48 files clean; controller starts.
+
+## 2026-10-28 — M1: FU-2 + FU-5 live check PASS (PR #153)
+- Dev DB reset; branch controller `2d7530a6`; connector on inkyank .75; client on .164 rebuilt for the new platform root (`dev-build.sh`; needs sudo to install).
+- **Scan:** request bound to the connector, results stored, foreign ID refused and logged with no request left.
+- **Policy:** group, member (trigger-filled workspace), resource and rule; tunnel access 200 with the connector's `access allowed`.
+- **Posture:** the evaluation is linked to the report; approval is audited and re-evaluates; firewall FAIL as expected on this PC.
+- **Note:** after a dev DB reset the client must be rebuilt (`client/scripts/dev-build.sh`) and reinstalled, and workspace `xiyo` recreated. This time it was done with a throwaway `bootstrap.Provision` program instead of a Google sign-in.
+
+## 2026-10-28 — Sprint 22 Phase X (relay revoke/delete in the console): implemented, live AT-X2…X5 PASS
+- Branch `sprint22/phase-x-relay-revoke-delete` (from `fixed-pendings` `a3ac8518`; merged with #149, #150, #152, #153 before the PR).
+- Console: shared `ConfirmDangerDialog` (reason counted like the server, exact name), relay detail "Danger zone" (super-admin only; Delete also on revoked and pending relays), `revokeRelay` / `deleteRelay` (body, never URL), error mapping, outcome notice that survives the reload.
+- Found and fixed: provider CORS didn't allow `DELETE`, so Delete would fail in production (console on its own origin). One-line controller change with a test.
+- Gates: console 469 pass, lint/build clean; middleware tests pass. Live (isolated stack, cross-origin): revoke → CRL + audit with reason; delete of a revoked and a pending relay.
+- AT-X4 also PASS live: a real connector on a revoked relay logged "Active relay absent from new list; migrating immediately" and registered with the other relay within ~150 ms; CRL and audit verified. Traffic continuity not exercised (no client tunnel).
+- Note: a Postgres crash during one full Go run (automatic recovery, ~2 min; 1234 databases on the dev server, mostly leaked `resolvers_updsc_*` test databases). The rerun passed in full. Cleanup of leaked test databases pending approval.
+
+
+## 2026-10-29 — M2: Provider feature tracker (PR #155); Sprint 22 Phase D (relay drain and resume) design review and implementation
+
+- Feature tracker F1–F40 (must have / can have, quick-win queue) merged as PR #155.
+- Phase D design review: problem statements P1–P10 reviewed with an external review (ChatGPT). Decided: one shared eligibility predicate (the guard could otherwise count a relay never published); row-lock guard in id order; revoke/delete stay unguarded with an advisory console warning; server-computed `drain_state` because the stored `connection_count` can be ~5 min old (DB-write throttle) and connectors keep old sessions up to 120 s after switching; `connection_count_at` + Valkey write flag (Postgres authoritative, fail-safe to `unverified`); no new rebroadcast (FU-6).
+- Implemented on `sprint22/phase-d-relay-drain`: `043_relay_drain.sql` (`[schema: reset DB]`), `internal/relay/eligible`, drain/resume store + handlers + routes, heartbeat flag, read API fields, console Drain card, badges, Overview item, last-relay warning. No connector, relay or proto change.
+- Independent read-only review: ready with follow-ups. Fixed before commit: post-commit hooks (drain/resume and revoke/delete) detached from the request context; broadcast failures logged with the relay id (`relay.DrainFanout`); inactive draining relay text. Added AT-D12 and hook-ordering tests. Residuals tracked as FU-7.
+- Gates: Go 1520 pass / 0 fail / 2 expected skips; console 507 pass, lint/build clean; `cargo test relay_selector` 27 pass. Mutation checks on the row locks, the shared predicate, the warning condition and the detached hook context.
+- Pending: live AT-D on the lab fleet (M1, V3).
+
+## 2026-10-29 — M1: live end-to-end run of `fixed-pendings` (journeys 1–2) and fixes F-1, O-1, O-2, O-4
+- Record: `.zecurity-obs/Sprint22/Live-E2E-Run-2026-10-29.md` (7 real-user journeys; 1 and 2 done).
+- Lab: controller + client on .164 (ufw on), connectors on inkyank .75 and manoj .53, shield + test web server on
+  nika .44, spare host seechan5 .42 for the relay journey. Branch builds installed with the update timers disabled.
+- **Journey 1 (admin onboarding) PASS; journey 2 (first day) PASS with F-1.**
+- **F-1** firewall posture failed with ufw on an iptables-legacy host → ufw config fallback on legacy hosts only.
+- **O-1** token responses now `Cache-Control: no-store`; **O-2** every workspace admin change is audited
+  (`auditAdmin`, guard test); **O-4** `zecurity-client login` no longer exits non-zero after a good login.
+- **O-3** (clients learn regained access on a 60 s poll) left as is by decision → Sprint22 FU-8.
+- Gates: client 293 pass; controller 1504 / 0 / 2; live re-check of all four PASS. Branch `fix/e2e-live-findings`,
+  pushed 2026-10-29.
+- Seen, to check in journey 3: after `systemctl restart zecurity-client` the daemon loads its state but doesn't
+  bring the tunnel back up until `zecurity-client up`.
+
+## 2026-10-29 — M1: live E2E journey 3 (day-to-day) and fixes F-3, O-5 status
+- Journey 3 PASS with findings: renewals under traffic clean (50/50); connector stop → 1 failed request; start → none;
+  resource rename audited and seen by the client.
+- **F-3** connector restart cut users for 32 s → `SHIELD_NOT_ATTACHED` now resyncs and recovery re-checks a changed
+  map → **3 s** live. **O-5** `status` shows `Tunnel: up/down`.
+- **F-2** slow readers (25 KB/s) cut by the Fix 14 2 s stall limit → FU-9 (per-tunnel flow control); restoring the
+  tunnel at daemon start → FU-10.
+- Client 296 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
+
+## 2026-10-29 — M1: live E2E journey 4 (offboarding) and fix F-4
+- Member removed / device revoked / connector revoked mid-traffic: connector cut in 58 / 56 / 62 ms; connector revoke
+  cost 3 s of failed requests (shield moved to the other connector); a revoked connector stays revoked after a
+  restart; revokes audited. Replacement connector `e2e-conn-manoj2` installed.
+- **F-4** signing in after a device revoke failed and left orphan devices → `login` clears the revoked state and
+  reaches the daemon before enrolling (D-D kept). Live: one `login` restores access; no orphan on failure.
+- **O-6** after a cut, already-buffered data still reaches the app (~24 s at 300 KB/s); low.
+- Client 297 pass; branch `fix/e2e-live-findings` (pushed 2026-10-29).
+
+## 2026-10-29 — M1: live E2E journey 5 (discovery and scan) and fixes F-5, O-7
+- Discovery found the new service within one round; promote → resource in the shield's network → protect, assign →
+  tunnel 200; scan bound to its connector and audited; protected resources invisible to a scan; refused scans leave
+  no request.
+- **F-5** promote naming and repeated-promote error, **O-7** unscannable targets refused up front — fixed, live
+  re-checked. Branch `fix/e2e-live-findings` (pushed 2026-10-29).
+
+## 2026-10-30 — M1: live E2E — lab rebuilt after the reboot and the Phase D reset; journey 6 (workspace isolation) PASS
+- All machines had rebooted; dev DB reset for Phase D `043_`; controller from `fixed-pendings` `710ed362`; workspaces
+  `xiyo` and `e2e-other` re-seeded with a throwaway program (deleted); client rebuilt for the new platform root.
+- seechan5's shield (not ours) uninstalled at the user's request; the unknown shield on this PC left alone; nika's IP
+  is now .33.
+- Journey 6: 51 cross-workspace probes as `e2e-other`'s admin with `xiyo`'s IDs, all refused with not-found answers;
+  `xiyo`'s rows identical before and after; no leaks in lists; no controller errors.
+- **F-6** public `lookupWorkspacesByEmail` enumerates email → workspace with no limit (ADR-009 Tier 3 not built) →
+  FU-11 (user decision: follow-up).
+
+## 2026-10-30 — M1: live E2E journey 7 (provider console relays) and fixes F-8, O-8
+- AT-E4 on real hosts, AT-D1–D5, D7, AT-X refusals, X4, X5 PASS; AT-D6 drain mechanics PASS.
+- **F-8** relay revoke left relay-path clients failing 35 s → client resync timing + revoked relay closes connections
+  and stops; live 3.5 s. **O-8** controller stop deadlock (Control handler without `ctx.Done()`, random select) →
+  fixed; 6/6 stops in 10 s.
+- **F-7** sustained relay-path download torn down (direct path fine) → FU-12; duplicate outbox processor → FU-13.
+- Branch `fix/e2e-j7-findings`, local only.
+
+## 2026-10-30 — M1: F-7 (FU-12) root-caused and fixed; FU-13 fixed
+- F-7: relayed shield-tunnel flows ended without the inner TLS close_notify (Connector `relay_stream` dropped the
+  device stream on a clean end), so the Client reset the app connection and lost the tail of every relay-path
+  response. Fixed (shutdown on clean close, 120 s, cancellable); live 2/2 full 20 MB downloads, 0 errors in 55 flows.
+- FU-13: duplicate `outboxProcessor.Run` removed.
+- Diagnostics kept: relay bridge summary + full error chains, connector copy result, client relay-pool lines.
+
+## 2026-10-30 — M2: Phase D follow-ups FU-6 and FU-7; Sprint 22 doc fixes
+- Branch `sprint22/fu6-fu7-relay-drain-residuals` (from `fixed-pendings` `11d3d3e1`). No schema, connector, relay or proto change.
+- **FU-6:** each connector Control stream records the relay list version last sent; `RunRelayListSync` (60 s) sends the current list only to streams that are behind (missed broadcast, full queue, out-of-order delivery). Not a blind re-broadcast: the connector re-probes on every push.
+- **FU-7:** `EvictRelays` locks in id order (drain/eviction deadlock reproduced on the old statement, gone on the new); `RecordHeartbeat` keeps a newer count; `drain_started_at` from the controller clock after the locks; `GetActiveRelay` skips draining relays; `eligible.Where` never NULL; race tests for drain vs eviction, revoke and resume.
+- Mutation checks: every fix reverted once, its test failed.
+- Gate: Go 1531 pass / 0 fail / 2 expected skips; `go vet` clean.
+- Docs: D-gate status (merged in #156), Done Criteria ticked where met (TOTP, relay roles, reason + name, console write surface, no out-of-scope changes); enrolment and drain criteria wait for AT-E4/E5 and AT-D6 on the lab.
+- Pending (M1, lab): AT-D6 client data plane, AT-E4/E5, AT-X, then V4.
+
+## 2026-10-30 — M2: lab runs AT-D6 (client data plane) and AT-E4: PASS; FU-14 filed
+- **Stack:** throwaway controller, two relays and the console on this PC, with a throwaway DB on the dev Postgres and the isolated Valkey (never `ztna_platform`). Connector, file server and the AT-E4 relay on **manojinkyank** (.53) over SSH in an Orca terminal. Real client on this PC; the operator ran every `sudo` step and the Google sign-ins. `ufw` was opened for .53 only. Torn down afterwards: DB dropped, Valkey cleared, client uninstalled, files removed from .53.
+- **AT-D6 PASS:**
+  - connector migrated 17 ms after the drain;
+  - new connections went to the other relay after the client's 60 s transport sync (+59 s);
+  - the running 1 GiB download **completed** (+442 s);
+  - the console went from `streams_open` to "Drained".
+- **FU-14 (connector, numbered FU-11 in PR #158):** the 120 s drain timeout only aborts the session task; detached stream tasks keep the old relay connection open, so running streams aren't cut. Not fixed: D-32 rules out connector changes this sprint.
+- **AT-E4 PASS:** the console's install-as-a-service block ran unchanged on .53; the relay went pending → active; its token was used up (JTI gone). AT-E5 part: delete of a pending relay and add again works. The expired-token hint still needs a 24 h token.
+- **Setup notes for the next lab run:**
+  - `CONTROLLER_HTTP_URL` must be `http://localhost:8080`: Google rejects a private-IP client callback.
+  - The CLI login doesn't send invite tokens, so the user must create the workspace through an admin sign-in.
+  - Python's `http.server` ignores `Range`.
+  - Provider console sessions expire within minutes.
+  - The install dialog's token is lost when the dialog closes.
+- Pending: AT-E5 expired-token hint (24 h), V4 final run; manojinkyank still has the AT-E4 relay service installed until the operator removes it.
+
+## 2026-10-30 — M2: #159 conflicts resolved and merged; drain text fixed (#160); V4 final run PASS
+- **#159 (Sathiya, live E2E journeys 6–7):** merged `fixed-pendings` into his branch at Barath's request.
+  - The FU-6 relay-list sync worker now starts with `workers.Go` (the combined code didn't compile without it).
+  - #158's drain-timeout finding was renumbered **FU-11 → FU-14**, because #159 uses FU-11 to FU-13.
+  - Gates: Go 1541 / 0 / 2; relay 119 and connector 275 pass. Merged as `4c5f947d`.
+- **#160:** the console's drain card, dialog and `streams_open` line no longer promise a 120 s cut (FU-14).
+- **V4 targeted final run: PASS.**
+  - Automated gates: Go 1541 / 0 / 2, console 507, `relay_selector` 27, fresh DB 49 files.
+  - Live: TOTP gate, relay-ops limits and validation codes, console install on .53 (E4), drain (connector 42 ms, last-eligible 409, resume), console revoke (CRL, audit, relay stops itself in 10 s) and delete, FU-6 worker, scope checks, AT-E5 hint.
+- **Observations, not failures:**
+  - A host with another relay's leftover certificate state refuses to start the new relay. Safe, but the installer doesn't warn.
+  - With no open streams, a drained relay is dropped at once. One new connection still sent to it fails, and the client recovers in 18 ms (early resync).
+- **Kept for 2026-10-31:** V4 DB and `~/.cache/zecurity-v4-at-e5` (env, `v4-target` token, TOTP helper). After 16:34:25 IST, check that enrolment with the expired token is refused, then tick V2, V4 and "All scenarios pass", and clean up.
+- **Operator to clean on .53:** the relay service and its state (`sudo systemctl disable --now zecurity-relay; sudo rm -f /var/lib/zecurity-relay/pki/*`).
+- **Operator to clean on this PC:** the client (uninstall script) and the `ufw` rules.
+
+## 2026-10-30 — M1: D21-R (hostile connector at the shield) implemented
+- Reviewed Barath's D21 note (PR #135), replied, then reopened D21 and authorised the build (comment on #135). Decisions: generation reset on connector switch; peers only from a controller-signed list (Workspace CA key, per-shield snapshot delivery); A′ CRL on the shield stream; D tunnel allowlist.
+- Branch `fix/d21r-shield-hostile-connector` (off `fixed-pendings`), commits for a1; a2 (+ watermark, ack-path and coalescer fixes); A′ (+ review fix); D; S signed resource sets (supersedes a1); docs. Not pushed. Controller 1536/0/2, connector 270, shield 79; mutant-checked.
+- Record: `.zecurity-obs/Sprint20/Fixes/connector-revocation/D21R-Shield-Hostile-Connector-Design-2026-10-30.md`. Next: live check on the lab (needs new controller, connector and shield builds), then push + PR into `fixed-pendings`.
+
+## 2026-10-31 — M2: FU-11 workspace-discovery rate limiting (mitigation)
+- Branch `fu11/discovery-rate-limit` (from `fixed-pendings` `770193e1`). Spec approved by Barath (with a ChatGPT review); decisions A–D.
+- New package `internal/discoverylimit` (the existing `internal/discovery` is network/service discovery and was left untouched).
+- **Shared budget:** one per-IP budget (30/60 s, IPv6 /64) for `lookupWorkspacesByEmail`, `lookupWorkspace`, `lookupIdpConnections` and `GET /workspaces/{slug}/auth`.
+- **Email budget:** 5/h per HMAC'd canonical email.
+- **Enforcement and responses:** charged per resolver run; whole-response refusal; 429 + `Retry-After`, 503 fail closed; optional trusted proxies.
+- **Telemetry:** `discovery_requests_total`, `discovery:` logs without emails.
+- Found during testing: aliases let one public request run many lookups, and signed-in users had no limit either. Both are covered now.
+- Smoke test of the real binary on a throwaway DB:
+  - shared budget across GraphQL and REST → 429;
+  - Valkey down → 503 on both routes;
+  - bad proxy config refuses startup;
+  - no email in logs.
+- Docs: ADR-009 section (status kept *proposed*), `docs/workspace-discovery-rate-limit.md`, FU-11 → Mitigated.
+- **Open:**
+  - email-verified discovery decision before GA;
+  - admin login "too many attempts" message (`admin/`);
+  - `initiateAuth` limit (ADR-009 Tier 3);
+  - provider login adopting trusted proxies;
+  - `.env.example` lines, added by Barath.
+
+## 2026-10-31 — M2: small fixes, S4: relay installer and leftover state
+- Branch `fix/relay-installer-stale-state` (from `fixed-pendings` `a6b83625`).
+- `scripts/relay-local-install.sh` `check_existing_state` reads the existing certificate's relay ID before installing anything:
+  - same ID: kept;
+  - another or unreadable certificate: stops and names both IDs;
+  - `RELAY_RESET_STATE=1`: stops the service and moves the state to a private backup (never deletes a key).
+- Test `scripts/test-relay-installer-state.sh`: 18 checks, no root; 5 mutants killed.
+- Small-fix plan agreed with Barath:
+  - S4 (this), then S2 (relay forwards a reset) and S3 (FU-14 connector drain timeout), as post-sprint fixes;
+  - S1, S5 and S6 (D21-R follow-ups) left to Sathiya.
+
+## 2026-10-31 — M2: small fixes, S2: the relay forwards a reset (FU-15 relay path)
+- Branch `fix/relay-forward-reset` (from `fixed-pendings` `a6b83625`). From the #162 review: the relay finished the client-bound stream gracefully after the connector's reset, so a revoked session's buffered tail still arrived.
+- `pipe_streams` now copies with quinn's own read/write (keeps reset and stop codes). A failed bridge aborts all four halves with the peer's code (RVKD reaches the client), or with `RLAB` for other failures. Clean ends are unchanged.
+- 4 new tests on a real QUIC bridge; the 3 abort tests failed before the fix (the client got 1.27 MB, then a clean EOF). Relay 123 pass; 3 mutants killed. Not live-tested (pairs with #162).
+
+## 2026-10-31 — M2: small fixes, S3: FU-14 the drain timeout cuts
+- Branch `fix/connector-drain-timeout-cut` (from `fixed-pendings` `a6b83625`).
+- `RelayDrainTracker` keeps the relay connection (`RelayHandler::run` attaches it). `cut()` closes it with `DRNT`. `drain_old_relay` cuts on timeout; a completed drain closes nothing.
+- 5 new tests, one through the real `RelayHandler`. Connector 277 pass; 3 mutants killed.
+- Tooling slip: my first `cargo fmt` reformatted 13 unrelated connector files. They were restored before anything was committed; only my four files are changed.
+- Open: console drain text can name 120 s again once connectors run this (decision for Barath); not live-tested.
+
+
+## 2026-10-31 — M2: small fixes merged; AT-E5 PASS; Sprint 22 closed
+- Merged #164 (S4 relay installer state), #165 (S2 relay forwards reset), #166 (S3 / FU-14 connector drain-timeout cut); doc conflicts (append-only, `path.md` + Session Log) resolved on the branches, entries kept in merge order. All CI green (merged before CI had finished; checked afterwards).
+- AT-E5 expired-token refusal: 16:35:31 IST, 66 s after the token's `exp`. Kept V4 controller + `ci_valkey_6390`; the relay verified the CA fingerprint, then Provision got `PermissionDenied: invalid provisioning token`; no certificate; `v4-target` stayed `pending`. **PASS.**
+- Cleanup: V4 DB dropped (removes `v4-target`), `~/.cache/zecurity-v4-at-e5` removed, isolated Valkey stopped. Remaining DBs: `ztna_platform`, `ci_empty_admin`, `postgres`.
+- Ticked V2, V4, AT-E5 and "All scenarios pass" in `Sprint22/path.md`. Sprint 22 closed.
+- Still open: lab checks for S2 (with #162) and S3 (AT-D6 drain rerun); #162 awaits Sathiya's client fix; FU-8/9/10; FU-11 leftovers.
+
+## 2026-11-02 — M2: FU-10 the client restores the tunnel after a restart (not committed)
+- Branch `fix/fu10-restore-tunnel` (from `fixed-pendings` `93f1a888`). Barath chose option (a): remember the last state.
+- `tunnel_wanted` in the encrypted client state: set by a successful `up` and by login, cleared by `down` and by a revoke/re-enroll marker. At start the daemon restores the tunnel through the normal `up` path, retrying 2 s → 60 s while wanted and the device is active; `down` and restore attempts are serialized; `status` shows "restoring after restart (last attempt: …)".
+- 10 new tests; client 307 pass; clippy no new findings; 8 mutants killed (the first run hung on 3 of them, so every restore test now has a 5 s bound; one mutant first survived and the test was fixed).
+- **Live run (same day): PASS.** Client on manojinkyank (.53) as the system service; throwaway controller, connector and a Docker-network resource (only reachable through the tunnel) on this PC.
+  - `systemctl restart`: restored in 35 ms.
+  - Real reboot while up: restored on attempt 3, +6 s after start (the network wasn't ready for the first two).
+  - `down` + real reboot: stayed down, no restore attempt.
+  - Plain `up` + restart: restored.
+  - Torn down (DB, Valkey, client, firewall rules).
+
+## 2026-11-02 — M1: workspace RBAC epic (PENDING-19), approval + R1 backend
+- Approved the design: O-1→R-9 (no self group change unless Admin), O-3→R-10 (invites Admin-only), O-4→R-11. The O-4 code check found SCIM could suspend or delete the last Admin through DELETE, PATCH `active=false` and connection disable, with no guard. Decision: refuse only when it would leave zero active Admins.
+- R1 built on local branch `feat/workspace-rbac-r1` (from `fixed-pendings` `b817cee8`, note commits cherry-picked). Not pushed. PR needs `[schema: reset DB]`.
+  - Migration `047_workspace_roles.sql`; `internal/rbac` (capability table, cached live `Checker`, last-Admin lock); `@requires(capability:)` on all 73 ops; `RequireCapability` on the 3 REST routes (`RequireRole` removed); `setMemberRole`; R-9; R-11 in SCIM `Deprovision`/`Update` and `DisableConnection`.
+  - `schema_authz_test.go` now globs every `*.graphqls`; the old list missed `idp.graphqls` and `posture.graphqls` (~26 ops never checked).
+- Bugs found and fixed before commit, each test-first:
+  - role cache could be repopulated with a stale role by a lookup racing an invalidation (generation counters);
+  - non-canonical UUID spellings (upper case, `{…}`) bypassed the self-change, R-9 and last-Admin guards, because Postgres matches them and the guards compared raw strings.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; only the 2 pre-existing unconditional skips), and `scripts/resource-test-fixture.sh` (pass).
+- O-6→R-12 (no resource access change on your own group unless Admin) and O-7→R-13 (no self device approval unless Admin), decided and built, tested. Shared `ztna_platform` recreated with consent (047 applied, no init errors); lab data was wiped. `/auth/refresh` keeps the old display role claim. `admin/` generated types are stale until R2.
+- R2 (admin UI) built, same branch, commit `7ff57371`:
+  - console access = `CONSOLE_READ` (one helper, three call sites); write controls hidden per capability across all pages and modal triggers; the self rules R-9, R-12 and R-13 shown in the UI; `ManageRoleDialog`;
+  - gate: `npm run codegen`, `npm run build`, `npm test` (25 files, 195 tests incl. a Viewer sweep over 18 page states, mutation-checked), lint unchanged (17 pre-existing).
+  - Known: the console reads `me.capabilities` once per load; a user demoted mid-session keeps their controls until reload (server refuses every call). R3 should expect this.
+  - The parity test reads `controller/graph/*.graphqls` (vitest `server.fs.allow`), so the UI map can't drift from the server's `@requires`.
+- R3 live run (local stack, local test login), controller and console from this branch:
+  - API checks: 41/41 PASS (per-role allowed/refused, REST 200/403, R-8/9/10/12/13, mid-session demotion with the same token, self-change and last-Admin, 8 audit rows);
+  - UI pass: PASS after one fix. The sidebar hid Devices/Policies/IdP/Access Log from non-Admin roles; fixed with a test that fails on the old code;
+  - Follow-up fixed: no toast container was mounted (every toast() was dropped); a capability refusal now shows a toast and re-reads `me`, so controls follow the live role without reload. Live-checked. (The first "silent" observation was partly a test-script slip: the click hit a disabled Create button.)
+  - R-11 (SCIM) not live-checked: no SCIM users; covered by DB tests.
+- Further fixes, same PR, each test-first and live-checked:
+  - invited join activates the membership and accepts the invitation;
+  - 24 silent mutation hooks now toast, with a guard test;
+  - **ErrorPresenter leak:** gqlgen-wrapped resolver errors were passed through, so raw DB/constraint text reached clients; now masked;
+  - group names: blank refused, duplicate gets a clear message.
+- Gate: controller full `go test` (exit 0, 2 pre-existing skips), fixture suites pass; admin 28 files / 210 tests (one run timed out under load while Go tests ran; clean when rerun alone), build passes, lint unchanged.
+- Small follow-ups (local branch `fix/rbac-small-followups`, on top of #168):
+  - 14 user-actionable resolver errors became user errors (the presenter fix had hidden them);
+  - role labels in GroupDetail;
+  - `/auth/refresh` stamps the current role.
+  - The Users "active" pill needed no change: `users` lists only active users. A list of invited-not-joined people would be a feature.
+  - Gates green; live-checked.
+- Live round 2 (no SCIM), all PASS:
+  - 22 role × endpoint checks (posture, identity, shield-token REST, invitation REST);
+  - the 30 s cache backstop for a role changed in SQL;
+  - demotion to Member with a page open redirects to `/install`;
+  - 13 checks on real enrolled client devices, including one fully connected client (root daemon run by the user in an Orca terminal; `zecurity0` up; then stopped and removed; the system client service was untouched).
+  - Found: client enrolment requires an active membership, so pre-fix sign-in joiners could never enrol a client. The invited-join fix in #168 resolves it for new joins.
+
+## 2026-11-02 — M2: FU-8 client wake-up hints (PR #170)
+- Branch `fix/fu8-client-wake-hints` (from `fixed-pendings` `11e2ed94`, after #169). Barath chose option B: an advisory `WatchChanges` stream; the snapshot RPCs and the 60 s poll stay authoritative.
+- Verified first:
+  - device approval already bumps the ACL version, only on a posture transition, so no approval change was needed;
+  - snapshot versions equal the notifier counters;
+  - `transport.Notifier` had no hook;
+  - the stream interceptor demanded a SPIFFE cert from every stream.
+- Built:
+  - additive proto RPC;
+  - `internal/changehint` hub (1-slot wake per stream, one stream per device, never blocks);
+  - `AddChangeListener` on both notifiers (after the unchanged connector push hook);
+  - the stream handler: subscribe then read, coalesced and deduplicated, 60 s device re-check plus heartbeat, ends at token expiry, on a directive, when replaced, at shutdown;
+  - `AccessTokenClaims.ExpiresAt`; interceptor skip for ClientService streams;
+  - client `change_watch.rs` (jittered backoff 1–60 s, 150 s idle limit) waking the existing scheduler.
+- ADR-018 amended; ADR-016 and ADR-017 notes; the 120 s drain cap unchanged.
+- Gates:
+  - Go 1605 pass / 0 fail / 2 expected skips; build and vet clean; `-race` clean on the six touched packages.
+  - Client 317 pass; no new clippy findings.
+  - 15 mutants killed (10 controller, 5 client). Pre-lab review fixes: a device revoke now ends the stream on the wake (every revoke path notifies the policy plane), and `RENEW_SOON` no longer ends it.
+- A mid-run `git stash` (for a clippy baseline) overlapped the first Go run, so that run was discarded and the suite re-run clean.
+- Live check 2026-11-02 PASS (details in `Sprint22/path.md` → FU-8):
+  - re-add → hint 49 ms, resource back 83 ms;
+  - relay drain → hint 41 ms, new connections on the other relay from 78 ms; a running download was cut at the unchanged 120 s drain timeout;
+  - restart: counter reset handled; with no hint stream (base controller) the 60 s poll converged in 55 s;
+  - revoke: connector refused in 85 ms and the stream closed at once;
+  - the 10 s shutdown is the existing O-8 issue (the base controller takes the same).
+- Lab torn down: DB dropped, Valkey db7 flushed, relays, controller and the .53 connector/file server stopped and removed, lab secrets deleted. Pending at commit time (sudo not entered): uninstalling the local client service and deleting the two `fu8-live` ufw rules.
+
+## 2026-11-02 — M1: geofencing (PENDING-20), design approved + G1a backend
+- Design note PENDING-20 approved (G-1 … G-9):
+  - a GeoIP country check, server-attested from the controller's gRPC peer address;
+  - allow and deny lists;
+  - DB-IP Lite;
+  - unknown location denies;
+  - observe on posture reports and the 60 s ACL poll;
+  - store the country and the /24 or /48 prefix only;
+  - a dev-only override;
+  - deny-only rules allowed.
+  - Device OS location (G2) is a later note.
+- G1a built on local branch `feat/geofencing-g1` (from `fixed-pendings` `768a9736`):
+  - migration `048_geofencing.sql`;
+  - `internal/geoip`;
+  - the posture country check;
+  - RPC observation and re-evaluation on a move;
+  - the GraphQL fields.
+  - No connector, relay, shield or proto change.
+- Gate: `go build`, `go vet`, full `go test -count=1 ./...` with all DB vars (exit 0; 2 pre-existing skips), `scripts/resource-test-fixture.sh`, admin 210 tests.
+- Dependencies were pinned so none shared moved: `maxminddb-golang/v2` v2.0.0 (v2.9.0 would have upgraded `x/crypto`, `x/net`, `x/tools` and others); `mmdbwriter` v1.1.0 is test-only.
+- G1b built (same branch):
+  - the country rule editor in Create and Edit device profile (Edit uses the in-place update);
+  - a profile-list summary;
+  - the Devices page Country column;
+  - the DB-IP credit.
+  - Admin gate: 29 files / 217 tests, build passes, lint unchanged (17).
+- Found while building: the profile modals rendered every server-side check as the "Approved by an admin" switch, so the country check needed its own editor before G1a could ship.
+- G1c live run PASS:
+  - real DB-IP Lite database and metric;
+  - a real client gained the resource in IN and lost it within 1 s of the switch to CN;
+  - the console editor's in-place update restored access in 8 s, with an audit row;
+  - the Devices page shows the country;
+  - the override is ignored with `ENV=production`.
+- Local DB was reset for migration 048 (with consent).

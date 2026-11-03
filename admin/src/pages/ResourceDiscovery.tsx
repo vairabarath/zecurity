@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { DiscoveredServicesPanel } from '@/components/DiscoveredServicesPanel'
 import { ScanModal } from '@/components/ScanModal'
+import { Capability, useCan } from '@/lib/capabilities'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -103,6 +104,7 @@ export default function ResourceDiscovery() {
   const [query, setQuery] = useState('')
   const [selectedShieldId, setSelectedShieldId] = useState<string | null>(null)
   const [scanTarget, setScanTarget] = useState<{ networkId: string; connectorId: string } | null>(null)
+  const canWrite = useCan(Capability.NetworkWrite)
 
   const { data, loading } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
@@ -306,6 +308,7 @@ export default function ResourceDiscovery() {
                       </span>
                     </div>
                     <div className="text-right">
+                      {canWrite && (
                       <Button
                         type="button"
                         size="sm"
@@ -316,6 +319,7 @@ export default function ResourceDiscovery() {
                         <Radar className="h-4 w-4" />
                         Scan Network
                       </Button>
+                      )}
                     </div>
                     <div className="text-right">
                       <Link to={`/connectors/${connector.id}`} className="inline-flex items-center gap-1.5 text-[12.5px] font-bold text-primary transition hover:opacity-80">

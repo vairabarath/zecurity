@@ -8,12 +8,22 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
+	github.com/maxmind/mmdbwriter v1.1.0
+	github.com/oschwald/maxminddb-golang/v2 v2.0.0
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.42.0
 	github.com/valkey-io/valkey-go v1.0.74
 	github.com/valkey-io/valkey-go/valkeycompat v1.0.74
 	github.com/vektah/gqlparser/v2 v2.5.33
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
+)
+
+require (
+	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/urfave/cli/v3 v3.8.0 // indirect
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 )
 
 require (
@@ -74,7 +84,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.3 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/sosodev/duration v1.4.0 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
@@ -85,11 +95,13 @@ require (
 	go.opentelemetry.io/otel v1.41.0 // indirect
 	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/crypto v0.50.0
+	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sync v0.20.0
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+tool github.com/99designs/gqlgen

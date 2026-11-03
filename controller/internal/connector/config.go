@@ -12,4 +12,8 @@ type Config struct {
 	GRPCPort            string
 	JWTSecret           string
 	RenewalWindow       time.Duration
+	// ShieldRenewalWindow is sent to the Connector in AgentPolicy when its
+	// Control stream opens (shield.Config.EffectiveRenewalWindow). Zero or
+	// sub-second: not sent; the Connector keeps its default window.
+	ShieldRenewalWindow time.Duration
 }

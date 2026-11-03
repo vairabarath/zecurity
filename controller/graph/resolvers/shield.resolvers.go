@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -60,6 +61,7 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 		return nil, fmt.Errorf("generate shield token: insert shield: %w", err)
 	}
 
+	r.auditAdmin(ctx, "shield.create", "shield", shieldID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})
 	// Token minting is lazy: the create path only reserves the pending row with a
 	// placeholder connector. The real connector selection + enrollment token
 	// (JWT + Redis jti + install command) happen on demand in the REST endpoint
@@ -73,23 +75,17 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
-	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
-		`UPDATE shields
-		    SET status = 'revoked', updated_at = NOW()
-		  WHERE id = $1
-		    AND tenant_id = $2
-		    AND status IN ('active', 'disconnected')
-		 RETURNING id`,
-		id, tc.TenantID,
-	).Scan(&discardedID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("revoke shield: shield not found or not in revocable status")
+	// Certificate audit bug 3: the revocation, its tombstone and its
+	// propagation work commit together; the dispatcher then invalidates the
+	// policy and tells the workspace's connectors.
+	if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, id); err != nil {
+		if errors.Is(err, shield.ErrNotRevocable) {
+			return false, apperr.UserErrorf("revoke shield: shield not found or not in revocable status")
 		}
-		return false, fmt.Errorf("revoke shield: %w", err)
+		return false, err
 	}
-
+	r.auditAdmin(ctx, "shield.revoke", "shield", id, nil)
+	r.ShieldRevocations.Wake()
 	return true, nil
 }
 
@@ -108,11 +104,12 @@ func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, e
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("delete shield: shield not found or must be revoked before deletion")
+			return false, apperr.UserErrorf("delete shield: shield not found or must be revoked before deletion")
 		}
 		return false, fmt.Errorf("delete shield: %w", err)
 	}
 
+	r.auditAdmin(ctx, "shield.delete", "shield", id, nil)
 	return true, nil
 }
 

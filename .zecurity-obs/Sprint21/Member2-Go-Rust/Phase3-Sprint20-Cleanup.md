@@ -1,0 +1,230 @@
+---
+type: phase
+member: M2
+person: Barath
+sprint: 21
+phase: 3
+execution: K
+title: Sprint 20 Cleanup (KI-1, KI-2, KI-3, .env.example JWTs)
+status: done   # 2026-10-09, branch sprint21/k-sprint20-cleanup (8e55a36 … 657fdd0), not yet pushed
+depends_on: [1]   # after H (both edit controller/.env.example); scheduled after U
+schema_change: false
+tags:
+  - rust
+  - go
+  - relay
+  - connector
+  - shield
+  - hygiene
+  - provider-dashboard
+---
+
+# Phase 3 (K) — Sprint 20 Cleanup
+
+> **Source:** `.zecurity-obs/Sprint20/path.md` → **Known Issues** (KI-1 … KI-3), and runbook §2 (`docs/sprint20-live-acceptance-runbook.md`).
+> **Ordering:** Barath's third phase, after H and U. It depends only on H, because both edit `controller/.env.example`. K1 and K2 don't depend on H or U and can be picked up whenever there's a gap. **If the sprint runs short, K2 (KI-2) is the item that may move to Sprint 22.** It's low-risk and unrelated to the console.
+
+## Problem (verified)
+
+### KI-1 — Relay short-TTL renewal loop
+
+- **Cause:** the controller issues relay certificates with `NotBefore = now − 1h` (`controller/internal/pki/relay.go:61`).
+  - The relay scheduler computes `lifetime = not_after − not_before` and renews when 2/5 of that remains (`relay/src/renewal.rs` `plan()`, `cert_manager.rs:43,174`).
+  - So `renew_at = issue + 0.6·TTL − 24 min`.
+- **Effect:** at `RELAY_CERT_TTL` ≤ 40 min the relay renews immediately after every install, in a continuous `RenewCert` loop.
+  - The 30-day default is unaffected.
+  - The unit test for the "~9 min at 15m" case assumes no backdate.
+- This is the same class of bug as Sprint 20 PF-1 (controller rotator).
+
+### KI-2 — Shield renewal window not wired; shields renew every ~15 s at TTL ≤ 48h
+
+- **The connector's window is hard-coded:** it decides a shield needs renewal with `DEFAULT_RENEWAL_WINDOW_SECS = 48h` (`connector/src/agent_server.rs:33`, `cert_needs_renewal`).
+- **The controller's value is unused:** the controller parses `SHIELD_RENEWAL_WINDOW` (`cmd/server/main.go:202` → `internal/shield/config.go:25`), but nothing uses it.
+- **No throttle on the connector:** it sends `ReEnroll` on **every** shield health report (15 s, `shield/src/control_stream.rs:28`) while the shield is inside the window.
+- **No debounce on the shield.**
+- **Effect:** with `SHIELD_CERT_TTL` ≤ 48h, the shield renews and reconnects its control stream about every 15 s.
+
+### KI-3 — Dev provider redirect URI
+
+- `controller/.env.example` sets `PROVIDER_GOOGLE_REDIRECT_URI=http://localhost:8080/auth/callback`. That is the **tenant** callback, so provider login never yields a token.
+- **Superseded by D-24 (amendment 2026-09-26):** provider login is now local (email + password), and Phase H **removes** the provider Google OAuth path and the `PROVIDER_GOOGLE_REDIRECT_URI` variable. There's no redirect URI left to fix. K3 only confirms the variable is gone from `.env.example` and closes KI-3.
+
+### Committed JWTs in `.env.example`
+
+- Leftover `sudo … ENROLLMENT_TOKEN=eyJ…` install commands, with real-looking enrollment JWTs and LAN IPs, are committed in `controller/.env.example`, around lines 70–85.
+- These are dev enrollment tokens (24 h TTL), long expired, so no rotation is needed. They're still a hygiene and secret-scanning problem.
+
+### Minor
+
+- `connector/src/crl.rs:30` says CRLs refresh "every 5 minutes". The real cadence is 60 s + 0–15 s jitter (`main.rs:193-206`).
+
+## Goal
+
+- Relay renewal schedules correctly for any TTL.
+- Shield renewal follows the configured window and never churns.
+- The dev env template works for provider login and carries no tokens.
+
+## Files
+
+| File | Change |
+|------|--------|
+| `relay/src/renewal.rs`, `relay/src/cert_manager.rs` (K1, option per decision) | Correct lifetime basis; tests |
+| `controller/internal/pki/relay.go` (K1 **option B only**) | Backdate change |
+| `connector/src/agent_server.rs` (K2) | Configurable window; per-shield `ReEnroll` throttle |
+| `shield/src/control_stream.rs` / `renewal.rs` (K2) | Renewal debounce |
+| `proto/connector/v1/connector.proto`, `controller/internal/connector/*` (K2 **option A only**) | Additive config message |
+| `controller/.env.example` (K3, K4) | Confirm `PROVIDER_GOOGLE_REDIRECT_URI` is gone (removed by H); token scrub |
+| `.github/workflows/ci.yml` (K4) | JWT grep guard |
+| `connector/src/crl.rs` (K5) | Comment |
+
+## Steps
+
+### K1 — KI-1 relay renewal scheduling
+
+> **Chosen: Option A.** Implemented in `7fb0fb7`; test-safety follow-up `fd8b6d7`.
+> - `relay.crt.meta` = `{"serial_hex", "installed_at_unix"}`, written atomically (`write_atomic`) at **both** provisioning and renewal. The serial binds the record to one certificate.
+> - `plan()` measures from `schedule_start = max(NotBefore, installed_at)`; jitter uses the same lifetime.
+> - Missing, malformed or mismatched metadata, or an install time at/after `NotAfter`: schedule from `NotBefore` exactly as before (never fails the load, never substitutes "now"). A metadata write failure doesn't fail the install.
+> - Timing: a 15m cert renews ~9 min **after install** (6 min remaining, ±45 s); 1h → ~36 min after install (±3 min); 30d without metadata unchanged (with metadata, 24 min later).
+> - `fd8b6d7`: the two scheduler-expiry tests run in a killable subprocess with a 30 s hard limit, so a scheduler regression that spins fails CI instead of hanging it.
+
+Choose at phase start and record the choice here.
+
+- **Option A (recommended):** the relay measures the lifetime from **when it installed the certificate**, not from `NotBefore`.
+  - At install (provisioning or renewal), persist `issued_at_unix` next to the certificate, e.g. `relay.crt.meta` JSON written atomically with `write_atomic`.
+  - `plan()` uses `start = max(not_before, issued_at)` and `lifetime = not_after − start`. This mirrors PF-1's `issuedAt`.
+  - For a certificate without metadata (existing relays), fall back to `not_before`, so current behaviour is unchanged.
+- **Option B:** the controller reduces the relay-certificate `NotBefore` backdate, e.g. to 5 min.
+  - One line, but it changes PKI behaviour for every relay and narrows clock-skew tolerance, so it needs care.
+- **Tests:**
+  - `plan()` for a backdated 15m cert renews at about 9 min (± jitter), not immediately;
+  - a 1h cert renews at about 36 min;
+  - the 30 d default is unchanged;
+  - the metadata round-trips;
+  - a missing-metadata fallback.
+
+### K2 — KI-2 shield renewal window wiring
+
+> **Chosen: Option A**, with one refinement. Implemented in `2c3dda0`; test follow-up `657fdd0`.
+> - Proto: `AgentPolicy { uint64 shield_renewal_window_secs = 1; }` as `ConnectorControlMessage` oneof field **18** (additive; `buf breaking` clean).
+> - **Refinement:** the controller sends the *effective* window `min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL)` (`shield.Config.EffectiveRenewalWindow`), computed from the configured TTL. If the connector derived 2/5 of the lifetime from the certificate, the 1 h `NotBefore` backdate would count and TTLs ≤ 40 min would renew immediately (the KI-1 bug again). Sent once per control stream on open; not sent for a window under 1 s.
+> - Connector: window is shared state, 48 h until `AgentPolicy` arrives (0 keeps the current value). Per-shield, per-stream throttle: at most one `ReEnroll` per 10 min, recorded only after a successful send (`send_reenroll_if_due`).
+> - Shield: 60 s debounce after a **successful** renewal, owned by the reconnect loop (`reconnect_loop`) so it survives the reconnect that follows; a failed renewal doesn't start it.
+> - `health_round_trip` now uses `PeerConnectorList` as its liveness reply and expects `ReEnroll` only on a stream's first report.
+
+Choose the wiring at phase start.
+
+- **Option A (recommended; "wire the window"):** the controller tells the connector.
+  - Add a new controller→connector message, e.g. `AgentPolicy { uint64 shield_renewal_window_secs = 1; }`, as the **next free** field number in the `ConnectorControlMessage.body` oneof.
+  - **Additive only; never renumber.** Field 16 is reserved.
+  - The controller sends it when the control stream is established, from `shield.Config.RenewalWindow`.
+  - The connector stores it (default 48h until received) and uses it in `cert_needs_renewal`.
+  - Run `buf generate`.
+- **Option B:** a connector env var `SHIELD_RENEWAL_WINDOW` (duration), and delete the controller's unused `SHIELD_RENEWAL_WINDOW`. Simpler, but configured in two places.
+- **Option C:** the connector derives the window as 2/5 of the shield certificate's lifetime (same ratio as relay and client), and the controller's unused var is removed. No config.
+- **Whichever option is chosen, also add:**
+  - **Connector throttle:** at most one `ReEnroll` per shield per stream every 10 min, the same as G-1's `reEnrollResendInterval`. Record the time only on a successful send.
+  - **Shield debounce:** ignore a `ReEnroll` within 60 s of a successful renewal, the same as the connector's `REENROLL_DEBOUNCE`.
+- **Tests:**
+  - the window is respected (inside → one `ReEnroll`; outside → none);
+  - the throttle suppresses duplicates, then re-asks after the interval;
+  - the shield debounce ignores a duplicate;
+  - (option A) the proto message round-trips, and a default applies until received.
+
+### K3 — KI-3 closed by Phase H
+
+> **Done.** Confirmed 2026-10-09: `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (removed by Phase H). KI-3 closed as resolved by removal.
+
+- Phase H deletes the provider Google OAuth routes and stops reading `PROVIDER_GOOGLE_REDIRECT_URI` (D-24).
+- K3 confirms `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (H removes it) and records KI-3 as **resolved by removal** in `.zecurity-obs/Sprint20/path.md` Known Issues.
+- The tenant `GOOGLE_REDIRECT_URI` stays as it is.
+
+### K4 — Remove committed JWTs
+
+> **Done in `8e55a36`.** JWTs, the LAN IP and a personal path replaced with placeholders; new CI `hygiene` job "No JWTs in controller/.env.example" (checked to fail on a JWT and pass on clean files). History not rewritten: the tokens are expired dev enrollment tokens.
+
+- Delete every install command containing `ENROLLMENT_TOKEN=eyJ…` (and any other `eyJ` JWT) from `controller/.env.example`. Replace them with placeholders: `ENROLLMENT_TOKEN=<paste token from admin UI>`.
+- Keep the placeholders for the Phase H variables (`PROVIDER_JWT_SECRET=<32+ random bytes, different from JWT_SECRET>`, etc.).
+- **CI guard:** add a step that fails if `grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example` matches, so the scrub can't regress.
+- **Don't rewrite git history.** The tokens are expired dev enrollment tokens; note this in the PR.
+- `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
+
+### K6 — Pre-existing auth integration test defect (found during Phase H-a; corrected 2026-09-28)
+
+> **Done in `411e216`.** New `internal/valkeyurl` parses `redis://[userinfo@]host[:port][/db]`, used by **both** the auth and connector Valkey clients (`SelectDB`). The production parser had the same bug, so a `VALKEY_URL` with `/db` stopped the controller from starting; that is fixed too. The test applies every schema file, never calls `FlushDB` (a sentinel key must survive), fails instead of skipping when the configured Valkey is unreachable or the URL is bad, and checks the refresh key lands in the URL's db. CI's "Verify integration tests actually ran" step now also fails if this test skips.
+
+`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` has three problems:
+
+1. **It never runs in CI, silently.** CI sets `AUTH_TEST_VALKEY_URL=redis://localhost:6379/15`. The test's `parseValkeyAddr` keeps the `/15` in the address (`localhost:6379/15`), the dial fails with "unknown port", and `mustConnectAuthTestValkey` calls `t.Skip`. So CI reports `ok` for `internal/auth` without running it, and the workflow's "verify integration tests actually ran" step doesn't catch the skip. Fix: parse `redis://host:port[/db]` properly, honouring the db index; make an unreachable Valkey a **failure** when the DB env var is set, not a skip; and extend the CI verification step to flag this test if it's skipped.
+2. **When forced to run, it fails:** `column "subject_claim" does not exist`. It applies a **hard-coded list** of schema files (`001`, `031`; `~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites (e.g. `internal/provider/store_test.go` `newTestStore`, `internal/resource/testdb_test.go` `newResourceTestDB` from #105).
+3. **It wipes Valkey when it does run.** It falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. With a URL the helper *can* parse (no `/db`), that flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+
+**How it was found:** run locally with `AUTH_TEST_VALKEY_URL=redis://localhost:6379` (no `/15`), it ran and failed. With CI's exact URL it skips. The failure is independent of Phase H.
+
+**Acceptance:** the test **runs** (not skips) in CI with the standard env vars and passes, and running the full gate leaves unrelated Valkey keys intact.
+
+### K5 — Minor
+
+Fix the `crl.rs:30` comment to "every 60 s (+0–15 s jitter)".
+
+> **Done in `8e55a36`.**
+
+## Invariants
+
+1. Relay renewal remains same-key (D-19), and expired certificates are never renewed (D-20).
+2. Existing relay certificates without K1 metadata keep today's schedule. There's no forced renewal on upgrade.
+3. A shield inside the window still renews. The throttle and debounce only remove duplicates.
+4. Proto changes are additive only; `buf generate` diff is limited to the new message and field.
+5. `.env.example` keeps every variable the controller requires (`mustEnv`); only token values change.
+
+## Tests / Build Check
+
+```bash
+cd relay && cargo build && cargo test
+cd connector && cargo build && cargo test
+cargo build --manifest-path shield/Cargo.toml && cargo test --manifest-path shield/Cargo.toml
+buf generate && git diff --stat proto/ controller/gen/      # option A only: additive
+cd controller && go build ./... && go test ./internal/connector/... ./internal/shield/...
+grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example && exit 1 || true
+```
+
+## Acceptance Criteria
+
+- [ ] AT-K.1 … AT-K.6 in [[Sprint21/Acceptance-Test-Plan]] pass.
+- [ ] Live (optional; it strengthens AT-K.1): `RELAY_CERT_TTL=15m` renews at about 9 min with no loop, and `SHIELD_CERT_TTL=24h` no longer churns.
+
+## Implementation Checklist
+
+- [x] K1 option chosen and recorded; implemented; tests (`7fb0fb7`, `fd8b6d7`)
+- [x] K2 option chosen and recorded; window + throttle + debounce; tests (`2c3dda0`, `657fdd0`)
+- [x] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
+- [x] K4 JWTs removed; CI guard (`8e55a36`)
+- [x] K5 comment (`8e55a36`)
+- [x] K6 auth integration test: all schema files applied; no `FlushDB`; passes (`411e216`)
+- [x] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
+- [x] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid). The Sprint 20 live run is pinned to `46ab87d`, which still has KI-1/KI-2, so its workarounds stay; §2 now says they're fixed from Sprint 21 K onward.
+
+## Post-Phase Fixes
+
+### Fix: S1 — relay revocation check used a peer-chosen CA (security; found by the 2026-10-09 certificate audit)
+**Issue:** a revoked connector or client certificate could get through the relay. The relay's revocation gate (`relay/src/tls.rs` `peer_revocation`, from PENDING-02, `dfb2c65`) took the peer's `chain[1]` as the workspace CA without checking it issued the leaf. A revoked tenant-A leaf sent as `[leaf_A, CA_B, CA_A]` passed the handshake (webpki skips the unrelated CA and builds the path through CA_A), was checked against tenant B's CRL, and was admitted.
+
+**Root Cause:** `chain[1]` chose both the workspace whose CRL is fetched and the CA that CRL is verified against, and nothing tied it to the leaf.
+
+**Fix Applied:** `peer_revocation` → new `revocation_from_chain`, which requires `chain[1]` to be the leaf's issuer before using it:
+```rust
+// AFTER (relay/src/tls.rs):
+if leaf.issuer() != ca.subject() {
+    bail!("chain[1] is not the issuer of the peer leaf (issuer name mismatch)");
+}
+leaf.verify_signature(Some(ca.public_key())).map_err(|e| {
+    anyhow::anyhow!("chain[1] is not the issuer of the peer leaf (signature: {e:?})")
+})?;
+```
+Failure → the listener closes with "revocation context error" (fail closed); no other peer-supplied CA is tried. Normal `[leaf, workspace CA]` chains are unchanged. Connector and client CRLs cover one workspace and don't pick a CA from the peer chain, so they were not affected.
+
+**Commits / tests:** `276fb4f` added the end-to-end regression test (real QUIC/mTLS handshake through `run_listener`, CRLs from a fake controller); `735d485` is the fix and un-ignores it, plus unit tests (foreign CA, impostor CA with the issuer's name, malformed/missing issuer).
+
+### Test follow-ups within Phase K
+- `fd8b6d7` (K1): scheduler-expiry tests now run in a killable subprocess; a mutation that made `run()` spin had hung `cargo test` for hours.
+- `657fdd0` (K2): behaviour-preserving seams (`reconnect_loop`/`ControlSession` in the shield, `send_reenroll_if_due` in the connector) so the debounce-across-reconnect and throttle-after-send rules are tested (paused Tokio time). Residual, not covered: `run_once` ignoring the debounce it's given (needs a live connector).

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { Plus, Users } from 'lucide-react'
@@ -6,6 +7,7 @@ import {
   CreateGroupDocument,
   DeleteGroupDocument,
   GetGroupsDocument,
+  GetIdpConnectionsDocument,
   UpdateGroupDocument,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -20,12 +22,16 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, relativeTime } from '@/lib/console'
+import { Capability, useCan } from '@/lib/capabilities'
 import { cn } from '@/lib/utils'
+import { GroupOriginLabel } from '@/components/groups/GroupOriginLabel'
 
 type Group = {
   id: string
   name: string
   description?: string | null
+  origin: string
+  connectionId?: string | null
   createdAt: string
   updatedAt: string
   members: { id: string }[]
@@ -114,11 +120,13 @@ function DeleteDialog({
   onClose,
   onConfirm,
   loading,
+  connectionName,
 }: {
   group: Group | null
   onClose: () => void
   onConfirm: () => void
   loading: boolean
+  connectionName?: string | null
 }) {
   return (
     <Dialog open={!!group} onOpenChange={(open) => { if (!open) onClose() }}>
@@ -127,7 +135,16 @@ function DeleteDialog({
           <DialogTitle>Delete group</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
-          Are you sure you want to delete <span className="font-semibold text-foreground">{group?.name}</span>? This will remove all member assignments and access rules.
+          Are you sure you want to delete{' '}
+          <span className="font-semibold text-foreground">
+            {group && (
+              <GroupOriginLabel
+                group={group}
+                connectionName={connectionName}
+              />
+            )}
+          </span>
+          ? This will remove all member assignments and access rules.
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
@@ -144,6 +161,7 @@ export default function Groups() {
   const navigate = useNavigate()
 
   const [showCreate, setShowCreate] = useState(false)
+  const canWrite = useCan(Capability.AccessWrite)
   const [editTarget, setEditTarget] = useState<Group | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Group | null>(null)
 
@@ -152,15 +170,28 @@ export default function Groups() {
   })
   const groups: Group[] = (data?.groups ?? []) as Group[]
 
+  // Resolve SCIM connectionIds → display names so SCIM-origin groups can render
+  // "Engineering · SCIM (Okta)". GetIdpConnections is already used across the
+  // SCIM pages; reusing it here avoids a dedicated backend call.
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: 'cache-and-network',
+  })
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
+  )
+
   const [createGroup, { loading: creating }] = useMutation(CreateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowCreate(false); refetch() },
   })
 
   const [updateGroup, { loading: updating }] = useMutation(UpdateGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setEditTarget(null); refetch() },
   })
 
   const [deleteGroup, { loading: deleting }] = useMutation(DeleteGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setDeleteTarget(null); refetch() },
   })
 
@@ -175,10 +206,12 @@ export default function Groups() {
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{groups.length}</span> total
           </span>
+          {canWrite && (
           <Button onClick={() => setShowCreate(true)} className="gap-2">
             <Plus className="h-4 w-4" />
             New Group
           </Button>
+          )}
         </div>
       </div>
 
@@ -201,7 +234,7 @@ export default function Groups() {
               icon={<Users className="h-6 w-6" />}
               title="No groups yet"
               description="Create a group, add users, and assign resources to control who can access what."
-              action={<Button onClick={() => setShowCreate(true)}>New Group</Button>}
+              action={canWrite ? <Button onClick={() => setShowCreate(true)}>New Group</Button> : undefined}
             />
           ) : (
             <div className="min-w-[860px]">
@@ -213,7 +246,12 @@ export default function Groups() {
                   <div className="flex min-w-0 items-center gap-3">
                     <GroupIcon />
                     <div className="min-w-0">
-                      <div className="truncate text-[15px] font-bold leading-tight">{group.name}</div>
+                      <div className="truncate text-[15px] font-bold leading-tight">
+                        <GroupOriginLabel
+                          group={group}
+                          connectionName={connectionNameById.get(group.connectionId ?? '')}
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -236,18 +274,22 @@ export default function Groups() {
                   </div>
 
                   <div className="flex items-center justify-end gap-3">
-                    <button
-                      onClick={() => setEditTarget(group)}
-                      className="text-[12.5px] font-semibold text-muted-foreground transition hover:text-foreground"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget(group)}
-                      className="text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
-                    >
-                      Delete
-                    </button>
+                    {group.origin !== 'scim' && canWrite && (
+                      <>
+                        <button
+                          onClick={() => setEditTarget(group)}
+                          className="text-[12.5px] font-semibold text-muted-foreground transition hover:text-foreground"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => setDeleteTarget(group)}
+                          className="text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => navigate(`/groups/${group.id}`)}
                       className="inline-flex items-center gap-1 text-[13px] font-bold text-primary transition hover:opacity-80"
@@ -289,6 +331,11 @@ export default function Groups() {
       <DeleteDialog
         group={deleteTarget}
         loading={deleting}
+        connectionName={
+          deleteTarget?.connectionId
+            ? connectionNameById.get(deleteTarget.connectionId)
+            : undefined
+        }
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget && deleteGroup({ variables: { id: deleteTarget.id } })}
       />

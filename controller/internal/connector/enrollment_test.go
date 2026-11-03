@@ -23,9 +23,9 @@ import (
 	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
-	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -391,10 +391,12 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
+	remoteNetworkID := insertEnrollmentRemoteNetwork(t, ctx, testPool, workspaceID)
+
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
-		connectorID, workspaceID, uuid.NewString(), "test-connector",
+		connectorID, workspaceID, remoteNetworkID, "test-connector",
 	)
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
@@ -414,6 +416,12 @@ func TestEnroll_FullFlow(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	trustDomain := appmeta.WorkspaceTrustDomain(workspaceSlug)
@@ -595,10 +603,12 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
+	remoteNetworkID := insertEnrollmentRemoteNetwork(t, ctx, testPool, workspaceID)
+
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
-		connectorID, workspaceID, uuid.NewString(), "replay-connector",
+		connectorID, workspaceID, remoteNetworkID, "replay-connector",
 	)
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
@@ -617,6 +627,12 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
@@ -748,10 +764,12 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 	}
 
 	// Connector is already active — not pending
+	remoteNetworkID := insertEnrollmentRemoteNetwork(t, ctx, testPool, workspaceID)
+
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'active')`,
-		connectorID, workspaceID, uuid.NewString(), "active-connector",
+		connectorID, workspaceID, remoteNetworkID, "active-connector",
 	)
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
@@ -770,6 +788,12 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
@@ -881,10 +905,12 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
+	remoteNetworkID := insertEnrollmentRemoteNetwork(t, ctx, testPool, workspaceID)
+
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
-		connectorID, workspaceID, uuid.NewString(), "suspended-connector",
+		connectorID, workspaceID, remoteNetworkID, "suspended-connector",
 	)
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
@@ -903,6 +929,12 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
@@ -1014,10 +1046,12 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
+	remoteNetworkID := insertEnrollmentRemoteNetwork(t, ctx, testPool, workspaceID)
+
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
-		connectorID, workspaceID, uuid.NewString(), "mismatch-connector",
+		connectorID, workspaceID, remoteNetworkID, "mismatch-connector",
 	)
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
@@ -1036,6 +1070,12 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	// CSR uses a different connector ID — SPIFFE mismatch
@@ -1096,6 +1136,25 @@ func generateConnectorCSR(t *testing.T, connectorID, trustDomain string) []byte 
 	}
 
 	return csrDER
+}
+
+// insertEnrollmentRemoteNetwork creates a remote network for the workspace and
+// returns its id. connectors.remote_network_id has carried a foreign key to
+// remote_networks since migration 002, so a freshly generated UUID can never
+// satisfy it — these tests used one and could not have passed.
+func insertEnrollmentRemoteNetwork(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID string) string {
+	t.Helper()
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO remote_networks (tenant_id, name, location)
+		 VALUES ($1, 'enrollment-test-network', 'other')
+		 RETURNING id`,
+		workspaceID,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert remote network: %v", err)
+	}
+	return id
 }
 
 func applyEnrollmentMigration(ctx context.Context, pool *pgxpool.Pool, filename string) error {

@@ -5,14 +5,23 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"math/big"
 	"net/url"
 	"testing"
 	"time"
 
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // ── parseSPIFFEID tests ─────────────────────────────────────────────────────
@@ -134,6 +143,21 @@ func TestContextAccessors_EmptyContext(t *testing.T) {
 type mockWorkspaceStore struct {
 	workspaces     map[string]*WorkspaceLookup
 	intermediateCA *x509.Certificate
+	workspaceCA    *x509.Certificate
+	standing       *ConnectorStanding
+	standingErr    error
+	standingCalls  int
+	relayStatus    string
+	relayStatusErr error
+}
+
+func (m *mockWorkspaceStore) GetRelayStatus(ctx context.Context, relayID string) (string, error) {
+	return m.relayStatus, m.relayStatusErr
+}
+
+func (m *mockWorkspaceStore) GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error) {
+	m.standingCalls++
+	return m.standing, m.standingErr
 }
 
 func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string) (*WorkspaceLookup, error) {
@@ -145,7 +169,7 @@ func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string
 }
 
 func (m *mockWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context, domain string) (*x509.Certificate, error) {
-	return nil, nil
+	return m.workspaceCA, nil
 }
 
 func (m *mockWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
@@ -165,6 +189,154 @@ func TestVerifyRelayCertificate(t *testing.T) {
 	}
 	if err := verifyRelayCertificate(context.Background(), &mockWorkspaceStore{}, appmeta.SPIFFEGlobalTrustDomain, relay); err == nil {
 		t.Fatal("Relay certificate accepted without Intermediate CA")
+	}
+}
+
+// ── UnarySPIFFEInterceptor relay-revocation tests ───────────────────────────
+
+func relayPeerContext(t *testing.T, leaf *x509.Certificate) context.Context {
+	t.Helper()
+	return peer.NewContext(context.Background(), &peer.Peer{
+		AuthInfo: credentials.TLSInfo{
+			State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}},
+		},
+	})
+}
+
+func relayInterceptorFixture(t *testing.T) (ctx context.Context, validator TrustDomainValidator, store WorkspaceStore, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) {
+	t.Helper()
+	intermediate, intermediateKey := makeTestCA(t)
+	relay := makeTestRelayLeaf(t, intermediate, intermediateKey)
+
+	ctx = relayPeerContext(t, relay)
+	validator = func(context.Context, string) bool { return true }
+	store = &mockWorkspaceStore{intermediateCA: intermediate}
+	info = &grpc.UnaryServerInfo{FullMethod: relaypb.RelayService_Heartbeat_FullMethodName}
+	handler = func(ctx context.Context, req any) (any, error) { return "ok", nil }
+	return
+}
+
+func TestUnarySPIFFEInterceptor_RelayRevocationUnavailable_NilChecker(t *testing.T) {
+	ctx, validator, store, info, handler := relayInterceptorFixture(t)
+	interceptor := UnarySPIFFEInterceptor(validator, store, nil)
+
+	_, err := interceptor(ctx, nil, info, handler)
+	if got, want := status.Code(err), codes.Unavailable; got != want {
+		t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+	}
+}
+
+func TestUnarySPIFFEInterceptor_RelayRevocationUnavailable_NotReady(t *testing.T) {
+	ctx, validator, store, info, handler := relayInterceptorFixture(t)
+	revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
+		return nil, nil
+	})
+	interceptor := UnarySPIFFEInterceptor(validator, store, revChecker)
+
+	_, err := interceptor(ctx, nil, info, handler)
+	if got, want := status.Code(err), codes.Unavailable; got != want {
+		t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+	}
+}
+
+func TestUnarySPIFFEInterceptor_RelayRevoked(t *testing.T) {
+	ctx, validator, store, info, handler := relayInterceptorFixture(t)
+
+	// Recover the leaf's serial from the fixture's peer info to revoke exactly it.
+	p, _ := peer.FromContext(ctx)
+	leaf := p.AuthInfo.(credentials.TLSInfo).State.PeerCertificates[0]
+
+	revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
+		return []string{leaf.SerialNumber.Text(16)}, nil
+	})
+	if err := revChecker.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	interceptor := UnarySPIFFEInterceptor(validator, store, revChecker)
+
+	_, err := interceptor(ctx, nil, info, handler)
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+	}
+}
+
+// trailerStream records the trailer an interceptor sets via grpc.SetTrailer.
+type trailerStream struct {
+	grpc.ServerTransportStream
+	trailer metadata.MD
+}
+
+func (s *trailerStream) Method() string               { return "" }
+func (s *trailerStream) SetHeader(metadata.MD) error  { return nil }
+func (s *trailerStream) SendHeader(metadata.MD) error { return nil }
+func (s *trailerStream) SetTrailer(md metadata.MD) error {
+	s.trailer = metadata.Join(s.trailer, md)
+	return nil
+}
+
+// Sprint 20 F32: a refused relay carries the revoked marker only when the
+// relay row itself is terminal. A revoked serial of a live relay (superseded
+// renewal) and an unreadable status get none, so that relay keeps retrying.
+func TestUnarySPIFFEInterceptor_RelayRevoked_TerminalMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     string
+		statusErr  error
+		wantMarker bool
+	}{
+		{"relay revoked", "revoked", nil, true},
+		{"relay deleted", "deleted", nil, true},
+		{"relay active, serial superseded", "active", nil, false},
+		{"relay row missing", "", nil, false},
+		{"status unreadable", "", errors.New("db down"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, validator, store, info, handler := relayInterceptorFixture(t)
+			ms := store.(*mockWorkspaceStore)
+			ms.relayStatus, ms.relayStatusErr = tc.status, tc.statusErr
+
+			p, _ := peer.FromContext(ctx)
+			leaf := p.AuthInfo.(credentials.TLSInfo).State.PeerCertificates[0]
+			revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
+				return []string{leaf.SerialNumber.Text(16)}, nil
+			})
+			if err := revChecker.Refresh(context.Background()); err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+			stream := &trailerStream{}
+			ctx = grpc.NewContextWithServerTransportStream(ctx, stream)
+
+			_, err := UnarySPIFFEInterceptor(validator, store, revChecker)(ctx, nil, info, handler)
+			if got, want := status.Code(err), codes.PermissionDenied; got != want {
+				t.Fatalf("code = %v, want %v (err=%v)", got, want, err)
+			}
+			got := stream.trailer.Get(RelayStateMarkerKey)
+			if tc.wantMarker && (len(got) != 1 || got[0] != RelayStateRevoked) {
+				t.Fatalf("marker = %v, want [%q]", got, RelayStateRevoked)
+			}
+			if !tc.wantMarker && len(got) != 0 {
+				t.Fatalf("marker = %v, want none", got)
+			}
+		})
+	}
+}
+
+func TestUnarySPIFFEInterceptor_RelayNotRevoked_Allowed(t *testing.T) {
+	ctx, validator, store, info, handler := relayInterceptorFixture(t)
+	revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
+		return []string{"bb"}, nil
+	})
+	if err := revChecker.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	interceptor := UnarySPIFFEInterceptor(validator, store, revChecker)
+
+	resp, err := interceptor(ctx, nil, info, handler)
+	if err != nil {
+		t.Fatalf("expected non-revoked relay to be allowed, got err: %v", err)
+	}
+	if resp != "ok" {
+		t.Fatalf("expected handler response %q, got %v", "ok", resp)
 	}
 }
 

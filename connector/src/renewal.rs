@@ -1,109 +1,305 @@
 // renewal.rs — Certificate renewal for the ZECURITY connector
 //
-// Called when Control stream receives re_enroll.
-// The connector keeps its existing EC P-384 keypair.
-// We just get a fresh cert for the same key + same SPIFFE identity.
+// Called when the Control stream receives ReEnroll (sent by the controller
+// inside CONNECTOR_RENEWAL_WINDOW — Sprint 20 Phase G-1).
 //
-// Steps:
-//   1. Load cert/key material from disk (CertStore)
-//   2. Extract public key in DER format
-//   3. Build mTLS channel (uses existing cert — still valid for ~48h)
-//   4. Call RenewCert RPC
-//   5. Save new connector.crt to disk
-//   6. Save updated CA chain (workspace CA + intermediate CA)
-//   7. Parse new cert_not_after from the returned certificate
-//   8. Build updated EnrollmentState with new expiry
-//   9. Save updated state.json
+// The connector keeps its existing EC P-384 keypair; only the certificate is
+// renewed. Lifecycle (Sprint 20 Phase G-2a):
+//   1. single-flight + debounce: rapid/duplicate ReEnroll messages produce one
+//      renewal;
+//   2. CSR from the EXISTING key → RenewCert over the current mTLS identity;
+//   3. CertHolder::install_renewed: verify → atomic persist → publish, after
+//      which every consumer switches to the renewed certificate;
+//   4. update state.json (informational cert_not_after).
 
-use std::path::Path;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::controller_client;
-use crate::tls::cert_store::CertStore;
 use anyhow::{Context, Result};
+use time::OffsetDateTime;
 use tracing::info;
 
 use crate::config::ConnectorConfig;
+use crate::controller_client;
 use crate::crypto;
 use crate::enrollment::EnrollmentState;
 use crate::proto;
+use crate::tls::cert_holder::{CertHolder, CertMaterial};
 
-/// Renew the connector's certificate.
+/// A ReEnroll arriving this soon after a successful renewal is a duplicate
+/// (queued before the controller saw the renewed certificate) and is ignored.
+pub const REENROLL_DEBOUNCE: Duration = Duration::from_secs(60);
+
+/// The controller call behind renewal (real gRPC, or a test fake).
+pub trait CertRenewer: Send + Sync {
+    fn renew(
+        &self,
+        current: &CertMaterial,
+        csr_der: Vec<u8>,
+    ) -> impl Future<Output = Result<proto::RenewCertResponse>> + Send;
+}
+
+/// `ConnectorService.RenewCert` over mTLS, presenting the CURRENT certificate.
+pub struct GrpcCertRenewer<'a> {
+    cfg: &'a ConnectorConfig,
+    connector_id: &'a str,
+}
+
+impl CertRenewer for GrpcCertRenewer<'_> {
+    async fn renew(
+        &self,
+        current: &CertMaterial,
+        csr_der: Vec<u8>,
+    ) -> Result<proto::RenewCertResponse> {
+        let channel = controller_client::build_channel(self.cfg, &current.store)
+            .await
+            .context("failed to build mTLS channel")?;
+        let mut client = proto::connector_service_client::ConnectorServiceClient::new(channel);
+        Ok(client
+            .renew_cert(proto::RenewCertRequest {
+                connector_id: self.connector_id.to_owned(),
+                public_key_der: csr_der,
+            })
+            .await
+            .context("renew_cert RPC failed")?
+            .into_inner())
+    }
+}
+
+#[derive(Debug)]
+pub enum RenewalOutcome {
+    /// Renewed, persisted and published.
+    Renewed(Arc<CertMaterial>),
+    /// Another renewal is already running (single-flight).
+    InProgress,
+    /// A renewal completed within REENROLL_DEBOUNCE; this ReEnroll is a duplicate.
+    RecentlyRenewed,
+}
+
+/// Run one renewal through `holder`, guarded so concurrent or back-to-back
+/// ReEnroll messages produce exactly one renewal.
+pub async fn renew_with<R: CertRenewer>(
+    holder: &CertHolder,
+    renewer: &R,
+) -> Result<RenewalOutcome> {
+    let Some(_guard) = holder.try_begin_renewal() else {
+        return Ok(RenewalOutcome::InProgress);
+    };
+    if holder.renewed_within(REENROLL_DEBOUNCE) {
+        return Ok(RenewalOutcome::RecentlyRenewed);
+    }
+
+    let current = holder.current();
+    let key_pem =
+        std::str::from_utf8(&current.store.key_pem).context("connector.key is not valid UTF-8")?;
+    // Same key: the CSR is proof of possession of the EXISTING private key.
+    let csr_der = crypto::extract_public_key_der(key_pem).context("failed to build renewal CSR")?;
+
+    let resp = renewer.renew(&current, csr_der).await?;
+    let installed = holder
+        .install_renewed(
+            &resp.certificate_pem,
+            &resp.workspace_ca_pem,
+            &resp.intermediate_ca_pem,
+        )
+        .context("renewed certificate rejected")?;
+    Ok(RenewalOutcome::Renewed(installed))
+}
+
+/// Renew the connector's certificate (Control stream ReEnroll handler).
 ///
-/// Called from control_stream.rs when ReEnrollSignal arrives.
-/// Returns the updated enrollment state (with new cert_not_after).
-pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Result<EnrollmentState> {
+/// Returns `Some(new_state)` when a renewed certificate was installed (the
+/// caller reconnects the Control stream with it) and `None` when the request
+/// was a duplicate of an in-flight or just-completed renewal.
+pub async fn renew_cert(
+    state: &EnrollmentState,
+    cfg: &ConnectorConfig,
+    holder: &CertHolder,
+) -> Result<Option<EnrollmentState>> {
     info!("starting certificate renewal");
-
-    // 1. Read existing private key from disk
-    let cert_store = CertStore::load_async(&cfg.state_dir)
-        .await
-        .context("failed to load cert store for renewal")?;
-
-    // 2. Extract public key in DER format
-    let key_pem_str =
-        std::str::from_utf8(&cert_store.key_pem).context("connector.key is not valid UTF-8")?;
-    let public_key_der =
-        crypto::extract_public_key_der(&key_pem_str).context("failed to extract public key")?;
-
-    // 3. Build mTLS channel (uses existing cert — still valid)
-    let channel = controller_client::build_channel(cfg, &cert_store)
-        .await
-        .context("failed to build mTLS channel")?;
-
-    let mut client = proto::connector_service_client::ConnectorServiceClient::new(channel);
-
-    // 4. Call RenewCert RPC
-    let req = proto::RenewCertRequest {
-        connector_id: state.connector_id.clone(),
-        public_key_der,
+    let renewer = GrpcCertRenewer {
+        cfg,
+        connector_id: &state.connector_id,
     };
+    match renew_with(holder, &renewer).await? {
+        RenewalOutcome::Renewed(material) => {
+            let not_after = OffsetDateTime::from_unix_timestamp(material.not_after_unix)
+                .context("invalid renewed certificate expiry")?;
+            let new_state = EnrollmentState {
+                connector_id: state.connector_id.clone(),
+                trust_domain: state.trust_domain.clone(),
+                workspace_id: state.workspace_id.clone(),
+                enrolled_at: state.enrolled_at.clone(),
+                cert_not_after: format!("{}", not_after),
+            };
+            new_state
+                .save(&cfg.state_dir)
+                .context("failed to save renewed state")?;
+            info!(
+                serial = %material.serial_hex,
+                new_expiry = %new_state.cert_not_after,
+                "certificate renewed, persisted and published"
+            );
+            Ok(Some(new_state))
+        }
+        RenewalOutcome::InProgress => {
+            info!("certificate renewal already in progress — ignoring duplicate ReEnroll");
+            Ok(None)
+        }
+        RenewalOutcome::RecentlyRenewed => {
+            info!("certificate renewed moments ago — ignoring duplicate ReEnroll");
+            Ok(None)
+        }
+    }
+}
 
-    let resp = client
-        .renew_cert(req)
-        .await
-        .with_context(|| "renew_cert RPC failed")?
-        .into_inner();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestPki;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // 5. Save new connector.crt
-    let cert_path = Path::new(&cfg.state_dir).join("connector.crt");
-    tokio::fs::write(&cert_path, &resp.certificate_pem)
-        .await
-        .with_context(|| format!("failed to write {}", cert_path.display()))?;
+    /// Answers RenewCert with a pre-issued same-key renewal, after a delay so
+    /// concurrent attempts overlap.
+    struct FakeRenewer {
+        response: proto::RenewCertResponse,
+        calls: AtomicUsize,
+        delay: Duration,
+    }
 
-    // 6. Save updated CA chain
-    let ca_path = Path::new(&cfg.state_dir).join("workspace_ca.crt");
-    let ca_chain = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&resp.workspace_ca_pem),
-        String::from_utf8_lossy(&resp.intermediate_ca_pem),
-    );
-    tokio::fs::write(&ca_path, ca_chain.as_bytes())
-        .await
-        .with_context(|| format!("failed to write {}", ca_path.display()))?;
+    impl FakeRenewer {
+        fn new(pki: &TestPki, delay: Duration) -> Self {
+            Self {
+                response: proto::RenewCertResponse {
+                    certificate_pem: pki.connector_leaf(-60, 7200).into_bytes(),
+                    workspace_ca_pem: pki.workspace_ca_pem.clone().into_bytes(),
+                    intermediate_ca_pem: pki.intermediate_pem.clone().into_bytes(),
+                },
+                calls: AtomicUsize::new(0),
+                delay,
+            }
+        }
+    }
 
-    // 7. Parse new cert_not_after from the cert
-    let new_not_after = crypto::parse_cert_not_after(&resp.certificate_pem)
-        .context("failed to parse new cert expiry")?;
+    impl CertRenewer for FakeRenewer {
+        async fn renew(
+            &self,
+            _current: &CertMaterial,
+            _csr: Vec<u8>,
+        ) -> Result<proto::RenewCertResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            Ok(self.response.clone())
+        }
+    }
 
-    // 8. Update state.json
-    let new_not_after_str = format!("{}", new_not_after);
-    let new_state = EnrollmentState {
-        connector_id: state.connector_id.clone(),
-        trust_domain: state.trust_domain.clone(),
-        workspace_id: state.workspace_id.clone(),
-        enrolled_at: state.enrolled_at.clone(),
-        cert_not_after: new_not_after_str.clone(),
-    };
+    /// Several ReEnroll messages arriving together (concurrent) and
+    /// back-to-back (sequential, before the controller sees the new cert)
+    /// still produce exactly ONE renewal.
+    #[tokio::test]
+    async fn rapid_reenroll_messages_produce_one_renewal() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let renewer = FakeRenewer::new(&pki, Duration::from_millis(50));
 
-    // 9. Save updated state.json
-    new_state
-        .save(&cfg.state_dir)
-        .context("failed to save renewed state")?;
+        let (a, b, c) = tokio::join!(
+            renew_with(&holder, &renewer),
+            renew_with(&holder, &renewer),
+            renew_with(&holder, &renewer)
+        );
+        let outcomes = [a.unwrap(), b.unwrap(), c.unwrap()];
+        let renewed = outcomes
+            .iter()
+            .filter(|o| matches!(o, RenewalOutcome::Renewed(_)))
+            .count();
+        let in_progress = outcomes
+            .iter()
+            .filter(|o| matches!(o, RenewalOutcome::InProgress))
+            .count();
+        assert_eq!((renewed, in_progress), (1, 2), "outcomes: {outcomes:?}");
 
-    info!(
-        "certificate renewed successfully, new expiry: {}",
-        new_not_after_str
-    );
+        // A stale ReEnroll queued before the controller saw the renewal.
+        let later = renew_with(&holder, &renewer).await.unwrap();
+        assert!(
+            matches!(later, RenewalOutcome::RecentlyRenewed),
+            "got {later:?}"
+        );
 
-    Ok(new_state)
+        assert_eq!(
+            renewer.calls.load(Ordering::SeqCst),
+            1,
+            "RenewCert must be called exactly once"
+        );
+    }
+
+    /// A failed renewal does not arm the debounce: the next ReEnroll retries.
+    #[tokio::test]
+    async fn failed_renewal_allows_retry() {
+        struct Failing(AtomicUsize);
+        impl CertRenewer for Failing {
+            async fn renew(
+                &self,
+                _c: &CertMaterial,
+                _csr: Vec<u8>,
+            ) -> Result<proto::RenewCertResponse> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("controller unavailable")
+            }
+        }
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let failing = Failing(AtomicUsize::new(0));
+
+        assert!(renew_with(&holder, &failing).await.is_err());
+        assert!(renew_with(&holder, &failing).await.is_err());
+        assert_eq!(
+            failing.0.load(Ordering::SeqCst),
+            2,
+            "each ReEnroll after a failure must retry"
+        );
+    }
+
+    /// The renewal CSR is built from the existing key (never a new one).
+    #[tokio::test]
+    async fn renewal_reuses_the_existing_key() {
+        struct Capture(parking_lot::Mutex<Vec<u8>>, proto::RenewCertResponse);
+        impl CertRenewer for Capture {
+            async fn renew(
+                &self,
+                _c: &CertMaterial,
+                csr: Vec<u8>,
+            ) -> Result<proto::RenewCertResponse> {
+                *self.0.lock() = csr;
+                Ok(self.1.clone())
+            }
+        }
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let key_before = std::fs::read(dir.path().join("connector.key")).unwrap();
+        let capture = Capture(
+            parking_lot::Mutex::new(vec![]),
+            FakeRenewer::new(&pki, Duration::ZERO).response,
+        );
+
+        renew_with(&holder, &capture).await.unwrap();
+
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+        let csr = capture.0.lock().clone();
+        let (_, parsed) = X509CertificationRequest::from_der(&csr).unwrap();
+        parsed
+            .verify_signature()
+            .expect("CSR signed by the existing key");
+        let spki = crate::tls::cert_holder::key_spki_der(&key_before).unwrap();
+        assert_eq!(
+            parsed.certification_request_info.subject_pki.raw,
+            spki.as_slice()
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("connector.key")).unwrap(),
+            key_before,
+            "key must never be rewritten"
+        );
+    }
 }

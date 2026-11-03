@@ -2,9 +2,17 @@ package discovery
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
 
 type DiscoveredService struct {
@@ -88,27 +96,132 @@ func ReplaceDiscoveredServices(ctx context.Context, db *pgxpool.Pool, shieldID s
 	return tx.Commit(ctx)
 }
 
-func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]DiscoveredService, error) {
+// ErrShieldNotFound answers a shield that doesn't exist or belongs to another
+// workspace, with one user-safe message for both, so the response reveals
+// nothing about other workspaces' shields or what they discovered.
+var ErrShieldNotFound = apperr.UserErrorf("shield not found")
+
+// GetDiscoveredServices returns the services discovered on one of tenantID's
+// shields (an empty list if it has none). The shield's ownership is checked in
+// the same query: a foreign, missing or malformed shield ID is
+// ErrShieldNotFound, never another workspace's services.
+// ShieldNetworkAndName returns the remote network and the name of one of the
+// workspace's shields; a foreign, missing or malformed shield is
+// ErrShieldNotFound.
+func ShieldNetworkAndName(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) (string, string, error) {
+	if _, err := uuid.Parse(shieldID); err != nil {
+		return "", "", ErrShieldNotFound
+	}
+	var rn, name string
+	err := db.QueryRow(ctx,
+		`SELECT remote_network_id::text, name FROM shields WHERE id=$1 AND tenant_id=$2`,
+		shieldID, tenantID).Scan(&rn, &name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrShieldNotFound
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return rn, name, nil
+}
+
+// PromotedResourceName names the resource promoted from a discovered service:
+// "<service> on <shield>", or "<protocol>/<port> on <shield>" for a service
+// the shield couldn't name (live run 2026-10-29, F-5: it was " on <id>").
+func PromotedResourceName(serviceName, protocol string, port int, shieldName string) string {
+	service := strings.TrimSpace(serviceName)
+	if service == "" {
+		service = fmt.Sprintf("%s/%d", protocol, port)
+	}
+	return service + " on " + shieldName
+}
+
+// scanTargetRanges are never scanned: the connector skips these addresses
+// (connector/src/discovery/scope.rs is_invalid_target).
+var scanTargetRanges = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("0.0.0.0/32"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("::/128"),
+}
+
+// ErrInvalidScanTarget refuses a scan target that is not an IP address or
+// CIDR, or that lies entirely in a range the connector never scans
+// (loopback, multicast, unspecified). Such a scan used to be accepted and
+// silently return nothing (live run 2026-10-29, O-7).
+var ErrInvalidScanTarget = apperr.UserErrorf("scan target must be an IP address or CIDR outside loopback, multicast and unspecified ranges")
+
+// CheckScanTarget returns ErrInvalidScanTarget for a target the connector
+// would never scan.
+func CheckScanTarget(target string) error {
+	var p netip.Prefix
+	if strings.Contains(target, "/") {
+		parsed, err := netip.ParsePrefix(target)
+		if err != nil {
+			return ErrInvalidScanTarget
+		}
+		p = parsed.Masked()
+	} else {
+		addr, err := netip.ParseAddr(target)
+		if err != nil {
+			return ErrInvalidScanTarget
+		}
+		p = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	for _, r := range scanTargetRanges {
+		if r.Addr().Is4() == p.Addr().Is4() && r.Bits() <= p.Bits() && r.Contains(p.Addr()) {
+			return ErrInvalidScanTarget
+		}
+	}
+	return nil
+}
+
+func GetDiscoveredServices(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID string) ([]DiscoveredService, error) {
+	if _, err := uuid.Parse(shieldID); err != nil {
+		return nil, ErrShieldNotFound
+	}
 	rows, err := db.Query(ctx, `
-		SELECT shield_id, protocol, port, bound_ip, service_name, first_seen, last_seen
-		FROM shield_discovered_services
-		WHERE shield_id=$1
-		ORDER BY port ASC
-	`, shieldID)
+		SELECT s.id::text, d.protocol, d.port, d.bound_ip, d.service_name, d.first_seen, d.last_seen
+		FROM shields s
+		LEFT JOIN shield_discovered_services d ON d.shield_id = s.id
+		WHERE s.id=$1 AND s.tenant_id=$2
+		ORDER BY d.port ASC
+	`, shieldID, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var result []DiscoveredService
+	owned := false
+	result := []DiscoveredService{}
 	for rows.Next() {
-		var s DiscoveredService
-		if err := rows.Scan(&s.ShieldID, &s.Protocol, &s.Port, &s.BoundIP, &s.ServiceName, &s.FirstSeen, &s.LastSeen); err != nil {
+		owned = true
+		// The service columns are NULL on the shield's row when it has none.
+		var (
+			s                              DiscoveredService
+			protocol, boundIP, serviceName *string
+			port                           *int
+			firstSeen, lastSeen            *time.Time
+		)
+		if err := rows.Scan(&s.ShieldID, &protocol, &port, &boundIP, &serviceName, &firstSeen, &lastSeen); err != nil {
 			return nil, err
 		}
+		if protocol == nil {
+			continue
+		}
+		s.Protocol, s.Port, s.BoundIP, s.ServiceName = *protocol, *port, *boundIP, *serviceName
+		s.FirstSeen, s.LastSeen = *firstSeen, *lastSeen
 		result = append(result, s)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !owned {
+		return nil, ErrShieldNotFound
+	}
+	return result, nil
 }
 
 func DeleteDiscoveredService(ctx context.Context, db *pgxpool.Pool, shieldID, protocol string, port int) error {
@@ -119,6 +232,32 @@ func DeleteDiscoveredService(ctx context.Context, db *pgxpool.Pool, shieldID, pr
 	return err
 }
 
+// RecordScanRequest binds requestID to connectorID before the scan command is
+// sent (FU-5), so only that connector's report for it is stored. It records
+// nothing, and returns false, unless the connector belongs to tenantID; a
+// malformed connector ID is simply not found.
+func RecordScanRequest(ctx context.Context, db *pgxpool.Pool, tenantID, connectorID, requestID string) (bool, error) {
+	tag, err := db.Exec(ctx, `
+		INSERT INTO scan_requests (request_id, connector_id, tenant_id)
+		SELECT $3, c.id, c.tenant_id
+		FROM connectors c
+		WHERE c.id::text = $2 AND c.tenant_id = $1
+	`, tenantID, connectorID, requestID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// DeleteScanRequest removes a request whose scan command was never sent.
+func DeleteScanRequest(ctx context.Context, db *pgxpool.Pool, requestID string) error {
+	_, err := db.Exec(ctx, `DELETE FROM scan_requests WHERE request_id = $1`, requestID)
+	return err
+}
+
+// UpsertScanResults stores connectorID's results. A result for a request that
+// wasn't sent to connectorID is dropped (FU-5): a connector can't add rows to
+// another connector's request, in any workspace.
 func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string, results []ScanResult) error {
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -131,8 +270,9 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 		_, err := tx.Exec(ctx, `
 			INSERT INTO connector_scan_results
 				(request_id, connector_id, ip, port, protocol, service_name, first_seen)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (request_id, ip, port, protocol) DO NOTHING
+			SELECT $1::text, $2::uuid, $3::text, $4::int, $5::text, $6::text, $7::timestamptz
+			WHERE EXISTS (SELECT 1 FROM scan_requests WHERE request_id = $1::text AND connector_id = $2::uuid)
+			ON CONFLICT (request_id, connector_id, ip, port, protocol) DO NOTHING
 		`, r.RequestID, connectorID, r.IP, r.Port, r.Protocol, r.ServiceName, now)
 		if err != nil {
 			return err
@@ -142,13 +282,19 @@ func UpsertScanResults(ctx context.Context, db *pgxpool.Pool, connectorID string
 	return tx.Commit(ctx)
 }
 
-func GetScanResults(ctx context.Context, db *pgxpool.Pool, requestID string) ([]ScanResult, error) {
+// GetScanResults returns tenantID's results for a scan request: only rows
+// reported by tenantID's own connectors (FU-3). A result row's connector is the
+// authenticated stream that reported it, and a connector's workspace never
+// changes, so the join is the ownership check; the request ID is not.
+// Foreign and unknown request IDs both return an empty list.
+func GetScanResults(ctx context.Context, db *pgxpool.Pool, tenantID, requestID string) ([]ScanResult, error) {
 	rows, err := db.Query(ctx, `
-		SELECT request_id, connector_id, ip, port, protocol, service_name, first_seen
-		FROM connector_scan_results
-		WHERE request_id=$1
-		ORDER BY ip, port
-	`, requestID)
+		SELECT r.request_id, r.connector_id, r.ip, r.port, r.protocol, r.service_name, r.first_seen
+		FROM connector_scan_results r
+		JOIN connectors c ON c.id = r.connector_id AND c.tenant_id = $2
+		WHERE r.request_id=$1
+		ORDER BY r.ip, r.port
+	`, requestID, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +312,12 @@ func GetScanResults(ctx context.Context, db *pgxpool.Pool, requestID string) ([]
 	return result, rows.Err()
 }
 
+// PurgeScanResults removes results and scan requests older than olderThan
+// (a request's results go with it).
 func PurgeScanResults(ctx context.Context, db *pgxpool.Pool, olderThan time.Time) error {
-	_, err := db.Exec(ctx, `DELETE FROM connector_scan_results WHERE first_seen < $1`, olderThan)
+	if _, err := db.Exec(ctx, `DELETE FROM connector_scan_results WHERE first_seen < $1`, olderThan); err != nil {
+		return err
+	}
+	_, err := db.Exec(ctx, `DELETE FROM scan_requests WHERE created_at < $1`, olderThan)
 	return err
 }

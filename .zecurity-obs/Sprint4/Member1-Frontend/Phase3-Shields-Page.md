@@ -39,25 +39,25 @@ Route: `/remote-networks/:remoteNetworkId/shields`
 
 ### Page Structure
 
-- [ ] Load `remoteNetworkId` from route params
-- [ ] Use `useGetShieldsQuery({ variables: { remoteNetworkId }, pollInterval: 30000 })`
-- [ ] Show loading skeleton while fetching
-- [ ] Show empty state: "No shields enrolled. Click 'Add Shield' to get started."
+- [x] Load `remoteNetworkId` from route params
+- [x] Use `useGetShieldsQuery({ variables: { remoteNetworkId }, pollInterval: 30000 })`
+- [x] Show loading skeleton while fetching
+- [x] Show empty state: "No shields enrolled. Click 'Add Shield' to get started."
 
 ### Table Columns
 
-- [ ] **Name** — shield name from DB
-- [ ] **Status** — `StatusBadge` component (PENDING=gray, ACTIVE=green, DISCONNECTED=amber, REVOKED=red)
-- [ ] **Interface** — `interfaceAddr` (zecurity0 IP, e.g. `100.64.0.1/32`)
-- [ ] **Via Connector** — `connectorId` (show connector name if available, else ID truncated)
-- [ ] **Last Seen** — `lastSeenAt` formatted as relative time (e.g. "2 minutes ago")
-- [ ] **Version** — shield binary version
-- [ ] **Actions** — Revoke + Delete buttons (with confirmation dialog)
+- [x] **Name** — shield name from DB
+- [x] **Status** — `StatusBadge` component (PENDING=gray, ACTIVE=green, DISCONNECTED=amber, REVOKED=red)
+- [x] **Interface** — `interfaceAddr` (zecurity0 IP, e.g. `100.64.0.1/32`)
+- [x] **Via Connector** — `connectorId` (show connector name if available, else ID truncated)
+- [x] **Last Seen** — `lastSeenAt` formatted as relative time (e.g. "2 minutes ago")
+- [x] **Version** — shield binary version
+- [x] **Actions** — Revoke + Delete buttons (with confirmation dialog)
 
 ### Add Shield Flow
 
-- [ ] "Add Shield" button in page header
-- [ ] Opens `InstallCommandModal` with Shield variant:
+- [x] "Add Shield" button in page header
+- [x] Opens `InstallCommandModal` with Shield variant:
   - Input: Shield name
   - On submit: calls `useGenerateShieldTokenMutation`
   - Shows `installCommand` in a copy-to-clipboard code block
@@ -66,15 +66,15 @@ Route: `/remote-networks/:remoteNetworkId/shields`
 
 ### Actions
 
-- [ ] **Revoke**: confirmation dialog → `useRevokeShieldMutation` → refetch
-- [ ] **Delete**: confirmation dialog (only for PENDING/REVOKED) → `useDeleteShieldMutation` → refetch
+- [x] **Revoke**: confirmation dialog → `useRevokeShieldMutation` → refetch
+- [x] **Delete**: confirmation dialog (only for PENDING/REVOKED) → `useDeleteShieldMutation` → refetch
 
 ### Reuse from Connectors page
 
-- [ ] `StatusBadge` component (or equivalent)
-- [ ] `InstallCommandModal` component (check if it supports a `variant="shield"` prop or needs a second instance)
-- [ ] Confirmation dialog component
-- [ ] Relative time formatter
+- [x] `StatusBadge` component (or equivalent)
+- [x] `InstallCommandModal` component (check if it supports a `variant="shield"` prop or needs a second instance)
+- [x] Confirmation dialog component
+- [x] Relative time formatter
 
 ---
 

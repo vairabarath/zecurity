@@ -23,9 +23,24 @@ service ClientService {
   // Requires valid access_token in request (not in gRPC metadata).
   rpc EnrollDevice(EnrollDeviceRequest) returns (EnrollDeviceResponse);
 
+  // RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+  // proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+  // ADR-028). The CSR's public key must match the fingerprint pinned at
+  // EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+  // legacy device with no pinned fingerprint are all denied identically —
+  // callers must fall back to EnrollDevice, never retry RenewCert.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
   // GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
   // Validates access_token and device_id; default-deny if either is invalid.
   rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
+
+  // GetTransportSnapshot — returns the workspace transport (connectivity)
+  // snapshot: per-connector relay coordinates keyed by remote_network_id
+  // (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+  // changes propagate without an authorization recompile. Validates
+  // access_token and device_id; default-deny if either is invalid.
+  rpc GetTransportSnapshot(GetTransportSnapshotRequest) returns (GetTransportSnapshotResponse);
 
  // RevokeDevice — mark a client device as revoked. Called by the CLI on
   // logout; also usable by admin flows in the future. Best-effort from the
@@ -34,8 +49,74 @@ service ClientService {
   // user + workspace. Removes the device's SPIFFE from subsequent ACL
   // compiles and bumps the workspace policy version.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  rpc ReportDevicePosture(ReportDevicePostureRequest) returns (ReportDevicePostureResponse);
+
+  // RefreshSession — exchange the (possibly expired) access token plus the
+  // single-use refresh token for a fresh pair, over the TLS channel pinned to
+  // the device's saved anchors. Replaces the client's use of the plain-HTTP
+  // /auth/refresh, which put both tokens on the wire in clear. Same session
+  // rules as /auth/refresh (rotation, lifecycle and generation checks,
+  // absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+  // must log in again.
+  rpc RefreshSession(RefreshSessionRequest) returns (RefreshSessionResponse);
+
+  // Logout — end the caller's session server-side (delete its refresh
+  // session). Idempotent: succeeds whether or not a session existed, so it
+  // reveals nothing about session liveness. Replaces the client's plain-HTTP
+  // /auth/logout.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+  // 2026-11-02). Carries only the workspace's current ACL and transport
+  // versions, never rules or topology: on a hint whose versions differ from
+  // its cached snapshots the client reconciles through GetACLSnapshot /
+  // GetTransportSnapshot, which stay authoritative. The first message is sent
+  // right after the server subscribes, so a change made before or during the
+  // client's last sync is never missed; later messages coalesce (latest
+  // versions only) and repeat about once a minute as a heartbeat. The client
+  // keeps its 60 s poll whether or not the stream is up.
+  // Same authentication as GetACLSnapshot (access_token + device_id). The
+  // stream ends with UNAUTHENTICATED when the access token expires, with
+  // FAILED_PRECONDITION when the device carries a directive (revoked,
+  // re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+  // the controller shuts down.
+  rpc WatchChanges(WatchChangesRequest) returns (stream ChangeHint);
+}
+message ReportDevicePostureRequest {
+  string access_token = 1;
+  string device_id = 2;
+  DevicePostureReport report = 3;
 }
 
+message ReportDevicePostureResponse {
+  bool accepted = 1;
+  string rejection_reason = 2;
+}
+
+message DevicePostureReport {
+  string report_id = 1;
+  int64 reported_at = 2;
+  string client_version = 3;
+  string os_name = 4;
+  string os_version = 5;
+  repeated PostureCheck checks = 6;
+}
+
+message PostureCheck {
+  string check_id = 1;
+  CheckStatus status = 2;
+  string detail = 3;
+}
+
+enum CheckStatus {
+  CHECK_STATUS_UNSPECIFIED = 0;
+  PASS = 1;
+  FAIL = 2;
+  UNSUPPORTED = 3;
+  UNKNOWN = 4;
+  ERROR = 5;
+}
 // ── GetAuthConfig ──────────────────────────────────────────────────────────
 
 message GetAuthConfigRequest {
@@ -99,15 +180,49 @@ message EnrollDeviceResponse {
   string device_id           = 5;
 }
 
+// ── RenewCert (Sprint 19 Track 3 / PENDING-13) ──────────────────────────────
+// Issues a fresh cert for an already-enrolled device. No spiffe_id/device_id
+// in the response — renewal never changes either; only the cert itself is new.
+
+message RenewCertRequest {
+  string access_token = 1;
+  string device_id    = 2;
+  string csr_pem      = 3;
+}
+
+message RenewCertResponse {
+  string certificate_pem     = 1;
+  string workspace_ca_pem    = 2;
+  string intermediate_ca_pem = 3;
+  int64  cert_expires_at     = 4; // unix seconds — mirrors client_devices.cert_not_after
+}
+
 // ── GetACLSnapshot ─────────────────────────────────────────────────────────
 
 message GetACLSnapshotRequest {
-  string access_token = 1;
-  string device_id    = 2;
+  string access_token  = 1;
+  string device_id     = 2;
+  uint64 known_version = 3; // client's cached version; 0 = always return the snapshot
 }
 
 message GetACLSnapshotResponse {
-  ACLSnapshot snapshot = 1;
+  ACLSnapshot     snapshot         = 1; // omitted when up_to_date OR device_directive != DIRECTIVE_NONE
+  bool            up_to_date       = 2; // true when known_version == current version; always false when device_directive != DIRECTIVE_NONE
+  DeviceDirective device_directive = 3; // Sprint 19 Track 2 (PENDING-13) — server->client device trust signal
+  string          directive_reason = 4; // human-readable, e.g. "user suspended"; empty for DIRECTIVE_NONE
+}
+
+// DeviceDirective — server->client device trust signal, piggybacked on the
+// 60s ACL poll (Sprint 19 Track 2 / PENDING-13, ADR-028). REVOKED and
+// RE_ENROLL_REQUIRED are derived server-side from client_devices.revoked_at /
+// status (single source of truth, see device_trust_handler.go); the client
+// never infers them from an error string. RENEW_SOON is reserved for Track 3
+// (RenewCert RPC + renewal scheduler) — not populated yet.
+enum DeviceDirective {
+  DIRECTIVE_NONE               = 0;
+  DIRECTIVE_REVOKED            = 1; // device offboarded — wipe key, stop tunnels, exit daemon
+  DIRECTIVE_RE_ENROLL_REQUIRED = 2; // device recoverable — wipe cert, stop tunnels, stay alive disabled
+  DIRECTIVE_RENEW_SOON         = 3; // reserved for Track 3
 }
 
 // ACLConnector holds the tunnel endpoint for one Connector instance.
@@ -142,6 +257,17 @@ message ACLSnapshot {
   reserved 8;                               // was: connector_spiffe
   string relay_spiffe_id                    = 9; // SPIFFE URI of the relay. Required whenever relay_addr is set.
   repeated ACLRemoteNetwork remote_networks = 10;
+  // Connector-revocation Phase C (design §8, D19): connectors whose identity
+  // is revoked (or revoked then deleted) while any of their certificates can
+  // still be valid. The client never uses a listed connector and cuts flows
+  // on it. Only an explicit entry blocks; absence keeps today's behaviour.
+  repeated RevokedConnector revoked_connectors = 11;
+}
+
+// RevokedConnector identifies one revoked connector identity.
+message RevokedConnector {
+  string connector_id     = 1;
+  string connector_spiffe = 2;
 }
 
 message ACLEntry {
@@ -156,6 +282,48 @@ message ACLEntry {
   string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
   string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
 }
+
+// ── Transport plane (ADR-015 Track B) ───────────────────────────────────────
+// The transport snapshot carries connectivity (which connector + relay) for a
+// workspace, independent of authorization (the ACL snapshot). Relay coords live
+// here so a relay change propagates without recompiling/bumping the ACL. Lives
+// in client.v1 (not connector.v1) to mirror ACLSnapshot and avoid an import
+// cycle — connector.proto references it as client.v1.TransportSnapshot.
+// Correlated with the ACL by the shared join key remote_network_id.
+
+message GetTransportSnapshotRequest {
+  string access_token  = 1;
+  string device_id     = 2;
+  uint64 known_version = 3; // client's cached version; 0 = always return the snapshot
+}
+
+message GetTransportSnapshotResponse {
+  TransportSnapshot snapshot         = 1; // omitted when up_to_date OR device_directive != DIRECTIVE_NONE
+  bool              up_to_date       = 2; // true when known_version == current version; always false when device_directive != DIRECTIVE_NONE
+  DeviceDirective   device_directive = 3; // same signal as GetACLSnapshotResponse; the ACL poll is the authoritative reaction path (see DeviceDirective doc)
+  string            directive_reason = 4;
+}
+
+// TransportConnector mirrors ACLConnector's tunnel/relay coordinates.
+message TransportConnector {
+  string connector_id          = 1;
+  string connector_tunnel_addr = 2; // host:9092 QUIC
+  string connector_spiffe      = 3;
+  string relay_addr            = 4; // relay QUIC address for this connector; empty = no relay
+  string relay_spiffe_id       = 5; // SPIFFE URI of the relay this connector is registered with
+}
+
+// TransportRemoteNetwork groups the connectors serving one remote network.
+message TransportRemoteNetwork {
+  string remote_network_id               = 1; // shared join key with ACLEntry.remote_network_id
+  repeated TransportConnector connectors = 2;
+}
+
+message TransportSnapshot {
+  repeated TransportRemoteNetwork remote_networks = 1;
+  uint64 version                                  = 2; // monotonic; independent of ACLSnapshot.version
+}
+
 // ── RevokeDevice ───────────────────────────────────────────────────────────
 
 message RevokeDeviceRequest {
@@ -166,4 +334,34 @@ message RevokeDeviceRequest {
 message RevokeDeviceResponse {
   // Intentionally empty in v1. Reserved for future fields (revoked_at,
   // was_already_revoked, etc.) without breaking the wire format.
+}
+
+// ── RefreshSession / Logout (certificate audit follow-up) ────────────────────
+
+message RefreshSessionRequest {
+  string access_token  = 1; // may be expired; signature is verified
+  string refresh_token = 2; // single-use; rotated on success
+}
+
+message RefreshSessionResponse {
+  string access_token  = 1;
+  string refresh_token = 2; // the rotated refresh token — replaces the old one
+}
+
+message LogoutRequest {
+  string access_token = 1; // may be expired; signature is verified
+}
+
+message LogoutResponse {}
+
+message WatchChangesRequest {
+  string access_token = 1;
+  string device_id    = 2;
+}
+
+// Advisory only: grants nothing. Versions are per controller process (they
+// restart at 0), so the client compares them for equality, not order.
+message ChangeHint {
+  uint64 acl_version       = 1; // == GetACLSnapshot snapshot.version
+  uint64 transport_version = 2; // == GetTransportSnapshot snapshot.version
 }

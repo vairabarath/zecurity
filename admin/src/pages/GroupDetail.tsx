@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { toastMutationError } from '@/lib/mutationErrors'
+import { Capability, roleLabel, useCan, useCurrentUserId, useIsAdmin } from '@/lib/capabilities'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { ArrowLeft, Box, Loader2, Minus, Plus, Users } from 'lucide-react'
@@ -7,6 +9,7 @@ import {
   AssignResourceToGroupDocument,
   GetAllResourcesDocument,
   GetGroupDocument,
+  GetIdpConnectionsDocument,
   GetUsersDocument,
   RemoveGroupMemberDocument,
   UnassignResourceFromGroupDocument,
@@ -21,6 +24,7 @@ import {
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
+import { GroupOriginLabel } from '@/components/groups/GroupOriginLabel'
 
 type Tab = 'members' | 'resources'
 
@@ -57,6 +61,9 @@ export default function GroupDetail() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('members')
   const [showAddMember, setShowAddMember] = useState(false)
+  const canWrite = useCan(Capability.AccessWrite)
+  const isAdmin = useIsAdmin()
+  const myId = useCurrentUserId()
   const [showAssignResource, setShowAssignResource] = useState(false)
   const [selectedUserId, setSelectedUserId] = useState('')
   const [selectedResourceId, setSelectedResourceId] = useState('')
@@ -75,6 +82,15 @@ export default function GroupDetail() {
     fetchPolicy: 'cache-and-network',
   })
 
+  // Resolve this group's SCIM connectionId → display name for the
+  // "Engineering · SCIM (Okta)" form (reuses the existing GetIdpConnections).
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: 'cache-and-network',
+  })
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
+  )
+
   const group = data?.group
   const allResources = resourcesData?.allResources ?? []
 
@@ -83,21 +99,29 @@ export default function GroupDetail() {
 
   const allUsers = usersData?.users ?? []
   const memberIds = new Set((group?.members ?? []).map((m) => m.id))
-  const nonMembers = allUsers.filter((u) => !memberIds.has(u.id))
+  // R-9: only an Admin may add or remove themselves.
+  const nonMembers = allUsers.filter((u) => !memberIds.has(u.id) && (isAdmin || u.id !== myId))
+  // R-12: only an Admin may change resource access for a group they belong to.
+  const iAmMember = !!myId && memberIds.has(myId)
+  const canChangeResources = canWrite && (isAdmin || !iAmMember)
 
   const [addMember, { loading: addingMember }] = useMutation(AddGroupMemberDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowAddMember(false); setSelectedUserId(''); refetch() },
   })
 
   const [removeMember, { loading: removingMember }] = useMutation(RemoveGroupMemberDocument, {
+    onError: toastMutationError,
     onCompleted: () => refetch(),
   })
 
   const [assignResource, { loading: assigning }] = useMutation(AssignResourceToGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => { setShowAssignResource(false); setSelectedResourceId(''); refetch() },
   })
 
   const [unassignResource, { loading: unassigning }] = useMutation(UnassignResourceFromGroupDocument, {
+    onError: toastMutationError,
     onCompleted: () => refetch(),
   })
 
@@ -135,7 +159,18 @@ export default function GroupDetail() {
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Link to="/groups" className="transition hover:text-foreground">Groups</Link>
         <span>/</span>
-        <span className="text-foreground">{group.name}</span>
+        <span className="text-foreground">
+          {group && (
+            <GroupOriginLabel
+              group={group}
+              connectionName={
+                group.connectionId
+                  ? connectionNameById.get(group.connectionId)
+                  : undefined
+              }
+            />
+          )}
+        </span>
       </div>
 
       <Link to="/groups" className="inline-flex items-center gap-2 text-sm text-muted-foreground transition hover:text-foreground">
@@ -149,7 +184,18 @@ export default function GroupDetail() {
           <Users className="h-7 w-7" />
         </div>
         <div className="min-w-0">
-          <h1 className="text-[2.2rem] font-bold tracking-[-0.03em]">{group.name}</h1>
+          <h1 className="text-[2.2rem] font-bold tracking-[-0.03em]">
+            {group && (
+              <GroupOriginLabel
+                group={group}
+                connectionName={
+                  group.connectionId
+                    ? connectionNameById.get(group.connectionId)
+                    : undefined
+                }
+              />
+            )}
+          </h1>
           {group.description && (
             <p className="mt-1 text-sm text-muted-foreground">{group.description}</p>
           )}
@@ -188,12 +234,20 @@ export default function GroupDetail() {
             title="Members"
             subtitle={`${group.members.length} user${group.members.length === 1 ? '' : 's'} in this group`}
             action={
-              <Button size="sm" className="gap-2" onClick={() => setShowAddMember(true)} disabled={nonMembers.length === 0}>
-                <Plus className="h-4 w-4" />
-                Add Member
-              </Button>
+              group.origin !== 'scim' && canWrite ? (
+                <Button size="sm" className="gap-2" onClick={() => setShowAddMember(true)} disabled={nonMembers.length === 0}>
+                  <Plus className="h-4 w-4" />
+                  Add Member
+                </Button>
+              ) : undefined
             }
           />
+
+          {group.origin === 'scim' && (
+            <div className="border-b border-border bg-secondary/50 px-5 py-3 text-xs text-muted-foreground">
+              Membership is managed by your identity provider (SCIM) and cannot be edited in Zecurity.
+            </div>
+          )}
 
           {group.members.length === 0 ? (
             <div className="px-5 py-14 text-center text-sm text-muted-foreground">
@@ -212,17 +266,19 @@ export default function GroupDetail() {
                     </div>
                     <div>
                       <div className="text-[14px] font-semibold">{member.email}</div>
-                      <div className="text-[11.5px] capitalize text-muted-foreground">{member.role.toLowerCase()}</div>
+                      <div className="text-[11.5px] text-muted-foreground">{roleLabel(member.role)}</div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => removeMember({ variables: { groupId: group.id, userId: member.id } })}
-                    disabled={removingMember}
-                    className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80 disabled:opacity-40"
-                  >
-                    <Minus className="h-3.5 w-3.5" />
-                    Remove
-                  </button>
+                  {group.origin !== 'scim' && canWrite && (isAdmin || member.id !== myId) && (
+                    <button
+                      onClick={() => removeMember({ variables: { groupId: group.id, userId: member.id } })}
+                      disabled={removingMember}
+                      className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80 disabled:opacity-40"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                      Remove
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -241,18 +297,25 @@ export default function GroupDetail() {
                 : `${group.resources.length} resource${group.resources.length === 1 ? '' : 's'} accessible by this group`
             }
             action={
-              <Button size="sm" className="gap-2" onClick={() => setShowAssignResource(true)} disabled={unassignedResources.length === 0}>
-                <Plus className="h-4 w-4" />
-                Assign Resource
-              </Button>
+              canChangeResources ? (
+                <Button size="sm" className="gap-2" onClick={() => setShowAssignResource(true)} disabled={unassignedResources.length === 0}>
+                  <Plus className="h-4 w-4" />
+                  Assign Resource
+                </Button>
+              ) : undefined
             }
           />
+          {canWrite && !canChangeResources && (
+            <div className="border-b border-border px-5 py-3 text-xs text-muted-foreground">
+              You are a member of this group, so only an Admin can change its resources.
+            </div>
+          )}
 
           {group.resources.length === 0 ? (
             <div className="px-5 py-14 text-center">
               <p className="text-sm font-semibold text-[oklch(0.85_0.13_80)]">Default-deny active</p>
               <p className="mt-1 text-sm text-muted-foreground">No resources are assigned. Members of this group cannot access anything.</p>
-              {unassignedResources.length > 0 && (
+              {unassignedResources.length > 0 && canChangeResources && (
                 <Button size="sm" className="mt-4 gap-2" onClick={() => setShowAssignResource(true)}>
                   <Plus className="h-4 w-4" />
                   Assign Resource
@@ -278,6 +341,7 @@ export default function GroupDetail() {
                       </div>
                     </div>
                   </div>
+                  {canChangeResources && (
                   <button
                     onClick={() => unassignResource({ variables: { resourceId: resource.id, groupId: group.id } })}
                     disabled={unassigning}
@@ -286,6 +350,7 @@ export default function GroupDetail() {
                     <Minus className="h-3.5 w-3.5" />
                     Unassign
                   </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -310,7 +375,7 @@ export default function GroupDetail() {
               <option value="">Select a user…</option>
               {nonMembers.map((u) => (
                 <option key={u.id} value={u.id}>
-                  {u.email} ({u.role.toLowerCase()})
+                  {u.email} ({roleLabel(u.role)})
                 </option>
               ))}
             </select>

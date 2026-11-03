@@ -208,19 +208,19 @@ These must be committed to the shared branch **before** anyone else starts their
 
 Run these once all phases are complete:
 
-- [ ] `buf generate` (from repo root) — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd connector && cargo build` — clean (warnings OK)
-- [ ] `cargo build --manifest-path shield/Cargo.toml` — clean
-- [ ] `cd admin && npm run build` — clean
-- [ ] Full DB migration: `003_shield_schema.sql` runs on fresh DB
-- [ ] End-to-end enrollment: Shield appears ACTIVE within 30s
-- [ ] `ip link show zecurity0` visible on resource host after enrollment
-- [ ] `nft list ruleset` shows `table inet zecurity` after enrollment
-- [ ] Kill Shield process → DISCONNECTED within 120s
-- [ ] Restart Shield → ACTIVE on next Connector heartbeat cycle
-- [ ] Connector SIGTERM → Connector DISCONNECTED immediately (Goodbye RPC)
-- [ ] Shield SIGTERM → Shield removed from Connector's health map
+- [x] `buf generate` (from repo root) — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd connector && cargo build` — clean (warnings OK)
+- [x] `cargo build --manifest-path shield/Cargo.toml` — clean
+- [x] `cd admin && npm run build` — clean
+- [x] Full DB migration: `003_shield_schema.sql` runs on fresh DB
+- [x] End-to-end enrollment: Shield appears ACTIVE within 30s
+- [x] `ip link show zecurity0` visible on resource host after enrollment
+- [x] `nft list ruleset` shows `table inet zecurity` after enrollment
+- [x] Kill Shield process → DISCONNECTED within 120s
+- [x] Restart Shield → ACTIVE on next Connector heartbeat cycle
+- [x] Connector SIGTERM → Connector DISCONNECTED immediately (Goodbye RPC)
+- [x] Shield SIGTERM → Shield removed from Connector's health map
 
 ---
 

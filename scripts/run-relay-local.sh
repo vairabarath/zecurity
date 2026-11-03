@@ -15,6 +15,12 @@
 #   scripts/run-relay-local.sh relay1 9093        # first relay  (default)
 #   scripts/run-relay-local.sh relay2 9094        # second relay (for migration/drain tests)
 #
+# SAN allowlist: this script defaults RELAY_IP_SANS=127.0.0.1, so create the
+# relay with a matching allowlist or provisioning is rejected, e.g.
+#   POST /provider/relays {"name":"relay1","dns_allowlist":[],"ip_allowlist":["127.0.0.1"]}
+# RELAY_DNS_SANS / RELAY_IP_SANS must always be a subset of the registered
+# dns_allowlist / ip_allowlist (DNS names lowercase).
+#
 # Override anything via env, e.g.:
 #   CONTROLLER_ADDR=localhost:9090 CONTROLLER_HTTP_ADDR=localhost:8080 \
 #   RELAY_MAX_CONNECTIONS=4 RELAY_HEARTBEAT_INTERVAL_SECS=10 \

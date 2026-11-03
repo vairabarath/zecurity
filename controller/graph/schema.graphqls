@@ -1,11 +1,17 @@
+scalar Time
+
 # controller/graph/schema.graphqls — Sprint 1 types
 
-# Restricts a field to callers whose JWT role is one of `roles`.
-# Enforced in the GraphQL execution layer (see resolvers.HasRole), so it gates
-# individual queries/mutations — unlike the route-level RequireRole HTTP middleware,
-# which can't distinguish operations on the single /graphql endpoint.
-# Widen the list (e.g. [ADMIN, AUDITOR]) when new roles are added.
-directive @hasRole(roles: [Role!]!) on FIELD_DEFINITION
+# Restricts a field to callers whose LIVE workspace role (users.role, looked up
+# per request; PENDING-19 §5) holds `capability`. Enforced in the GraphQL
+# execution layer (see resolvers.Requires); REST routes use the same check via
+# middleware.RequireCapability. The JWT role claim is display-only and is never
+# read for authorization. The role → capability table lives in internal/rbac.
+directive @requires(capability: Capability!) on FIELD_DEFINITION
+
+# gqlgen built-in: forces a field to be resolved by a hand-written resolver method
+# instead of reading a matching struct field directly off the parent Go model.
+directive @goField(forceResolver: Boolean, name: String) on FIELD_DEFINITION | INPUT_FIELD_DEFINITION
 
 type Query {
   # Returns the currently authenticated user.
@@ -14,7 +20,7 @@ type Query {
 
   # Returns all active users in the current workspace.
   # Scoped to tenant_id from JWT — never crosses workspaces.
-  users: [User!]! @hasRole(roles: [ADMIN])
+  users: [User!]! @requires(capability: CONSOLE_READ)
 
   # Returns the workspace the current user belongs to.
   # Scoped to tenant_id from JWT — never crosses workspaces.
@@ -36,7 +42,17 @@ type Mutation {
   # Go generates PKCE pair, stores code_verifier in Redis,
   # builds and returns the Google OAuth redirect URL.
   # workspaceName is optional — set during signup flow, empty during normal login.
-  initiateAuth(provider: String!, workspaceName: String): AuthInitPayload!
+  # connectionId is optional — the identity_connections id from the discovery API
+  # (GET /workspaces/{slug}/auth); when set it selects that exact connection
+  # (Enterprise or Bootstrap). When omitted, the platform IdP for `provider` is
+  # resolved. It is the ONLY connection selector; resolution is server-side.
+  initiateAuth(provider: String!, workspaceName: String, connectionId: ID): AuthInitPayload!
+
+  # PENDING-19 §7 — change a workspace member's console role. Admin only.
+  # Refused for your own account and when it would leave the workspace with no
+  # active Admin. `reason` is required and stored in the audit log only. Applies
+  # on the target's next request (live role check); their client is untouched.
+  setMemberRole(userId: ID!, role: Role!, reason: String!): User! @requires(capability: MEMBERS_ADMIN)
 }
 
 type AuthInitPayload {
@@ -52,6 +68,28 @@ type User {
   role:        Role!
   provider:    String!
   createdAt:   String!
+
+  # --- Provisioning provenance (ADR-025 §4) --------------------------------
+  # Two distinct facts, deliberately not collapsed into one:
+  #
+  # provisionedBy      IMMUTABLE origin recorded at creation: jit | manual | scim
+  # provisioningOwner  MUTABLE current authority over directory-owned
+  #                    attributes: jit | manual | scim | unmanaged
+  #
+  # "unmanaged" is an explicit state, NOT inferred from scim_enabled=false — a
+  # user whose SCIM connection was removed is unmanaged, and removing a
+  # connection never deletes the user.
+  #
+  # The admin UI MUST derive "managed by the directory" from provisioningOwner
+  # == "scim" and disable directory-owned fields on that basis — never guess it
+  # from `provider`.
+  provisionedBy:     String!
+  provisioningOwner: String!
+
+  # Console capabilities of this user's current role (PENDING-19 §4). The admin
+  # UI uses it on `me` to choose what to show; the server still checks every
+  # call, so this is never an authorization input.
+  capabilities: [Capability!]!
 }
 
 type Workspace {
@@ -62,10 +100,26 @@ type Workspace {
   createdAt:   String!
 }
 
+# Workspace console roles (PENDING-19 §3). One role per person.
 enum Role {
   ADMIN
-  MEMBER
   VIEWER
+  DEVOPS
+  SECURITY
+  HELPDESK
+  MEMBER
+}
+
+# Console operation classes (PENDING-19 §4). Values equal internal/rbac.Capability.
+enum Capability {
+  CONSOLE_READ
+  NETWORK_WRITE
+  ACCESS_WRITE
+  POSTURE_WRITE
+  DEVICE_WRITE
+  DEVICE_ADMIN
+  IDENTITY_ADMIN
+  MEMBERS_ADMIN
 }
 
 enum WorkspaceStatus {

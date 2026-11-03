@@ -1,12 +1,25 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
-	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 )
+
+// connectionStore is the slice of the idp store the auth service needs to
+// resolve identity connections at login. *idp.Store satisfies it; tests use a
+// fake so login can be unit-tested without a database.
+type connectionStore interface {
+	GetByID(ctx context.Context, id string) (*idp.Connection, error)
+	GetPlatformByProvider(ctx context.Context, provider string) (*idp.Connection, error)
+	ListForWorkspace(ctx context.Context, tenantID string) ([]idp.Connection, error)
+	WorkspaceIDBySlug(ctx context.Context, slug string) (string, error)
+	PlatformLoginEnabled(ctx context.Context, tenantID string) (bool, error)
+}
 
 // Config holds all dependencies and settings for the auth service.
 // Called by: main.go — Member 4 instantiates this using env vars and passes it to NewService().
@@ -60,9 +73,14 @@ type Config struct {
 	// Used by: main.go for CORS middleware configuration.
 	AllowedOrigin string
 
-	// BootstrapService provisions or retrieves the user's workspace membership
-	// during the auth callback flow.
-	BootstrapService *bootstrap.Service
+	// IdentityService is the identity pipeline (resolve → lifecycle → link →
+	// Principal → event). The callback flow runs a proven AuthenticationContext
+	// through it instead of provisioning users directly. PENDING-04 Phase 5.
+	IdentityService *identity.Service
+
+	// IdpStore resolves identity connections (Bootstrap + Enterprise IdPs) at
+	// login. Provided by main.go as *idp.Store; PENDING-04.
+	IdpStore connectionStore
 }
 
 // serviceImpl is the concrete implementation of auth.Service (defined in service.go by Member 4).
@@ -70,9 +88,10 @@ type Config struct {
 // Created by: NewService() below.
 // Methods implemented in: oidc.go, callback.go, refresh.go, session.go, exchange.go.
 type serviceImpl struct {
-	cfg          Config
-	redisClient  *valkeyClient
-	bootstrapSvc *bootstrap.Service
+	cfg         Config
+	redisClient *valkeyClient
+	identitySvc *identity.Service
+	idpStore    connectionStore
 }
 
 // minJWTSecretBytes is the floor on JWT_SECRET length, in bytes.
@@ -107,8 +126,11 @@ func NewService(cfg Config) (Service, error) {
 	if cfg.RedirectURI == "" {
 		return nil, fmt.Errorf("auth: RedirectURI is required")
 	}
-	if cfg.BootstrapService == nil {
-		return nil, fmt.Errorf("auth: BootstrapService is required")
+	if cfg.IdentityService == nil {
+		return nil, fmt.Errorf("auth: IdentityService is required")
+	}
+	if cfg.IdpStore == nil {
+		return nil, fmt.Errorf("auth: IdpStore is required")
 	}
 
 	// Apply defaults for optional fields.
@@ -133,8 +155,9 @@ func NewService(cfg Config) (Service, error) {
 	}
 
 	return &serviceImpl{
-		cfg:          cfg,
-		redisClient:  rc,
-		bootstrapSvc: cfg.BootstrapService,
+		cfg:         cfg,
+		redisClient: rc,
+		identitySvc: cfg.IdentityService,
+		idpStore:    cfg.IdpStore,
 	}, nil
 }

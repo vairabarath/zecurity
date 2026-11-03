@@ -7,9 +7,9 @@ priority: P1
 created: 2026-07-03
 supersedes: PENDING-07-Provider-Operator-Plane (folded into this + 07a + 07b)
 related:
-  - PENDING-07a-Provider-Identity-and-Authorization
+  - ADR-021-Provider-Identity-and-Authorization
   - PENDING-07b-Provider-Console-Packaging
-  - PENDING-01-Authenticated-Relay-Provisioning
+  - ADR-020-Authenticated-Relay-Provisioning
   - PENDING-02-Certificate-Revocation-Enforcement
 tags: [pending, vision, operator, provider, multi-tenant, roadmap]
 ---
@@ -18,7 +18,7 @@ tags: [pending, vision, operator, provider, multi-tenant, roadmap]
 
 > **Status: PENDING — vision doc for team alignment.** This is the north-star for the
 > provider/operator plane. The two concrete decisions under it are
-> [[PENDING-07a-Provider-Identity-and-Authorization]] (backend identity + authz tier) and
+> [[ADR-021-Provider-Identity-and-Authorization]] (backend identity + authz tier) and
 > [[PENDING-07b-Provider-Console-Packaging]] (separate app vs shared, deployment). Alpha scope is
 > defined at the bottom.
 
@@ -125,7 +125,7 @@ for a multi-tenant SaaS"** (Tailscale/Cloudflare-style ops), not anything ZTNA-s
 > network-locked → with authz kept in **one policy chokepoint** so partner-scoping and roles slot
 > in later.
 
-This ships the two P0 fixes ([[PENDING-01-Authenticated-Relay-Provisioning]],
+This ships the two P0 fixes ([[ADR-020-Authenticated-Relay-Provisioning]],
 [[PENDING-02-Certificate-Revocation-Enforcement]]) *correctly*, establishes the provider plane's
 hard boundaries, and defers the partner/RBAC/billing machinery until it's actually being designed.
 

@@ -9,13 +9,16 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/yourorg/ztna/controller/internal/geoip"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -38,32 +41,93 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/changehint"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/discoverylimit"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
+	"github.com/yourorg/ztna/controller/internal/outbox"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/transport"
+	"github.com/yourorg/ztna/controller/internal/valkeyurl"
+	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
 func main() {
+	// Break-glass CLI (Sprint 22 Phase T): handled before any server setup.
+	if isRecoverAdminCommand(os.Args) {
+		os.Exit(runRecoverAdmin(os.Args[3:]))
+	}
 	loadOptionalEnv()
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	defer stop()
+	workers := newWorkerSet()
+	var outboxStore *outbox.Outbox
+	var err error
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	outboxMaxRetries := envOrInt(
+		"OUTBOX_MAX_RETRIES",
+		100,
+	)
+	outboxBatchSize := envOrInt(
+		"OUTBOX_BATCH_SIZE",
+		100,
+	)
+	outboxStore, err = outbox.NewOutboxWithMaxRetries(
+		db.Pool,
+		outboxMaxRetries,
+	)
+
+	if err != nil {
+		log.Fatalf("outbox init: %v", err)
+	}
+	outboxRegistry := outbox.NewHandlerRegistry()
+	outboxProcessor, err := outbox.NewProcessor(
+		outboxStore,
+		outboxRegistry,
+		outbox.WithPollInterval(
+			mustDuration("OUTBOX_POLL_INTERVAL", 1*time.Second),
+		),
+		outbox.WithLockWindow(
+			mustDuration("OUTBOX_LOCK_WINDOW", 30*time.Second),
+		),
+		outbox.WithReaperInterval(
+			mustDuration("OUTBOX_REAPER_INTERVAL", 30*time.Second),
+		),
+		outbox.WithMaxRetries(outboxMaxRetries),
+	)
+	if err != nil {
+		log.Fatalf("outbox processor init: %v", err)
+	}
 
 	pkiService, err := pki.Init(ctx, db.Pool)
 	if err != nil {
@@ -77,20 +141,62 @@ func main() {
 
 	tenantDB := db.NewTenantDB(db.Pool)
 
+	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
+	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	// Live workspace role check (PENDING-19 §5): @requires and RequireCapability
+	// read users.role per request through this process-local cache (D-02).
+	roleChecker := rbac.NewChecker(db.Pool)
+	idpStore := idp.NewStore(db.Pool, pkiService)
+
+	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
+	// (SCIM_TOKEN_HASH_KEY) distinct from the PKI master secret.
+	scimStore, err := scim.NewStore(db.Pool, []byte(mustEnv("SCIM_TOKEN_HASH_KEY")), 0)
+	if err != nil {
+		log.Fatalf("scim token store init: %v", err)
+	}
+
+	// Explicit fine-grained permission store (Sprint 17 / ADR-025 Phase 3).
+	// Backs the break-glass primitive; possession is always an explicit row.
+	permissionStore := permission.NewStore(db.Pool)
+
+	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
+	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
+	// invokes on a resolver miss; the audit sink writes identity events to
+	// audit_logs.
+	identitySvc := identity.NewService(
+		db.Pool,
+		identity.NewLinker(bootstrapSvc),
+		identity.NewAuditSink(db.Pool),
+	)
+
+	// Shared by the login path (auth.Config.RedirectURI) and the admin
+	// credential-verification probe (resolvers.OIDCRedirectURI), so the probe
+	// always presents the redirect URI actually registered with the IdP.
+	oidcRedirectURI := mustEnv("GOOGLE_REDIRECT_URI")
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
+		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
 		JWTIssuer:          appmeta.ControllerIssuer,
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
-		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
+		RedirectURI:        oidcRedirectURI,
 		ValkeyURL:          mustEnv("VALKEY_URL"),
 		AllowedOrigin:      envOr("APP_BASE_URL", "http://localhost:5173"),
 	})
 	if err != nil {
 		log.Fatalf("auth init: %v", err)
 	}
+
+	// Session-generation revoker (PENDING-04 Phase 6): admin actions that remove
+	// a login path (disable/delete a connection) bump users.identity_generation
+	// and drop the live refresh session — authSvc satisfies
+	// identity.SessionInvalidator. Break-glass admins may always authenticate via
+	// the platform IdP so a workspace can never lock itself out (ADR-024 §5).
+	identityRevoker := identity.NewRevoker(db.Pool, authSvc, identity.NewAuditSink(db.Pool))
+	breakGlassEmails := parseBreakGlassEmails(os.Getenv("IDP_BREAK_GLASS_EMAILS"))
 
 	connectorCfg := connector.Config{
 		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
@@ -101,6 +207,9 @@ func main() {
 		JWTSecret:           mustEnv("JWT_SECRET"),
 		RenewalWindow:       mustDuration("CONNECTOR_RENEWAL_WINDOW", 48*time.Hour),
 	}
+	if msg := connectorRenewalWarning(connectorCfg.CertTTL, connectorCfg.RenewalWindow); msg != "" {
+		log.Print(msg)
+	}
 
 	shieldCfg := shield.Config{
 		CertTTL:             mustDuration("SHIELD_CERT_TTL", 7*24*time.Hour),
@@ -109,6 +218,9 @@ func main() {
 		DisconnectThreshold: mustDuration("SHIELD_DISCONNECT_THRESHOLD", 120*time.Second),
 		JWTSecret:           mustEnv("JWT_SECRET"),
 	}
+	connectorCfg.ShieldRenewalWindow = shieldCfg.EffectiveRenewalWindow()
+	log.Printf("shield renewal window: %s (SHIELD_RENEWAL_WINDOW=%s, SHIELD_CERT_TTL=%s)",
+		connectorCfg.ShieldRenewalWindow, shieldCfg.RenewalWindow, shieldCfg.CertTTL)
 
 	connectorValkey, err := newConnectorValkeyClient(ctx, mustEnv("VALKEY_URL"))
 	if err != nil {
@@ -117,12 +229,35 @@ func main() {
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	relayStore := relay.NewStore(db.Pool)
+	providerStore := provider.NewStore(db.Pool)
+	bootstrapProviderAdmin(ctx, providerStore)
 	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
 			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
-		)
+		).WithProvisioningAuth(mustEnv("JWT_SECRET")).
+		WithPrivateRelayAddrs(devAllowPrivateRelayAddrs())
+	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
+		rs, err := relayStore.ListRevokedRelaySerials(ctx)
+		if err != nil {
+			return nil, err
+		}
+		serials := make([]string, len(rs))
+		for i, r := range rs {
+			serials[i] = r.Serial
+		}
+		return serials, nil
+	})
+	if err := relayRevChecker.Refresh(ctx); err != nil {
+		log.Printf("relay revocation checker: initial load failed (relays denied u succeeds): %v", err)
+	}
+	relayRevChecker.SpawnRefresh(ctx, 60*time.Second, func(err error) {
+		log.Printf("relay revocation checker: refresh failed: %v", err)
+	})
 	connectorRegistry := connector.NewConnectorRegistry()
+	// D21-R (a2, S): every shield snapshot carries a Workspace-CA-signed peer
+	// list and resource set.
+	connectorRegistry.SetShieldSigner(pkiService)
 
 	inviteStore := invitation.NewStore(db.Pool)
 	inviteEmailer := invitation.NewEmailer(
@@ -137,7 +272,34 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
-	relaySvc.WithPolicyNotifier(policyNotifier)
+	policy.RegisterExpiryNotifier(func(workspaceID string) {
+		if err := policyNotifier.NotifyPolicyChange(
+			context.Background(),
+			workspaceID,
+		); err != nil {
+			log.Printf("expiry policy notification: %v", err)
+		}
+	})
+	// ADR-015/017 Track B: transport (connectivity) plane, independent of the
+	// ACL (authorization) plane. Relay metadata/eviction and connector relay
+	// placement changes drive transportNotifier.NotifyTopologyChange — never
+	// the policy notifier — so they never recompile or bump the ACL.
+	transportStore := transport.NewStore(db.Pool)
+	transportCache := transport.NewSnapshotCache()
+	transportNotifier := transport.NewNotifier(transportCache)
+	transportCompiler := transport.NewCompiler(transportStore, transportCache, transportNotifier)
+	relaySvc.WithTransportNotifier(transportNotifier)
+	postureStore := posture.NewStore(db.Pool)
+	postureEvaluator := posture.NewEvaluator(postureStore, policyNotifier)
+
+	// Certificate audit bug 3: drain the shield revocation outbox — at start
+	// (work left by a previous process), on every revocation, and on a timer.
+	shieldRevocations := &connector.ShieldRevocationDispatcher{
+		Pool:           db.Pool,
+		Registry:       connectorRegistry,
+		PolicyNotifier: policyNotifier,
+	}
+	go shieldRevocations.Run(ctx)
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
@@ -146,15 +308,39 @@ func main() {
 	// connect-time push in control_stream.go agree on it, and it changes iff
 	// the eligible set / an address / a label changes — so a connector
 	// re-probes exactly when the pool actually changed.
-	broadcastRelayList := func(ctx context.Context) {
+	publishRelayList := func(ctx context.Context) error {
 		list, err := relayStore.BuildLabelledRelayList(ctx)
 		if err != nil {
-			log.Printf("relay pool broadcast: build list: %v", err)
-			return
+			return fmt.Errorf("build list: %w", err)
 		}
 		connectorRegistry.BroadcastRelayList(list)
+		return nil
+	}
+	broadcastRelayList := func(ctx context.Context) {
+		if err := publishRelayList(ctx); err != nil {
+			log.Printf("relay pool broadcast: %v", err)
+		}
 	}
 	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
+
+	// FU-11 (ADR-009): public workspace discovery is rate limited — one Valkey
+	// budget per client IP shared by all four entry points, plus a per-email
+	// budget for lookupWorkspacesByEmail. Bad settings stop startup.
+	discoveryProxies, err := discoverylimit.ParseTrustedProxies(os.Getenv("DISCOVERY_TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		log.Fatalf("DISCOVERY_TRUSTED_PROXY_CIDRS: %v", err)
+	}
+	discoveryIPs := discoverylimit.NewIPResolver(discoveryProxies)
+	discoveryLimiter, err := discoverylimit.NewLimiter(valkeycompat.NewAdapter(connectorValkey), discoverylimit.Config{
+		IPLimit:    envOrInt("DISCOVERY_RATE_LIMIT_IP_PER_MIN", discoverylimit.DefaultIPLimit),
+		EmailLimit: envOrInt("DISCOVERY_RATE_LIMIT_EMAIL_PER_HOUR", discoverylimit.DefaultEmailLimit),
+	}, os.Getenv("PKI_MASTER_SECRET"))
+	if err != nil {
+		log.Fatalf("discovery rate limiter: %v", err)
+	}
+	if len(discoveryProxies) > 0 {
+		log.Printf("discovery rate limit: trusting X-Forwarded-For from %d proxy range(s)", len(discoveryProxies))
+	}
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
@@ -163,6 +349,8 @@ func main() {
 				AuthService:       authSvc,
 				ConnectorCfg:      connectorCfg,
 				ConnectorRegistry: connectorRegistry,
+				ShieldRevocations: shieldRevocations,
+				Outbox:            outboxStore,
 				Redis:             valkeycompat.NewAdapter(connectorValkey),
 				Pool:              db.Pool,
 				ShieldSvc:         shieldSvc,
@@ -170,16 +358,28 @@ func main() {
 				InvitationStore:   inviteStore,
 				InvitationEmailer: inviteEmailer,
 				PolicyStore:       policyStore,
+				PostureStore:      postureStore,
+				PostureEvaluator:  postureEvaluator,
 				PolicyNotifier:    policyNotifier,
+				TransportNotifier: transportNotifier,
+				IdpStore:          idpStore,
+				ScimStore:         scimStore,
+				PermissionStore:   permissionStore,
+				Revoker:           identityRevoker,
+				BreakGlassEmails:  breakGlassEmails,
+				OIDCRedirectURI:   oidcRedirectURI,
+				Roles:             roleChecker,
 			},
 			Directives: graph.DirectiveRoot{
-				HasRole: resolvers.HasRole,
+				Requires: resolvers.NewRequires(roleChecker),
 			},
 		}),
 	)
 	// Fail-closed error masking: only apperr.UserError + gqlgen parse/validation
 	// errors reach clients; raw resolver/DB errors are logged and genericized.
 	gqlSrv.SetErrorPresenter(resolvers.ErrorPresenter)
+	// FU-11: a refused discovery field replaces the operation's whole response.
+	gqlSrv.Use(discoverylimit.Extension{})
 
 	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
 	// enables it by default via extension.Introspection{}, which exposes the
@@ -194,7 +394,65 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	// Provider login is local (Sprint 21 Phase H, D-24): the direct Google OAuth
+	// provider routes (/provider/auth/initiate, /provider/auth/callback) and
+	// PROVIDER_GOOGLE_REDIRECT_URI are gone. Tenant Google/OIDC is unchanged.
+	// Provider plane (PENDING-07a): routes behind RequireProvider — provider JWT
+	// (dedicated PROVIDER_JWT_SECRET, iss=zecurity-provider, aud=provider,
+	// session_generation) verified by the internal Provider Identity Service
+	// (ADR-029). NEVER WorkspaceGuard; provider identity has no tenant.
+	providerIdentity := mustProviderIdentity()
+	providerAuthz := provider.NewAuthz()
+	providerHandlers := provider.NewHandlers(providerStore, providerAuthz)
+	requireProvider := middleware.RequireProvider(providerIdentity, providerStore)
+	// Provider auth (Sprint 21 Phase H): local email + password login
+	// (rate-limited in Valkey; fails closed), password change (the only route
+	// that accepts password-change-only tokens) and logout.
+	providerAuth := provider.NewAuthHandlers(
+		providerIdentity,
+		provider.NewLocalPasswordAuthenticator(providerStore),
+		providerStore,
+		provider.NewValkeyLoginLimiter(valkeycompat.NewAdapter(connectorValkey)),
+	)
+	mux.Handle("POST /provider/auth/login", http.HandlerFunc(providerAuth.Login))
+	mux.Handle("POST /provider/auth/password",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowPasswordChangeToken())(
+			http.HandlerFunc(providerAuth.ChangePassword)))
+	mux.Handle("POST /provider/auth/logout", requireProvider(http.HandlerFunc(providerAuth.Logout)))
+	// Mandatory super-admin TOTP (Sprint 22 Phase T; D-28, D-33). Each route
+	// takes only the confined MFA-stage token for its stage; the secret is
+	// sealed with the PKI master secret; code failures have their own limiter.
+	providerTOTP := provider.NewTOTPHandlers(
+		providerIdentity,
+		providerStore,
+		pkiService,
+		provider.NewValkeyTOTPLimiter(valkeycompat.NewAdapter(connectorValkey)),
+	)
+	mux.Handle("POST /provider/auth/totp/verify",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageVerify))(
+			http.HandlerFunc(providerTOTP.Verify)))
+	mux.Handle("POST /provider/auth/totp/enroll",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageEnroll))(
+			http.HandlerFunc(providerTOTP.Enroll)))
+	mux.Handle("POST /provider/auth/totp/enroll/confirm",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageEnroll))(
+			http.HandlerFunc(providerTOTP.ConfirmEnroll)))
+	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
+	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
+	// Operator management (Sprint 21 Phase U, D-27): super-admin only
+	// (provider_user.manage); every mutation is audited atomically and ends the
+	// affected operator's sessions.
+	operatorHandlers := provider.NewOperatorHandlers(providerStore, providerAuthz)
+	mux.Handle("POST /provider/users", requireProvider(http.HandlerFunc(operatorHandlers.Create)))
+	mux.Handle("PATCH /provider/users/{id}", requireProvider(http.HandlerFunc(operatorHandlers.ChangeRole)))
+	mux.Handle("POST /provider/users/{id}/disable", requireProvider(http.HandlerFunc(operatorHandlers.Disable)))
+	mux.Handle("POST /provider/users/{id}/enable", requireProvider(http.HandlerFunc(operatorHandlers.Enable)))
+	mux.Handle("POST /provider/users/{id}/reset-password", requireProvider(http.HandlerFunc(operatorHandlers.ResetPassword)))
+	mux.Handle("POST /provider/users/{id}/reset-totp", requireProvider(http.HandlerFunc(operatorHandlers.ResetTOTP)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
+	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
+	mux.Handle("GET /workspaces/{slug}/auth",
+		discoverylimit.ProtectHTTP(discoveryLimiter, discoveryIPs, discoverylimit.OpRESTAuth, authSvc.DiscoveryHandler()))
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -206,14 +464,17 @@ func main() {
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
 		middleware.WorkspaceGuard(db.Pool)(gqlSrv),
 	)
-	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
+	// The discovery middleware sits outside the public/protected routing, so both
+	// routes share one budget and a refusal becomes 429/503 on either.
+	mux.Handle("/graphql", discoverylimit.Middleware(discoveryLimiter, discoveryIPs)(routeGraphQL(protected, gqlSrv)))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))
+	mux.HandleFunc("/relay.crl", relay.RelayCRLHandler(pkiService, relayStore))
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 			middleware.WorkspaceGuard(db.Pool)(
 				http.HandlerFunc(inviteHandler.Create),
 			),
@@ -230,7 +491,7 @@ func main() {
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 			),
@@ -240,7 +501,7 @@ func main() {
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
 	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
+		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				shieldSvc.TokenHandler(),
 			),
@@ -248,27 +509,70 @@ func main() {
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
-	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
-	// Platform-level (no WorkspaceGuard); admin-only.
-	relayAdminHandler := &relay.AdminHandler{
-		Store:     relayStore,
-		Redis:     valkeycompat.NewAdapter(connectorValkey),
-		JWTSecret: mustEnv("JWT_SECRET"),
-	}
-	relayCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
-			http.HandlerFunc(relayAdminHandler.Create),
-		),
-	)
-	mux.Handle("POST /api/relays", relayCreateRoute)
+	// SCIM 2.0 directory-sync endpoint (Sprint 17 / ADR-025 Phase 5). Mounted
+	// under the SCIM bearer-auth middleware, which binds (workspace_id,
+	// connection_id) from the token onto the request context. The DirectoryService
+	// derives all scope from that token — never from the request payload.
+	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
+		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimDirSvc.WithRoleInvalidator(roleChecker)
+	scimStore.WithDirectoryService(scimDirSvc)
+	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 
+	// REST endpoint: POST /provider/relays — creates a relay registration +
+	// provisioning token. Provider-plane action (PENDING-07a): guarded by
+	// RequireProvider (aud=provider + active allowlist), NOT the tenant model.
+	// The handler runs the Authz chokepoint and writes a provider_audit_logs row.
+	relayAdminHandler := &relay.AdminHandler{
+		Store:         relayStore,
+		Redis:         valkeycompat.NewAdapter(connectorValkey),
+		JWTSecret:     mustEnv("JWT_SECRET"),
+		Authz:         providerAuthz,
+		ProviderStore: providerStore,
+		CAFingerprint: func(ctx context.Context) (string, error) {
+			return pki.IntermediateFingerprint(ctx, db.Pool)
+		},
+		ControllerGRPCAddr: optionalInstallAddr("PROVIDER_RELAY_CONTROLLER_ADDR"),
+		ControllerHTTPAddr: optionalInstallAddr("PROVIDER_RELAY_CONTROLLER_HTTP_ADDR"),
+	}
+	// Post-commit convergence when a relay is revoked/deleted: rebuild+broadcast the
+	// relay list (connectors migrate) AND invalidate the transport snapshot for each
+	// affected workspace (Sprint-13 clients re-poll) — mirrors the expiry path.
+
+	relayAdminHandler.OnRelayRevoked = func(ctx context.Context, relayID string) {
+		if err := relayRevChecker.Refresh(ctx); err != nil {
+			log.Printf("relay revoke fan-out: refresh revocation checker for %s: %v", relayID, err)
+		}
+		broadcastRelayList(ctx)
+		conns, err := relayStore.ListConnectorsForRelay(ctx, relayID)
+		if err != nil {
+			log.Printf("relay revoke fan-out: list connectors for %s: %v", relayID, err)
+			return
+		}
+		for wsID, connectorIDs := range conns {
+			if err := transportNotifier.NotifyTopologyChange(ctx, wsID, connectorIDs); err != nil {
+				log.Printf("relay revoke fan-out: transport notify ws=%s: %v", wsID, err)
+			}
+		}
+	}
+	mux.Handle("POST /provider/relays", requireProvider(http.HandlerFunc(relayAdminHandler.Create)))
+	mux.Handle("POST /provider/relays/{id}/revoke", requireProvider(http.HandlerFunc(relayAdminHandler.Revoke)))
+	mux.Handle("DELETE /provider/relays/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.Delete)))
+
+	// Sprint 22 Phase D (D-32): drain and resume. Post-commit, only on a real
+	// change: the heartbeat draining flag and the relay-list broadcast (see
+	// relay.DrainFanout).
+	relayAdminHandler.OnRelayDrainChanged = relay.DrainFanout(relaySvc, publishRelayList)
+	mux.Handle("POST /provider/relays/{id}/drain", requireProvider(http.HandlerFunc(relayAdminHandler.Drain)))
+	mux.Handle("POST /provider/relays/{id}/resume", requireProvider(http.HandlerFunc(relayAdminHandler.Resume)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
 	}
 
 	connectorStore := connectorWorkspaceStore{pool: db.Pool}
-	controllerTLS, err := pkiService.GenerateControllerServerTLS(ctx, controllerCertHosts(connectorCfg.GRPCPort), connectorCfg.CertTTL)
+	hostNames := controllerCertHosts(connectorCfg.GRPCPort)
+	controllerTLS, err := pkiService.GenerateControllerServerTLS(ctx, hostNames, connectorCfg.CertTTL)
 	if err != nil {
 		log.Fatalf("generate controller gRPC TLS cert: %v", err)
 	}
@@ -277,31 +581,62 @@ func main() {
 		log.Fatalf("load controller gRPC TLS keypair: %v", err)
 	}
 
+	regen := func(ctx context.Context) (*tls.Certificate, time.Time, time.Time, error) {
+		res, err := pkiService.GenerateControllerServerTLS(ctx, hostNames, connectorCfg.CertTTL)
+		if err != nil {
+			return nil, time.Time{}, time.Time{}, err
+		}
+		cert, err := tls.X509KeyPair([]byte(res.CertificatePEM), []byte(res.PrivateKeyPEM))
+		if err != nil {
+			return nil, time.Time{}, time.Time{}, err
+		}
+		return &cert, res.NotBefore, res.NotAfter, nil
+	}
+	controllerRotator := pki.NewControllerCertRotator(regen, &controllerCert, controllerTLS.NotBefore, controllerTLS.NotAfter, nil)
+
+	// Provider read APIs (Sprint 21 Phase R). Registered here because the
+	// certificate report needs the controller rotator; the HTTP server starts
+	// later. relaySvc supplies Valkey relay liveness, controllerRotator the
+	// process-local controller_grpc certificate. Tenant detail reads are
+	// audited fail-closed inside the handler.
+	providerReads := provider.NewReadHandlers(db.Pool, providerAuthz, providerStore, relaySvc, controllerRotator)
+	mux.Handle("GET /provider/relays", requireProvider(http.HandlerFunc(providerReads.ListRelays)))
+	mux.Handle("GET /provider/relays/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelay)))
+	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
+	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
+	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
+	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
+
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
 
 	grpcServer := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
-			Certificates: []tls.Certificate{controllerCert},
-			ClientAuth:   tls.RequestClientCert,
-			MinVersion:   tls.VersionTLS13,
+			GetCertificate: controllerRotator.GetCertificate,
+			ClientAuth:     tls.RequestClientCert,
+			MinVersion:     tls.VersionTLS13,
 		})),
-		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore)),
-		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore)),
+		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
+		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
 	)
 
-	connectorSvc := &connector.EnrollmentHandler{
-		Cfg:        connectorCfg,
-		Pool:       db.Pool,
-		Redis:      valkeycompat.NewAdapter(connectorValkey),
-		PKIService: pkiService,
-		ShieldSvc:  shieldSvc,
-		Registry:   connectorRegistry,
+	workers.Go("controller-rotator", func() {
+		controllerRotator.Run(ctx)
+	})
 
-		PolicyStore:    policyStore,
-		PolicyCache:    policyCache,
-		PolicyNotifier: policyNotifier,
-		RelayStore:     relayStore,
-		RelayListSrc:   relayStore,
+	connectorSvc := &connector.EnrollmentHandler{
+		Cfg:               connectorCfg,
+		Pool:              db.Pool,
+		Redis:             valkeycompat.NewAdapter(connectorValkey),
+		PKIService:        pkiService,
+		ShieldSvc:         shieldSvc,
+		Registry:          connectorRegistry,
+		PostureStore:      postureStore,
+		PolicyStore:       policyStore,
+		PolicyCache:       policyCache,
+		PolicyNotifier:    policyNotifier,
+		RelayStore:        relayStore,
+		RelayListSrc:      relayStore,
+		TransportNotifier: transportNotifier,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
@@ -311,13 +646,28 @@ func main() {
 	// invalidates the cache, push the fresh snapshot to all connected connectors
 	// in the workspace immediately instead of waiting for the next heartbeat.
 	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
-	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, postureStore, policyCache, policyNotifier)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
+
+	// Transport plane has no proactive push: the client is the sole consumer and
+	// polls GetTransportSnapshot (plus an immediate re-poll on relay failure,
+	// Phase C). A topology change just bumps the transport version + invalidates
+	// the cache; the client's next poll picks it up. Connectors do not consume
+	// the transport snapshot, so nothing is pushed to them.
+
+	// FU-8 (ADR-018 amendment 2026-11-02): client wake-up hints. Both notifiers
+	// wake the clients' WatchChanges streams after a change, so a client polls
+	// at once instead of on its next 60 s tick. A separate listener after the
+	// connector push hook, non-blocking; the poll stays authoritative.
+	hintHub := changehint.New()
+	policyNotifier.AddChangeListener(hintHub.Notify)
+	transportNotifier.AddChangeListener(hintHub.Notify)
 
 	clientSvc := clientsvc.NewService(
 		db.Pool,
 		authSvc,
 		pkiService,
+		idpStore,
 		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
@@ -325,52 +675,224 @@ func main() {
 		policyStore,
 		policyCache,
 		policyNotifier,
+		transportCompiler,
+		postureStore,
+		postureEvaluator,
 	)
+	// Open hint streams end on shutdown so they don't hold GracefulStop (O-8).
+	clientSvc.EnableChangeHints(hintHub, transportNotifier, ctx.Done())
+
+	// PENDING-20 G1: country of the address each device connects from.
+	geoDB := openGeoIP()
+	clientSvc.WithGeoIP(geoDB)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
+
+	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM
+	// deprovision/reactivate (PENDING-05) enqueues device.trust.* events; these
+	// handlers execute them — revoking the user's device certs (→ workspace CRL)
+	// and recording re-enrollment requirements. Fail-fast at startup so a missing
+	// registration is caught immediately rather than letting events dead-letter.
+	if err := registerOutboxHandlers(outboxRegistry, db.Pool, policyNotifier); err != nil {
+		log.Fatalf("register outbox handlers: %v", err)
+	}
 
 	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
 	// Google redirects here after user consent; controller exchanges the code
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
-	go shieldSvc.RunDisconnectWatcher(ctx)
-	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
-	go func() {
+	workers.Go("outbox-processor", func() {
+
+		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
+			log.Printf("outbox processor stopped: %v", err)
+		}
+	})
+
+	workers.Go("connector-disconnect-watcher", func() {
+		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier, transportNotifier)
+	})
+
+	workers.Go("shield-disconnect-watcher", func() {
+		shieldSvc.RunDisconnectWatcher(ctx)
+	})
+
+	// Sprint 20 Fix 16 (F50): a deleted resource whose shield did not ack the
+	// rule removal within 2 s is removed anyway; the shield's snapshot drops
+	// the rule (now if connected, else on reconnect).
+	workers.Go("resource-tombstone-sweeper", func() {
+		resource.RunTombstoneSweeper(ctx, db.Pool, time.Second, 2*time.Second, func(t resource.ReapedTombstone) {
+			if err := policyNotifier.NotifyPolicyChange(ctx, t.TenantID); err != nil {
+				log.Printf("resource tombstone sweeper: notify policy change: %v", err)
+			}
+			connector.PushSnapshotForShield(ctx, db.Pool, connectorRegistry, t.ConnectorID, t.ShieldID)
+		})
+	})
+
+	workers.Go("relay-expiry-loop", func() {
+		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	})
+
+	// FU-6: re-send the current relay list to any connector a post-commit
+	// broadcast missed (failed build, full send queue, out-of-order delivery).
+	workers.Go("relay-list-sync", func() {
+		connectorRegistry.RunRelayListSync(ctx, relayStore, 60*time.Second)
+	})
+
+	// Sprint 22 Phase D: re-set the heartbeat draining flags from Postgres.
+	workers.Go("relay-drain-reconcile", func() {
+		relay.ReconcileDrainFlags(ctx, relayStore, relaySvc)
+		relay.RunDrainFlagLoop(ctx, relayStore, relaySvc, 60*time.Second)
+	})
+
+	retentionDays := envOrInt(
+		"POSTURE_RETENTION_DAYS",
+		30,
+	)
+
+	retentionBatchSize := envOrInt(
+		"POSTURE_RETENTION_BATCH_SIZE",
+		2000,
+	)
+
+	retentionWorker := posture.NewRetentionWorker(
+		postureStore,
+		time.Duration(retentionDays)*24*time.Hour,
+		retentionBatchSize,
+		nil,
+	)
+	workers.Go("posture-retention", func() {
+		retentionWorker.Run(ctx)
+	})
+
+	// PENDING-20 G1: pick up a new GeoIP database file (operators replace it
+	// monthly); devices are re-judged on their next poll.
+	workers.Go("geoip-reload", func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
-			if err := discovery.PurgeScanResults(context.Background(), db.Pool, cutoff); err != nil {
-				log.Printf("discovery: purge scan results: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reloadGeoIP(geoDB)
 			}
 		}
-	}()
+	})
 
-	go func() {
+	workers.Go("hourly-ticker", func() {
+
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
+				if err := discovery.PurgeScanResults(ctx, db.Pool, cutoff); err != nil {
+					log.Printf("discovery: purge scan results: %v", err)
+				}
+			}
+		}
+	})
+	workers.Go("grpc-server", func() {
+
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
-		if err := grpcServer.Serve(grpcListener); err != nil {
+		if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("grpc serve: %v", err)
 		}
-	}()
+	})
 
 	// Metrics on a SEPARATE internal listener — they leak operational data, so they
 	// must not sit on the public mux. Defaults to loopback; set METRICS_ADDR (e.g.
 	// ":9102") to expose to a network scraper behind your own firewall. A failure
 	// here is logged, not fatal — metrics are non-critical to serving traffic.
-	go func() {
-		metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", metrics.Handler())
-		log.Printf("metrics listening on %s/metrics", metricsAddr)
-		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
+
+	metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsServer := &http.Server{
+		Addr:    metricsAddr,
+		Handler: metricsMux,
+	}
+
+	workers.Go("metrics-server", func() {
+
+		log.Printf("metrics listenin on %s/metrics", metricsAddr)
+
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
 		}
-	}()
+	})
+
+	// Provider console CORS (Sprint 21 H-b, D-18): only /provider/* and only
+	// the exact PROVIDER_CONSOLE_ORIGIN; unset = off (dev uses the Vite proxy).
+	// Wraps the whole mux so browser preflights reach it before method routing.
+	providerCORS, err := middleware.NewProviderCORS(strings.TrimSpace(os.Getenv("PROVIDER_CONSOLE_ORIGIN")))
+	if err != nil {
+		log.Fatalf("provider console CORS: %v", err)
+	}
 
 	addr := ":" + envOr("PORT", "8080")
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: providerCORS(mux),
+	}
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+
+	// Serve the public/admin HTTP API. This MUST have its own goroutine: the
+	// outbox worker below previously replaced this call, so the process logged
+	// "listening on :8080", bound nothing, and every request through the SPA
+	// proxy came back 502.
+	workers.Go("http-server", func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http serve: %v", err)
+		}
+	})
+
+	<-ctx.Done()
+	log.Printf("shutdown requested")
+
+	// Signal shutdown to all background workers
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Shutdown HTTP server
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown error: %v", err)
+	}
+
+	// Shutdown metrics server
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics server shutdown error: %v", err)
+	}
+
+	// Gracefully stop gRPC server with timeout
+	grpcStopped := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcStopped)
+	}()
+	select {
+	case <-grpcStopped:
+		log.Printf("gRPC server gracefully stopped")
+	case <-shutdownCtx.Done():
+		log.Printf("gRPC graceful shutdown timed out; forcing stop")
+		grpcServer.Stop()
+	}
+
+	// Wait for the background workers, but not forever: one that ignores ctx
+	// used to hold the process until systemd's SIGKILL (live E2E run
+	// 2026-10-30, O-8). Name the stragglers so they can be fixed.
+	if stuck := workers.Wait(15 * time.Second); len(stuck) > 0 {
+		log.Printf("shutdown: workers still running after 15s, exiting anyway: %v", stuck)
+	} else {
+		log.Printf("all workers completed")
+	}
+
+	log.Printf("shutdown complete")
 }
 
 // publicRootFields are the GraphQL root fields callable WITHOUT authentication —
@@ -386,6 +908,7 @@ var publicRootFields = map[string]struct{}{
 	"initiateAuth":            {}, // login redirect
 	"lookupWorkspace":         {}, // signup slug availability / login flow
 	"lookupWorkspacesByEmail": {}, // login workspace picker
+	"lookupIdpConnections":    {}, // login IdP picker (F7-5); returns PublicIdpConnection only
 }
 
 // routeGraphQL decides server-side whether a /graphql request may bypass the auth
@@ -500,6 +1023,31 @@ func healthHandler() http.Handler {
 	})
 }
 
+// mustProviderIdentity builds the Provider Identity Service from
+// PROVIDER_JWT_SECRET, refusing to start if the key is missing, shorter than 32
+// bytes, or the tenant JWT_SECRET (D-25).
+func mustProviderIdentity() *provider.IdentityService {
+	key := os.Getenv("PROVIDER_JWT_SECRET")
+	if err := provider.ValidateProviderSigningKey(key, mustEnv("JWT_SECRET")); err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	ids, err := provider.NewIdentityService(key)
+	if err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	return ids
+}
+
+// optionalInstallAddr reads a controller address printed in the relay install
+// command (Phase E). Unset is fine; a malformed value stops startup.
+func optionalInstallAddr(key string) string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if err := relay.ValidateInstallAddr(v); err != nil {
+		log.Fatalf("%s: %v", key, err)
+	}
+	return v
+}
+
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -532,13 +1080,14 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 }
 
 func newConnectorValkeyClient(ctx context.Context, valkeyURL string) (valkey.Client, error) {
-	addr, err := parseValkeyAddr(valkeyURL)
+	opts, err := valkeyurl.Parse(valkeyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse valkey URL: %w", err)
 	}
 
 	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{addr},
+		InitAddress: []string{opts.Addr},
+		SelectDB:    opts.DB,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create valkey client: %w", err)
@@ -603,17 +1152,6 @@ func versionAtLeast(version string, major, minor int) bool {
 	return maj > major || (maj == major && min >= minor)
 }
 
-func parseValkeyAddr(rawURL string) (string, error) {
-	after, found := strings.CutPrefix(rawURL, "redis://")
-	if !found {
-		return "", fmt.Errorf("expected redis:// URL, got: %s", rawURL)
-	}
-	if idx := strings.LastIndex(after, "@"); idx != -1 {
-		after = after[idx+1:]
-	}
-	return after, nil
-}
-
 type connectorWorkspaceStore struct {
 	pool *pgxpool.Pool
 }
@@ -652,6 +1190,22 @@ func (s connectorWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context
 	}
 
 	return parseCertPEM(certPEM)
+}
+
+func (s connectorWorkspaceStore) GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*connector.ConnectorStanding, error) {
+	return connector.LoadConnectorStanding(ctx, s.pool, trustDomain, connectorID)
+}
+
+func (s connectorWorkspaceStore) GetRelayStatus(ctx context.Context, relayID string) (string, error) {
+	var relayStatus string
+	err := s.pool.QueryRow(ctx, `SELECT status FROM relays WHERE id = $1`, relayID).Scan(&relayStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get relay status: %w", err)
+	}
+	return relayStatus, nil
 }
 
 func (s connectorWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
@@ -738,4 +1292,151 @@ func loadOptionalEnv() {
 
 		log.Fatalf("load %s: %v", path, err)
 	}
+}
+
+// parseBreakGlassEmails parses IDP_BREAK_GLASS_EMAILS (comma-separated) into a
+// lowercased set of workspace admins who may always authenticate via the
+// platform IdP, so a workspace can never lock itself out (ADR-024 §5). Consulted
+// by the no-lockout guard. Empty/unset → no break-glass admins.
+func parseBreakGlassEmails(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range strings.Split(raw, ",") {
+		if email := strings.ToLower(strings.TrimSpace(e)); email != "" {
+			out[email] = true
+		}
+	}
+	return out
+}
+
+// bootstrapProviderAdmin runs the create-only provider bootstrap (D-26,
+// ADR-029): PROVIDER_BOOTSTRAP_EMAIL + PROVIDER_BOOTSTRAP_PASSWORD create the
+// first super-admin only while none exists; afterwards they are ignored. There
+// is no self-registration and no reset flag — break-glass recovery is a future
+// controller CLI command.
+func bootstrapProviderAdmin(ctx context.Context, store *provider.Store) {
+	for _, legacy := range []string{"PROVIDER_BOOTSTRAP_EMAILS", "PROVIDER_GOOGLE_REDIRECT_URI"} {
+		if os.Getenv(legacy) != "" {
+			log.Printf("%s is ignored — provider login is local (D-24); remove it from the environment", legacy)
+		}
+	}
+	email := os.Getenv("PROVIDER_BOOTSTRAP_EMAIL")
+	passwordSet := os.Getenv("PROVIDER_BOOTSTRAP_PASSWORD") != ""
+
+	res, u, err := provider.Bootstrap(ctx, store, email, os.Getenv("PROVIDER_BOOTSTRAP_PASSWORD"))
+	if err != nil {
+		log.Fatalf("provider bootstrap: %v", err)
+	}
+	switch res {
+	case provider.BootstrapCreated:
+		log.Printf("created bootstrap provider super-admin %s — change the password at first login, then remove PROVIDER_BOOTSTRAP_PASSWORD", u.Email)
+	case provider.BootstrapSkippedAdminExists:
+		log.Printf("provider super-admin exists — PROVIDER_BOOTSTRAP_* ignored")
+		if passwordSet {
+			log.Printf("WARNING: remove PROVIDER_BOOTSTRAP_PASSWORD from the environment")
+		}
+	case provider.BootstrapEmailTaken:
+		log.Printf("ERROR: provider bootstrap skipped: %s already exists as a non-super-admin account; bootstrap never promotes an existing account", strings.ToLower(strings.TrimSpace(email)))
+	case provider.BootstrapNotConfigured:
+		log.Printf("WARNING: no provider super-admin exists and PROVIDER_BOOTSTRAP_EMAIL is unset — nobody can sign in to the provider console")
+	}
+}
+
+func envOrInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf(
+			"invalid value for %s=%q, using default %d",
+			key,
+			v,
+			fallback,
+		)
+		return fallback
+	}
+
+	return n
+}
+
+// registerOutboxHandlers registers every outbox consumer. Startup fails if
+// one cannot be registered, because an event without a handler is failed
+// terminally on its first attempt.
+func registerOutboxHandlers(reg *outbox.HandlerRegistry, pool *pgxpool.Pool, notifier *policy.Notifier) error {
+	if err := reg.RegisterHandler(
+		identity.EventDeviceTrustRevokeRequested,
+		clientsvc.NewDeviceTrustRevokeHandler(pool, notifier),
+	); err != nil {
+		return fmt.Errorf("device.trust.revoke.requested: %w", err)
+	}
+	if err := reg.RegisterHandler(
+		identity.EventDeviceTrustReEnrollmentRequired,
+		clientsvc.NewDeviceTrustReEnrollHandler(pool, notifier),
+	); err != nil {
+		return fmt.Errorf("device.trust.re_enrollment_required: %w", err)
+	}
+	if err := reg.RegisterHandler(
+		policy.EventPolicyInvalidationRequested,
+		policy.NewInvalidationHandler(notifier),
+	); err != nil {
+		return fmt.Errorf("%s: %w", policy.EventPolicyInvalidationRequested, err)
+	}
+	return nil
+}
+
+// devAllowPrivateRelayAddrs reports whether relays on private (RFC 1918)
+// addresses are advertised to connectors and clients. Development labs only:
+// RELAY_DEV_ALLOW_PRIVATE_ADDR=true takes effect only with ENV=development;
+// anywhere else it is ignored with a warning.
+func devAllowPrivateRelayAddrs() bool {
+	if os.Getenv("RELAY_DEV_ALLOW_PRIVATE_ADDR") != "true" {
+		return false
+	}
+	if os.Getenv("ENV") != "development" {
+		log.Printf("WARNING: RELAY_DEV_ALLOW_PRIVATE_ADDR ignored — only honoured with ENV=development")
+		return false
+	}
+	log.Printf("DEV: relays on private addresses are advertised (RELAY_DEV_ALLOW_PRIVATE_ADDR=true, ENV=development)")
+	return true
+}
+
+// geoipMaxAge is when an unchanged GeoIP database is reported as stale.
+const geoipMaxAge = 60 * 24 * time.Hour
+
+// openGeoIP opens the country database (GEOIP_DB_PATH, PENDING-20 G-3). The
+// GEOIP_DEV_OVERRIDES map (G-7) is honoured only with ENV=development, so a
+// production controller can never be told a private address is in a country.
+func openGeoIP() *geoip.DB {
+	overrides := os.Getenv("GEOIP_DEV_OVERRIDES")
+	if overrides != "" && os.Getenv("ENV") != "development" {
+		log.Printf("geoip: GEOIP_DEV_OVERRIDES ignored: only honoured with ENV=development")
+		overrides = ""
+	}
+	geoDB, err := geoip.Open(os.Getenv("GEOIP_DB_PATH"), overrides)
+	if err != nil {
+		log.Fatalf("geoip: %v", err)
+	}
+	metrics.SetGeoIPBuild(geoDB.Build())
+	warnStaleGeoIP(geoDB)
+	return geoDB
+}
+
+func warnStaleGeoIP(geoDB *geoip.DB) {
+	if b := geoDB.Build(); !b.IsZero() && time.Since(b) > geoipMaxAge {
+		log.Printf("geoip: WARNING database built %s is older than %d days; replace it (DB-IP Lite Country is monthly)",
+			b.Format("2006-01-02"), int(geoipMaxAge.Hours()/24))
+	}
+}
+
+// reloadGeoIP re-reads the database file if it changed. Nothing else is
+// needed: each device's next ACL poll (≤ 60 s) or posture report resolves its
+// address against the new database, and a changed country re-evaluates it.
+func reloadGeoIP(geoDB *geoip.DB) {
+	if _, err := geoDB.Reload(); err != nil {
+		log.Printf("geoip: reload: %v", err)
+	}
+	metrics.SetGeoIPBuild(geoDB.Build())
+	warnStaleGeoIP(geoDB)
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::grpc::client_v1::AclSnapshot;
+use crate::grpc::client_v1::{AclSnapshot, TransportSnapshot};
 
 /// Live TUN session handle — present while `zecurity up` is active.
 pub struct TunHandle {
@@ -9,6 +9,17 @@ pub struct TunHandle {
     pub abort: tokio::task::AbortHandle,
     /// Resource IPs added as /32 routes (for cleanup logging).
     pub route_count: usize,
+    /// Effective config this tunnel was built from; Fix 01 Phase 1 restart decision.
+    pub applied: AppliedConfig,
+    /// Fix 01 Phase 2-A: publishes a new connector transport map into the
+    /// running net_stack (read once per accepted flow). Shared via Arc so a
+    /// hot-apply can replace this TunHandle while keeping the same channel.
+    pub transport_tx: Arc<tokio::sync::watch::Sender<Arc<crate::net_stack::TransportMap>>>,
+    /// Fix 05 Phase 5-C: sequenced, acknowledged resource commands (listeners,
+    /// smoltcp addresses, affected-flow close) into the running net_stack.
+    /// Shared via Arc so a hot-apply can replace this TunHandle while keeping
+    /// the same channel.
+    pub resource_tx: Arc<tokio::sync::mpsc::Sender<crate::net_stack::ResourceCmd>>,
 }
 
 impl std::fmt::Debug for TunHandle {
@@ -19,24 +30,176 @@ impl std::fmt::Debug for TunHandle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedCoords {
+    pub connector_id: String,
+    pub connector_tunnel_addr: String,
+    pub connector_spiffe: String,
+    pub relay_addr: String,
+    pub relay_spiffe_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEntry {
+    pub address: String,
+    pub port: u32,
+    pub protocol: String,
+    pub remote_network_id: String,
+    pub preferred_connector_id: String,
+    pub coords: Vec<AppliedCoords>,
+}
+
+/// The effective config the running tunnel was built from (Fix 01 Phase 1).
+/// It deliberately excludes version, generated_at, workspace_id, names,
+/// top-level relay_addr/relay_spiffe_id, and non-preferred connector order.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AppliedConfig {
+    pub spiffe_id: String,
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+    pub tpm_key_material: Option<String>,
+    pub ca_cert_pem: String,
+    pub entries: Vec<AppliedEntry>,
+}
+
+impl std::fmt::Debug for AppliedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppliedConfig")
+            .field("spiffe_id", &self.spiffe_id)
+            .field("entries_len", &self.entries.len())
+            .finish()
+    }
+}
+
+/// Coordination state for `daemon::restart_tunnel_if_running`'s queued-oneshot
+/// batch coordinator. `running` is true while a worker task is draining
+/// `pending` passes; a caller pushes a oneshot sender onto `pending` and
+/// starts a worker only if none is already running.
+#[derive(Default)]
+pub struct TunnelRestartCoordinator {
+    pub running: bool,
+    pub pending: Vec<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+}
+
+impl std::fmt::Debug for TunnelRestartCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelRestartCoordinator")
+            .field("running", &self.running)
+            .field("pending_count", &self.pending.len())
+            .finish()
+    }
+}
+
+/// Mirrors the persisted `StoredDevice.device_state` marker (state_store.rs)
+/// so live code — IPC handlers, the ACL sync scheduler — can check the
+/// daemon's trust state without re-reading disk. Sprint 19 Track 2
+/// (PENDING-13, see Track2-Device-Trust-Directive.md). Active means proceed
+/// normally; ReEnrollRequired/Revoked mean the on-disk cert has been wiped
+/// and must not be used.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceState {
+    #[default]
+    Active,
+    ReEnrollRequired,
+    Revoked,
+}
+
+impl DeviceState {
+    pub fn from_marker(marker: &str) -> Self {
+        match marker {
+            "revoked" => Self::Revoked,
+            "re_enroll_required" => Self::ReEnrollRequired,
+            _ => Self::Active,
+        }
+    }
+
+    pub fn as_marker(&self) -> &'static str {
+        match self {
+            Self::Active => "",
+            Self::ReEnrollRequired => "re_enroll_required",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
-    pub schema_version: u32,
+    // pub schema_version: u32,
     pub workspace: Option<WorkspaceInfo>,
     pub user: Option<UserInfo>,
     pub device: Option<DeviceInfo>,
     pub session: Option<SessionInfo>,
-    pub resources: Vec<Resource>,
-    pub last_sync_at: Option<i64>,
     /// ACL snapshot fetched from the Controller. None = default-deny.
     pub acl_snapshot: Option<AclSnapshot>,
     /// Unix timestamp of the last successful ACL snapshot fetch.
     pub acl_last_sync_at: Option<i64>,
+    /// Connector-revocation Phase C (D19): monotonic time of the last
+    /// successful ACL sync (snapshot or up_to_date). Drives the 1 h
+    /// staleness bound; wall-clock time is not used for that.
+    pub acl_last_ok: Option<std::time::Instant>,
+    /// Phase C: connectors the client must not use (the ACL's
+    /// `revoked_connectors`). Shared with every relay task; survives restarts.
+    pub blocked_connectors: crate::net_stack::BlockedConnectors,
+    /// Transport (connectivity) snapshot — per-connector relay coords keyed by
+    /// remote_network_id (ADR-015 Track B). Independent of the ACL. None = fall
+    /// back to the ACL's transitional relay fields (ACLConnector 4+5).
+    pub transport_snapshot: Option<TransportSnapshot>,
+    /// Unix timestamp of the last successful transport snapshot fetch.
+    pub transport_last_sync_at: Option<i64>,
+    /// Verified platform Relay CRL cache shared across tunnel restarts.
+    pub relay_crl: Option<crate::crl::CrlManager>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
     /// Ensures only one task refreshes the session tokens at a time.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the transport fetch/read/store operation so a concurrent
+    /// scheduler tick and relay-recovery task cannot overwrite a newer transport
+    /// snapshot with an older response. Held across the whole known-version →
+    /// fetch → store sequence, not just the store.
+    pub transport_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Coordinates tunnel down→up restarts so concurrent triggers (relay
+    /// recovery, the 60s ACL tick, IPC sync/resources, post-login) share
+    /// restart passes instead of each running its own full down/up cycle.
+    /// See `daemon::restart_tunnel_if_running`.
+    pub tunnel_restart: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+    /// Signalled by the data plane (net_stack) when a managed-resource relay
+    /// transport fails, so the ACL sync scheduler re-syncs early instead of
+    /// waiting for the next poll tick. Coalescing: a burst of failures collapses
+    /// into a single wake.
+    pub relay_resync: Arc<tokio::sync::Notify>,
+     /// Signalled by PostLoginState right after a successful login, so the
+    /// posture scheduler collects and submits immediately instead of waiting
+    /// for the next 5-minute tick.
+    pub posture_resync: Arc<tokio::sync::Notify>,
+    /// Sprint 19 Track 2 (PENDING-13): the device trust directive last
+    /// reported by the controller. Active unless a revoke/re-enroll directive
+    /// has been received this process (or was already persisted at startup).
+    pub device_state: DeviceState,
+    /// Human-readable reason accompanying device_state — the server's
+    /// directive_reason. Empty when device_state is Active.
+    pub device_state_reason: String,
+    /// Sprint 19 Track 3 (PENDING-13, ADR-028 D1): signalled when the ACL
+    /// poll reports DIRECTIVE_RENEW_SOON, so the cert renewal scheduler wakes
+    /// early instead of waiting for its own timer — a backstop for a
+    /// scheduler that's running late (sleep/suspend, clock drift), not the
+    /// primary trigger. See daemon::run_cert_renewal_scheduler.
+    pub cert_renewal_resync: Arc<tokio::sync::Notify>,
+    /// FU-8: woken by the WatchChanges hint stream (change_watch.rs) when the
+    /// controller's ACL or transport version differs from the cached one; the
+    /// ACL sync scheduler then syncs at once instead of on its next tick.
+    /// Coalescing: any burst of hints leaves one pending wake.
+    pub change_hint: Arc<tokio::sync::Notify>,
+    /// FU-10: in-memory copy of `StoredWorkspaceState::tunnel_wanted` — the
+    /// user last left the tunnel up. Read by the startup restore.
+    pub tunnel_wanted: bool,
+    /// FU-10: serializes the user's up/down (IPC Up, Down, post-login) with
+    /// the startup restore, so a `down` can't be overtaken by a restore
+    /// attempt that was already under way.
+    pub tunnel_intent_lock: Arc<tokio::sync::Mutex<()>>,
+    /// FU-10: Some while the startup restore is still trying to bring the
+    /// tunnel back; holds the last attempt's error ("" before the first).
+    pub tunnel_restore: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,7 +209,7 @@ pub struct WorkspaceInfo {
     pub slug: String,
     pub trust_domain: String,
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UserInfo {
     pub id: String,
@@ -59,8 +222,16 @@ pub struct DeviceInfo {
     pub id: String,
     pub spiffe_id: String,
     pub certificate_pem: String,
-    pub private_key_pem: String, // plaintext in memory — never written to disk
-    pub ca_cert_pem: String,     // workspace CA + intermediate (concatenated)
+    /// Software-backed key: plaintext in memory — never written to disk
+    /// unencrypted. Empty when this device is TPM-backed (PENDING-17), in
+    /// which case `tpm_key_material` carries the key instead — exactly one of
+    /// the two is populated.
+    pub private_key_pem: String,
+    /// TPM-backed key material (PENDING-17), opaque as stored — see
+    /// `state_store::StoredDevice::tpm_key_material`. `None` for
+    /// software-backed devices.
+    pub tpm_key_material: Option<String>,
+    pub ca_cert_pem: String, // workspace CA + intermediate (concatenated)
     pub cert_expires_at: i64,    // Unix timestamp
     pub hostname: String,
     pub os: String,
@@ -73,30 +244,35 @@ pub struct SessionInfo {
     pub expires_at: i64, // Unix timestamp
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Resource {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub protocol: String,
-}
-
 /// Shared handle used across async tasks.
 pub type SharedState = Arc<RwLock<RuntimeState>>;
 
 pub fn new_shared() -> SharedState {
     Arc::new(RwLock::new(RuntimeState {
-        schema_version: crate::appmeta::SCHEMA_VERSION,
+        // schema_version: crate::appmeta::SCHEMA_VERSION,
         workspace: None,
         user: None,
         device: None,
         session: None,
-        resources: Vec::new(),
-        last_sync_at: None,
         acl_snapshot: None,
         acl_last_sync_at: None,
+        acl_last_ok: None,
+        blocked_connectors: crate::net_stack::new_blocked_connectors(),
+        transport_snapshot: None,
+        transport_last_sync_at: None,
+        relay_crl: None,
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restart: Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default())),
+        relay_resync: Arc::new(tokio::sync::Notify::new()),
+         posture_resync: Arc::new(tokio::sync::Notify::new()),
+        device_state: DeviceState::Active,
+        device_state_reason: String::new(),
+        cert_renewal_resync: Arc::new(tokio::sync::Notify::new()),
+        change_hint: Arc::new(tokio::sync::Notify::new()),
+        tunnel_wanted: false,
+        tunnel_intent_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restore: None,
     }))
 }

@@ -1,6 +1,6 @@
 # ADR-018: Track A → Track B Migration Strategy
 
-**Status:** Proposed
+**Status:** Accepted — Phases 1 and 3 implemented by Sprint 13; breaking Phase 4 deferred
 **Track:** B — Architecture (migration phase)
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-26
@@ -226,14 +226,18 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 
 ## Implementation Checklist
 
+> **Sprint 13 reconciliation:** Phases 1 and 3 use version-aware client polling. Transport messages
+> are client-owned, connector field 16 is reserved, and the proposed connector stream-push path was
+> intentionally superseded. Phase 4 remains deferred for the compatibility window.
+
 ### Phase 1 — Transport Snapshot Proto + Compiler
-- [ ] Add `TransportSnapshot`, `TransportRemoteNetwork`, `TransportConnector` to `connector.proto` (field 16 on `ConnectorControlMessage`)
-- [ ] Add `GetTransportSnapshot` RPC + request/response messages to `client.proto`
-- [ ] `buf generate` — regenerate Go stubs
-- [ ] Build Transport Compiler in `controller/internal/transport/compiler.go`
-- [ ] Build `GetTransportSnapshot` handler in controller client service
-- [ ] Controller pushes `TransportSnapshot` on control stream open (alongside ACLSnapshot)
-- [ ] Build gate: `cd controller && go build ./...` passes
+- [x] **Architecture correction:** add transport messages to `client.proto`; reserve obsolete connector field 16
+- [x] Add `GetTransportSnapshot` RPC + request/response messages to `client.proto`
+- [x] `buf generate` — regenerate Go stubs
+- [x] Build Transport Compiler in `controller/internal/transport/compiler.go`
+- [x] Build `GetTransportSnapshot` handler in controller client service
+- [x] **Architecture correction:** serve snapshots through version-aware client polling rather than connector stream push
+- [x] Build gate: `cd controller && go build ./...` passes
 
 ### Phase 2 — Connector Dynamic Relay Selection *(delivered by ADR-016 / Sprint 11)*
 - [x] `connector/src/relay_selector.rs` (new) — three-phase state machine: instant startup, background optimization, make-before-break migration
@@ -244,9 +248,9 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 - [x] Build gate: `cd connector && cargo build` passes
 
 ### Phase 3 — Client Transport Cache
-- [ ] `client/src/daemon.rs` — add `TransportCache`; fetch via `GetTransportSnapshot` alongside ACL
-- [ ] `build_transports_by_resource` — resolve relay from Transport Cache on `remote_network_id`; fall back to ACLConnector fields 4+5 if cache empty
-- [ ] Build gate: `cd client && cargo build` passes
+- [x] `client/src/daemon.rs` — add `TransportCache`; fetch via `GetTransportSnapshot` alongside ACL
+- [x] `build_transports_by_resource` — resolve relay from Transport Cache on `remote_network_id`; fall back to ACLConnector fields 4+5 if cache empty
+- [x] Build gate: `cd client && cargo build` passes
 
 ### Phase 4 — Remove Track A Elements (coordinated deploy)
 - [ ] Reserve `ACLConnector` fields 4+5 in `client.proto` (exact statements above)
@@ -261,6 +265,28 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 - [ ] All existing tests pass with relay fields removed from ACL pipeline
 
 ---
+
+## Amendment 2026-11-02 — client wake-up hints (FU-8)
+
+**Context.** Sprint 13 chose version-aware client polling over a stream push (checklist above). That stays. The live E2E run of 2026-10-29 (O-3, filed as FU-8) showed the cost of polling alone: losing access is immediate (the connector gets the ACL push and cuts the session), but **regaining** access waited for the client's next 60 s poll. Likewise, a drained relay's clients kept opening new connections through it for up to 60 s (AT-D6: +59 s).
+
+**Decision (Barath, 2026-11-02: option B).** Add an *advisory* wake-up stream and keep everything else.
+- `ClientService.WatchChanges(WatchChangesRequest) returns (stream ChangeHint)`, an additive change to `client.proto`. `ChangeHint` carries only `acl_version` and `transport_version`: no rules, no topology, nothing that grants access.
+- **The snapshot RPCs stay authoritative.** On a hint whose versions differ from its cached snapshots, the client runs its normal sync (GetACLSnapshot + GetTransportSnapshot, the same path as the 60 s tick). Access is never granted by a hint.
+- **The 60 s poll stays on** whether or not the stream is up. A lost hint, a dead stream, or a controller without this RPC only costs speed, never correctness.
+- **Nothing is missed:**
+  - the server subscribes before it reads the versions it sends, and sends them as the first message;
+  - a change before the read is in that message, and a change after it wakes the stream;
+  - each later message carries the *current* versions (bursts coalesce);
+  - the client compares for equality (versions restart at 0 with the controller), so duplicate or stale hints cost at most one up-to-date poll.
+- **Separate from the connector push.** `policy.Notifier` keeps its single connector push hook; client hints are an extra listener fired after it (`AddChangeListener`), and `transport.Notifier` gained the same listener. The hub never blocks (a 1-slot wake per stream) and keeps at most one stream per device.
+- **Authentication:** the same as GetACLSnapshot (access token + device_id in the request; the stream interceptor skips `ClientService` like the unary one).
+  - The stream ends at token expiry (`UNAUTHENTICATED`), on a directive that removes the device's standing (`FAILED_PRECONDITION`: revoked or re-enroll required; checked at open, on every wake, and every 60 s, so a revoke, which always notifies the policy plane, ends it at once; `RENEW_SOON` does not end it), on a newer stream from the same device (`ABORTED`), and on controller shutdown (`UNAVAILABLE`, so it never holds GracefulStop).
+  - The client reconnects with jittered backoff from 1 s up to 60 s, and drops a connection silent for 150 s (the server repeats the versions every 60 s).
+
+**Unchanged:** the snapshot RPCs and their version rules, connector-side enforcement and revocation, the 60 s poll, and Track B's separation (a transport change never moves the ACL version, and the hint keeps them in separate fields).
+
+**Latency.** In normal operation a client syncs within about a second of a change (network plus one sync). This is not guaranteed. Without the stream, convergence is the poll's, as before (ADR-017: worst case 2 × 60 s).
 
 ## Follow-up
 

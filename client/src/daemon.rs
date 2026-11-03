@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -12,22 +13,54 @@ use crate::auth;
 use crate::config;
 use crate::grpc::{
     self,
-    client_v1::{AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
+    client_v1::{
+        AclConnector, AclEntry, AclRemoteNetwork, AclSnapshot, DeviceDirective,
+        DevicePostureReport, GetAclSnapshotRequest, GetTransportSnapshotRequest, RenewCertRequest,
+        ReportDevicePostureRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
+    },
 };
+use crate::posture;
+use uuid::Uuid;
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
-    self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
+    self, AppliedConfig, AppliedCoords, AppliedEntry, DeviceInfo, DeviceState, SessionInfo,
+    SharedState, TunHandle, TunnelRestartCoordinator, UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
-use crate::tun::{AllowedFlow, TunManager};
+use crate::tun::{AllowedFlow, ResourceKernel, TunManager};
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
 const ACL_REFRESH_TTL_SECS: i64 = 60;
+/// Fix 05 Phase 5-C (H4): how long a resource command may take to be
+/// acknowledged by the net_stack loop. For a removal (R1) the ack means every
+/// affected socket was reset AND reaped. Exceeding it is a post-mutation
+/// failure → recovery restart.
+const RESOURCE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Queue depth of the resource command channel (the apply sends one command
+/// at a time and awaits its ack).
+const RESOURCE_CMD_QUEUE_CAP: usize = 16;
+// Early-resync backoff after a relay transport failure. The connector may still
+// be re-homing, so the controller's ACL may not carry the new relay yet — retry
+// with exponential backoff until the version changes, then fall back to the
+// steady poll tick. Bounded so a permanently-dead relay can't spin forever.
+// ~2+4+8+8 = 22s span, which covers the connector re-home floor (~5–15s).
+// The cap is 8s, not 16s, so a change published while a burst is waiting is
+// seen within 8s (live E2E run 2026-10-30, F-8).
+const RELAY_RESYNC_BASE_SECS: u64 = 2;
+const RELAY_RESYNC_MAX_SECS: u64 = 8;
+const RELAY_RESYNC_MAX_ATTEMPTS: u32 = 5;
+// Minimum gap between early-resync bursts. Without it, a permanently-dead relay
+// plus an app that keeps retrying connections would re-arm the signal
+// continuously and spin the burst back-to-back (still at most 5 fetches per
+// burst). It was 30s: a relay revoked just after a burst left relay-path
+// clients failing for ~35s while their connectors had already moved (F-8).
+// The 60s tick is the backstop.
+const RELAY_RESYNC_COOLDOWN_SECS: u64 = 5;
 
 struct AclSyncResult {
     version: u64,
@@ -52,8 +85,18 @@ pub async fn run() -> Result<()> {
 
     let state = runtime::new_shared();
 
-    // Load encrypted durable state on startup if present.
-    if let Ok(stored) = state_store::load_workspace_state(&conf.workspace) {
+    // Created here (rather than just before the acl-sync-scheduler spawn
+    // below) so the startup ACL fetch can react to a device directive by
+    // stopping a tunnel — moot on a fresh daemon (nothing is up yet), but
+    // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
+    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+    // Load encrypted durable state on startup if present — only if its saved
+    // trust anchors chain to the platform root compiled into this client
+    // (certificate audit bug 1); otherwise the device must log in again.
+    if let Some(stored) =
+        load_trusted_state(&conf.workspace, crate::trust::embedded_platform_root_pem())
+    {
         let mut s = state.write().await;
         populate_runtime(&mut s, &stored);
         info!(workspace = %conf.workspace, "durable state loaded on startup");
@@ -62,11 +105,34 @@ pub async fn run() -> Result<()> {
         // Fetch ACL snapshot in background — stale token will just log a warning.
         let state_clone = Arc::clone(&state);
         let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
         let ca_pem = stored.device.ca_cert_pem.clone();
         let device_id = stored.device.id.clone();
         tokio::spawn(async move {
-            fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, device_id).await;
+            fetch_and_store_acl(&state_clone, &conf_clone, &tun_slot_clone, ca_pem, device_id)
+                .await;
         });
+
+        // Fetch the transport snapshot too, so relay routing is available before
+        // the first background tick (ADR-015 Track B).
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            if let Err(e) = fetch_and_store_transport(&state_clone, &conf_clone).await {
+                warn!(error = %e, "startup transport snapshot fetch failed");
+            }
+        });
+
+        // FU-10: the user last left the tunnel up — bring it back after this
+        // restart or reboot instead of waiting for `zecurity-client up`.
+        if stored.tunnel_wanted {
+            let state_clone = Arc::clone(&state);
+            let conf_clone = conf.clone();
+            let tun_slot_clone = Arc::clone(&tun_slot);
+            tokio::spawn(async move {
+                restore_tunnel(&state_clone, &conf_clone, &tun_slot_clone).await;
+            });
+        }
     }
 
     // Proactive session-refresh loop. Runs for the daemon's lifetime, sleeps
@@ -78,7 +144,29 @@ pub async fn run() -> Result<()> {
             run_refresh_scheduler(state_clone, conf_clone).await;
         });
     }
-
+    // Posture collection loop. Sibling to run_refresh_scheduler — posture
+    // cadence (fixed 5-minute interval) and token-refresh cadence are
+    // different concerns, so this is its own task, not merged into either.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_posture_scheduler(state_clone, conf_clone).await;
+        });
+    }
+    // Proactive device-cert renewal loop (Sprint 19 Track 3 / PENDING-13,
+    // ADR-028 D1). Sibling to run_refresh_scheduler — cert renewal (days-long
+    // TTL) and token refresh (minutes-long TTL) are on completely different
+    // clocks. Gets tun_slot so a successful renewal can restart a running
+    // tunnel onto the new certificate (Sprint 21 B1).
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
+        tokio::spawn(async move {
+            run_cert_renewal_scheduler(state_clone, conf_clone, tun_slot_clone).await;
+        });
+    }
     let socket_path = ipc_socket_path();
 
     // Remove stale socket from a previous run.
@@ -105,8 +193,6 @@ pub async fn run() -> Result<()> {
     // pings every half-interval so a transient slow tick never trips the timeout.
     sd_spawn_watchdog();
 
-    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
-
     // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
     // and restarts the tunnel when the version changes — the timer counterpart
     // to the action-triggered sync in handle_request. See run_acl_sync_scheduler.
@@ -118,6 +204,9 @@ pub async fn run() -> Result<()> {
             run_acl_sync_scheduler(state_clone, conf_clone, tun_slot_clone).await;
         });
     }
+    // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
+    // the scheduler's own tick keeps running whether or not this is connected.
+    tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -153,9 +242,16 @@ async fn handle_connection(
 
     let (response, shutdown) = match serde_json::from_str::<IpcRequest>(line.trim()) {
         Ok(req) => {
-            let is_shutdown = matches!(req, IpcRequest::Shutdown);
+            let is_shutdown_req = matches!(req, IpcRequest::Shutdown);
             let resp = handle_request(req, &state, &conf, &tun_slot).await;
-            (resp, is_shutdown)
+            // A device directive reaction may have set Revoked while handling
+            // this request (Sprint 19 Track 2 / PENDING-13, react_to_device_
+            // directive) — exit after the response is flushed below, same as
+            // an explicit Shutdown request. Checked generically (not tied to
+            // one IpcRequest variant) so any future call path that can trigger
+            // a directive reaction is covered automatically.
+            let revoked = state.read().await.device_state == DeviceState::Revoked;
+            (resp, is_shutdown_req || revoked)
         }
         Err(_) => (
             IpcResponse {
@@ -189,11 +285,18 @@ async fn handle_request(
 ) -> IpcResponse {
     match req {
         IpcRequest::Status => {
+            let tunnel_up = tun_slot.lock().await.is_some();
             let s = state.read().await;
             IpcResponse {
                 ok: true,
                 kind: "Status".into(),
                 state: Some("running".into()),
+                tunnel_up: Some(tunnel_up),
+                tunnel_restoring: if tunnel_up {
+                    None
+                } else {
+                    s.tunnel_restore.clone()
+                },
                 email: s.user.as_ref().map(|u| u.email.clone()),
                 device_id: s.device.as_ref().map(|d| d.id.clone()),
                 spiffe_id: s.device.as_ref().map(|d| d.spiffe_id.clone()),
@@ -202,16 +305,25 @@ async fn handle_request(
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                device_state: match s.device_state {
+                    DeviceState::Active => None,
+                    other => Some(other.as_marker().to_string()),
+                },
+                revoked_reason: if s.device_state == DeviceState::Active {
+                    None
+                } else {
+                    Some(s.device_state_reason.clone())
+                },
                 ..Default::default()
             }
         }
 
-        IpcRequest::Sync => match sync_acl_now(state, conf).await {
+        IpcRequest::Sync => match sync_acl_now(state, conf, tun_slot).await {
             Ok(result) => {
                 if result.changed {
                     info!(
                         version = result.version,
-                        "ACL changed, restarting VPN or tunnel"
+                        "ACL changed, evaluating tunnel configuration"
                     );
 
                     if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
@@ -247,7 +359,7 @@ async fn handle_request(
         },
 
         IpcRequest::Resources => {
-            match refresh_acl_if_needed(state, conf).await {
+            match refresh_acl_if_needed(state, conf, tun_slot).await {
                 Ok(Some(result)) if result.changed => {
                     if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
                         return IpcResponse {
@@ -358,6 +470,7 @@ async fn handle_request(
             spiffe_id,
             certificate_pem,
             private_key_pem,
+            tpm_key_material,
             ca_cert_pem,
             cert_expires_at,
             hostname,
@@ -382,6 +495,7 @@ async fn handle_request(
                     spiffe_id,
                     certificate_pem,
                     private_key_pem,
+                    tpm_key_material,
                     ca_cert_pem,
                     cert_expires_at,
                     hostname,
@@ -401,8 +515,11 @@ async fn handle_request(
                     populate_runtime(&mut s, &stored);
                     info!("PostLoginState: durable state saved, runtime updated");
                     drop(s);
-
-                    let result = match sync_acl_now(state, conf).await {
+                    {
+                        let s = state.read().await;
+                        s.posture_resync.notify_one();
+                    }
+                    let result = match sync_acl_now(state, conf, tun_slot).await {
                         Ok(r) => r,
                         Err(e) => {
                             return IpcResponse {
@@ -422,6 +539,8 @@ async fn handle_request(
                         "ACL syncronized after login"
                     );
 
+                    let intent_lock = state.read().await.tunnel_intent_lock.clone();
+                    let _intent = intent_lock.lock().await;
                     let running = tun_slot.lock().await.is_some();
                     if !running {
                         // Automatically connect after login.
@@ -456,6 +575,7 @@ async fn handle_request(
                             );
                         }
                     }
+                    set_tunnel_wanted(state, conf, true).await;
 
                     IpcResponse {
                         ok: true,
@@ -472,9 +592,22 @@ async fn handle_request(
             }
         }
 
-        IpcRequest::Up => handle_up(state, conf, tun_slot).await,
+        IpcRequest::Up => {
+            let intent_lock = state.read().await.tunnel_intent_lock.clone();
+            let _intent = intent_lock.lock().await;
+            let resp = handle_up(state, conf, tun_slot).await;
+            if resp.ok {
+                set_tunnel_wanted(state, conf, true).await;
+            }
+            resp
+        }
 
-        IpcRequest::Down => handle_down(state, tun_slot).await,
+        IpcRequest::Down => {
+            let intent_lock = state.read().await.tunnel_intent_lock.clone();
+            let _intent = intent_lock.lock().await;
+            set_tunnel_wanted(state, conf, false).await;
+            handle_down(state, tun_slot).await
+        }
     }
 }
 
@@ -493,7 +626,7 @@ async fn handle_up(
         };
     }
 
-    if let Err(e) = refresh_acl_if_needed(state, conf).await {
+    if let Err(e) = refresh_acl_if_needed(state, conf, tun_slot).await {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
@@ -502,80 +635,69 @@ async fn handle_up(
         };
     }
 
-    // Require an ACL snapshot with at least one entry.
-    let (acl, device) = {
+    // Require a synced ACL snapshot and a device identity. The transport
+    // snapshot is optional — routing falls back to the ACL relay fields when
+    // it's absent. Zero resources is a valid tunnel state (see up_preflight).
+    let (acl, transport, device) = {
         let s = state.read().await;
-        (s.acl_snapshot.clone(), s.device.clone())
+        (
+            s.acl_snapshot.clone(),
+            s.transport_snapshot.clone(),
+            s.device.clone(),
+        )
     };
 
-    let acl = match acl {
-        None => {
+    let UpInputs {
+        acl,
+        device,
+        allowed_entries,
+        allowed_flows,
+    } = match up_preflight(acl, device) {
+        Ok(inputs) => inputs,
+        Err(error) => {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some(
-                    "no ACL snapshot — run zecurity-client status to check daemon state".into(),
-                ),
+                error: Some(error),
                 ..Default::default()
             }
         }
-        Some(a) if a.entries.is_empty() => {
+    };
+
+    let applied = effective_config(&acl, transport.as_ref(), &device);
+
+    let relay_crl = {
+        let mut runtime = state.write().await;
+        runtime
+            .relay_crl
+            .get_or_insert_with(crate::crl::CrlManager::new)
+            .clone()
+    };
+    let relay_crl_url = format!("{}/relay.crl", conf.http_base());
+    crate::crl::start_relay_crl(&relay_crl, relay_crl_url, device.ca_cert_pem.as_bytes()).await;
+
+    let transports = match build_transports_by_resource_with_crl(
+        &allowed_entries,
+        &acl.remote_networks,
+        &revoked_connector_ids(&acl),
+        transport.as_ref(),
+        &device,
+        relay_crl,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some("ACL snapshot has no entries — no resources to route".into()),
+                error: Some(format!("failed to build client transport: {}", e)),
                 ..Default::default()
             }
         }
-        Some(a) => Arc::new(a),
     };
-
-    let device = match device {
-        None => {
-            return IpcResponse {
-                ok: false,
-                kind: "Up".into(),
-                error: Some("no device identity — run zecurity-client login first".into()),
-                ..Default::default()
-            }
-        }
-        Some(d) => d,
-    };
-
-    // Filter to only entries this device is permitted to access.
-    let my_spiffe = device.spiffe_id.clone();
-    let allowed_entries: Vec<AclEntry> = acl
-        .entries
-        .iter()
-        .filter(|e| {
-            e.allowed_spiffe_ids
-                .iter()
-                .any(|id| id == my_spiffe.as_str())
-        })
-        .cloned()
-        .collect();
-
-    if allowed_entries.is_empty() {
-        return IpcResponse {
-            ok: false,
-            kind: "Up".into(),
-            error: Some("no accessible resources for this device — check group membership".into()),
-            ..Default::default()
-        };
-    }
-
-    let transports =
-        match build_transports_by_resource(&allowed_entries, &acl.remote_networks, &device) {
-            Ok(t) => Arc::new(t),
-            Err(e) => {
-                return IpcResponse {
-                    ok: false,
-                    kind: "Up".into(),
-                    error: Some(format!("failed to build client transport: {}", e)),
-                    ..Default::default()
-                }
-            }
-        };
+    // Fix 01 Phase 2-A: the running net_stack reads the transport map through
+    // this watch channel, so a connector-topology change can publish a new map
+    // without a VPN restart. The sender lives in TunHandle.
+    let (transport_tx, transport_rx) = tokio::sync::watch::channel(Arc::new(transports));
 
     // Create TUN device.
     let mut mgr = match TunManager::create().await {
@@ -591,30 +713,10 @@ async fn handle_up(
     };
 
     // Mark only the allowed TCP destination flows into the Zecurity route table.
-    // Other ports on the same IP stay on the normal kernel route.
-    let allowed_flows: Vec<AllowedFlow> = allowed_entries
-        .iter()
-        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
-        .filter_map(|e| {
-            let IpAddr::V4(ip) = e.address.parse::<IpAddr>().ok()? else {
-                return None;
-            };
-            Some(AllowedFlow {
-                ip,
-                port: e.port as u16,
-            })
-        })
-        .collect();
-
-    if allowed_flows.is_empty() {
-        return IpcResponse {
-            ok: false,
-            kind: "Up".into(),
-            error: Some("no TCP resources available for this device".into()),
-            ..Default::default()
-        };
-    }
-
+    // Other ports on the same IP stay on the normal kernel route. With zero
+    // flows this only clears stale policy state; the first resource assigned
+    // later is added by the Phase 5-C resource hot-apply (it creates the nft
+    // table/chain and ensures the fwmark rule).
     if let Err(e) = mgr.configure_allowed_flows(&allowed_flows) {
         return IpcResponse {
             ok: false,
@@ -637,8 +739,24 @@ async fn handle_up(
         }
     };
 
+    let allowed_entries_count = allowed_entries.len();
+    let (relay_resync, blocked) = {
+        let s = state.read().await;
+        (s.relay_resync.clone(), s.blocked_connectors.clone())
+    };
+    // Fix 05 Phase 5-C: resource hot-apply commands into the running net_stack.
+    let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, allowed_entries, transports).await {
+        if let Err(e) = net_stack::run(
+            dev,
+            allowed_entries,
+            transport_rx,
+            resource_rx,
+            relay_resync,
+            blocked,
+        )
+        .await
+        {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -646,13 +764,185 @@ async fn handle_up(
 
     // Store TunManager (for route cleanup) and AbortHandle (for task cancel).
     *tun_slot.lock().await = Some(mgr);
-    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
+    state.write().await.tun_handle = Some(Arc::new(TunHandle {
+        abort,
+        route_count,
+        applied,
+        transport_tx: Arc::new(transport_tx),
+        resource_tx: Arc::new(resource_tx),
+    }));
 
     info!(routes = route_count, "zecurity0 up");
+    if route_count == 0 {
+        log_no_resources_assigned(acl.entries.len(), allowed_entries_count);
+    }
     IpcResponse {
         ok: true,
         kind: "Up".into(),
+        synced_resources: Some(route_count),
         ..Default::default()
+    }
+}
+
+/// What `handle_up` needs once the preconditions hold.
+struct UpInputs {
+    acl: Arc<AclSnapshot>,
+    device: DeviceInfo,
+    /// ACL entries this device may access (SPIFFE-filtered).
+    allowed_entries: Vec<AclEntry>,
+    /// The routable (TCP, IPv4) subset the kernel marks into zecurity0.
+    allowed_flows: Vec<AllowedFlow>,
+}
+
+/// Preconditions for bringing the tunnel up. Only a missing ACL snapshot (the
+/// client has never synced) or a missing device identity fails. Zero resources
+/// — an empty snapshot, no entry for this device, or no routable entry — is a
+/// valid tunnel state: the resource mapping is empty and the Phase 5-C
+/// resource hot-apply fills it when a resource is assigned later.
+fn up_preflight(
+    acl: Option<AclSnapshot>,
+    device: Option<DeviceInfo>,
+) -> std::result::Result<UpInputs, String> {
+    let acl = acl.ok_or_else(|| {
+        "no ACL snapshot — run zecurity-client status to check daemon state".to_string()
+    })?;
+    let device =
+        device.ok_or_else(|| "no device identity — run zecurity-client login first".to_string())?;
+    let allowed_entries = allowed_entries_for(&acl, &device);
+    let allowed_flows = allowed_entries
+        .iter()
+        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
+        .map(|(ip, port)| AllowedFlow { ip, port })
+        .collect();
+    Ok(UpInputs {
+        acl: Arc::new(acl),
+        device,
+        allowed_entries,
+        allowed_flows,
+    })
+}
+
+/// Logged when the tunnel comes up with an empty resource mapping.
+fn log_no_resources_assigned(acl_entries: usize, allowed: usize) {
+    if allowed == 0 {
+        info!(
+            acl_entries,
+            "no resources currently assigned to this device; tunnel up, waiting for resource assignment"
+        );
+    } else {
+        info!(
+            acl_entries,
+            allowed,
+            "no routable (TCP) resources currently assigned to this device; tunnel up, waiting for resource assignment"
+        );
+    }
+}
+
+/// FU-10 restore backoff: the first retry after 2 s, doubling up to once a
+/// minute (the ACL poll's own cadence), for as long as the user wants the
+/// tunnel and the device stays active.
+const TUNNEL_RESTORE_FIRST_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+const TUNNEL_RESTORE_MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Records the user's up/down choice (FU-10) in memory and in the saved state,
+/// so the next daemon start knows whether to bring the tunnel back. A failed
+/// save is logged, not returned: the tunnel itself already did what was asked.
+async fn set_tunnel_wanted(state: &SharedState, conf: &config::ClientConf, wanted: bool) {
+    {
+        let mut s = state.write().await;
+        s.tunnel_wanted = wanted;
+        if !wanted {
+            s.tunnel_restore = None;
+        }
+    }
+    if let Err(e) = state_store::save_tunnel_wanted(&conf.workspace, wanted) {
+        warn!(
+            error = %format!("{e:#}"),
+            wanted,
+            "could not save the tunnel up/down choice; a daemon restart may not follow it"
+        );
+    }
+}
+
+/// FU-10 (live run 2026-10-29, O-5): brings the tunnel back after a daemon
+/// restart or reboot when the user last left it up. Uses the same path as
+/// `zecurity-client up`; a revoke seen while restoring exits like the startup
+/// ACL fetch does.
+async fn restore_tunnel(state: &SharedState, conf: &config::ClientConf, tun_slot: &TunSlot) {
+    restore_tunnel_with(
+        state,
+        tun_slot,
+        TUNNEL_RESTORE_FIRST_RETRY,
+        TUNNEL_RESTORE_MAX_RETRY,
+        || handle_up(state, conf, tun_slot),
+    )
+    .await;
+    if state.read().await.device_state == DeviceState::Revoked {
+        info!("device revoked — exiting");
+        std::process::exit(0);
+    }
+}
+
+/// The restore loop, with the "bring it up" step injected so tests can drive
+/// it without a TUN device. Each attempt holds the tunnel-intent lock, so a
+/// `down` either lands before an attempt (which then stops) or after it (and
+/// takes the tunnel down again). Stops when the tunnel is up, when the user
+/// no longer wants it, or when the device is no longer active. Returns
+/// whether the tunnel was restored.
+async fn restore_tunnel_with<F, Fut>(
+    state: &SharedState,
+    tun_slot: &TunSlot,
+    first_retry: std::time::Duration,
+    max_retry: std::time::Duration,
+    mut up: F,
+) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = IpcResponse>,
+{
+    info!("restoring the tunnel the user left up before this restart");
+    state.write().await.tunnel_restore = Some(String::new());
+    let mut delay = first_retry;
+    let mut attempt = 0u32;
+    loop {
+        let intent_lock = state.read().await.tunnel_intent_lock.clone();
+        let done = {
+            let _intent = intent_lock.lock().await;
+            let (wanted, active) = {
+                let s = state.read().await;
+                (s.tunnel_wanted, s.device_state == DeviceState::Active)
+            };
+            if !wanted || !active {
+                info!(wanted, active, "tunnel restore stopped");
+                Some(false)
+            } else if tun_slot.lock().await.is_some() {
+                // Already up: `up` or `login` got there first.
+                Some(true)
+            } else {
+                attempt += 1;
+                let resp = up().await;
+                if resp.ok {
+                    info!(attempt, "tunnel restored after restart");
+                    Some(true)
+                } else {
+                    let error = resp.error.unwrap_or_default();
+                    warn!(
+                        attempt,
+                        error = %error,
+                        retry_in_secs = delay.as_secs(),
+                        "tunnel restore failed; retrying"
+                    );
+                    state.write().await.tunnel_restore = Some(error);
+                    None
+                }
+            }
+        };
+        if let Some(restored) = done {
+            state.write().await.tunnel_restore = None;
+            return restored;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(max_retry);
     }
 }
 
@@ -677,36 +967,2943 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     }
 }
 
+/// Relay recovery, the 60s ACL tick, IPC sync/resources, and post-login can
+/// each call this concurrently. Requests are coalesced via
+/// `register_restart_request`: everyone queued before a restart pass starts
+/// shares that pass's result; anyone arriving mid-pass is deferred to the
+/// next one. This avoids one full down/up cycle per concurrent caller while
+/// still giving every caller the correct pass's real result.
 async fn restart_tunnel_if_running(
     state: &SharedState,
     conf: &config::ClientConf,
     tun_slot: &TunSlot,
 ) -> Result<()> {
-    let running = tun_slot.lock().await.is_some();
+    let coordinator = { state.read().await.tunnel_restart.clone() };
+    let state = state.clone();
+    let conf = conf.clone();
+    let tun_slot = tun_slot.clone();
 
-    if !running {
+    let work = move || {
+        let state = state.clone();
+        let conf = conf.clone();
+        let tun_slot = tun_slot.clone();
+        async move {
+            perform_tunnel_restart(&state, &conf, &tun_slot)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+
+    register_restart_request(&coordinator, work)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Fix 01 three-way restart decision (Phase 2-A).
+///
+/// * `NoChange`      — effective config identical → keep the tunnel.
+/// * `TransportOnly` — ONLY connector topology changed (connector added/removed,
+///   preferred connector changed, connector coords changed) → hot-apply the
+///   transport map into the running net_stack.
+/// * `ResourceDelta` — Fix 05 Phase 5-C: identity unchanged and no resource
+///   moved to another remote network; resource entries were added/removed/
+///   changed (IP, port, protocol, access, non-routable entries), possibly
+///   together with connector changes → ordered resource hot-apply with one
+///   transport-map publication.
+/// * `Structural`    — the only classification-level restart boundaries:
+///   a resource's `remote_network_id` changed (D3) or the device identity
+///   changed (D4); plus missing inputs (fail closed) → full VPN restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigDelta {
+    NoChange,
+    TransportOnly,
+    ResourceDelta,
+    Structural,
+}
+
+/// The applied config with every connector-topology field blanked. Two configs
+/// whose structural views are equal differ ONLY in connector topology.
+///
+/// Fail-closed by construction: this clears an explicit set of connector
+/// fields and compares EVERYTHING else (identity + every other entry field),
+/// so any field added to `AppliedConfig`/`AppliedEntry` later is treated as
+/// structural until someone deliberately classifies it here.
+fn structural_view(cfg: &AppliedConfig) -> AppliedConfig {
+    let mut view = cfg.clone();
+    for entry in &mut view.entries {
+        entry.preferred_connector_id.clear();
+        entry.coords.clear();
+    }
+    // effective_config sorts entries with preferred_connector_id in the key;
+    // re-sort after blanking so ordering can't create a false difference.
+    view.entries.sort_by(|a, b| {
+        (&a.address, a.port, &a.protocol, &a.remote_network_id).cmp(&(
+            &b.address,
+            b.port,
+            &b.protocol,
+            &b.remote_network_id,
+        ))
+    });
+    view
+}
+
+/// Pure classifier over two effective configs.
+pub(crate) fn classify_applied(applied: &AppliedConfig, candidate: &AppliedConfig) -> ConfigDelta {
+    if candidate == applied {
+        ConfigDelta::NoChange
+    } else if structural_view(candidate) == structural_view(applied) {
+        ConfigDelta::TransportOnly
+    } else if resource_delta_allowed(applied, candidate) {
+        ConfigDelta::ResourceDelta
+    } else {
+        ConfigDelta::Structural
+    }
+}
+
+/// Fix 05 Phase 5-C: the only classification-level restart boundaries.
+/// Returns false (→ Structural) when the device identity changed (D4) or an
+/// entry key `(address, port, protocol)` present in both configs has a
+/// different remote-network set (D3). Every other difference is a resource
+/// add/remove plus connector fields, which the resource hot-apply handles.
+///
+/// Fail-closed by construction: `AppliedConfig` and `AppliedEntry` are
+/// destructured exhaustively, so a field added later won't compile here
+/// until someone classifies it.
+fn resource_delta_allowed(applied: &AppliedConfig, candidate: &AppliedConfig) -> bool {
+    let AppliedConfig {
+        spiffe_id: a_spiffe,
+        certificate_pem: a_cert,
+        private_key_pem: a_key,
+        tpm_key_material: a_tpm,
+        ca_cert_pem: a_ca,
+        entries: a_entries,
+    } = applied;
+    let AppliedConfig {
+        spiffe_id: c_spiffe,
+        certificate_pem: c_cert,
+        private_key_pem: c_key,
+        tpm_key_material: c_tpm,
+        ca_cert_pem: c_ca,
+        entries: c_entries,
+    } = candidate;
+    // D4: device identity is baked into every connection pool.
+    if (a_spiffe, a_cert, a_key, a_tpm, a_ca) != (c_spiffe, c_cert, c_key, c_tpm, c_ca) {
+        return false;
+    }
+    // D3: a resource that moved to another remote network.
+    let a_rns = remote_networks_by_entry_key(a_entries);
+    let c_rns = remote_networks_by_entry_key(c_entries);
+    a_rns
+        .iter()
+        .all(|(key, a_set)| c_rns.get(key).is_none_or(|c_set| c_set == a_set))
+}
+
+type EntryKey<'a> = (&'a str, u32, &'a str);
+
+fn remote_networks_by_entry_key(
+    entries: &[AppliedEntry],
+) -> BTreeMap<EntryKey<'_>, BTreeSet<&str>> {
+    let mut out: BTreeMap<EntryKey<'_>, BTreeSet<&str>> = BTreeMap::new();
+    for entry in entries {
+        let AppliedEntry {
+            address,
+            port,
+            protocol,
+            remote_network_id,
+            // Connector fields: handled by the transport-map rebuild.
+            preferred_connector_id: _,
+            coords: _,
+        } = entry;
+        out.entry((address.as_str(), *port, protocol.as_str()))
+            .or_default()
+            .insert(remote_network_id.as_str());
+    }
+    out
+}
+
+/// Classify the current snapshots against the config the running tunnel was
+/// built from. Missing inputs can't be proven connector-only → `Structural`
+/// (fail closed; `handle_up` then fails exactly as before).
+pub(crate) fn classify_delta(
+    applied: Option<&AppliedConfig>,
+    acl: Option<&AclSnapshot>,
+    transport: Option<&TransportSnapshot>,
+    device: Option<&DeviceInfo>,
+) -> ConfigDelta {
+    let (Some(applied), Some(acl), Some(device)) = (applied, acl, device) else {
+        return ConfigDelta::Structural;
+    };
+    classify_applied(applied, &effective_config(acl, transport, device))
+}
+
+/// True only for a Structural delta (kept for the Phase 1 tests' vocabulary).
+#[cfg(test)]
+pub(crate) fn needs_full_restart(
+    applied: Option<&AppliedConfig>,
+    acl: Option<&AclSnapshot>,
+    transport: Option<&TransportSnapshot>,
+    device: Option<&DeviceInfo>,
+) -> bool {
+    classify_delta(applied, acl, transport, device) == ConfigDelta::Structural
+}
+
+/// Entries this device may access (SPIFFE-filtered). Shared by `handle_up`
+/// and the Phase 2-A hot-apply so both build transports from the same set.
+fn allowed_entries_for(acl: &AclSnapshot, device: &DeviceInfo) -> Vec<AclEntry> {
+    let my_spiffe = device.spiffe_id.as_str();
+    acl.entries
+        .iter()
+        .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe))
+        .cloned()
+        .collect()
+}
+
+/// Outcome of a Phase 2-A transport-map hot-apply attempt.
+#[derive(Debug)]
+enum HotApplyOutcome {
+    /// New map published into the running net_stack; `applied` updated.
+    Applied,
+    /// The tunnel was stopped or replaced by another path while we built the
+    /// map (IPC Down, device directive). Nothing to apply to; restarting here
+    /// could undo a user's Down, so do nothing.
+    TunnelGone,
+    /// The new map could not be built. Nothing was published; the old map and
+    /// `applied` are untouched (D2: keep the working VPN).
+    BuildFailed(anyhow::Error),
+    /// Hot-apply is not safe; fall back to the existing full restart.
+    Fallback(&'static str),
+}
+
+/// Fix 01 Phase 2-A: build a complete new connector transport map off to the
+/// side, then publish it atomically into the running net_stack.
+///
+/// Runs inside the restart coordinator pass (via `run_restart_decision`), so
+/// it is serialized against every other restart/apply. `build` is injectable
+/// for tests; production passes `build_transports_by_resource_with_crl`.
+async fn hot_apply_transport_map<B>(state: &SharedState, build: B) -> HotApplyOutcome
+where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
+{
+    // 1. Snapshot inputs.
+    let (handle, acl, transport, device, relay_crl) = {
+        let s = state.read().await;
+        let Some(handle) = s.tun_handle.clone() else {
+            return HotApplyOutcome::TunnelGone;
+        };
+        let (Some(acl), Some(device)) = (s.acl_snapshot.clone(), s.device.clone()) else {
+            return HotApplyOutcome::Fallback("ACL snapshot or device identity missing");
+        };
+        let Some(relay_crl) = s.relay_crl.clone() else {
+            return HotApplyOutcome::Fallback("relay CRL manager not initialised");
+        };
+        (handle, acl, s.transport_snapshot.clone(), device, relay_crl)
+    };
+    let candidate = effective_config(&acl, transport.as_ref(), &device);
+    if classify_applied(&handle.applied, &candidate) != ConfigDelta::TransportOnly {
+        return HotApplyOutcome::Fallback("delta is no longer transport-only");
+    }
+
+    // 2. Build the COMPLETE new map. All-or-nothing: on error nothing is
+    //    published and the running map/applied config are untouched.
+    let allowed_entries = allowed_entries_for(&acl, &device);
+    let map = match build(
+        &allowed_entries,
+        &acl,
+        transport.as_ref(),
+        &device,
+        relay_crl,
+    ) {
+        Ok(map) => map,
+        Err(e) => return HotApplyOutcome::BuildFailed(e),
+    };
+    let resources = map.len();
+    let reachable = map.values().filter(|slot| slot.is_some()).count();
+
+    // 3. Publish under the state write lock, only if nothing moved underneath.
+    let mut s = state.write().await;
+    match s.tun_handle.as_ref() {
+        Some(current) if Arc::ptr_eq(current, &handle) => {}
+        _ => return HotApplyOutcome::TunnelGone,
+    }
+    let still_current = match (s.acl_snapshot.as_ref(), s.device.as_ref()) {
+        (Some(acl_now), Some(device_now)) => {
+            effective_config(acl_now, s.transport_snapshot.as_ref(), device_now) == candidate
+        }
+        _ => false,
+    };
+    if !still_current {
+        return HotApplyOutcome::Fallback(
+            "configuration changed while the transport map was built",
+        );
+    }
+    if handle.transport_tx.send(Arc::new(map)).is_err() {
+        // Receiver gone ⇒ net_stack::run has exited; the data plane is dead.
+        return HotApplyOutcome::Fallback("net_stack is not receiving transport updates");
+    }
+
+    // 4. Only after a successful publish: record the new applied config. Same
+    //    abort handle / routes / channel — the data plane was not restarted.
+    s.tun_handle = Some(Arc::new(TunHandle {
+        abort: handle.abort.clone(),
+        route_count: handle.route_count,
+        applied: candidate,
+        transport_tx: handle.transport_tx.clone(),
+        resource_tx: handle.resource_tx.clone(),
+    }));
+    info!(
+        resources,
+        reachable, "transport map hot-applied successfully"
+    );
+    HotApplyOutcome::Applied
+}
+
+/// True when the running tunnel has a pending TransportOnly change that was
+/// not applied (e.g. a transport-map build failed — D2). The 60 s sync tick
+/// uses this to retry even when no snapshot version changed. Structural
+/// pendings are deliberately NOT retried here — Phase 1 behaviour (wait for
+/// the next version bump) is preserved for them. A renewed device cert is the
+/// exception handled elsewhere: the renewal scheduler restarts the tunnel
+/// itself (renew_and_apply_to_tunnel, Sprint 21 B1).
+async fn transport_apply_pending(state: &SharedState) -> bool {
+    let s = state.read().await;
+    let Some(handle) = s.tun_handle.as_ref() else {
+        return false;
+    };
+    classify_delta(
+        Some(&handle.applied),
+        s.acl_snapshot.as_ref(),
+        s.transport_snapshot.as_ref(),
+        s.device.as_ref(),
+    ) == ConfigDelta::TransportOnly
+}
+
+/// True when the running tunnel has a pending ResourceDelta that was not (fully)
+/// applied: an earlier apply failed before mutation. The 60 s tick retries it without a
+/// version bump. (`transport_apply_pending` keeps its frozen 2-A meaning.)
+async fn resource_apply_pending(state: &SharedState) -> bool {
+    let s = state.read().await;
+    let Some(handle) = s.tun_handle.as_ref() else {
+        return false;
+    };
+    classify_delta(
+        Some(&handle.applied),
+        s.acl_snapshot.as_ref(),
+        s.transport_snapshot.as_ref(),
+        s.device.as_ref(),
+    ) == ConfigDelta::ResourceDelta
+}
+
+// ---- Fix 05 Phase 5-C: resource hot-apply -------------------------------------------
+
+type ResourceKey = (Ipv4Addr, u16);
+
+/// The pure plan for one resource apply (Phase 5-C; capacity rule H1 retired
+/// by Fix 09: with AnyIP every addition applies).
+#[derive(Debug, Clone)]
+pub(crate) struct ResourcePlan {
+    /// Routable keys to stop serving (their flows are reset).
+    pub(crate) removed: BTreeSet<ResourceKey>,
+    /// Routable keys applied by this pass.
+    pub(crate) added: BTreeSet<ResourceKey>,
+    /// Table-105 routes to remove (IPs no longer served).
+    pub(crate) addr_del: BTreeSet<Ipv4Addr>,
+    /// Table-105 routes to add (newly served IPs).
+    pub(crate) addr_add: BTreeSet<Ipv4Addr>,
+    /// Capture rules after the remove side (= kept keys).
+    pub(crate) flows_after_removal: BTreeSet<ResourceKey>,
+    /// Capture rules after the whole apply.
+    pub(crate) flows_after: BTreeSet<ResourceKey>,
+    /// What `AppliedConfig` becomes on success (the candidate).
+    pub(crate) target: AppliedConfig,
+}
+
+fn routable_keys(cfg: &AppliedConfig) -> BTreeSet<ResourceKey> {
+    cfg.entries
+        .iter()
+        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
+        .collect()
+}
+
+fn ips_of(keys: &BTreeSet<ResourceKey>) -> BTreeSet<Ipv4Addr> {
+    keys.iter().map(|(ip, _)| *ip).collect()
+}
+
+/// Plan a resource apply (pure; Phase 5-C):
+/// * removals first, then additions;
+/// * every addition applies: the capture interface accepts any number of
+///   resource IPs (Fix 09, AnyIP), so nothing waits for address capacity;
+/// * `addr_add` / `addr_del` are the table-105 route changes (IPs newly
+///   served / no longer served by any key);
+/// * removals, connector changes and non-routable changes are independent.
+pub(crate) fn plan_resource_apply(
+    applied: &AppliedConfig,
+    candidate: &AppliedConfig,
+) -> ResourcePlan {
+    let applied_keys = routable_keys(applied);
+    let cand_keys = routable_keys(candidate);
+    let kept: BTreeSet<ResourceKey> = applied_keys.intersection(&cand_keys).copied().collect();
+    let removed: BTreeSet<ResourceKey> = applied_keys.difference(&cand_keys).copied().collect();
+    let added: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
+
+    let current_ips = ips_of(&applied_keys);
+    let cand_ips = ips_of(&cand_keys);
+    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&cand_ips).copied().collect();
+    let addr_add: BTreeSet<Ipv4Addr> = cand_ips.difference(&current_ips).copied().collect();
+
+    let mut flows_after = kept.clone();
+    flows_after.extend(added.iter().copied());
+
+    let target = candidate.clone();
+
+    ResourcePlan {
+        removed,
+        added,
+        addr_del,
+        addr_add,
+        flows_after_removal: kept,
+        flows_after,
+        target,
+    }
+}
+
+fn to_flows(keys: &BTreeSet<ResourceKey>) -> BTreeSet<AllowedFlow> {
+    keys.iter()
+        .map(|(ip, port)| AllowedFlow {
+            ip: *ip,
+            port: *port,
+        })
+        .collect()
+}
+
+/// Send one resource command and wait (bounded, H4) for the loop's ack.
+async fn send_resource_cmd(
+    tx: &tokio::sync::mpsc::Sender<net_stack::ResourceCmd>,
+    what: &'static str,
+    make: impl FnOnce(tokio::sync::oneshot::Sender<Result<()>>) -> net_stack::ResourceCmd,
+) -> Result<()> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let cmd = make(ack_tx);
+    let exchange = async {
+        tx.send(cmd)
+            .await
+            .map_err(|_| anyhow::anyhow!("{what}: net_stack is not receiving resource commands"))?;
+        match ack_rx.await {
+            Ok(res) => res.with_context(|| what),
+            Err(_) => Err(anyhow::anyhow!(
+                "{what}: net_stack dropped the acknowledgement"
+            )),
+        }
+    };
+    match tokio::time::timeout(RESOURCE_ACK_TIMEOUT, exchange).await {
+        Ok(res) => res,
+        Err(_) => Err(anyhow::anyhow!(
+            "{what}: no acknowledgement within {:?}",
+            RESOURCE_ACK_TIMEOUT
+        )),
+    }
+}
+
+/// Outcome of a Phase 5-C resource hot-apply attempt.
+#[derive(Debug)]
+enum ResourceApplyOutcome {
+    /// Applied; `applied` now equals the plan target.
+    Applied,
+    /// Nothing to apply (the plan target equals what is applied).
+    NothingToApply,
+    /// The configuration moved between the decision and this apply; the
+    /// coordinator's next pass (requested by whoever stored it) re-evaluates.
+    Superseded,
+    /// The tunnel was stopped/replaced (IPC Down, device directive).
+    TunnelGone,
+    /// Failed BEFORE any mutation: the working VPN is untouched; retry.
+    PreMutationFailed(anyhow::Error),
+    /// Failed AFTER mutation began: recovery restart required.
+    MutationFailed(anyhow::Error),
+}
+
+/// Fix 05 Phase 5-C: apply a ResourceDelta (possibly combined with connector
+/// changes) to the running tunnel without a restart.
+///
+/// Pre-mutation: snapshot → plan → build the full transport map
+/// for the plan target → lock `tun_slot` (serialises against `handle_down`)
+/// → re-check the tunnel handle.
+/// Mutation (H2 order): R1 close flows + remove listeners (ack after reset +
+/// reap) → nft desired state → remove smoltcp addresses → delete routes →
+/// ONE transport-map publish → fwmark ensure → add addresses + listeners →
+/// add routes → nft desired state LAST.
+/// Commit: `applied = plan.target` only after every step succeeded.
+async fn hot_apply_resources<B, K>(
+    state: &SharedState,
+    kernel_slot: &Mutex<Option<K>>,
+    build: B,
+) -> ResourceApplyOutcome
+where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
+    K: ResourceKernel,
+{
+    // ---- pre-mutation ----
+    let (handle, acl, transport, device, relay_crl) = {
+        let s = state.read().await;
+        let Some(handle) = s.tun_handle.clone() else {
+            return ResourceApplyOutcome::TunnelGone;
+        };
+        let (Some(acl), Some(device)) = (s.acl_snapshot.clone(), s.device.clone()) else {
+            return ResourceApplyOutcome::Superseded;
+        };
+        let Some(relay_crl) = s.relay_crl.clone() else {
+            return ResourceApplyOutcome::PreMutationFailed(anyhow::anyhow!(
+                "relay CRL manager not initialised"
+            ));
+        };
+        (handle, acl, s.transport_snapshot.clone(), device, relay_crl)
+    };
+    let candidate = effective_config(&acl, transport.as_ref(), &device);
+    if classify_applied(&handle.applied, &candidate) != ConfigDelta::ResourceDelta {
+        return ResourceApplyOutcome::Superseded;
+    }
+    if kernel_slot.lock().await.is_none() {
+        return ResourceApplyOutcome::TunnelGone;
+    }
+    let plan = plan_resource_apply(&handle.applied, &candidate);
+    if plan.target == handle.applied {
+        return ResourceApplyOutcome::NothingToApply;
+    }
+    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device);
+    let map = match build(&entries, &acl, transport.as_ref(), &device, relay_crl) {
+        Ok(map) => map,
+        Err(e) => {
+            return ResourceApplyOutcome::PreMutationFailed(
+                e.context("resource map build failed, retaining current state"),
+            )
+        }
+    };
+    let mut kernel_guard = kernel_slot.lock().await;
+    let Some(kernel) = kernel_guard.as_mut() else {
+        return ResourceApplyOutcome::TunnelGone;
+    };
+    {
+        let s = state.read().await;
+        match s.tun_handle.as_ref() {
+            Some(current) if Arc::ptr_eq(current, &handle) => {}
+            _ => return ResourceApplyOutcome::TunnelGone,
+        }
+    }
+    info!(
+        removed = plan.removed.len(),
+        added = plan.added.len(),
+        "resource change, hot-applying"
+    );
+
+    // ---- mutation (any failure from here on → recovery restart) ----
+    let applied: Result<()> = async {
+        // Remove side (H2): close + listeners → nft → addresses → routes.
+        if !plan.removed.is_empty() {
+            let keys: Vec<ResourceKey> = plan.removed.iter().copied().collect();
+            send_resource_cmd(&handle.resource_tx, "close removed resources", |ack| {
+                net_stack::ResourceCmd::Remove { keys, ack }
+            })
+            .await?;
+            kernel
+                .apply_nft_desired(&to_flows(&plan.flows_after_removal))
+                .context("nft desired state (remove side)")?;
+        }
+        if !plan.addr_del.is_empty() {
+            kernel
+                .del_routes(&plan.addr_del)
+                .context("delete resource routes")?;
+        }
+        // ONE publication: connector changes + slots for admitted additions.
+        handle
+            .transport_tx
+            .send(Arc::new(map))
+            .map_err(|_| anyhow::anyhow!("net_stack is not receiving transport updates"))?;
+        // Add side: fwmark → addresses + listeners → routes → nft LAST.
+        if !plan.added.is_empty() {
+            kernel.ensure_fwmark_rule().context("ensure fwmark rule")?;
+            let keys: Vec<ResourceKey> = plan.added.iter().copied().collect();
+            send_resource_cmd(&handle.resource_tx, "add listeners", |ack| {
+                net_stack::ResourceCmd::Add { keys, ack }
+            })
+            .await?;
+            if !plan.addr_add.is_empty() {
+                kernel
+                    .add_routes(&plan.addr_add)
+                    .context("add resource routes")?;
+            }
+            kernel
+                .apply_nft_desired(&to_flows(&plan.flows_after))
+                .context("nft desired state (add side)")?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = applied {
+        return ResourceApplyOutcome::MutationFailed(e);
+    }
+
+    // ---- commit ----
+    let mut s = state.write().await;
+    match s.tun_handle.as_ref() {
+        Some(current) if Arc::ptr_eq(current, &handle) => {}
+        _ => return ResourceApplyOutcome::TunnelGone,
+    }
+    s.tun_handle = Some(Arc::new(TunHandle {
+        abort: handle.abort.clone(),
+        route_count: plan.flows_after.len(),
+        applied: plan.target.clone(),
+        transport_tx: handle.transport_tx.clone(),
+        resource_tx: handle.resource_tx.clone(),
+    }));
+    drop(s);
+    drop(kernel_guard);
+    info!(
+        resources = plan.flows_after.len(),
+        removed = plan.removed.len(),
+        added = plan.added.len(),
+        "resources hot-applied"
+    );
+    if plan.flows_after.is_empty() {
+        info!("no routable resources; tunnel kept up, nothing captured");
+    }
+    ResourceApplyOutcome::Applied
+}
+
+/// Evaluates the Fix 01 decision against the current runtime state:
+/// dead data plane or Structural → `down_up` (full restart); NoChange → keep;
+/// TransportOnly → hot-apply the connector transport map (`build`), falling
+/// back to `down_up` only where hot-apply is unsafe.
+async fn run_restart_decision<B, K, F, Fut>(
+    state: &SharedState,
+    build: B,
+    kernel: &Mutex<Option<K>>,
+    down_up: F,
+) -> Result<()>
+where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
+    K: ResourceKernel,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let (task_dead, delta) = {
+        let s = state.read().await;
+        let task_dead = s
+            .tun_handle
+            .as_ref()
+            .map(|h| h.abort.is_finished())
+            .unwrap_or(false);
+        let delta = classify_delta(
+            s.tun_handle.as_ref().map(|h| &h.applied),
+            s.acl_snapshot.as_ref(),
+            s.transport_snapshot.as_ref(),
+            s.device.as_ref(),
+        );
+        (task_dead, delta)
+    };
+
+    if task_dead {
+        warn!("net_stack task is not running, restarting VPN");
+        return down_up().await;
+    }
+
+    match delta {
+        ConfigDelta::NoChange => {
+            info!("effective config unchanged, keeping tunnel");
+            Ok(())
+        }
+        ConfigDelta::Structural => {
+            info!("structural configuration change, restarting VPN");
+            down_up().await
+        }
+        ConfigDelta::TransportOnly => {
+            info!("transport-only change, hot-applying connector map");
+            match hot_apply_transport_map(state, build).await {
+                HotApplyOutcome::Applied => Ok(()),
+                HotApplyOutcome::TunnelGone => {
+                    info!("tunnel stopped or replaced during hot-apply; nothing to apply");
+                    Ok(())
+                }
+                HotApplyOutcome::BuildFailed(e) => {
+                    warn!(error = %e, "transport map build failed, retaining existing map");
+                    Err(e.context("transport map build failed, retaining existing map"))
+                }
+                HotApplyOutcome::Fallback(reason) => {
+                    warn!(
+                        reason,
+                        "hot-apply not possible, falling back to full restart"
+                    );
+                    info!("structural configuration change, restarting VPN");
+                    down_up().await
+                }
+            }
+        }
+        ConfigDelta::ResourceDelta => match hot_apply_resources(state, kernel, build).await {
+            ResourceApplyOutcome::Applied | ResourceApplyOutcome::NothingToApply => Ok(()),
+            ResourceApplyOutcome::Superseded => {
+                info!("configuration changed during resource apply; next pass re-evaluates");
+                Ok(())
+            }
+            ResourceApplyOutcome::TunnelGone => {
+                info!("tunnel stopped or replaced during resource apply; nothing to apply");
+                Ok(())
+            }
+            ResourceApplyOutcome::PreMutationFailed(e) => {
+                warn!(error = %e, "resource apply failed before mutation, retaining current state");
+                Err(e)
+            }
+            ResourceApplyOutcome::MutationFailed(e) => {
+                warn!(
+                    error = %e,
+                    "resource apply failed after mutation, recovering with full restart"
+                );
+                down_up().await
+            }
+        },
+    }
+}
+
+/// Runs the Fix 01 decision (run_restart_decision): full down→up only on a
+/// Structural change, a dead net_stack task, or an unsafe hot-apply; a
+/// connector-only change is hot-applied. Extracted so `run_restart_worker`
+/// can drive it through the queued-oneshot coordinator, and so tests can
+/// drive the coordination logic itself against a fake `work` closure.
+async fn perform_tunnel_restart(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<()> {
+    if tun_slot.lock().await.is_none() {
         return Ok(());
     }
 
-    info!("ACL changed, restarting VPN");
+    run_restart_decision(
+        state,
+        |entries, acl, transport, device, relay_crl| {
+            build_transports_by_resource_with_crl(
+                entries,
+                &acl.remote_networks,
+                &revoked_connector_ids(acl),
+                transport,
+                device,
+                relay_crl,
+            )
+        },
+        tun_slot.as_ref(),
+        || async {
+            let down = handle_down(state, tun_slot).await;
+            if !down.ok {
+                anyhow::bail!(
+                    "{}",
+                    down.error.unwrap_or_else(|| "failed to stop VPN".into())
+                );
+            }
 
-    let down = handle_down(state, tun_slot).await;
-    if !down.ok {
-        anyhow::bail!(
-            "{}",
-            down.error.unwrap_or_else(|| "failed to stop VPN".into())
+            let up = handle_up(state, conf, tun_slot).await;
+            if !up.ok {
+                anyhow::bail!(
+                    "{}",
+                    up.error.unwrap_or_else(|| "failed to start VPN".into())
+                );
+            }
+
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Runs restart passes for one `TunnelRestartCoordinator` until its `pending`
+/// queue is drained. Each pass answers exactly the requests queued at the
+/// moment it starts (`batch`); requests arriving mid-pass land in `pending`
+/// and are picked up by the next loop iteration. On failure, both the
+/// failing batch and everything queued during that failed pass are failed
+/// together — a later pass re-checking tunnel state could otherwise
+/// misreport success to requests that were actually waiting on the failure.
+async fn run_restart_worker<F, Fut>(coordinator: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>, work: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    loop {
+        let batch = {
+            let mut c = coordinator.lock().await;
+            if c.pending.is_empty() {
+                c.running = false;
+                return;
+            }
+            std::mem::take(&mut c.pending)
+        };
+
+        let outcome = std::panic::AssertUnwindSafe(work()).catch_unwind().await;
+        match outcome {
+            Ok(Ok(())) => {
+                for waiter in batch {
+                    let _ = waiter.send(Ok(()));
+                }
+                // Loop: pick up any stragglers that arrived mid-pass.
+            }
+            Ok(Err(e)) => {
+                // Stabilize coordinator state before publishing the failure.
+                // Otherwise a waiter can observe Err, immediately enqueue a
+                // fresh request while running is still true, and be incorrectly
+                // drained as a straggler of this failed pass.
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                return;
+            }
+            Err(_) => {
+                // Catch the panic while `batch` is still owned here. Reset the
+                // coordinator before resolving any receiver so callers cannot
+                // race a fresh request against stale running=true state.
+                let error = "tunnel restart worker panicked".to_string();
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Registers a restart request with the coordinator, starting a worker if
+/// none is running, and waits for the pass that answers this request.
+///
+/// The worker is supervised with `catch_unwind` in the same spawned task
+/// that runs it, so a panic mid-pass still resets `running` and fails any
+/// queued waiters instead of leaving the coordinator permanently wedged.
+/// This is best-effort panic recovery, not an absolute guarantee against
+/// every possible abnormal termination (e.g. process exit) — nothing
+/// currently retains the worker's `JoinHandle` to observe or abort it
+/// externally, so an in-task panic is the realistic failure mode covered.
+async fn register_restart_request<F, Fut>(
+    coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+    work: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let start_worker = {
+        let mut c = coordinator.lock().await;
+        c.pending.push(tx);
+        if c.running {
+            false
+        } else {
+            c.running = true;
+            true
+        }
+    };
+
+    if start_worker {
+        let coordinator = coordinator.clone();
+        // The worker catches panics from the restart operation per pass while
+        // it still owns that pass's batch. This outer supervisor is defensive
+        // best-effort cleanup for an unexpected panic in coordinator logic.
+        tokio::spawn(async move {
+            let outcome = std::panic::AssertUnwindSafe(run_restart_worker(coordinator.clone(), work))
+                .catch_unwind()
+                .await;
+            if outcome.is_err() {
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in stragglers {
+                    let _ = waiter.send(Err("tunnel restart worker panicked".into()));
+                }
+            }
+        });
+    }
+
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("tunnel restart worker stopped unexpectedly".into()),
+    }
+}
+
+#[cfg(test)]
+mod tunnel_restart_coordinator_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn new_coordinator() -> Arc<tokio::sync::Mutex<TunnelRestartCoordinator>> {
+        Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default()))
+    }
+
+    /// A controllable fake restart operation: counts calls, and only
+    /// completes each call once the test explicitly releases it via the
+    /// returned `Notify`, so tests can deterministically control pass
+    /// timing instead of relying on real sleeps.
+    struct FakeWork {
+        calls: Arc<AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+        result: Arc<std::sync::Mutex<std::result::Result<(), String>>>,
+    }
+
+    impl FakeWork {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                release: Arc::new(tokio::sync::Notify::new()),
+                result: Arc::new(std::sync::Mutex::new(Ok(()))),
+            }
+        }
+
+        fn set_result(&self, result: std::result::Result<(), String>) {
+            *self.result.lock().unwrap() = result;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        fn closure(&self) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> + 'static
+        {
+            let calls = self.calls.clone();
+            let release = self.release.clone();
+            let result = self.result.clone();
+            move || {
+                let calls = calls.clone();
+                let release = release.clone();
+                let result = result.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    release.notified().await;
+                    result.lock().unwrap().clone()
+                })
+            }
+        }
+    }
+
+    /// Registers one restart request as its own spawned task, so it is
+    /// driven independently by the runtime (not just when the test task
+    /// happens to poll it directly).
+    fn spawn_request<F, Fut>(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        work: F,
+    ) -> tokio::task::JoinHandle<std::result::Result<(), String>>
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { register_restart_request(&coordinator, work).await })
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if condition() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never became true");
+    }
+
+    async fn wait_for_pending(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        expected: usize,
+    ) {
+        for _ in 0..1000 {
+            if coordinator.lock().await.pending.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("pending queue never reached {expected}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_before_a_pass_share_one_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // Pre-populate one batch under the coordinator lock so this assertion
+        // does not depend on task scheduling between two registration calls.
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "only one pass should have started");
+        fake.release();
+
+        assert!(rx1.await.unwrap().is_ok());
+        assert!(rx2.await.unwrap().is_ok());
+        worker.await.unwrap();
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "both requests must be answered by the same pass");
+    }
+
+    #[tokio::test]
+    async fn request_arriving_mid_pass_is_answered_by_next_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        // Register a second request while pass 1 is still in flight.
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "straggler must not join the in-flight pass");
+
+        // Releasing pass 1 lets the worker loop and start pass 2 for the straggler.
+        fake.release();
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 2).await;
+        fake.release();
+
+        assert!(r1.await.unwrap().is_ok());
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn failing_pass_fails_its_whole_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+
+        assert_eq!(rx1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(rx2.await.unwrap(), Err("boom".to_string()));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stragglers_during_a_failing_pass_are_also_failed() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+
+        // Only one pass ever runs: it fails, and must drain+fail the
+        // straggler too instead of letting a spurious pass 2 report success.
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(r2.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        assert!(!coordinator.lock().await.running, "worker must reset running on failure");
+    }
+
+    #[tokio::test]
+    async fn fresh_request_after_failure_starts_a_new_worker() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert!(!coordinator.lock().await.running);
+
+        let fake2 = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake2.closure());
+        wait_until(|| fake2.calls.load(Ordering::SeqCst) >= 1).await;
+        fake2.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_does_not_break_other_waiters_in_the_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // r1's task (and its oneshot receiver) will be aborted before the
+        // pass completes; r2 must still get its result.
+        let r1 = spawn_request(&coordinator, fake.closure());
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        r1.abort();
+        tokio::task::yield_now().await;
+        fake.release();
+
+        assert!(
+            r2.await.unwrap().is_ok(),
+            "surviving waiter in the same batch must still get its result"
         );
     }
 
-    let up = handle_up(state, conf, tun_slot).await;
-    if !up.ok {
-        anyhow::bail!(
-            "{}",
-            up.error.unwrap_or_else(|| "failed to start VPN".into())
+    #[tokio::test]
+    async fn panic_mid_pass_resets_running_and_fails_queued_waiters() {
+        let coordinator = new_coordinator();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let work_calls = calls.clone();
+        let work = move || {
+            let work_calls = work_calls.clone();
+            Box::pin(async move {
+                work_calls.fetch_add(1, Ordering::SeqCst);
+                panic!("simulated restart panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>
+        };
+
+        let res = register_restart_request(&coordinator, work).await;
+        assert_eq!(
+            res,
+            Err("tunnel restart worker panicked".to_string()),
+            "a panicked pass must surface its explicit error, not a closed channel"
+        );
+        assert!(
+            !coordinator.lock().await.running,
+            "panic recovery must reset running so a later request can start a fresh worker"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Confirm the coordinator is usable again after the panic.
+        let fake = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod restart_decision_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn make_test_device() -> DeviceInfo {
+        DeviceInfo {
+            id: "d1".to_string(),
+            spiffe_id: "spiffe://t/d1".to_string(),
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nCERT1\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\nKEY1\n-----END PRIVATE KEY-----\n"
+                .to_string(),
+            tpm_key_material: None,
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nCA1\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            cert_expires_at: i64::MAX,
+            hostname: "test-host".to_string(),
+            os: "linux".to_string(),
+        }
+    }
+
+    fn make_test_acl(device: &DeviceInfo) -> AclSnapshot {
+        AclSnapshot {
+            version: 1,
+            workspace_id: "ws1".to_string(),
+            revoked_connectors: vec![],
+            generated_at: 1000,
+            relay_addr: "relay:9093".to_string(),
+            relay_spiffe_id: "spiffe://r".to_string(),
+            entries: vec![AclEntry {
+                resource_id: "res1".to_string(),
+                name: "res1".to_string(),
+                address: "10.0.0.1".to_string(),
+                port: 80,
+                protocol: "tcp".to_string(),
+                allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+                remote_network_id: "rn1".to_string(),
+                preferred_connector_id: String::new(),
+                ..Default::default()
+            }],
+            remote_networks: vec![AclRemoteNetwork {
+                remote_network_id: "rn1".to_string(),
+                name: "rn1".to_string(),
+                connectors: vec![AclConnector {
+                    connector_id: "c1".to_string(),
+                    connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://t/c1".to_string(),
+                    relay_addr: "relay:9093".to_string(),
+                    relay_spiffe_id: "spiffe://r".to_string(),
+                }],
+            }],
+        }
+    }
+
+    fn make_test_transport() -> TransportSnapshot {
+        TransportSnapshot {
+            version: 1,
+            remote_networks: vec![TransportRemoteNetwork {
+                remote_network_id: "rn1".to_string(),
+                connectors: vec![TransportConnector {
+                    connector_id: "c1".to_string(),
+                    connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://t/c1".to_string(),
+                    relay_addr: "relay:9093".to_string(),
+                    relay_spiffe_id: "spiffe://r".to_string(),
+                }],
+            }],
+        }
+    }
+
+    // ---- Fix 01 Phase 2-A harness -------------------------------------------------
+    //
+    // A real watch channel stands in for the running net_stack: `rx` is what
+    // net_stack::run would hold. A fake builder (counts calls, can fail) stands
+    // in for build_transports_by_resource_with_crl, and a counting down_up
+    // closure stands in for the full VPN restart.
+
+    struct NoopDirect;
+
+    #[async_trait::async_trait]
+    impl crate::transport::DirectOpener for NoopDirect {
+        async fn open(
+            &self,
+            _addr: std::net::SocketAddr,
+        ) -> std::result::Result<
+            crate::tunnel_pool::AuthenticatedStream,
+            crate::tunnel_pool::TunnelOpenError,
+        > {
+            Err(crate::tunnel_pool::TunnelOpenError::Connect(
+                anyhow::anyhow!("noop"),
+            ))
+        }
+    }
+
+    /// Fake map: one ClientTransport per resolved connector, in resolve order.
+    fn fake_map(
+        entries: &[AclEntry],
+        acl: &AclSnapshot,
+        transport: Option<&TransportSnapshot>,
+    ) -> net_stack::TransportMap {
+        let rn_by_id: HashMap<&str, &AclRemoteNetwork> = acl
+            .remote_networks
+            .iter()
+            .map(|rn| (rn.remote_network_id.as_str(), rn))
+            .collect();
+        let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = transport
+            .map(|t| {
+                t.remote_networks
+                    .iter()
+                    .map(|rn| (rn.remote_network_id.as_str(), rn))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut map = net_stack::TransportMap::new();
+        for e in entries {
+            let ip: Ipv4Addr = e.address.parse().unwrap();
+            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
+            let ts: Vec<Arc<crate::transport::ClientTransport>> = coords
+                .iter()
+                .map(|_| {
+                    Arc::new(crate::transport::ClientTransport::new(
+                        Arc::new(NoopDirect),
+                        "127.0.0.1:9092".parse().unwrap(),
+                        None,
+                    ))
+                })
+                .collect();
+            map.insert(
+                (ip, e.port as u16),
+                if ts.is_empty() { None } else { Some(ts) },
+            );
+        }
+        map
+    }
+
+    fn tconn(id: &str) -> TransportConnector {
+        TransportConnector {
+            connector_id: id.to_string(),
+            connector_tunnel_addr: format!("10.0.9.{}:9092", id.len()),
+            connector_spiffe: format!("spiffe://t/{id}"),
+            relay_addr: "relay:9093".to_string(),
+            relay_spiffe_id: "spiffe://r".to_string(),
+        }
+    }
+
+    struct Harness {
+        state: SharedState,
+        rx: tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>,
+        initial_map: Arc<net_stack::TransportMap>,
+        builds: Arc<AtomicUsize>,
+        down_ups: Arc<AtomicUsize>,
+        /// Phase 5-C: ordered log of every loop command and kernel call.
+        log: Log,
+        /// Phase 5-C: fake kernel (`tun_slot` stand-in).
+        kernel: Mutex<Option<FakeKernel>>,
+        /// Phase 5-C: how the fake net_stack loop answers each command kind.
+        loop_ctl: Arc<std::sync::Mutex<LoopCtl>>,
+        published_rx: PublishedRx,
+        published: Published,
+    }
+
+    // ---- Fix 05 Phase 5-C harness ---------------------------------------------------
+    //
+    // A fake net_stack loop consumes `ResourceCmd`s (logging them, acking per
+    // `LoopCtl`) and a fake `ResourceKernel` logs nft/route/fwmark calls into
+    // the same ordered log. Every entry records whether the transport map had
+    // been published at that point (`pub=0/1`), which pins the single publish
+    // between the remove side and the add side.
+
+    type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Reply {
+        Ack,
+        Fail,
+        /// Never answer (keeps the ack sender alive) → H4 timeout.
+        Hang,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct LoopCtl {
+        remove: Reply,
+        add: Reply,
+    }
+
+    impl Default for LoopCtl {
+        fn default() -> Self {
+            Self {
+                remove: Reply::Ack,
+                add: Reply::Ack,
+            }
+        }
+    }
+
+    /// Observer of the transport channel. Shared and clearable, so a test can
+    /// drop it to simulate the net_stack receiver being gone.
+    type PublishedRx =
+        Arc<std::sync::Mutex<Option<tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>>>>;
+
+    /// The map the `pub=` flag compares against (re-baselined between applies).
+    type Baseline = Arc<std::sync::Mutex<Arc<net_stack::TransportMap>>>;
+
+    #[derive(Clone)]
+    struct Published {
+        rx: PublishedRx,
+        baseline: Baseline,
+    }
+
+    impl Published {
+        fn flag(&self) -> u8 {
+            let baseline = self.baseline.lock().unwrap().clone();
+            match self.rx.lock().unwrap().as_ref() {
+                Some(rx) => u8::from(!Arc::ptr_eq(&rx.borrow(), &baseline)),
+                None => 9,
+            }
+        }
+    }
+
+    /// Start a new apply window: clear the log and make the currently
+    /// published map the `pub=0` baseline.
+    fn rebaseline(h: &Harness) {
+        h.log.lock().unwrap().clear();
+        let current = h
+            .published_rx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .clone();
+        *h.published.baseline.lock().unwrap() = current;
+    }
+
+    fn keys_str(keys: &[(Ipv4Addr, u16)]) -> String {
+        keys.iter()
+            .map(|(ip, port)| format!("{ip}:{port}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn ips_str<'a>(ips: impl IntoIterator<Item = &'a Ipv4Addr>) -> String {
+        ips.into_iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    struct FakeKernel {
+        log: Log,
+        published: Published,
+        /// Fail the first call whose log entry starts with this prefix.
+        fail_on: Option<&'static str>,
+        /// Number of fwmark rules "installed" (starts at 1: the tunnel is up).
+        fwmark_rules: usize,
+        routes: BTreeSet<Ipv4Addr>,
+        nft: BTreeSet<AllowedFlow>,
+    }
+
+    impl FakeKernel {
+        fn record(&mut self, entry: String) -> Result<()> {
+            let entry = format!("{entry} pub={}", self.published.flag());
+            let fail = self.fail_on.is_some_and(|p| entry.starts_with(p));
+            self.log.lock().unwrap().push(entry.clone());
+            if fail {
+                self.fail_on = None;
+                anyhow::bail!("injected kernel failure at `{entry}`");
+            }
+            Ok(())
+        }
+    }
+
+    impl ResourceKernel for FakeKernel {
+        fn apply_nft_desired(&mut self, flows: &BTreeSet<AllowedFlow>) -> Result<()> {
+            let keys: Vec<_> = flows.iter().map(|f| (f.ip, f.port)).collect();
+            self.record(format!("nft [{}]", keys_str(&keys)))?;
+            self.nft = flows.clone();
+            Ok(())
+        }
+        fn add_routes(&mut self, ips: &BTreeSet<Ipv4Addr>) -> Result<()> {
+            self.record(format!("route+ [{}]", ips_str(ips)))?;
+            self.routes.extend(ips.iter().copied());
+            Ok(())
+        }
+        fn del_routes(&mut self, ips: &BTreeSet<Ipv4Addr>) -> Result<()> {
+            self.record(format!("route- [{}]", ips_str(ips)))?;
+            self.routes.retain(|ip| !ips.contains(ip));
+            Ok(())
+        }
+        fn ensure_fwmark_rule(&mut self) -> Result<()> {
+            self.record("fwmark".to_string())?;
+            if self.fwmark_rules == 0 {
+                self.fwmark_rules = 1;
+            }
+            Ok(())
+        }
+    }
+
+    /// Fake net_stack loop: logs and answers resource commands.
+    fn spawn_fake_loop(
+        mut cmd_rx: tokio::sync::mpsc::Receiver<net_stack::ResourceCmd>,
+        log: Log,
+        published: Published,
+        ctl: Arc<std::sync::Mutex<LoopCtl>>,
+    ) {
+        tokio::spawn(async move {
+            let mut hung = Vec::new();
+            while let Some(cmd) = cmd_rx.recv().await {
+                let ctl = *ctl.lock().unwrap();
+                let (entry, reply, ack) = match cmd {
+                    net_stack::ResourceCmd::Remove { keys, ack } => (
+                        format!("loop:remove [{}]", keys_str(&keys)),
+                        ctl.remove,
+                        ack,
+                    ),
+                    net_stack::ResourceCmd::Add { keys, ack } => (
+                        format!("loop:add keys=[{}]", keys_str(&keys)),
+                        ctl.add,
+                        ack,
+                    ),
+                    net_stack::ResourceCmd::CloseConnectorFlows { ack, .. } => {
+                        let _ = ack.send(Ok(0));
+                        continue;
+                    }
+                };
+                log.lock()
+                    .unwrap()
+                    .push(format!("{entry} pub={}", published.flag()));
+                match reply {
+                    Reply::Ack => {
+                        let _ = ack.send(Ok(()));
+                    }
+                    Reply::Fail => {
+                        let _ = ack.send(Err(anyhow::anyhow!("injected loop failure")));
+                    }
+                    Reply::Hang => hung.push(ack),
+                }
+            }
+        });
+    }
+
+    /// Running tunnel built from `connectors` (transport plane) with the
+    /// resource's preferred connector `preferred`.
+    async fn harness_with(connectors: &[&str], preferred: &str) -> Harness {
+        harness_built(connectors, preferred, false).await
+    }
+
+    /// A tunnel that was brought up with zero resources (empty ACL snapshot):
+    /// what `handle_up` now installs instead of refusing.
+    async fn harness_zero_start() -> Harness {
+        harness_built(&["c1"], "", true).await
+    }
+
+    async fn harness_built(connectors: &[&str], preferred: &str, zero_start: bool) -> Harness {
+        let state = crate::runtime::new_shared();
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].preferred_connector_id = preferred.to_string();
+        if zero_start {
+            acl.entries.clear();
+        }
+        let mut transport = make_test_transport();
+        transport.remote_networks[0].connectors = connectors.iter().map(|c| tconn(c)).collect();
+        let applied = effective_config(&acl, Some(&transport), &device);
+        let initial_map = Arc::new(fake_map(
+            &allowed_entries_for(&acl, &device),
+            &acl,
+            Some(&transport),
+        ));
+        let (tx, rx) = tokio::sync::watch::channel(initial_map.clone());
+        let log: Log = Arc::default();
+        let loop_ctl: Arc<std::sync::Mutex<LoopCtl>> = Arc::default();
+        let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
+        let published_rx: PublishedRx = Arc::new(std::sync::Mutex::new(Some(rx.clone())));
+        let published = Published {
+            rx: published_rx.clone(),
+            baseline: Arc::new(std::sync::Mutex::new(initial_map.clone())),
+        };
+        spawn_fake_loop(
+            resource_rx,
+            log.clone(),
+            published.clone(),
+            loop_ctl.clone(),
+        );
+        let route_ips: BTreeSet<Ipv4Addr> = ips_of(&routable_keys(&applied));
+        let nft: BTreeSet<AllowedFlow> = to_flows(&routable_keys(&applied));
+        let kernel = FakeKernel {
+            log: log.clone(),
+            published: published.clone(),
+            fail_on: None,
+            fwmark_rules: 1,
+            routes: route_ips,
+            nft,
+        };
+        {
+            let mut s = state.write().await;
+            s.device = Some(device);
+            s.acl_snapshot = Some(acl);
+            s.transport_snapshot = Some(transport);
+            s.relay_crl = Some(crate::crl::CrlManager::new());
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                route_count: if zero_start { 0 } else { 1 },
+                applied,
+                transport_tx: Arc::new(tx),
+                resource_tx: Arc::new(resource_tx),
+            }));
+        }
+        Harness {
+            state,
+            rx,
+            initial_map,
+            builds: Arc::new(AtomicUsize::new(0)),
+            down_ups: Arc::new(AtomicUsize::new(0)),
+            log,
+            kernel: Mutex::new(Some(kernel)),
+            loop_ctl,
+            published_rx,
+            published,
+        }
+    }
+
+    async fn setup_state() -> (SharedState, Arc<AtomicUsize>) {
+        let h = harness_with(&["c1"], "").await;
+        // Keep the receiver alive for the whole test (net_stack "running").
+        std::mem::forget(h.rx);
+        (h.state, h.down_ups)
+    }
+
+    /// Run the real decision with the fake builder (optionally failing) and a
+    /// counting down_up.
+    async fn decide(h: &Harness, fail_build: bool) -> Result<()> {
+        let builds = h.builds.clone();
+        let down_ups = h.down_ups.clone();
+        run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _device, _crl| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                if fail_build {
+                    anyhow::bail!("resolve connector tunnel address bogus: invalid socket address");
+                }
+                Ok(fake_map(entries, acl, transport))
+            },
+            &h.kernel,
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Counting-only decision used by the Phase 1 tests (builder must not run
+    /// for NoChange/Structural).
+    async fn decide_counting(
+        state: &SharedState,
+        count: &Arc<AtomicUsize>,
+        result: Result<()>,
+    ) -> Result<()> {
+        let c = count.clone();
+        run_restart_decision(
+            state,
+            |_, _, _, _, _| panic!("builder must not run for this delta"),
+            &Mutex::new(None::<FakeKernel>),
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result
+            },
+        )
+        .await
+    }
+
+    async fn applied_coord_ids(state: &SharedState) -> Vec<String> {
+        let s = state.read().await;
+        s.tun_handle.as_ref().unwrap().applied.entries[0]
+            .coords
+            .iter()
+            .map(|c| c.connector_id.clone())
+            .collect()
+    }
+
+    fn current_slot_len(h: &Harness) -> Option<usize> {
+        let map = h.rx.borrow().clone();
+        map.get(&("10.0.0.1".parse().unwrap(), 80))
+            .cloned()
+            .flatten()
+            .map(|v| v.len())
+    }
+
+    async fn set_transport_connectors(h: &Harness, connectors: &[&str]) {
+        let mut s = h.state.write().await;
+        let tr = s.transport_snapshot.as_mut().unwrap();
+        tr.version += 1;
+        tr.remote_networks[0].connectors = connectors.iter().map(|c| tconn(c)).collect();
+    }
+
+    // ---- Phase 1 behaviour (unchanged) ----------------------------------------------
+
+    #[tokio::test]
+    async fn restart_decision_nothing_changed_skips() {
+        let h = harness_with(&["c1"], "").await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0, "no transport build");
+        assert!(!h.rx.has_changed().unwrap(), "no transport swap");
+    }
+
+    #[tokio::test]
+    async fn restart_decision_dead_task_restarts_even_if_unchanged() {
+        let (state, count) = setup_state().await;
+        let finished_task = tokio::spawn(async {});
+        let dead_abort = finished_task.abort_handle();
+        finished_task.await.unwrap();
+
+        {
+            let mut s = state.write().await;
+            let current = s.tun_handle.as_ref().unwrap();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead_abort,
+                route_count: current.route_count,
+                applied: current.applied.clone(),
+                transport_tx: current.transport_tx.clone(),
+                resource_tx: current.resource_tx.clone(),
+            }));
+        }
+
+        let res = decide_counting(&state, &count, Ok(())).await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_dead_task_restarts_even_on_transport_only_change() {
+        let h = harness_with(&["c1"], "").await;
+        let finished_task = tokio::spawn(async {});
+        let dead_abort = finished_task.abort_handle();
+        finished_task.await.unwrap();
+        {
+            let mut s = h.state.write().await;
+            let current = s.tun_handle.as_ref().unwrap();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead_abort,
+                route_count: current.route_count,
+                applied: current.applied.clone(),
+                transport_tx: current.transport_tx.clone(),
+                resource_tx: current.resource_tx.clone(),
+            }));
+        }
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            1,
+            "dead data plane → full restart"
+        );
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_version_and_timestamp_bumps_skip() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            if let Some(ref mut acl) = s.acl_snapshot {
+                acl.version = 2;
+                acl.generated_at = 2000;
+            }
+            if let Some(ref mut tr) = s.transport_snapshot {
+                tr.version = 2;
+            }
+        }
+        let res = decide_counting(&state, &count, Ok(())).await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- Phase 2-A: TransportOnly → hot-apply ---------------------------------------
+
+    /// Existing test, meaning flipped by Phase 2-A: the vN+1 connector-absent
+    /// snapshot is a connector-only change, so it is hot-applied (no restart).
+    /// With every connector gone the new map's slot is None → NEW flows fail
+    /// closed (net_stack `Some(None)` arm); existing flows are not touched.
+    #[tokio::test]
+    async fn restart_decision_vn_plus_1_connector_absent_hot_applies() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &[]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap(), "new map published");
+        assert_eq!(current_slot_len(&h), None, "new flows fail closed");
+        assert!(applied_coord_ids(&h.state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connector_added_hot_applies_without_restart() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap());
+        assert_eq!(
+            current_slot_len(&h),
+            Some(2),
+            "new map contains the added connector"
+        );
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn connector_removed_hot_applies_and_new_flows_cannot_select_it() {
+        let h = harness_with(&["c1", "c2"], "").await;
+        set_transport_connectors(&h, &["c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(current_slot_len(&h), Some(1));
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c2"]);
+        // The map the old flows were handed is untouched by the swap.
+        assert_eq!(
+            h.initial_map
+                .get(&("10.0.0.1".parse().unwrap(), 80))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(2)
         );
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn connector_returns_hot_applies_with_preferred_first() {
+        // c1 (preferred, e.g. the shield's connector) gone; c2 carries traffic.
+        let h = harness_with(&["c2"], "c1").await;
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c2"]);
+        set_transport_connectors(&h, &["c2", "c1"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(current_slot_len(&h), Some(2));
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn preferred_connector_change_hot_applies() {
+        let h = harness_with(&["c1", "c2"], "c1").await;
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+        {
+            let mut s = h.state.write().await;
+            let acl = s.acl_snapshot.as_mut().unwrap();
+            acl.version += 1;
+            acl.entries[0].preferred_connector_id = "c2".to_string();
+        }
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            applied_coord_ids(&h.state).await,
+            vec!["c2", "c1"],
+            "new flows prefer c2"
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_coords_change_hot_applies() {
+        let h = harness_with(&["c1"], "").await;
+        {
+            let mut s = h.state.write().await;
+            let tr = s.transport_snapshot.as_mut().unwrap();
+            tr.version += 1;
+            tr.remote_networks[0].connectors[0].relay_addr = "relay2:9093".to_string();
+        }
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn hot_apply_keeps_same_data_plane_handle() {
+        let h = harness_with(&["c1"], "").await;
+        let (abort_before, tx_before) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            (th.abort.id(), th.transport_tx.clone())
+        };
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        decide(&h, false).await.unwrap();
+        let s = h.state.read().await;
+        let th = s.tun_handle.as_ref().unwrap();
+        assert_eq!(th.abort.id(), abort_before, "same net_stack task");
+        assert!(Arc::ptr_eq(&th.transport_tx, &tx_before), "same channel");
+        assert!(!th.abort.is_finished());
+    }
+
+    // ---- Structural → full restart (must NOT hot-apply) -----------------------------
+
+    async fn assert_structural(h: &Harness) {
+        assert!(decide(h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "full restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0, "no hot-apply build");
+        assert!(!h.rx.has_changed().unwrap(), "no transport swap");
+    }
+
+    // ---- Fix 05 Phase 5-C: ResourceDelta → resource hot-apply ----------------------
+    //
+    // These tests previously asserted Structural (full restart). Phase 5-C
+    // changes their meaning: every one is now a ResourceDelta, hot-applied in
+    // the approved order with one transport-map publish and no restart.
+
+    fn log_of(h: &Harness) -> Vec<String> {
+        h.log.lock().unwrap().clone()
+    }
+
+    async fn applied_now(h: &Harness) -> AppliedConfig {
+        h.state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .clone()
+    }
+
+    async fn candidate_now(h: &Harness) -> AppliedConfig {
+        let s = h.state.read().await;
+        effective_config(
+            s.acl_snapshot.as_ref().unwrap(),
+            s.transport_snapshot.as_ref(),
+            s.device.as_ref().unwrap(),
+        )
+    }
+
+    /// Resource hot-applied: no restart, one build, map published, the
+    /// command/kernel log is exactly `expected`, and applied == candidate.
+    async fn assert_resource_hot_applied(h: &Harness, expected: &[&str]) {
+        assert_eq!(
+            classify_applied(&applied_now(h).await, &candidate_now(h).await),
+            ConfigDelta::ResourceDelta
+        );
+        assert!(decide(h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1, "one map build");
+        assert!(h.rx.has_changed().unwrap(), "map published");
+        assert_eq!(log_of(h), expected, "ordered apply");
+        assert!(
+            applied_now(h).await == candidate_now(h).await,
+            "applied = target"
+        );
+    }
+
+    fn push_entry(acl: &mut AclSnapshot, spiffe: &str, addr: &str, port: u32, protocol: &str) {
+        acl.entries.push(AclEntry {
+            resource_id: format!("res-{addr}-{port}"),
+            name: format!("res-{addr}-{port}"),
+            address: addr.to_string(),
+            port,
+            protocol: protocol.to_string(),
+            allowed_spiffe_ids: vec![spiffe.to_string()],
+            remote_network_id: "rn1".to_string(),
+            preferred_connector_id: String::new(),
+            ..Default::default()
+        });
+    }
+
+    async fn add_entry(h: &Harness, addr: &str, port: u32, protocol: &str) {
+        let mut s = h.state.write().await;
+        let spiffe = s.device.as_ref().unwrap().spiffe_id.clone();
+        push_entry(
+            s.acl_snapshot.as_mut().unwrap(),
+            &spiffe,
+            addr,
+            port,
+            protocol,
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_decision_entry_added_restarts() {
+        // Name kept for traceability; meaning flipped by Phase 5-C: an added
+        // resource is hot-applied (add side only, nft last).
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.2:443] pub=1",
+                "route+ [10.0.0.2] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:443] pub=1",
+            ],
+        )
+        .await;
+        assert_eq!(
+            h.rx.borrow()
+                .get(&("10.0.0.2".parse().unwrap(), 443))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(1),
+            "new flows to the added resource find its connector"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_decision_resource_access_removed_restarts() {
+        // Meaning flipped by Phase 5-C: access lost → removal side only; the
+        // last resource goes, the tunnel stays up with nothing captured.
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0]
+            .allowed_spiffe_ids
+            .clear();
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "route- [10.0.0.1] pub=0",
+            ],
+        )
+        .await;
+        assert!(applied_now(&h).await.entries.is_empty());
+        assert!(
+            h.rx.borrow()
+                .get(&("10.0.0.1".parse().unwrap(), 80))
+                .is_none(),
+            "no slot for the removed resource"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_ip_change_is_structural() {
+        // Meaning flipped by Phase 5-C: IP change = remove old K + add new K.
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+            "10.0.0.9".to_string();
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "route- [10.0.0.1] pub=0",
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.9:80] pub=1",
+                "route+ [10.0.0.9] pub=1",
+                "nft [10.0.0.9:80] pub=1",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resource_port_change_is_structural() {
+        // Meaning flipped by Phase 5-C: (ip, 80) flows are closed by R1, the
+        // address/route stay (same IP), the new port is served.
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8080;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.1:8080] pub=1",
+                "nft [10.0.0.1:8080] pub=1",
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resource_protocol_change_is_structural() {
+        // Meaning flipped by Phase 5-C: tcp→udp leaves the client data plane
+        // (= removal); the udp entry is kept in applied as non-routable.
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].protocol =
+            "udp".to_string();
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "route- [10.0.0.1] pub=0",
+            ],
+        )
+        .await;
+        assert_eq!(applied_now(&h).await.entries[0].protocol, "udp");
+    }
+
+    /// D3: a resource moving to another remote network is Structural even when
+    /// the connector set would otherwise be identical.
+    #[tokio::test]
+    async fn resource_remote_network_change_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        {
+            let mut s = h.state.write().await;
+            let acl = s.acl_snapshot.as_mut().unwrap();
+            acl.entries[0].remote_network_id = "rn2".to_string();
+            let mut rn2 = acl.remote_networks[0].clone();
+            rn2.remote_network_id = "rn2".to_string();
+            acl.remote_networks.push(rn2);
+            let tr = s.transport_snapshot.as_mut().unwrap();
+            let mut trn2 = tr.remote_networks[0].clone();
+            trn2.remote_network_id = "rn2".to_string();
+            tr.remote_networks.push(trn2);
+        }
+        assert_structural(&h).await;
+    }
+
+    /// Phase 5-C (meaning flipped): resource + connector change together is
+    /// ONE combined apply with ONE publish, placed between the remove side and
+    /// the add side; the new key's slot carries the new connector set.
+    #[tokio::test]
+    async fn resource_and_connector_change_together_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8443;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.1:8443] pub=1",
+                "nft [10.0.0.1:8443] pub=1",
+            ],
+        )
+        .await;
+        let map = h.rx.borrow().clone();
+        assert_eq!(
+            map.get(&("10.0.0.1".parse().unwrap(), 8443))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(2),
+            "connector change applied in the same publish"
+        );
+        assert!(map.get(&("10.0.0.1".parse().unwrap(), 80)).is_none());
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    // ---- Phase 5-C: classification boundaries -------------------------------------
+
+    fn applied_with(entries: &[(&str, u32, &str, &str)]) -> AppliedConfig {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries.clear();
+        for (addr, port, proto, rn) in entries {
+            push_entry(&mut acl, &device.spiffe_id, addr, *port, proto);
+            acl.entries.last_mut().unwrap().remote_network_id = rn.to_string();
+        }
+        let mut rn2 = acl.remote_networks[0].clone();
+        rn2.remote_network_id = "rn2".to_string();
+        acl.remote_networks.push(rn2);
+        effective_config(&acl, None, &device)
+    }
+
+    #[test]
+    fn resource_changes_classify_as_resource_delta() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cases: [&[(&str, u32, &str, &str)]; 6] = [
+            &[
+                ("10.0.0.1", 80, "tcp", "rn1"),
+                ("10.0.0.2", 443, "tcp", "rn1"),
+            ], // add
+            &[],                               // remove / access lost (zero K)
+            &[("10.0.0.9", 80, "tcp", "rn1")], // IP
+            &[("10.0.0.1", 81, "tcp", "rn1")], // port
+            &[("10.0.0.1", 80, "udp", "rn1")], // protocol
+            &[
+                ("10.0.0.1", 80, "tcp", "rn1"),
+                ("10.0.0.5", 53, "udp", "rn2"),
+            ], // non-routable add
+        ];
+        for entries in cases {
+            assert_eq!(
+                classify_applied(&base, &applied_with(entries)),
+                ConfigDelta::ResourceDelta,
+                "{entries:?}"
+            );
+        }
+        // Access gained from zero.
+        assert_eq!(
+            classify_applied(&applied_with(&[]), &base),
+            ConfigDelta::ResourceDelta
+        );
+    }
+
+    /// D3 dominates: a remote-network move is Structural even when the same
+    /// snapshot also contains a hot-appliable resource change.
+    #[test]
+    fn remote_network_move_with_other_resource_changes_stays_structural() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let moved = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn2"),
+            ("10.0.0.2", 443, "tcp", "rn1"),
+        ]);
+        assert_eq!(classify_applied(&base, &moved), ConfigDelta::Structural);
+    }
+
+    /// D4 dominates: identity change + resource change is Structural.
+    #[test]
+    fn identity_change_with_resource_change_stays_structural() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let mut c = applied_with(&[("10.0.0.2", 80, "tcp", "rn1")]);
+        c.private_key_pem = "other".to_string();
+        assert_eq!(classify_applied(&base, &c), ConfigDelta::Structural);
+    }
+
+    /// Metadata (name, resource id) is not part of AppliedConfig → NoChange.
+    #[tokio::test]
+    async fn metadata_only_change_is_no_change() {
+        let h = harness_with(&["c1"], "").await;
+        {
+            let mut s = h.state.write().await;
+            let e = &mut s.acl_snapshot.as_mut().unwrap().entries[0];
+            e.name = "renamed".to_string();
+            e.resource_id = "res1-renamed".to_string();
+        }
+        assert_eq!(
+            classify_applied(&applied_now(&h).await, &candidate_now(&h).await),
+            ConfigDelta::NoChange
+        );
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0);
+        assert!(log_of(&h).is_empty());
+    }
+
+    /// A non-routable-only change (udp entry added; tcp→TCP spelling) has
+    /// no data-plane work: no loop command, no kernel call; publish + commit.
+    #[tokio::test]
+    async fn non_routable_only_change_does_no_dataplane_work() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.5", 53, "udp").await;
+        assert_resource_hot_applied(&h, &[]).await;
+
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].protocol =
+            "TCP".to_string();
+        assert_resource_hot_applied(&h, &[]).await;
+    }
+
+    // ---- Phase 5-C: zero resources + invariants -------------------------------------
+
+    #[tokio::test]
+    async fn zero_resources_keeps_tunnel_then_readd_without_restart() {
+        let h = harness_with(&["c1"], "").await;
+        let (abort_id, transport_tx, resource_tx) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            (
+                th.abort.id(),
+                th.transport_tx.clone(),
+                th.resource_tx.clone(),
+            )
+        };
+        let original = h.state.read().await.acl_snapshot.as_ref().unwrap().entries[0].clone();
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .clear();
+        assert!(decide(&h, false).await.is_ok());
+        {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            assert_eq!(th.abort.id(), abort_id, "same net_stack task");
+            assert!(!th.abort.is_finished());
+            assert!(Arc::ptr_eq(&th.transport_tx, &transport_tx));
+            assert!(Arc::ptr_eq(&th.resource_tx, &resource_tx));
+            assert_eq!(th.route_count, 0);
+            assert!(th.applied.entries.is_empty(), "zero-K target is a success");
+        }
+        {
+            let k = h.kernel.lock().await;
+            let k = k.as_ref().unwrap();
+            assert!(k.routes.is_empty(), "table 105 empty");
+            assert!(k.nft.is_empty(), "empty chain");
+            assert_eq!(k.fwmark_rules, 1, "fwmark rule never removed");
+        }
+        assert!(!resource_apply_pending(&h.state).await);
+
+        // Re-add after zero: normal add side, fwmark re-ensured (no duplicate).
+        rebaseline(&h);
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(original);
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            0,
+            "no restart either way"
+        );
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
+                "route+ [10.0.0.1] pub=1",
+                "nft [10.0.0.1:80] pub=1",
+            ]
+        );
+        assert_eq!(h.kernel.lock().await.as_ref().unwrap().fwmark_rules, 1);
+        let s = h.state.read().await;
+        assert_eq!(s.tun_handle.as_ref().unwrap().abort.id(), abort_id);
+    }
+
+    // Zero resources is a valid tunnel state: `up` must not refuse it.
+    #[test]
+    fn up_preflight_accepts_empty_acl_snapshot() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries.clear();
+        let inputs = up_preflight(Some(acl), Some(device)).expect("zero entries is a valid up");
+        assert!(inputs.acl.entries.is_empty());
+        assert!(inputs.allowed_entries.is_empty());
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_accepts_no_entry_for_this_device() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].allowed_spiffe_ids = vec!["spiffe://other/device".to_string()];
+        let inputs = up_preflight(Some(acl), Some(device)).expect("no access is a valid up");
+        assert_eq!(inputs.acl.entries.len(), 1);
+        assert!(inputs.allowed_entries.is_empty());
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_accepts_no_routable_entry() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].protocol = "udp".to_string();
+        let inputs = up_preflight(Some(acl), Some(device)).expect("UDP-only is a valid up");
+        assert_eq!(inputs.allowed_entries.len(), 1);
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_routable_entry_yields_flow() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let inputs = up_preflight(Some(acl), Some(device)).expect("up");
+        assert_eq!(
+            inputs.allowed_flows,
+            vec![AllowedFlow {
+                ip: "10.0.0.1".parse().unwrap(),
+                port: 80
+            }]
+        );
+    }
+
+    // Never synced / not logged in are not zero-resource states: still fail closed.
+    #[test]
+    fn up_preflight_without_acl_snapshot_fails_closed() {
+        let Err(e) = up_preflight(None, Some(make_test_device())) else {
+            panic!("missing ACL snapshot must fail");
+        };
+        assert!(e.contains("no ACL snapshot"), "{e}");
+    }
+
+    #[test]
+    fn up_preflight_without_device_fails_closed() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let Err(e) = up_preflight(Some(acl), None) else {
+            panic!("missing device identity must fail");
+        };
+        assert!(e.contains("no device identity"), "{e}");
+    }
+
+    // A tunnel that came up with zero resources applies the first assignment
+    // through the Phase 5-C resource hot-apply: same net_stack, no restart.
+    #[tokio::test]
+    async fn zero_start_tunnel_hot_applies_first_assigned_resource() {
+        let h = harness_zero_start().await;
+        let (abort_id, transport_tx, resource_tx) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            assert_eq!(th.route_count, 0);
+            assert!(th.applied.entries.is_empty());
+            (
+                th.abort.id(),
+                th.transport_tx.clone(),
+                th.resource_tx.clone(),
+            )
+        };
+        {
+            let k = h.kernel.lock().await;
+            let k = k.as_ref().unwrap();
+            assert!(k.routes.is_empty());
+            assert!(k.nft.is_empty());
+        }
+        // Nothing assigned yet: a poll is a no-op.
+        assert!(decide(&h, false).await.is_ok());
+        assert!(log_of(&h).is_empty());
+
+        // Resource assigned later.
+        let device = make_test_device();
+        let entry = make_test_acl(&device).entries[0].clone();
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(entry);
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
+                "route+ [10.0.0.1] pub=1",
+                "nft [10.0.0.1:80] pub=1",
+            ]
+        );
+        let s = h.state.read().await;
+        let th = s.tun_handle.as_ref().unwrap();
+        assert_eq!(th.abort.id(), abort_id, "same net_stack task");
+        assert!(Arc::ptr_eq(&th.transport_tx, &transport_tx));
+        assert!(Arc::ptr_eq(&th.resource_tx, &resource_tx));
+        assert_eq!(th.applied.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kernel_desired_state_matches_after_each_step() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        decide(&h, false).await.unwrap();
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8080;
+        decide(&h, false).await.unwrap();
+        {
+            let guard = h.kernel.lock().await;
+            let k = guard.as_ref().unwrap();
+            let ips: Vec<String> = k.routes.iter().map(|ip| ip.to_string()).collect();
+            assert_eq!(ips, vec!["10.0.0.1", "10.0.0.2"]);
+            let flows: Vec<(String, u16)> =
+                k.nft.iter().map(|f| (f.ip.to_string(), f.port)).collect();
+            assert_eq!(
+                flows,
+                vec![
+                    ("10.0.0.1".to_string(), 8080),
+                    ("10.0.0.2".to_string(), 443)
+                ]
+            );
+        }
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- Fix 09: no address capacity (AnyIP); every addition applies ----------------
+
+    fn keys(v: &BTreeSet<ResourceKey>) -> Vec<String> {
+        v.iter().map(|(ip, p)| format!("{ip}:{p}")).collect()
+    }
+
+    /// B2 finding 5 / H1 retired: more new IPs than the old smoltcp
+    /// capacity (2, one reserved) all apply in one pass, with a route each.
+    #[test]
+    fn plan_applies_every_new_ip() {
+        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.7", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+            ("10.0.0.5", 443, "tcp", "rn1"),
+        ]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(
+            keys(&plan.added),
+            vec!["10.0.0.3:80", "10.0.0.5:443", "10.0.0.7:80"]
+        );
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5,10.0.0.7");
+        assert!(plan.addr_del.is_empty() && plan.removed.is_empty());
+        assert!(plan.target == cand, "the whole candidate is applied");
+    }
+
+    #[test]
+    fn plan_addition_on_a_served_ip_adds_no_route() {
+        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.1", 443, "tcp", "rn1"),
+        ]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.1:443"]);
+        assert!(plan.addr_add.is_empty());
+    }
+
+    #[test]
+    fn plan_route_is_kept_while_another_key_uses_the_ip() {
+        let applied = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.1", 443, "tcp", "rn1"),
+        ]);
+        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:443"]);
+        assert!(plan.addr_del.is_empty(), "10.0.0.1 is still served");
+    }
+
+    #[test]
+    fn plan_removal_and_addition_in_one_pass() {
+        let applied = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.2", 80, "tcp", "rn1"),
+        ]);
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+            ("10.0.0.4", 80, "tcp", "rn1"),
+        ]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80"]);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.4:80"]);
+        assert_eq!(ips_str(&plan.addr_del), "10.0.0.2");
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.4");
+    }
+
+    /// The live B2 case: three new resource IPs while the tunnel is up are
+    /// hot-applied in one pass. No restart, nothing left pending.
+    #[tokio::test]
+    async fn several_new_resource_ips_hot_apply_in_one_pass() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 80, "tcp").await;
+        add_entry(&h, "10.0.0.3", 80, "tcp").await;
+        add_entry(&h, "10.0.0.4", 8080, "tcp").await;
+        decide(&h, false).await.unwrap();
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "fwmark pub=1",
+                "loop:add keys=[10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
+                "route+ [10.0.0.2,10.0.0.3,10.0.0.4] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
+            ]
+        );
+        let applied = applied_now(&h).await;
+        for ip in ["10.0.0.2", "10.0.0.3", "10.0.0.4"] {
+            assert!(applied.entries.iter().any(|e| e.address == ip), "{ip} applied");
+        }
+        assert!(!resource_apply_pending(&h.state).await, "nothing pending");
+    }
+
+    // ---- Phase 5-C: failure / recovery -----------------------------------------------
+
+    async fn assert_recovered_by_restart(h: &Harness, applied_before: &AppliedConfig) {
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "recovery restart");
+        assert!(
+            applied_now(h).await == *applied_before,
+            "partial state never recorded as applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_build_failure_is_pre_mutation_and_retries() {
+        let h = harness_with(&["c1"], "").await;
+        let before = applied_now(&h).await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        let res = decide(&h, true).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("resource map build failed, retaining current state"));
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            0,
+            "working VPN untouched"
+        );
+        assert!(log_of(&h).is_empty(), "no mutation");
+        assert!(!h.rx.has_changed().unwrap(), "no publish");
+        assert!(applied_now(&h).await == before);
+        assert!(resource_apply_pending(&h.state).await, "retried next tick");
+        assert!(decide(&h, false).await.is_ok());
+        assert!(!resource_apply_pending(&h.state).await);
+    }
+
+    async fn loop_failure_case(set: impl FnOnce(&mut LoopCtl), port_change: bool) -> Harness {
+        let h = harness_with(&["c1"], "").await;
+        set(&mut h.loop_ctl.lock().unwrap());
+        let before = applied_now(&h).await;
+        if port_change {
+            h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+                "10.0.0.9".to_string();
+        } else {
+            add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        }
+        assert!(decide(&h, false).await.is_ok());
+        assert_recovered_by_restart(&h, &before).await;
+        h
+    }
+
+    #[tokio::test]
+    async fn loop_error_on_remove_triggers_recovery_restart() {
+        let h = loop_failure_case(|c| c.remove = Reply::Fail, true).await;
+        assert_eq!(
+            log_of(&h),
+            vec!["loop:remove [10.0.0.1:80] pub=0"],
+            "stopped at R1"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_error_on_add_triggers_recovery_restart() {
+        let h = loop_failure_case(|c| c.add = Reply::Fail, false).await;
+        assert_eq!(
+            log_of(&h).last().unwrap(),
+            "loop:add keys=[10.0.0.2:443] pub=1"
+        );
+        assert!(
+            !log_of(&h).iter().any(|l| l.starts_with("nft")),
+            "nft never reached"
+        );
+    }
+
+    /// H4: a removal not acknowledged (reset + reap) within 2 s is a
+    /// post-mutation failure → recovery restart.
+    #[tokio::test]
+    async fn remove_ack_timeout_triggers_recovery_restart() {
+        let started = std::time::Instant::now();
+        let h = loop_failure_case(|c| c.remove = Reply::Hang, true).await;
+        let took = started.elapsed();
+        assert!(
+            took >= RESOURCE_ACK_TIMEOUT,
+            "waited the full H4 timeout ({took:?})"
+        );
+        assert!(took < RESOURCE_ACK_TIMEOUT * 3);
+        assert_eq!(log_of(&h), vec!["loop:remove [10.0.0.1:80] pub=0"]);
+    }
+
+    async fn kernel_failure_case(fail_on: &'static str) -> Harness {
+        let h = harness_with(&["c1"], "").await;
+        h.kernel.lock().await.as_mut().unwrap().fail_on = Some(fail_on);
+        let before = applied_now(&h).await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+            "10.0.0.9".to_string();
+        assert!(decide(&h, false).await.is_ok());
+        assert_recovered_by_restart(&h, &before).await;
+        h
+    }
+
+    #[tokio::test]
+    async fn kernel_failures_after_mutation_trigger_recovery_restart() {
+        for step in ["nft [] ", "route- ", "fwmark", "route+ ", "nft [10.0.0.9"] {
+            let h = kernel_failure_case(step).await;
+            assert!(log_of(&h).last().unwrap().starts_with(step), "{step}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_replaced_during_resource_build_is_not_applied() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                state
+                    .try_write()
+                    .expect("no lock held during build")
+                    .tun_handle = None;
+                Ok(fake_map(entries, acl, transport))
+            },
+            &h.kernel,
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
+        assert!(log_of(&h).is_empty(), "no mutation");
+    }
+
+    #[tokio::test]
+    async fn dead_task_with_resource_change_restarts() {
+        let h = harness_with(&["c1"], "").await;
+        let finished = tokio::spawn(async {});
+        let dead = finished.abort_handle();
+        finished.await.unwrap();
+        {
+            let mut s = h.state.write().await;
+            let cur = s.tun_handle.as_ref().unwrap().clone();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead,
+                route_count: cur.route_count,
+                applied: cur.applied.clone(),
+                transport_tx: cur.transport_tx.clone(),
+                resource_tx: cur.resource_tx.clone(),
+            }));
+        }
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1);
+        assert!(log_of(&h).is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_decision_identity_change_restarts() {
+        let h = harness_with(&["c1"], "").await;
+        h.state
+            .write()
+            .await
+            .device
+            .as_mut()
+            .unwrap()
+            .certificate_pem =
+            "-----BEGIN CERTIFICATE-----\nNEW_CERT\n-----END CERTIFICATE-----\n".to_string();
+        assert_structural(&h).await;
+    }
+
+    /// D4: identity + connector change together → Structural.
+    #[tokio::test]
+    async fn identity_and_connector_change_together_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        h.state.write().await.device.as_mut().unwrap().ca_cert_pem = "CA2".to_string();
+        assert_structural(&h).await;
+    }
+
+    #[tokio::test]
+    async fn restart_decision_tun_handle_none_restarts() {
+        let (state, count) = setup_state().await;
+        state.write().await.tun_handle = None;
+        let res = decide_counting(&state, &count, Ok(())).await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_error_propagates() {
+        let (state, count) = setup_state().await;
+        state.write().await.tun_handle = None; // force restart
+        let res = decide_counting(&state, &count, Err(anyhow::anyhow!("down_up failed"))).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "down_up failed");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn classify_unknown_inputs_are_structural() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+        assert_eq!(
+            classify_delta(None, Some(&acl), None, Some(&device)),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), None, None, Some(&device)),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), Some(&acl), None, None),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), Some(&acl), None, Some(&device)),
+            ConfigDelta::NoChange
+        );
+    }
+
+    /// Fail-closed: any difference outside the connector fields is Structural,
+    /// even one the classifier has no specific rule for (here: spiffe_id,
+    /// tpm_key_material, and an entry's protocol letter case).
+    #[test]
+    fn classify_non_connector_field_differences_are_structural() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+
+        let mut c = applied.clone();
+        c.spiffe_id = "spiffe://t/other".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+
+        let mut c = applied.clone();
+        c.tpm_key_material = Some("tpm".to_string());
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+
+        // Phase 5-C: a protocol letter-case change is a ResourceDelta (both
+        // spellings map to the same routable key → a data-plane no-op).
+        let mut c = applied.clone();
+        c.entries[0].protocol = "TCP".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::ResourceDelta);
+
+        let mut c = applied.clone();
+        c.entries[0].coords.clear();
+        c.entries[0].preferred_connector_id = "cX".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::TransportOnly);
+    }
+
+    #[test]
+    fn needs_full_restart_acl_none_returns_true() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+        assert!(needs_full_restart(
+            Some(&applied),
+            None,
+            None,
+            Some(&device)
+        ));
+    }
+
+    #[test]
+    fn needs_full_restart_device_none_returns_true() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+        assert!(needs_full_restart(Some(&applied), Some(&acl), None, None));
+    }
+
+    // ---- Phase 2-A failure safety ---------------------------------------------------
+
+    /// D2: build failure keeps the working VPN and map; applied unchanged; the
+    /// change stays pending so the next 60 s tick retries.
+    #[tokio::test]
+    async fn map_build_failure_retains_existing_map_and_vpn() {
+        let h = harness_with(&["c1"], "").await;
+        let applied_before = h
+            .state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .clone();
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+
+        let res = decide(&h, true).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("transport map build failed, retaining existing map"));
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "VPN not restarted");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(!h.rx.has_changed().unwrap(), "no partial swap");
+        assert!(
+            Arc::ptr_eq(&h.rx.borrow(), &h.initial_map),
+            "old map still live"
+        );
+        let s = h.state.read().await;
+        assert!(s.tun_handle.as_ref().unwrap().applied == applied_before);
+        drop(s);
+        assert!(transport_apply_pending(&h.state).await, "retry pending");
+
+        // Retry succeeds on the next pass.
+        assert!(decide(&h, false).await.is_ok());
+        assert!(h.rx.has_changed().unwrap());
+        assert!(!transport_apply_pending(&h.state).await);
+    }
+
+    #[tokio::test]
+    async fn transport_apply_pending_ignores_structural_and_nochange() {
+        let h = harness_with(&["c1"], "").await;
+        assert!(!transport_apply_pending(&h.state).await);
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 1;
+        assert!(!transport_apply_pending(&h.state).await);
+    }
+
+    /// net_stack exited (receiver dropped) → hot-apply impossible → full restart.
+    #[tokio::test]
+    async fn receiver_gone_falls_back_to_full_restart() {
+        let h = harness_with(&["c1"], "").await;
+        let Harness {
+            state,
+            rx,
+            builds,
+            down_ups,
+            log,
+            kernel,
+            loop_ctl,
+            published_rx,
+            published,
+            ..
+        } = h;
+        drop(rx);
+        // The Phase 5-C observers' receiver clone would keep the channel open.
+        published_rx.lock().unwrap().take();
+        let h = Harness {
+            state,
+            rx: tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new())).1,
+            initial_map: Arc::new(net_stack::TransportMap::new()),
+            builds,
+            down_ups,
+            log,
+            kernel,
+            loop_ctl,
+            published_rx,
+            published,
+        };
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            1,
+            "fallback full restart"
+        );
+    }
+
+    /// The tunnel is replaced (e.g. IPC Down + Up) while the map is built →
+    /// do not publish into the stale handle, and do not restart.
+    #[tokio::test]
+    async fn tunnel_replaced_during_build_is_not_published() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                state
+                    .try_write()
+                    .expect("no lock held during build")
+                    .tun_handle = None;
+                Ok(fake_map(entries, acl, transport))
+            },
+            &h.kernel,
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        // tun_handle = None dropped the last Sender (channel closed), so check
+        // the receiver's current value rather than has_changed().
+        assert!(
+            Arc::ptr_eq(&h.rx.borrow(), &h.initial_map),
+            "nothing published"
+        );
+    }
+
+    /// Configuration moved again while the map was built → the built map is
+    /// stale → do not publish it; fall back to the full restart.
+    #[tokio::test]
+    async fn config_changed_during_build_falls_back() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                let mut s = state.try_write().expect("no lock held during build");
+                s.transport_snapshot.as_mut().unwrap().remote_networks[0]
+                    .connectors
+                    .push(tconn("c33"));
+                Ok(fake_map(entries, acl, transport))
+            },
+            &h.kernel,
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert!(!h.rx.has_changed().unwrap(), "stale map not published");
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "safe fallback");
+    }
 }
 
 fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState) {
@@ -714,6 +3911,12 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     s.user = Some(UserInfo::from(stored));
     s.device = Some(DeviceInfo::from(stored));
     s.session = Some(SessionInfo::from(stored));
+    // Restores the device directive across a daemon restart (e.g. the
+    // service manager relaunching after a RE_ENROLL_REQUIRED disable, which
+    // — unlike REVOKED — does not exit the process, so a restart mid-disable
+    // shouldn't be the common case, but must still recover correctly).
+    s.device_state = DeviceState::from_marker(&stored.device.device_state);
+    s.tunnel_wanted = stored.tunnel_wanted;
 }
 
 fn sd_notify_ready() {
@@ -745,22 +3948,47 @@ fn sd_spawn_watchdog() {
     });
 }
 
+/// Outcome of an ACL-plane fetch: a fresh snapshot, confirmation the cached
+/// one is current, or a device directive (Sprint 19 Track 2 / PENDING-13).
+/// Directive always means no snapshot — REVOKED/RE_ENROLL_REQUIRED gate the
+/// controller's ACL response entirely (D-B: empty payload, up_to_date=false).
+enum AclFetchOutcome {
+    Snapshot(crate::grpc::client_v1::AclSnapshot),
+    UpToDate,
+    Directive(DeviceDirective, String),
+}
+
+/// Raw GetACLSnapshot RPC. Returns AclFetchOutcome::UpToDate when the
+/// controller reports up_to_date (client's known_version matches — keep the
+/// cached snapshot).
 async fn fetch_acl_snapshot(
     conf: &config::ClientConf,
     ca_pem: &str,
     access_token: &str,
     device_id: &str,
-) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    known_version: u64,
+) -> Result<AclFetchOutcome> {
     let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
     let resp = client
         .get_acl_snapshot(GetAclSnapshotRequest {
             access_token: access_token.to_string(),
             device_id: device_id.to_string(),
+            known_version,
         })
         .await?
         .into_inner();
+
+    let directive = DeviceDirective::try_from(resp.device_directive)
+        .unwrap_or(DeviceDirective::DirectiveNone);
+    if directive != DeviceDirective::DirectiveNone {
+        return Ok(AclFetchOutcome::Directive(directive, resp.directive_reason));
+    }
+    if resp.up_to_date {
+        return Ok(AclFetchOutcome::UpToDate);
+    }
     resp.snapshot
         .ok_or_else(|| anyhow::anyhow!("controller returned empty ACL snapshot"))
+        .map(AclFetchOutcome::Snapshot)
 }
 
 /// Fetch the ACL snapshot, transparently refreshing the access token on 401.
@@ -787,12 +4015,13 @@ async fn fetch_acl_snapshot_with_refresh(
     ca_pem: &str,
     state: &SharedState,
     device_id: &str,
-) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    known_version: u64,
+) -> Result<AclFetchOutcome> {
     let refresh_lock = {
         let s = state.read().await;
         s.refresh_lock.clone()
     };
-    let (access_token, refresh_token) = {
+    let (access_token, _refresh_token) = {
         let s = state.read().await;
         let sess = s.session.as_ref().ok_or_else(|| {
             anyhow::anyhow!("no session in state — run zecurity-client login first")
@@ -800,7 +4029,7 @@ async fn fetch_acl_snapshot_with_refresh(
         (sess.access_token.clone(), sess.refresh_token.clone())
     };
 
-    match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+    match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
         Ok(snap) => Ok(snap),
         Err(err) => {
             if !is_grpc_unauthenticated(&err) {
@@ -821,7 +4050,7 @@ async fn fetch_acl_snapshot_with_refresh(
                 (sess.access_token.clone(), sess.refresh_token.clone())
             };
 
-            match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+            match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
                 Ok(snapshot) => {
                     info!("ACL fetch succeeded after another task refreshed the session");
                     return Ok(snapshot);
@@ -837,14 +4066,17 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             // Persist the rotated pair BEFORE updating in-memory state so a
             // crash between save and in-memory update leaves the disk as the
@@ -866,9 +4098,73 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id).await
+            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id, known_version)
+                .await
         }
     }
+}
+
+/// Reacts to a device directive from deviceGate (Sprint 19 Track 2 /
+/// PENDING-13, ADR-028): wipes the cert/key in memory and on disk, stops any
+/// running tunnel, clears the cached ACL, and records the new DeviceState —
+/// both in memory and via the on-disk marker (state_store::mark_device_state)
+/// so a daemon restart while still revoked/re-enroll-required picks the
+/// state back up (see populate_runtime).
+///
+/// Deliberately does NOT exit the process for REVOKED — that decision
+/// belongs to the caller, which may have a pending IPC response to write
+/// first (see fetch_and_store_acl and the IpcRequest::Sync arm in
+/// handle_request, which differ in whether a response is in flight).
+async fn react_to_device_directive(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    directive: DeviceDirective,
+    reason: String,
+) -> Result<()> {
+    let new_state = match directive {
+        DeviceDirective::DirectiveRevoked => DeviceState::Revoked,
+        DeviceDirective::DirectiveReEnrollRequired => DeviceState::ReEnrollRequired,
+        DeviceDirective::DirectiveRenewSoon => {
+            // Backstop, not the primary trigger: run_cert_renewal_scheduler
+            // wakes on its own timer computed from cert_expires_at. This just
+            // wakes it early if it's running late (sleep/suspend, clock
+            // drift) — same relationship run_refresh_scheduler's 401-retry
+            // path has to its own proactive scheduler. No DeviceState change:
+            // the device is still fully trusted, just due for a fresh cert.
+            let resync = state.read().await.cert_renewal_resync.clone();
+            resync.notify_one();
+            return Ok(());
+        }
+        // NONE is not a reaction this function handles.
+        _ => return Ok(()),
+    };
+
+    warn!(
+        directive = ?directive,
+        reason = %reason,
+        "device directive received — wiping credentials"
+    );
+
+    handle_down(state, tun_slot).await;
+
+    {
+        let mut s = state.write().await;
+        if let Some(device) = s.device.as_mut() {
+            device.certificate_pem.clear();
+            device.private_key_pem.clear();
+            device.tpm_key_material = None;
+            device.cert_expires_at = 0;
+        }
+        s.acl_snapshot = None;
+        s.device_state = new_state;
+        s.device_state_reason = reason;
+    }
+
+    state_store::mark_device_state(&conf.workspace, new_state.as_marker())
+        .context("persist device directive marker")?;
+
+    Ok(())
 }
 
 /// True when an error surfaced from a gRPC control-plane call is the
@@ -928,31 +4224,27 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
         }
 
-        
         // Re-read tokens right before the network call — the session may
         // have been rotated by a concurrent 401-retry in the meantime.
-        let (access_token, refresh_token) = {
-            let s = state.read().await;
-            match s.session.as_ref() {
-                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
-                None => continue, // logged out between sleep and now
-            }
-        };
         let refresh_lock = {
             let s = state.read().await;
             s.refresh_lock.clone()
         };
 
         let _guard = refresh_lock.lock().await;
-        let (access_token, refresh_token) = {
+        let (access_token, refresh_token, ca_pem) = {
             let s = state.read().await;
 
-            match s.session.as_ref() {
-                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
-                None => continue,
+            match (s.session.as_ref(), s.device.as_ref()) {
+                (Some(sess), Some(device)) => (
+                    sess.access_token.clone(),
+                    sess.refresh_token.clone(),
+                    device.ca_cert_pem.clone(),
+                ),
+                _ => continue,
             }
         };
-        match auth::refresh_access_token(&conf, &access_token, &refresh_token).await {
+        match auth::refresh_access_token(&conf, &ca_pem, &access_token, &refresh_token).await {
             Ok(new_tokens) => {
                 if let Err(e) = state_store::save_rotated_tokens(
                     &conf.workspace,
@@ -992,56 +4284,1026 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
     }
 }
 
+// ── Cert renewal (Sprint 19 Track 3 / PENDING-13, ADR-028 D1) ───────────────
+
+/// Mirrors the controller's clientCertTTL/renewalWindow (service.go) — a
+/// schedule constant, not device state, so it's duplicated here rather than
+/// fetched from the server, same reasoning as clientCertTTL itself being a
+/// compile-time constant server-side. Keep these two constants in lockstep
+/// with service.go's clientCertTTL/renewalWindow if either ever changes.
+const CLIENT_CERT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const RENEWAL_WINDOW_SECS: i64 = CLIENT_CERT_TTL_SECS * 2 / 5;
+
+/// Loads this device's signing key, whichever backend it enrolled with
+/// (PENDING-17). Both arms return a plain `rcgen::KeyPair`, so callers —
+/// `build_renewal_csr` today — neither know nor care which one they got: the
+/// TPM arm is a `RemoteKeyPair` that delegates signing to the chip, the
+/// software arm is an ordinary in-memory key.
+fn load_device_key_pair(
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+) -> Result<rcgen::KeyPair> {
+    match tpm_key_material {
+        #[cfg(target_os = "linux")]
+        Some(serialized) => {
+            let key_material = crate::tpm::deserialize_key_material(serialized)?;
+            crate::tpm::load(key_material)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some(_) => Err(anyhow::anyhow!(
+            "device has TPM-backed key material but this build has no TPM support"
+        )),
+        None => rcgen::KeyPair::from_pem(private_key_pem).map_err(Into::into),
+    }
+}
+
+/// Builds a fresh, self-signed CSR from the device's EXISTING private key —
+/// never a new keypair. Mirrors login.rs's enrollment CSR construction
+/// (rcgen::KeyPair::generate_for + CertificateParams) minus the key
+/// generation step. Reusing the same key is what makes RenewCert's
+/// fingerprint-pinning check (controller service.go D-A) meaningful: a fresh
+/// key on every renewal would defeat it entirely. The CSR's CommonName is
+/// cosmetic — the server derives the SPIFFE SAN from (trustDomain, deviceID),
+/// never from the CSR's subject fields.
+fn build_renewal_csr(
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+) -> Result<String> {
+    let key_pair = load_device_key_pair(private_key_pem, tpm_key_material)?;
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, hostname);
+    Ok(params.serialize_request(&key_pair)?.pem()?)
+}
+
+/// Raw RenewCert RPC.
+async fn renew_cert_rpc(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .renew_cert(RenewCertRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            csr_pem: csr_pem.to_string(),
+        })
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+/// RenewCert with the same 401-retry dance as fetch_acl_snapshot_with_refresh
+/// (verify -> on Unauthenticated, refresh via /auth/refresh, retry once).
+/// Duplicated rather than factored into a shared helper — this codebase's
+/// existing convention (ACL and Transport fetch each have their own copy
+/// too), not an oversight.
+async fn renew_cert_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
+    let access_token = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        sess.access_token.clone()
+    };
+
+    match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("RenewCert returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+                Ok(resp) => {
+                    info!("RenewCert succeeded after another task refreshed the session");
+                    return Ok(resp);
+                }
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            renew_cert_rpc(conf, ca_pem, &new_tokens.access_token, device_id, csr_pem).await
+        }
+    }
+}
+
+/// Pure: how long to sleep before the renewal window begins. Split out from
+/// the scheduler loop for unit testing without async/network, same reasoning
+/// as sync_acl_now_with being split from its real fetch. Clamped to 0 (never
+/// negative) — a cert already inside (or past) its renewal window means
+/// renew immediately, same as run_refresh_scheduler's `.max(0)`.
+fn renewal_sleep_secs(cert_expires_at: i64, now: i64) -> u64 {
+    let renew_at = cert_expires_at - RENEWAL_WINDOW_SECS;
+    (renew_at - now).max(0) as u64
+}
+
+/// Adds a one-time random jitter (±15 min) so a fleet of devices enrolled
+/// together doesn't all wake and hit RenewCert at the exact same instant
+/// (ADR-028 D1: "jittered retries"). Kept separate from renewal_sleep_secs so
+/// that function stays pure and testable.
+fn jittered_sleep_secs(sleep_secs: u64) -> u64 {
+    use rand::Rng;
+    let jitter_secs: i64 = rand::thread_rng().gen_range(-900..=900);
+    (sleep_secs as i64 + jitter_secs).max(0) as u64
+}
+
+/// Proactive device-cert renewal loop (ADR-028 D1). The daemon renews its own
+/// cert before expiry using a proof-of-possession CSR built from the SAME key
+/// it already holds — no user interaction, mirrors the connector/shield
+/// renewal pattern. Runs for the daemon's lifetime.
+///
+/// Lifecycle:
+///   - No device yet, or device_state != Active (Track 2 already revoked /
+///     flagged re-enroll-required — the key is wiped, nothing to renew):
+///     sleep and recheck, same shape as run_refresh_scheduler's "no session"
+///     branch.
+///   - Otherwise sleep until the renewal window (jittered), or wake early on
+///     cert_renewal_resync (DIRECTIVE_RENEW_SOON backstop — see
+///     react_to_device_directive).
+///   - Re-check device/device_state after waking — it may have changed
+///     during the sleep.
+///   - On success: update in-memory state AND persist via
+///     state_store::save_renewed_cert, then restart a running tunnel so it
+///     presents the new certificate (renew_and_apply_to_tunnel, B1).
+///   - On failure: warn and retry after a flat backoff. Deliberately does
+///     NOT react to a denial by wiping/exiting — that is exclusively
+///     react_to_device_directive's job via the ACL poll. This loop's only
+///     job is renewing; it never touches DeviceState itself.
+async fn run_cert_renewal_scheduler(
+    state: SharedState,
+    conf: config::ClientConf,
+    tun_slot: TunSlot,
+) {
+    const NO_DEVICE_POLL_SECS: u64 = 60;
+    const RENEWAL_RETRY_SECS: u64 = 30;
+
+    let resync = { state.read().await.cert_renewal_resync.clone() };
+
+    loop {
+        let (device_id, private_key_pem, tpm_key_material, hostname, cert_expires_at, ca_pem, eligible) = {
+            let s = state.read().await;
+            match (&s.device, s.device_state) {
+                (Some(d), DeviceState::Active) => (
+                    d.id.clone(),
+                    d.private_key_pem.clone(),
+                    d.tpm_key_material.clone(),
+                    d.hostname.clone(),
+                    d.cert_expires_at,
+                    d.ca_cert_pem.clone(),
+                    true,
+                ),
+                _ => (
+                    String::new(),
+                    String::new(),
+                    None,
+                    String::new(),
+                    0,
+                    String::new(),
+                    false,
+                ),
+            }
+        };
+
+        if !eligible {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_DEVICE_POLL_SECS)).await;
+            continue;
+        }
+
+        let sleep_secs = jittered_sleep_secs(renewal_sleep_secs(cert_expires_at, now_unix()));
+        if sleep_secs > 0 {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {}
+                _ = resync.notified() => {
+                    info!("RENEW_SOON directive received — waking renewal scheduler early");
+                }
+            }
+        }
+
+        // Re-check after waking: device_state may have changed while asleep.
+        let still_eligible = {
+            let s = state.read().await;
+            matches!((&s.device, s.device_state), (Some(_), DeviceState::Active))
+        };
+        if !still_eligible {
+            continue;
+        }
+
+        if let Err(e) = scheduled_cert_renewal(
+            &state,
+            &conf,
+            &tun_slot,
+            &device_id,
+            &private_key_pem,
+            tpm_key_material.as_deref(),
+            &hostname,
+            &ca_pem,
+        )
+        .await
+        {
+            warn!(error = %e, "cert renewal failed — retrying in {}s", RENEWAL_RETRY_SECS);
+            tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_RETRY_SECS)).await;
+        }
+    }
+}
+
+/// The scheduler's renewal attempt with its production restart operation:
+/// restart_tunnel_if_running on this daemon's tunnel slot (Sprint 21 B1).
+/// Split out of run_cert_renewal_scheduler, which keeps only the timing and
+/// eligibility logic, so this wiring is directly testable.
+#[allow(clippy::too_many_arguments)]
+async fn scheduled_cert_renewal(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    device_id: &str,
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    renew_and_apply_to_tunnel(
+        state,
+        conf,
+        device_id,
+        private_key_pem,
+        tpm_key_material,
+        hostname,
+        ca_pem,
+        || restart_tunnel_if_running(state, conf, tun_slot),
+    )
+    .await
+}
+
+/// One scheduler renewal step (Sprint 21 B1): renew the device certificate,
+/// then bring an already-running tunnel onto it.
+///
+/// The connection pools copy the certificate when the tunnel starts
+/// (handle_up), so before B1 a running tunnel kept presenting the old
+/// certificate until something else restarted it — on a quiet workspace,
+/// until that certificate expired. `restart` is restart_tunnel_if_running in
+/// production: a no-op when no tunnel is running; otherwise the renewed
+/// certificate makes the running config Structural, so the restart
+/// coordinator does one full down/up and handle_up rebuilds the pools from the
+/// renewed certificate. Concurrent restart requests share one pass, and a
+/// request after the tunnel already uses the new certificate is NoChange.
+///
+/// A failed renewal returns its error without restarting (the old certificate
+/// stays in use). A failed restart is logged, not returned: the certificate is
+/// already renewed and saved and must not be renewed again for it.
+#[allow(clippy::too_many_arguments)]
+async fn renew_and_apply_to_tunnel<F, Fut>(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    device_id: &str,
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+    ca_pem: &str,
+    restart: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    attempt_cert_renewal(
+        state,
+        conf,
+        device_id,
+        private_key_pem,
+        tpm_key_material,
+        hostname,
+        ca_pem,
+    )
+    .await?;
+    if let Err(e) = restart().await {
+        warn!(
+            error = %e,
+            "device cert renewed, but restarting the running tunnel onto it failed; \
+             the next restart will pick it up"
+        );
+    }
+    Ok(())
+}
+
+/// Whether the CA chain saved at enrollment (Workspace CA + Intermediate) is
+/// anchored in the platform root compiled into this client (certificate
+/// audit bug 1). A chain saved before the fix was never validated, so a
+/// mismatch means the device must log in again.
+pub(crate) fn check_saved_trust(ca_cert_pem: &str, platform_root_pem: &str) -> Result<()> {
+    crate::trust::saved_anchors(ca_cert_pem, platform_root_pem)
+        .map(|_| ())
+        .context(
+            "saved trust anchors are not issued by this client's platform root; \
+             run `zecurity-client login` again",
+        )
+}
+
+/// The saved state for `workspace`, if any, but only if its trust anchors
+/// chain to `platform_root_pem` (certificate audit bug 1). Otherwise it is
+/// not loaded and the device must log in again.
+fn load_trusted_state(
+    workspace: &str,
+    platform_root_pem: Result<&str>,
+) -> Option<state_store::StoredWorkspaceState> {
+    let stored = state_store::load_workspace_state(workspace).ok()?;
+    match platform_root_pem.and_then(|root| check_saved_trust(&stored.device.ca_cert_pem, root)) {
+        Ok(()) => Some(stored),
+        Err(e) => {
+            error!(error = %format!("{e:#}"), "saved device state not loaded");
+            None
+        }
+    }
+}
+
+/// One renewal attempt: build the CSR, call RenewCert, persist + update state
+/// on success. Split out from run_cert_renewal_scheduler's loop (which owns
+/// only the sleep/eligibility/retry-timing logic) so the actual network +
+/// state + persistence wiring is directly callable from tests — same
+/// reasoning as sync_acl_now_with being split from sync_acl_now.
+async fn attempt_cert_renewal(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    device_id: &str,
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    let csr_pem = build_renewal_csr(private_key_pem, tpm_key_material, hostname)
+        .context("build renewal CSR")?;
+    let resp = renew_cert_with_refresh(conf, ca_pem, state, device_id, &csr_pem).await?;
+
+    // Certificate audit bug 1: the renewed certificate must chain to the
+    // anchors saved at enrollment (byte-identical Workspace CA and
+    // Intermediate), for this device's identity and key. The anchors are
+    // never replaced by a renewal. On rejection nothing changes.
+    let spiffe_id = state
+        .read()
+        .await
+        .device
+        .as_ref()
+        .map(|d| d.spiffe_id.clone())
+        .unwrap_or_default();
+    (|| {
+        let (saved_workspace, saved_intermediate) = crate::trust::split_saved_chain(ca_pem)?;
+        crate::trust::validate_issued_chain(
+            &crate::trust::Anchors {
+                intermediate: &saved_intermediate,
+                workspace_ca: Some(&saved_workspace),
+            },
+            &resp.workspace_ca_pem,
+            &resp.intermediate_ca_pem,
+            &resp.certificate_pem,
+            &spiffe_id,
+            &crate::trust::csr_key_spki(&csr_pem)?,
+        )
+    })()
+    .context("renewed certificate rejected")?;
+
+    if let Err(e) = state_store::save_renewed_cert(
+        &conf.workspace,
+        resp.certificate_pem.clone(),
+        ca_pem.to_string(),
+        resp.cert_expires_at,
+    ) {
+        warn!(error = %e, "persist renewed cert failed — in-memory update still applied");
+    }
+
+    let mut s = state.write().await;
+    if let Some(device) = s.device.as_mut() {
+        device.certificate_pem = resp.certificate_pem;
+        device.cert_expires_at = resp.cert_expires_at;
+    }
+    info!(new_expiry = resp.cert_expires_at, "device cert renewed proactively");
+    Ok(())
+}
+
+/// Single-flight + cooldown state for the transport-recovery task, shared
+/// between the scheduler's select! loop and the spawned recovery task.
+#[derive(Debug, Default)]
+struct TransportRecoveryState {
+    /// True while a recovery task is in flight.
+    running: bool,
+    /// When the last recovery completed. The cooldown is measured from here (not
+    /// from when recovery started) so a long recovery can't immediately re-burst.
+    last_finished_at: Option<tokio::time::Instant>,
+}
+
+/// Decide whether a new transport-recovery burst may start, and reserve the slot
+/// if so. Pure so it is unit-testable without spawning tasks or mocking time:
+/// returns false when a recovery is already running or the cooldown since the
+/// last completion has not elapsed; otherwise marks `running` and returns true.
+fn may_start_transport_recovery(
+    recovery: &mut TransportRecoveryState,
+    now: tokio::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    if recovery.running {
+        return false;
+    }
+    if recovery
+        .last_finished_at
+        .is_some_and(|finished| now.duration_since(finished) < cooldown)
+    {
+        return false;
+    }
+    recovery.running = true;
+    true
+}
+
 /// Background ACL sync loop. The action-triggered paths (up / sync / resources)
 /// only converge when the user does something; this task guarantees an idle
 /// daemon with a long-lived tunnel still picks up policy changes within one
 /// ACL_REFRESH_TTL_SECS interval.
 ///
 /// Skips ticks when no session/device exists (pre-login or post-logout).
-/// On version change it reuses the exact same path as the 
+/// On version change it reuses the exact same path as the
 /// sync_acl_now + restart_tunnel_if_running. Transient fetch failures keep the
 /// cached snapshot (fail-open on staleness, consistent with refresh_acl_if_needed).
-async fn run_acl_sync_scheduler(
-    state: SharedState,
-    conf: config::ClientConf,
-    tun_slot: TunSlot,
-) {
+async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tun_slot: TunSlot) {
+    // Shared with net_stack (via handle_up): the data plane fires this when a
+    // managed-resource relay transport fails, so we re-sync early rather than
+    // waiting out the 60s tick.
+    let resync = { state.read().await.relay_resync.clone() };
+    // FU-8: woken by a change hint whose versions differ from the cache.
+    let change_hint = { state.read().await.change_hint.clone() };
+
     let mut ticker =
         tokio::time::interval(std::time::Duration::from_secs(ACL_REFRESH_TTL_SECS as u64));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // First tick completes immediately — consume it so we don
+    // First tick completes immediately — consume it so we don't double-fetch
     // right after the startup fetch_and_store_acl.
     ticker.tick().await;
 
-    loop {
-        ticker.tick().await;
+    // Single-flight + cooldown state for transport recovery. The recovery task
+    // runs off this select! thread so the 60s ACL tick keeps firing during a
+    // relay recovery (revocation polling must not stall). The cooldown is
+    // measured from completion (see TransportRecoveryState) so a permanently-dead
+    // relay can't spin bursts back-to-back.
+    let recovery_state =
+        std::sync::Arc::new(tokio::sync::Mutex::new(TransportRecoveryState::default()));
 
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
+            }
+            _ = change_hint.notified() => {
+                // FU-8: the controller says a version moved. Same authoritative
+                // sync as the tick; runs on this task, so never concurrently
+                // with it. The tick is not reset: it stays the fallback.
+                info!("change hint — syncing now");
+                sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
+            }
+            _ = resync.notified() => {
+                // A relay transport just failed. The relay change lives in the
+                // TRANSPORT snapshot (Track B), so re-poll transport — not ACL.
+                // Single check-and-set under one lock: skip if a recovery is
+                // already running, or if the cooldown since the last completion
+                // hasn't elapsed (the 60s tick remains the backstop).
+                let should_start = {
+                    let mut recovery = recovery_state.lock().await;
+                    may_start_transport_recovery(
+                        &mut recovery,
+                        tokio::time::Instant::now(),
+                        std::time::Duration::from_secs(RELAY_RESYNC_COOLDOWN_SECS),
+                    )
+                };
+                if !should_start {
+                    continue;
+                }
+
+                // Run the retry-until-changed loop as a SEPARATE task so this
+                // select! keeps servicing the ACL tick during relay recovery.
+                info!("relay failure signalled — early transport resync (background)");
+                let state = state.clone();
+                let conf = conf.clone();
+                let tun_slot = tun_slot.clone();
+                let recovery_state = recovery_state.clone();
+                tokio::spawn(async move {
+                    run_transport_recovery(&state, &conf, &tun_slot).await;
+                    // Mark complete and stamp the finish time so the cooldown is
+                    // measured from completion, not from when recovery started.
+                    let mut recovery = recovery_state.lock().await;
+                    recovery.running = false;
+                    recovery.last_finished_at = Some(tokio::time::Instant::now());
+                });
+            }
+        }
+    }
+}
+/// Posture collection + submission loop. Sibling to run_refresh_scheduler and
+/// run_acl_sync_scheduler — posture cadence is a fixed 5-minute interval, a
+/// different concern from token-refresh or ACL-poll cadence.
+///
+/// Lifecycle:
+///   - No session in state (fresh daemon before login, or post-logout): sleep
+///     and recheck — same "not logged in yet" handling as run_refresh_scheduler.
+///   - PostLoginState signals `posture_resync` right after a successful login,
+///     so a freshly-logged-in device reports posture immediately rather than
+///     waiting for the first 5-minute tick.
+///   - Unlike run_acl_sync_scheduler, this does NOT pre-consume the ticker's
+///     immediate first tick — there is no separate startup-time posture fetch
+///     elsewhere (unlike ACL's fetch_and_store_acl spawned in run()), so the
+///     interval's natural immediate first tick IS the "collect at startup"
+///     trigger the spec asks for.
+async fn run_posture_scheduler(state: SharedState, conf: config::ClientConf) {
+    const POSTURE_COLLECT_INTERVAL_SECS: u64 = 300;
+    const NO_SESSION_POLL_SECS: u64 = 60;
+
+    let resync = { state.read().await.posture_resync.clone() };
+
+    let mut ticker =
+        tokio::time::interval(std::time::Duration::from_secs(POSTURE_COLLECT_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let has_session = { state.read().await.session.is_some() };
+        if !has_session {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_SESSION_POLL_SECS)).await;
+            continue;
+        }
+
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = resync.notified() => {}
+        }
+
+        collect_and_submit_posture(&state, &conf).await;
+    }
+}
+
+/// Collects one posture report via the real gRPC submitter. Splitting
+/// collection (here) from assembly+retry (submit_with_retry) lets tests
+/// inject a fake submitter and drive the retry path without a live
+/// controller or real system posture collection.
+async fn collect_and_submit_posture(state: &SharedState, conf: &config::ClientConf) {
+    let (ca_pem, device_id) = {
+        let s = state.read().await;
+        match s.device.as_ref() {
+            Some(d) => (d.ca_cert_pem.clone(), d.id.clone()),
+            None => return,
+        }
+    };
+
+    let collected = posture::collect().await;
+    let submitter = GrpcPostureSubmitter {
+        state,
+        conf,
+        ca_pem: &ca_pem,
+        device_id: &device_id,
+    };
+    submit_with_retry(&submitter, collected).await;
+}
+
+/// Abstracts "submit this assembled report" so the retry-with-same-report_id
+/// logic in submit_with_retry can be unit-tested without a live controller —
+/// mirrors the AclFetcher/TransportFetcher pattern used by sync_acl_now_with /
+/// fetch_and_store_transport_with.
+#[async_trait::async_trait]
+trait PostureSubmitter {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()>;
+}
+
+/// Real submitter: submits via the gRPC RPC, transparently refreshing the
+/// access token on Unauthenticated (see submit_posture_report).
+struct GrpcPostureSubmitter<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+    ca_pem: &'a str,
+    device_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl PostureSubmitter for GrpcPostureSubmitter<'_> {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+        submit_posture_report(self.conf, self.ca_pem, self.state, self.device_id, report).await
+    }
+}
+
+/// Assembles the DevicePostureReport (one fresh report_id for this cycle) and
+/// submits it, retrying once with the SAME report_id on failure so the
+/// controller's UNIQUE(report_id) constraint makes the retry idempotent
+/// rather than creating a duplicate row. Gives up after the retry — the next
+/// scheduled tick collects fresh data anyway.
+async fn submit_with_retry(submitter: &impl PostureSubmitter, collected: posture::PostureReport) {
+    let report = DevicePostureReport {
+        report_id: Uuid::new_v4().to_string(),
+        reported_at: now_unix(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        os_name: collected.os_name,
+        os_version: collected.os_version,
+        checks: collected.checks,
+    };
+
+    if let Err(e) = submitter.submit(report.clone()).await {
+        warn!(error = %e, "posture submission failed, retrying once with same report_id");
+        if let Err(e) = submitter.submit(report).await {
+            warn!(error = %e, "posture submission retry failed, will try again next cycle");
+        }
+    }
+}
+
+/// Submit a device posture report, transparently refreshing the access token
+/// on Unauthenticated — same shape as fetch_acl_snapshot_with_refresh (see
+/// its doc comment for the full flow this mirrors).
+async fn submit_posture_report(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let refresh_lock = { state.read().await.refresh_lock.clone() };
+    let (access_token, _refresh_token) = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        (sess.access_token.clone(), sess.refresh_token.clone())
+    };
+
+    match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone()).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("posture submit returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            report_device_posture(conf, ca_pem, &new_tokens.access_token, device_id, report).await
+        }
+    }
+}
+
+/// Raw ReportDevicePosture RPC.
+async fn report_device_posture(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .report_device_posture(ReportDevicePostureRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            report: Some(report),
+        })
+        .await?
+        .into_inner();
+    if !resp.accepted {
+        anyhow::bail!(
+            "controller rejected posture report: {}",
+            resp.rejection_reason
+        );
+    }
+    Ok(())
+}
+/// What the early transport resync does after one fetch.
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryStep {
+    /// The map changed: apply it, then check again after the backoff.
+    Apply,
+    /// Nothing new yet (or the fetch failed): try again after the backoff.
+    Retry,
+    /// The map changed earlier and is now stable: done.
+    Stop,
+}
+
+/// A changed map is applied but not trusted to be final: during a connector
+/// restart the first changed map can be taken while that connector is marked
+/// disconnected, and stopping there left clients on it until the 60 s tick
+/// (live run 2026-10-29, F-3). So recovery ends only when a fetch after a
+/// change shows nothing new.
+fn recovery_step(changed: bool, applied_before: bool) -> RecoveryStep {
+    match (changed, applied_before) {
+        (true, _) => RecoveryStep::Apply,
+        (false, false) => RecoveryStep::Retry,
+        (false, true) => RecoveryStep::Stop,
+    }
+}
+
+/// Early transport re-poll after a relay failure, run as its own task so it
+/// never blocks the ACL sync tick (revocations keep polling). Retries with
+/// backoff until the transport version changes and then holds (restarting the
+/// tunnel on each change to adopt the new map), or attempts are exhausted —
+/// the 60s tick is the backstop.
+async fn run_transport_recovery(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) {
+    let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
+    let mut applied = false;
+    for attempt in 1..=RELAY_RESYNC_MAX_ATTEMPTS {
         let has_identity = {
             let s = state.read().await;
             s.device.is_some() && s.session.is_some()
         };
         if !has_identity {
-            continue;
+            break;
         }
-
-        match sync_acl_now(&state, &conf).await {
-            Ok(result) if result.changed => {
-                info!(
-                    version = result.version,
-                    "background ACL sync: version changed, restarting tunnel"
-                );
-                if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
-                    warn!(error = %e, "background ACL sync: tunnel restart failed");
+        match fetch_and_store_transport(state, conf).await {
+            Ok(changed) => match recovery_step(changed, applied) {
+                RecoveryStep::Apply => {
+                    info!(
+                        "early transport resync: transport version changed, evaluating tunnel configuration"
+                    );
+                    if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                        warn!(
+                            error = %e,
+                            "early transport resync: tunnel configuration apply failed"
+                        );
+                    }
+                    applied = true;
                 }
-            }
-            Ok(_) => {} // unchanged — quiet, this fires every 60s
+                RecoveryStep::Stop => break,
+                // Controller hasn't seen the connector re-home yet.
+                RecoveryStep::Retry => {}
+            },
             Err(e) => {
-                warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+                warn!(error = %e, "early transport resync failed — keeping cached snapshot");
             }
         }
+        // No sleep after the last attempt: it only delayed the cooldown (F-8).
+        if attempt == RELAY_RESYNC_MAX_ATTEMPTS {
+            break;
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
     }
 }
 
+/// One steady-cadence sync of BOTH planes: refresh the ACL and the transport
+/// snapshot; if either version changed, restart the tunnel to rebuild
+/// transports (which read both planes). No-op when not logged in.
+async fn sync_and_restart_if_changed(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) {
+    let has_identity = {
+        let s = state.read().await;
+        s.device.is_some() && s.session.is_some()
+    };
+    if !has_identity {
+        return;
+    }
+
+    let mut acl_changed = match sync_acl_now(state, conf, tun_slot).await {
+        Ok(result) => result.changed,
+        Err(e) => {
+            warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+            // No IPC response is in flight on this scheduler task, so REVOKED
+            // can exit immediately (Sprint 19 Track 2 / PENDING-13).
+            if state.read().await.device_state == DeviceState::Revoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
+            false
+        }
+    };
+    // Connector-revocation Phase C (D19): an ACL not refreshed for an hour is
+    // no longer trusted — every resource is withdrawn (flows reset) until the
+    // next successful sync, which fetches a full snapshot again.
+    {
+        let mut s = state.write().await;
+        let stale = acl_is_stale(s.acl_last_ok, std::time::Instant::now(), ACL_STALE_AFTER);
+        if stale {
+            if let Some(acl) = s.acl_snapshot.as_ref() {
+                if !is_stale_acl_placeholder(acl) {
+                    warn!(
+                        stale_after_secs = ACL_STALE_AFTER.as_secs(),
+                        "ACL not refreshed within the staleness bound — no connector is used until the next successful sync"
+                    );
+                    let placeholder = stale_acl_placeholder(acl);
+                    set_blocked_connectors(&s.blocked_connectors, &placeholder);
+                    s.acl_snapshot = Some(placeholder);
+                    acl_changed = true;
+                }
+            }
+        }
+    }
+    let transport_changed = match fetch_and_store_transport(state, conf).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            warn!(error = %e, "background transport sync failed — keeping cached snapshot");
+            false
+        }
+    };
+
+    // Fix 01 Phase 2-A (D2): a transport-map build that failed earlier left a
+    // pending connector-only change; retry it on this tick even without a bump.
+    let transport_pending = !acl_changed && !transport_changed && transport_apply_pending(state).await;
+    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (an apply that
+    // failed before mutation).
+    let resource_pending = !acl_changed
+        && !transport_changed
+        && !transport_pending
+        && resource_apply_pending(state).await;
+    if acl_changed || transport_changed || transport_pending || resource_pending {
+        info!(
+            acl_changed,
+            transport_changed,
+            transport_pending,
+            resource_pending,
+            "background sync: change detected, evaluating tunnel configuration"
+        );
+        if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+            warn!(error = %e, "background sync: tunnel configuration apply failed");
+        }
+    }
+    // Phase C: a new ACL may revoke connectors that still carry flows. The
+    // config apply above never closes flows on a connector map change, so
+    // cut them explicitly (idempotent).
+    if acl_changed {
+        close_revoked_connector_flows(state).await;
+    }
+}
+
+/// Phase C (D19): how long an ACL may go without a successful refresh.
+const ACL_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Whether the ACL is older than `max` since its last successful sync.
+/// Never synced → not stale (there is no ACL to distrust).
+fn acl_is_stale(
+    last_ok: Option<std::time::Instant>,
+    now: std::time::Instant,
+    max: std::time::Duration,
+) -> bool {
+    last_ok.is_some_and(|t| now.saturating_duration_since(t) >= max)
+}
+
+/// The ACL used while the real one is stale: no entries, no networks, and
+/// version 0 so the next fetch returns a full snapshot. The last known
+/// revoked connectors are KEPT: going stale must never lift a revocation
+/// (a flow still choosing a connector keeps its re-check).
+fn stale_acl_placeholder(acl: &AclSnapshot) -> AclSnapshot {
+    AclSnapshot {
+        version: 0,
+        workspace_id: acl.workspace_id.clone(),
+        generated_at: 0,
+        revoked_connectors: acl.revoked_connectors.clone(),
+        ..Default::default()
+    }
+}
+
+fn is_stale_acl_placeholder(acl: &AclSnapshot) -> bool {
+    acl.version == 0 && acl.entries.is_empty() && acl.remote_networks.is_empty()
+}
+
+/// Phase C: replace the shared blocked set with `acl`'s revoked connectors.
+fn set_blocked_connectors(blocked: &net_stack::BlockedConnectors, acl: &AclSnapshot) {
+    let ids = revoked_connector_ids(acl);
+    match blocked.write() {
+        Ok(mut set) => *set = ids,
+        Err(poisoned) => *poisoned.into_inner() = ids,
+    }
+}
+
+/// Phase C: reset live flows carried by a revoked connector (if a tunnel is up).
+async fn close_revoked_connector_flows(state: &SharedState) {
+    let (ids, tx) = {
+        let s = state.read().await;
+        let ids: HashSet<String> = match s.blocked_connectors.read() {
+            Ok(set) => set.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let tx = s.tun_handle.as_ref().map(|h| h.resource_tx.clone());
+        (ids, tx)
+    };
+    let Some(tx) = tx else { return };
+    if ids.is_empty() {
+        return;
+    }
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let cmd = net_stack::ResourceCmd::CloseConnectorFlows {
+        connector_ids: ids,
+        ack: ack_tx,
+    };
+    let exchange = async {
+        tx.send(cmd).await.ok()?;
+        ack_rx.await.ok()
+    };
+    match tokio::time::timeout(RESOURCE_ACK_TIMEOUT, exchange).await {
+        Ok(Some(Ok(closed))) => {
+            if closed > 0 {
+                info!(closed, "revoked connectors: live flows reset");
+            }
+        }
+        _ => warn!("revoked connectors: flow close not acknowledged"),
+    }
+}
 
 /// Fetch and store the ACL snapshot. On failure, keeps the existing snapshot
 /// (never reverts to None on a transient error). Access-token expiry is
@@ -1049,17 +5311,42 @@ async fn run_acl_sync_scheduler(
 async fn fetch_and_store_acl(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
     ca_pem: String,
     device_id: String,
 ) {
-    match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await {
-        Ok(snapshot) => {
+    // known_version = 0: startup has no cached snapshot, so always request the
+    // full ACL (the controller never reports up_to_date for known_version == 0).
+    match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id, 0).await {
+        Ok(AclFetchOutcome::Snapshot(snapshot)) => {
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             info!(version, "ACL snapshot stored");
+        }
+        Ok(AclFetchOutcome::UpToDate) => {
+            // Contract violation: up_to_date for known_version == 0. Keep whatever
+            // we have rather than acting on an empty response.
+            warn!("ACL fetch reported up_to_date for known_version=0 — unexpected; keeping cached snapshot");
+        }
+        Ok(AclFetchOutcome::Directive(directive, reason)) => {
+            if let Err(e) =
+                react_to_device_directive(state, conf, tun_slot, directive, reason).await
+            {
+                warn!(error = %e, "failed to react to device directive at startup");
+                return;
+            }
+            // No IPC response is in flight at startup (this runs in a
+            // detached tokio::spawn), so REVOKED can exit immediately —
+            // mirrors the shutdown precedent in handle_connection.
+            if directive == DeviceDirective::DirectiveRevoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
@@ -1067,9 +5354,212 @@ async fn fetch_and_store_acl(
     }
 }
 
+// ── Transport plane (ADR-015 Track B) ───────────────────────────────────────
+
+/// Raw GetTransportSnapshot RPC. Returns Ok(None) when the controller reports
+/// up_to_date (client's known_version matches — keep the cached snapshot).
+async fn fetch_transport_snapshot(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    known_version: u64,
+) -> Result<Option<TransportSnapshot>> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .get_transport_snapshot(GetTransportSnapshotRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            known_version,
+        })
+        .await?
+        .into_inner();
+    if resp.up_to_date {
+        return Ok(None);
+    }
+    resp.snapshot
+        .ok_or_else(|| anyhow::anyhow!("controller returned empty transport snapshot"))
+        .map(Some)
+}
+
+/// Fetch the transport snapshot, transparently refreshing the access token on
+/// Unauthenticated — mirrors fetch_acl_snapshot_with_refresh. Ok(None) means
+/// up_to_date (keep cached).
+async fn fetch_transport_snapshot_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    known_version: u64,
+) -> Result<Option<TransportSnapshot>> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
+    let access_token = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        sess.access_token.clone()
+    };
+
+    match fetch_transport_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
+        Ok(snap) => Ok(snap),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("transport fetch returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            // Another task may have refreshed while we waited for the lock.
+            match fetch_transport_snapshot(conf, ca_pem, &access_token, device_id, known_version)
+                .await
+            {
+                Ok(snap) => return Ok(snap),
+                Err(err) if is_grpc_unauthenticated(&err) => {}
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            fetch_transport_snapshot(
+                conf,
+                ca_pem,
+                &new_tokens.access_token,
+                device_id,
+                known_version,
+            )
+            .await
+        }
+    }
+}
+
+/// Abstracts the transport-snapshot fetch (given the client's known_version)
+/// so the store/serialization logic in fetch_and_store_transport_with can be
+/// unit-tested without a live controller. Ok(None) means up_to_date.
+#[async_trait::async_trait]
+trait TransportFetcher {
+    async fn fetch(&self, known_version: u64) -> Result<Option<TransportSnapshot>>;
+}
+
+/// Real fetcher: reads the device identity from state and calls the gRPC RPC.
+struct GrpcTransportFetcher<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+}
+
+#[async_trait::async_trait]
+impl TransportFetcher for GrpcTransportFetcher<'_> {
+    async fn fetch(&self, known_version: u64) -> Result<Option<TransportSnapshot>> {
+        let (ca_pem, device_id) = {
+            let s = self.state.read().await;
+            let device = s
+                .device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no device identity"))?;
+            (device.ca_cert_pem.clone(), device.id.clone())
+        };
+        fetch_transport_snapshot_with_refresh(
+            self.conf,
+            &ca_pem,
+            self.state,
+            &device_id,
+            known_version,
+        )
+        .await
+    }
+}
+
+/// Fetch and store the transport snapshot. Uses known_version so an unchanged
+/// snapshot returns up_to_date (no re-store). On failure keeps the cached
+/// snapshot. Returns true when the stored version changed.
+async fn fetch_and_store_transport(state: &SharedState, conf: &config::ClientConf) -> Result<bool> {
+    fetch_and_store_transport_with(state, &GrpcTransportFetcher { state, conf }).await
+}
+
+/// Inner: holds transport_sync_lock across the whole known-version → fetch →
+/// store sequence. Split out so tests can inject a fetcher and exercise both the
+/// up_to_date path and the serialization guarantee.
+///
+/// Serialization matters: the 60s scheduler tick and the spawned relay-recovery
+/// task can both call this at once; because the state lock is dropped during the
+/// network fetch, without the sync lock an older response could land last and
+/// move transport_snapshot backwards (stale relay coords). Holding the guard for
+/// the whole operation makes a second caller read a fresh known_version only
+/// after the first has stored, so versions progress monotonically.
+async fn fetch_and_store_transport_with(
+    state: &SharedState,
+    fetcher: &impl TransportFetcher,
+) -> Result<bool> {
+    let sync_lock = { state.read().await.transport_sync_lock.clone() };
+    let _sync_guard = sync_lock.lock().await;
+
+    let known_version = {
+        let s = state.read().await;
+        s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0)
+    };
+
+    match fetcher.fetch(known_version).await? {
+        None => {
+            // up_to_date — refresh the sync timestamp, keep the cached snapshot.
+            let mut s = state.write().await;
+            s.transport_last_sync_at = Some(now_unix());
+            Ok(false)
+        }
+        Some(snapshot) => {
+            let version = snapshot.version;
+            let changed = known_version != version;
+            let mut s = state.write().await;
+            s.transport_snapshot = Some(snapshot);
+            s.transport_last_sync_at = Some(now_unix());
+            info!(version, "transport snapshot stored");
+            Ok(changed)
+        }
+    }
+}
+
 async fn refresh_acl_if_needed(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
 ) -> Result<Option<AclSyncResult>> {
     let should_refresh = {
         let s = state.read().await;
@@ -1085,7 +5575,7 @@ async fn refresh_acl_if_needed(
         return Ok(None);
     }
 
-    match sync_acl_now(state, conf).await {
+    match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => Ok(Some(result)),
         Err(e) => {
             if state.read().await.acl_snapshot.is_some() {
@@ -1098,42 +5588,118 @@ async fn refresh_acl_if_needed(
     }
 }
 
-async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
-    let (ca_pem, device_id) = {
-        let s = state.read().await;
-        let device = s.device.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("no device identity — run zecurity-client login first")
-        })?;
-        // Session presence is checked inside fetch_acl_snapshot_with_refresh —
-        // we only need CA + device id here.
-        (device.ca_cert_pem.clone(), device.id.clone())
-    };
+/// Abstracts the ACL-snapshot fetch (given the client's known_version) so the
+/// version-comparison / up_to_date logic in sync_acl_now_with can be unit-tested
+/// without a live controller.
+#[async_trait::async_trait]
+trait AclFetcher {
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome>;
+}
+
+/// Real fetcher: reads the device identity from state and calls the gRPC RPC.
+struct GrpcAclFetcher<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+}
+
+#[async_trait::async_trait]
+impl AclFetcher for GrpcAclFetcher<'_> {
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome> {
+        let (ca_pem, device_id) = {
+            let s = self.state.read().await;
+            let device = s.device.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("no device identity — run zecurity-client login first")
+            })?;
+            (device.ca_cert_pem.clone(), device.id.clone())
+        };
+        fetch_acl_snapshot_with_refresh(self.conf, &ca_pem, self.state, &device_id, known_version)
+            .await
+    }
+}
+
+async fn sync_acl_now(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<AclSyncResult> {
+    sync_acl_now_with(state, conf, tun_slot, &GrpcAclFetcher { state, conf }).await
+}
+
+/// Inner: reads the cached version, fetches, and applies the result. Split out so
+/// tests can drive the up_to_date (keep cached, changed=false) and changed paths
+/// without a controller. conf/tun_slot are only used on the Directive arm (Sprint
+/// 19 Track 2 / PENDING-13) — the up_to_date/snapshot arms are unchanged.
+async fn sync_acl_now_with(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    fetcher: &impl AclFetcher,
+) -> Result<AclSyncResult> {
     let old_version = {
         let s = state.read().await;
         s.acl_snapshot.as_ref().map(|a| a.version)
     };
-    let snapshot = fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await?;
+    let outcome = fetcher.fetch(old_version.unwrap_or(0)).await?;
 
-    let changed = match old_version {
-        Some(v) => v != snapshot.version,
-        None => true,
-    };
-    let result = AclSyncResult {
-        version: snapshot.version,
-        entry_count: snapshot.entries.len(),
-        synced_at: now_unix(),
-        changed,
-    };
+    match outcome {
+        // up_to_date — the controller confirms our cached version is current.
+        // This branch is only reachable when we sent a non-zero known_version,
+        // which requires a cached snapshot, so acl_snapshot is guaranteed Some.
+        AclFetchOutcome::UpToDate => {
+            let synced_at = now_unix();
+            let mut s = state.write().await;
+            s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
+            let cached = s.acl_snapshot.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("controller reported ACL up_to_date but no cached snapshot")
+            })?;
+            let result = AclSyncResult {
+                version: cached.version,
+                entry_count: cached.entries.len(),
+                synced_at,
+                changed: false,
+            };
+            info!(version = result.version, "ACL up_to_date — kept cached snapshot");
+            Ok(result)
+        }
+        AclFetchOutcome::Snapshot(snapshot) => {
+            let changed = match old_version {
+                Some(v) => v != snapshot.version,
+                None => true,
+            };
+            let result = AclSyncResult {
+                version: snapshot.version,
+                entry_count: snapshot.entries.len(),
+                synced_at: now_unix(),
+                changed,
+            };
 
-    let mut s = state.write().await;
-    s.acl_snapshot = Some(snapshot);
-    s.acl_last_sync_at = Some(result.synced_at);
-    info!(
-        version = result.version,
-        entries = result.entry_count,
-        "ACL snapshot synced"
-    );
-    Ok(result)
+            let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
+            s.acl_snapshot = Some(snapshot);
+            s.acl_last_sync_at = Some(result.synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
+            info!(
+                version = result.version,
+                entries = result.entry_count,
+                "ACL snapshot synced"
+            );
+            Ok(result)
+        }
+        // No AclSyncResult makes sense here — there is no ACL. react_to_device_
+        // directive wipes credentials/tunnel and records DeviceState; returning
+        // Err fits the existing default-deny contract every caller already has
+        // for a failed fetch. Callers that can safely exit (no pending IPC
+        // response) check state.device_state after this Err to decide whether
+        // to terminate the process.
+        AclFetchOutcome::Directive(directive, reason) => {
+            react_to_device_directive(state, conf, tun_slot, directive, reason.clone()).await?;
+            Err(anyhow::anyhow!(
+                "device directive received: {} ({reason})",
+                directive.as_str_name()
+            ))
+        }
+    }
 }
 
 pub(crate) fn ordered_connectors_for_entry<'a>(
@@ -1166,21 +5732,247 @@ pub(crate) fn ordered_connectors_for_entry<'a>(
 //   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
 //   Some(None)    — managed resource, connector offline → fail closed
 //   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
+// ConnCoords is a connector's connectivity (tunnel + relay) coordinates,
+// sourced from either the transport snapshot (Track B, preferred) or the ACL's
+// transitional relay fields (fallback). ACLConnector and TransportConnector
+// carry identical fields.
+pub(crate) struct ConnCoords {
+    pub(crate) connector_id: String,
+    pub(crate) connector_tunnel_addr: String,
+    pub(crate) connector_spiffe: String,
+    pub(crate) relay_addr: String,
+    pub(crate) relay_spiffe_id: String,
+}
+
+fn coords_from_acl(c: &AclConnector) -> ConnCoords {
+    ConnCoords {
+        connector_id: c.connector_id.clone(),
+        connector_tunnel_addr: c.connector_tunnel_addr.clone(),
+        connector_spiffe: c.connector_spiffe.clone(),
+        relay_addr: c.relay_addr.clone(),
+        relay_spiffe_id: c.relay_spiffe_id.clone(),
+    }
+}
+
+fn coords_from_transport(c: &TransportConnector) -> ConnCoords {
+    ConnCoords {
+        connector_id: c.connector_id.clone(),
+        connector_tunnel_addr: c.connector_tunnel_addr.clone(),
+        connector_spiffe: c.connector_spiffe.clone(),
+        relay_addr: c.relay_addr.clone(),
+        relay_spiffe_id: c.relay_spiffe_id.clone(),
+    }
+}
+
+// ordered_transport_connectors_for_entry mirrors ordered_connectors_for_entry
+// for the transport plane: the ACL entry's preferred connector first.
+fn ordered_transport_connectors_for_entry<'a>(
+    entry: &AclEntry,
+    rn: &'a TransportRemoteNetwork,
+) -> Vec<&'a TransportConnector> {
+    let mut ordered = Vec::new();
+    let preferred = entry.preferred_connector_id.as_str();
+    if !preferred.is_empty() {
+        if let Some(c) = rn.connectors.iter().find(|c| c.connector_id == preferred) {
+            ordered.push(c);
+        }
+    }
+    for c in &rn.connectors {
+        if c.connector_id != preferred {
+            ordered.push(c);
+        }
+    }
+    ordered
+}
+
+// resolve_entry_coords picks a connector's connectivity coordinates for an ACL
+// entry: from the transport plane when that entry's remote_network_id is present
+// there (Track B, preferred), otherwise falling back per-RN to the ACL's
+// transitional relay fields. Returns empty when neither plane has the RN. Pure
+// (no cert/network work) so the routing decision is unit-testable.
+pub(crate) fn resolve_entry_coords(
+    entry: &AclEntry,
+    rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
+    trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
+    revoked: &HashSet<String>,
+) -> Vec<ConnCoords> {
+    // Connector-revocation Phase C: a revoked connector is dropped from both
+    // planes (a stale transport snapshot may still list it).
+    let mut coords = resolve_entry_coords_unfiltered(entry, rn_by_id, trn_by_id);
+    coords.retain(|c| !revoked.contains(&c.connector_id));
+    coords
+}
+
+/// Phase C: the ACL's revoked connector ids.
+pub(crate) fn revoked_connector_ids(acl: &AclSnapshot) -> HashSet<String> {
+    acl.revoked_connectors
+        .iter()
+        .map(|r| r.connector_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+fn resolve_entry_coords_unfiltered(
+    entry: &AclEntry,
+    rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
+    trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
+) -> Vec<ConnCoords> {
+    match trn_by_id.get(entry.remote_network_id.as_str()) {
+        Some(trn) => ordered_transport_connectors_for_entry(entry, trn)
+            .into_iter()
+            .map(coords_from_transport)
+            .collect(),
+        None => match rn_by_id.get(entry.remote_network_id.as_str()) {
+            Some(rn) => ordered_connectors_for_entry(entry, rn)
+                .into_iter()
+                .map(coords_from_acl)
+                .collect(),
+            None => Vec::new(),
+        },
+    }
+}
+
+pub(crate) fn effective_config(
+    acl: &AclSnapshot,
+    transport: Option<&TransportSnapshot>,
+    device: &DeviceInfo,
+) -> AppliedConfig {
+    let my_spiffe = device.spiffe_id.as_str();
+    let allowed_entries = acl
+        .entries
+        .iter()
+        .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe));
+
+    let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    for rn in &acl.remote_networks {
+        rn_by_id.insert(rn.remote_network_id.as_str(), rn);
+    }
+    let mut trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    if let Some(t) = transport {
+        for trn in &t.remote_networks {
+            trn_by_id.insert(trn.remote_network_id.as_str(), trn);
+        }
+    }
+
+    let revoked = revoked_connector_ids(acl);
+    let mut entries = Vec::new();
+    for entry in allowed_entries {
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, &revoked);
+        let mut applied_coords: Vec<AppliedCoords> = coords
+            .into_iter()
+            .map(|c| AppliedCoords {
+                connector_id: c.connector_id,
+                connector_tunnel_addr: c.connector_tunnel_addr,
+                connector_spiffe: c.connector_spiffe,
+                relay_addr: c.relay_addr,
+                relay_spiffe_id: c.relay_spiffe_id,
+            })
+            .collect();
+
+        let preferred = entry.preferred_connector_id.as_str();
+        if !preferred.is_empty()
+            && !applied_coords.is_empty()
+            && applied_coords[0].connector_id == preferred
+        {
+            if applied_coords.len() > 1 {
+                applied_coords[1..].sort_by(|a, b| {
+                    (&a.connector_id, &a.connector_tunnel_addr, &a.relay_addr)
+                        .cmp(&(&b.connector_id, &b.connector_tunnel_addr, &b.relay_addr))
+                });
+            }
+        } else {
+            applied_coords.sort_by(|a, b| {
+                (&a.connector_id, &a.connector_tunnel_addr, &a.relay_addr)
+                    .cmp(&(&b.connector_id, &b.connector_tunnel_addr, &b.relay_addr))
+            });
+        }
+
+        entries.push(AppliedEntry {
+            address: entry.address.clone(),
+            port: entry.port,
+            protocol: entry.protocol.clone(),
+            remote_network_id: entry.remote_network_id.clone(),
+            preferred_connector_id: entry.preferred_connector_id.clone(),
+            coords: applied_coords,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        (
+            &a.address,
+            a.port,
+            &a.protocol,
+            &a.remote_network_id,
+            &a.preferred_connector_id,
+        )
+            .cmp(&(
+                &b.address,
+                b.port,
+                &b.protocol,
+                &b.remote_network_id,
+                &b.preferred_connector_id,
+            ))
+    });
+
+    AppliedConfig {
+        spiffe_id: device.spiffe_id.clone(),
+        certificate_pem: device.certificate_pem.clone(),
+        private_key_pem: device.private_key_pem.clone(),
+        tpm_key_material: device.tpm_key_material.clone(),
+        ca_cert_pem: device.ca_cert_pem.clone(),
+        entries,
+    }
+}
+
+// Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
+//
+// Authorization comes from the ACL (which entries exist, their remote_network).
+// Connectivity (tunnel + relay coords) comes from the transport snapshot keyed
+// by remote_network_id when present; otherwise it falls back per-RN to the ACL's
+// transitional relay fields (ACLConnector 4+5) so rollout is non-breaking.
+//
+// Three cases at lookup time (enforced in net_stack):
+//   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
+//   Some(None)    — managed resource, connector offline → fail closed
+//   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
+#[cfg(test)]
 pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
+    transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
-    // Build a remote_network_id lookup. Each entry picks its preferred connector
-    // lazily so one bad unused connector does not poison every resource in the RN.
+    build_transports_by_resource_with_crl(
+        entries,
+        remote_networks,
+        &HashSet::new(),
+        transport,
+        device,
+        crate::crl::CrlManager::new(),
+    )
+}
+
+fn build_transports_by_resource_with_crl(
+    entries: &[AclEntry],
+    remote_networks: &[AclRemoteNetwork],
+    revoked: &HashSet<String>,
+    transport: Option<&TransportSnapshot>,
+    device: &DeviceInfo,
+    relay_crl: crate::crl::CrlManager,
+) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
     let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
         rn_by_id.insert(rn.remote_network_id.as_str(), rn);
     }
+    // Transport plane, keyed by remote_network_id. Empty/absent for an RN →
+    // fall back to the ACL relay fields for that RN.
+    let mut trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    if let Some(t) = transport {
+        for trn in &t.remote_networks {
+            trn_by_id.insert(trn.remote_network_id.as_str(), trn);
+        }
+    }
 
-    // Fan out: map each resource (Ipv4Addr, port) to its preferred connector's
-    // transport when present, otherwise the RN fallback transport.
-    // Resources in RNs absent from rn_by_id (shouldn't happen) are omitted.
     let mut out: HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>> = HashMap::new();
     let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
@@ -1188,27 +5980,22 @@ pub(crate) fn build_transports_by_resource(
             continue;
         };
         let IpAddr::V4(v4) = ip else { continue };
-        let Some(rn) = rn_by_id.get(entry.remote_network_id.as_str()) else {
-            continue;
-        };
+
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, revoked);
 
         let mut transports = Vec::new();
-        for connector in ordered_connectors_for_entry(entry, rn) {
-            let cache_key = if connector.connector_id.is_empty() {
-                format!(
-                    "{}:{}",
-                    rn.remote_network_id,
-                    connector.connector_tunnel_addr.clone()
-                )
+        for c in &coords {
+            let cache_key = if c.connector_id.is_empty() {
+                format!("{}:{}", entry.remote_network_id, c.connector_tunnel_addr)
             } else {
-                connector.connector_id.clone()
+                c.connector_id.clone()
             };
             let transport = match transport_cache.get(&cache_key) {
                 Some(t) => t.clone(),
                 None => {
-                    let transport = build_transport_for_connector(connector, device)?;
-                    transport_cache.insert(cache_key, transport.clone());
-                    transport
+                    let t = build_transport_from_coords(c, device, relay_crl.clone())?;
+                    transport_cache.insert(cache_key, t.clone());
+                    t
                 }
             };
             transports.push(transport);
@@ -1223,12 +6010,13 @@ pub(crate) fn build_transports_by_resource(
     Ok(out)
 }
 
-fn build_transport_for_connector(
-    connector: &AclConnector,
+fn build_transport_from_coords(
+    c: &ConnCoords,
     device: &DeviceInfo,
+    relay_crl: crate::crl::CrlManager,
 ) -> Result<Arc<ClientTransport>> {
-    let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
-        connector.connector_tunnel_addr.clone()
+    let connector_addr = if !c.connector_tunnel_addr.is_empty() {
+        c.connector_tunnel_addr.clone()
     } else {
         info!(
             connector_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),
@@ -1244,40 +6032,44 @@ fn build_transport_for_connector(
             format!("connector tunnel address {connector_addr} resolved to no addresses")
         })?;
 
-    let direct = Arc::new(TunnelPool::new(
+    // Connector-revocation Phase C: the direct path accepts only THIS
+    // connector's exact SPIFFE id (not any connector of the trust domain).
+    let direct = Arc::new(TunnelPool::new_for_connector(
         &device.certificate_pem,
         &device.private_key_pem,
+        device.tpm_key_material.as_deref(),
         &device.ca_cert_pem,
+        &c.connector_spiffe,
     )?);
 
-    // Relay coords are per-connector (ACLConnector fields 4+5).
-    // Empty relay_addr means this connector has no relay assignment — direct only.
-    let relay = if !connector.relay_addr.is_empty()
-        && !connector.relay_spiffe_id.is_empty()
-        && !connector.connector_id.is_empty()
-        && !connector.connector_spiffe.is_empty()
+    // Empty relay coords → this connector has no relay assignment (direct only).
+    let relay = if !c.relay_addr.is_empty()
+        && !c.relay_spiffe_id.is_empty()
+        && !c.connector_id.is_empty()
+        && !c.connector_spiffe.is_empty()
     {
         let pool = Arc::new(RelayPool::new(
             &device.certificate_pem,
             &device.private_key_pem,
+            device.tpm_key_material.as_deref(),
             &device.ca_cert_pem,
-            &connector.relay_spiffe_id,
+            &c.relay_spiffe_id,
+            relay_crl,
         )?);
         Some(RelayContext {
             pool,
-            relay_addr: connector.relay_addr.clone(),
-            connector_id: connector.connector_id.clone(),
-            connector_spiffe: connector.connector_spiffe.clone(),
+            relay_addr: c.relay_addr.clone(),
+            connector_id: c.connector_id.clone(),
+            connector_spiffe: c.connector_spiffe.clone(),
         })
     } else {
         None
     };
 
-    Ok(Arc::new(ClientTransport::new(
-        direct,
-        connector_socket,
-        relay,
-    )))
+    Ok(Arc::new(
+        ClientTransport::new(direct, connector_socket, relay)
+            .with_connector_id(c.connector_id.clone()),
+    ))
 }
 
 fn now_unix() -> i64 {
@@ -1285,4 +6077,1959 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    /// F-3: a changed transport map is applied and checked again; recovery
+    /// stops only once a fetch after a change shows nothing new.
+    #[test]
+    fn transport_recovery_checks_again_after_a_change() {
+        // before any change: keep retrying (connector not re-homed yet)
+        assert_eq!(recovery_step(false, false), RecoveryStep::Retry);
+        // a change is applied, and so is a further one (map taken mid-restart)
+        assert_eq!(recovery_step(true, false), RecoveryStep::Apply);
+        assert_eq!(recovery_step(true, true), RecoveryStep::Apply);
+        // unchanged after a change: settled
+        assert_eq!(recovery_step(false, true), RecoveryStep::Stop);
+    }
+
+    #[test]
+    fn recovery_is_single_flight() {
+        let now = tokio::time::Instant::now();
+        let mut state = TransportRecoveryState::default();
+
+        // First call reserves the slot.
+        assert!(may_start_transport_recovery(
+            &mut state,
+            now,
+            std::time::Duration::from_secs(10),
+        ));
+        // Second call while running is refused.
+        assert!(!may_start_transport_recovery(
+            &mut state,
+            now,
+            std::time::Duration::from_secs(10),
+        ));
+    }
+
+    #[test]
+    fn cooldown_is_measured_after_recovery_finishes() {
+        let finished = tokio::time::Instant::now();
+        let mut state = TransportRecoveryState {
+            running: false,
+            last_finished_at: Some(finished),
+        };
+
+        // 9s after completion: still inside the 10s cooldown → refused.
+        assert!(!may_start_transport_recovery(
+            &mut state,
+            finished + std::time::Duration::from_secs(9),
+            std::time::Duration::from_secs(10),
+        ));
+        // 10s after completion: cooldown elapsed → allowed.
+        assert!(may_start_transport_recovery(
+            &mut state,
+            finished + std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    use crate::grpc::client_v1::AclSnapshot;
+
+    // --- Transport: up_to_date keeps the cached snapshot and reports unchanged ---
+    struct UpToDateTransport;
+    #[async_trait::async_trait]
+    impl TransportFetcher for UpToDateTransport {
+        async fn fetch(&self, _known: u64) -> Result<Option<TransportSnapshot>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_up_to_date_keeps_cached_and_reports_unchanged() {
+        let state = crate::runtime::new_shared();
+        state.write().await.transport_snapshot = Some(TransportSnapshot {
+            version: 5,
+            ..Default::default()
+        });
+
+        let changed = fetch_and_store_transport_with(&state, &UpToDateTransport)
+            .await
+            .unwrap();
+
+        assert!(!changed, "up_to_date must report unchanged");
+        let s = state.read().await;
+        assert_eq!(
+            s.transport_snapshot.as_ref().unwrap().version,
+            5,
+            "cached snapshot must be kept"
+        );
+        assert!(s.transport_last_sync_at.is_some(), "sync timestamp refreshed");
+    }
+
+    // --- Transport: concurrent fetches are serialized (Fix 1 regression guard) ---
+    // Each fetch returns `known_version + 1` and yields at its await point. WITHOUT
+    // the sync lock, both concurrent calls would read the same known_version (0) and
+    // the newer result would be lost. WITH the lock, the second call reads the
+    // first's stored version, so versions advance monotonically (0 -> 1 -> 2).
+    struct MonotonicTransport {
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+    #[async_trait::async_trait]
+    impl TransportFetcher for MonotonicTransport {
+        async fn fetch(&self, known: u64) -> Result<Option<TransportSnapshot>> {
+            self.seen.lock().await.push(known);
+            // Force scheduling points so an unserialized impl would interleave.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            Ok(Some(TransportSnapshot {
+                version: known + 1,
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_sync_serializes_concurrent_fetches() {
+        let state = crate::runtime::new_shared();
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let fetcher = MonotonicTransport { seen: seen.clone() };
+
+        let (r1, r2) = tokio::join!(
+            fetch_and_store_transport_with(&state, &fetcher),
+            fetch_and_store_transport_with(&state, &fetcher),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        let mut seen = seen.lock().await.clone();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![0, 1],
+            "each fetch must observe the prior fetch's stored version (serialized)"
+        );
+        assert_eq!(
+            state.read().await.transport_snapshot.as_ref().unwrap().version,
+            2,
+            "final stored version must be the newest — no stale overwrite"
+        );
+    }
+
+    // --- ACL: up_to_date keeps the cached snapshot and reports unchanged ---
+    struct UpToDateAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for UpToDateAcl {
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::UpToDate)
+        }
+    }
+
+    #[tokio::test]
+    async fn acl_up_to_date_keeps_cached_and_reports_unchanged() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot {
+            version: 7,
+            entries: vec![AclEntry::default(), AclEntry::default(), AclEntry::default()],
+            ..Default::default()
+        });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &UpToDateAcl)
+            .await
+            .unwrap();
+
+        assert!(!result.changed, "up_to_date must report unchanged");
+        assert_eq!(result.version, 7, "result reflects the cached version");
+        assert_eq!(result.entry_count, 3, "result reflects the cached entry count");
+        assert_eq!(
+            state.read().await.acl_snapshot.as_ref().unwrap().version,
+            7,
+            "cached ACL snapshot must be kept"
+        );
+    }
+
+    // --- ACL: a newer version is stored and reported changed ---
+    struct NewAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for NewAcl {
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
+                version: 8,
+                entries: vec![AclEntry::default()],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn acl_new_version_is_stored_and_reported_changed() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot {
+            version: 7,
+            ..Default::default()
+        });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &NewAcl)
+            .await
+            .unwrap();
+
+        assert!(result.changed, "a new version must report changed");
+        assert_eq!(result.version, 8);
+        assert_eq!(
+            state.read().await.acl_snapshot.as_ref().unwrap().version,
+            8,
+            "new ACL snapshot must be stored"
+        );
+    }
+
+    // ── Connector-revocation Phase C ───────────────────────────────────────
+
+    struct RevokingAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for RevokingAcl {
+        async fn fetch(&self, known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
+                version: known + 1,
+                revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector {
+                    connector_id: "conn-r".into(),
+                    connector_spiffe: "spiffe://td/connector/conn-r".into(),
+                }],
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A synced ACL replaces the shared blocked set and records a monotonic
+    /// success time (the staleness clock).
+    #[tokio::test]
+    async fn acl_sync_updates_the_blocked_set_and_staleness_clock() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot { version: 3, ..Default::default() });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let before = std::time::Instant::now();
+        sync_acl_now_with(&state, &conf, &tun_slot, &RevokingAcl).await.unwrap();
+        let s = state.read().await;
+        assert!(s.blocked_connectors.read().unwrap().contains("conn-r"));
+        assert!(s.acl_last_ok.is_some_and(|t| t >= before));
+    }
+
+    /// AC-5: under 1 h nothing is stale; at 1 h the ACL is stale; never
+    /// synced is not stale.
+    #[test]
+    fn acl_staleness_bound_is_one_hour() {
+        let t0 = std::time::Instant::now();
+        let h = std::time::Duration::from_secs(3600);
+        assert_eq!(ACL_STALE_AFTER, h);
+        assert!(!acl_is_stale(Some(t0), t0 + h - std::time::Duration::from_millis(1), h));
+        assert!(acl_is_stale(Some(t0), t0 + h, h));
+        assert!(!acl_is_stale(None, t0 + h * 10, h));
+    }
+
+    /// AC-5: the stale placeholder withdraws every resource and connector,
+    /// and has version 0 so the next sync fetches a full snapshot.
+    #[test]
+    fn stale_placeholder_withdraws_everything() {
+        let acl = AclSnapshot {
+            version: 9,
+            workspace_id: "ws".into(),
+            entries: vec![AclEntry::default()],
+            remote_networks: vec![AclRemoteNetwork::default()],
+            revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector::default()],
+            ..Default::default()
+        };
+        let p = stale_acl_placeholder(&acl);
+        assert_eq!(p.version, 0);
+        assert!(p.entries.is_empty() && p.remote_networks.is_empty());
+        assert_eq!(
+            p.revoked_connectors, acl.revoked_connectors,
+            "going stale never lifts a revocation"
+        );
+        assert!(is_stale_acl_placeholder(&p));
+        assert!(!is_stale_acl_placeholder(&acl));
+    }
+
+    /// The flow-close helper sends CloseConnectorFlows with the blocked set
+    /// to the running tunnel, and sends nothing when no connector is blocked.
+    #[tokio::test]
+    async fn close_revoked_connector_flows_sends_the_blocked_set() {
+        let state = crate::runtime::new_shared();
+        let (resource_tx, mut resource_rx) = tokio::sync::mpsc::channel(4);
+        let (transport_tx, _rx) = tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new()));
+        let task = tokio::spawn(async {});
+        state.write().await.tun_handle = Some(Arc::new(crate::runtime::TunHandle {
+            abort: task.abort_handle(),
+            route_count: 0,
+            applied: crate::runtime::AppliedConfig {
+                spiffe_id: String::new(),
+                certificate_pem: String::new(),
+                private_key_pem: String::new(),
+                tpm_key_material: None,
+                ca_cert_pem: String::new(),
+                entries: Vec::new(),
+            },
+            transport_tx: Arc::new(transport_tx),
+            resource_tx: Arc::new(resource_tx),
+        }));
+        // Nothing blocked: nothing sent.
+        close_revoked_connector_flows(&state).await;
+        assert!(resource_rx.try_recv().is_err());
+        // Blocked: the set is sent and acknowledged.
+        state.read().await.blocked_connectors.write().unwrap().insert("conn-r".into());
+        let responder = tokio::spawn(async move {
+            let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), resource_rx.recv())
+                .await
+                .expect("CloseConnectorFlows must be sent");
+            match cmd {
+                Some(net_stack::ResourceCmd::CloseConnectorFlows { connector_ids, ack }) => {
+                    let _ = ack.send(Ok(1));
+                    connector_ids
+                }
+                _ => panic!("expected CloseConnectorFlows"),
+            }
+        });
+        close_revoked_connector_flows(&state).await;
+        let sent = responder.await.unwrap();
+        assert_eq!(sent, HashSet::from(["conn-r".to_string()]));
+    }
+}
+
+#[cfg(test)]
+mod posture_scheduler_tests {
+    use super::*;
+
+    // --- posture_resync wiring: notify_one() actually wakes a waiter ---
+    #[tokio::test]
+    async fn posture_resync_wakes_a_waiting_task() {
+        let state = crate::runtime::new_shared();
+        let resync = state.read().await.posture_resync.clone();
+
+        let waiter = {
+            let resync = resync.clone();
+            tokio::spawn(async move {
+                resync.notified().await;
+            })
+        };
+
+        // Give the spawned task a chance to start waiting before notifying.
+        tokio::task::yield_now().await;
+        resync.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter task timed out — posture_resync did not wake it")
+            .expect("waiter task panicked");
+    }
+
+    // --- submit_with_retry: fake submitter records every report_id it saw ---
+    struct FakeSubmitter {
+        report_ids_seen: Mutex<Vec<String>>,
+        fail_first_n: usize,
+    }
+
+    impl FakeSubmitter {
+        fn new(fail_first_n: usize) -> Self {
+            Self {
+                report_ids_seen: Mutex::new(Vec::new()),
+                fail_first_n,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PostureSubmitter for FakeSubmitter {
+        async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+            let mut seen = self.report_ids_seen.lock().await;
+            seen.push(report.report_id.clone());
+            if seen.len() <= self.fail_first_n {
+                anyhow::bail!("simulated transient failure");
+            }
+            Ok(())
+        }
+    }
+
+    fn fake_collected() -> posture::PostureReport {
+        posture::PostureReport {
+            checks: Vec::new(),
+            os_name: "TestOS".into(),
+            os_version: "1.0".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_reuses_report_id_on_failure() {
+        let submitter = FakeSubmitter::new(1); // first call fails, second succeeds
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(seen.len(), 2, "expected exactly one retry");
+        assert_eq!(
+            seen[0], seen[1],
+            "retry must reuse the same report_id, not generate a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_gives_up_after_one_retry() {
+        let submitter = FakeSubmitter::new(usize::MAX); // always fails
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(
+            seen.len(),
+            2,
+            "must attempt exactly once plus one retry, then give up — not loop forever"
+        );
+    }
+}
+
+/// react_to_device_directive tests (Sprint 19 Track 2 / PENDING-13). Uses a
+/// real state_store round-trip (not a mock) so the on-disk marker is actually
+/// verified — redirected to a tempdir via ZECURITY_STATE_DIR (state_store.rs)
+/// so tests never touch the real user's XDG state directory.
+// ZECURITY_STATE_DIR is a process-global env var; serialize every test that
+// sets it — across BOTH directive_tests and renewal_tests, not just within
+// one module — so parallel test threads (cargo test's default) never race
+// on it. A per-module guard would only serialize within that module, not
+// against the other one touching the same env var.
+#[cfg(test)]
+static STATE_DIR_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod directive_tests {
+    use super::*;
+    use crate::grpc::client_v1::AclSnapshot;
+    use crate::state_store::{self, StoredDevice, StoredWorkspaceState};
+    use tempfile::TempDir;
+
+    /// Points state_store at a fresh tempdir and seeds a state file for
+    /// `workspace` with placeholder cert/key material, so mark_device_state's
+    /// load->mutate->save has something to load.
+    fn seed_state_file(dir: &TempDir, workspace: &str) -> config::ClientConf {
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let stored = StoredWorkspaceState {
+            device: StoredDevice {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                tpm_key_material: None,
+                cert_expires_at: 1_700_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(workspace, &stored).expect("seed state file");
+        config::ClientConf {
+            workspace: workspace.to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn state_with_live_device() -> SharedState {
+        let state = crate::runtime::new_shared();
+        let mut s = state.write().await;
+        s.device = Some(DeviceInfo {
+            id: "device-1".into(),
+            spiffe_id: "spiffe://example.test/device-1".into(),
+            certificate_pem: "CERT".into(),
+            private_key_pem: "KEY".into(),
+                tpm_key_material: None,
+            ca_cert_pem: "CA".into(),
+            cert_expires_at: 1_700_000_000,
+            hostname: "host".into(),
+            os: "linux".into(),
+        });
+        s.acl_snapshot = Some(AclSnapshot {
+            version: 3,
+            ..Default::default()
+        });
+        drop(s);
+        state
+    }
+
+    #[tokio::test]
+    async fn revoked_wipes_credentials_stops_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-revoked");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "user suspended".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert!(device.private_key_pem.is_empty(), "key must be wiped");
+        assert_eq!(device.cert_expires_at, 0);
+        assert!(s.acl_snapshot.is_none(), "cached ACL must be cleared");
+        assert_eq!(s.device_state, DeviceState::Revoked);
+        assert_eq!(s.device_state_reason, "user suspended");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-revoked").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "revoked");
+        assert!(on_disk.device.certificate_pem.is_empty());
+        assert!(on_disk.device.private_key_pem.is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_enroll_required_wipes_credentials_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-re-enroll");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveReEnrollRequired,
+            "sign in again".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert_eq!(s.device_state, DeviceState::ReEnrollRequired);
+        assert_eq!(s.device_state_reason, "sign in again");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-re-enroll").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "re_enroll_required");
+    }
+
+    #[tokio::test]
+    async fn none_directive_is_a_no_op() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        // No seeded state file: a no-op must never touch disk, so
+        // mark_device_state (which would fail to load a nonexistent file)
+        // must never be reached.
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let conf = config::ClientConf {
+            workspace: "ws-none".into(),
+            ..Default::default()
+        };
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveNone,
+            String::new(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert_eq!(device.certificate_pem, "CERT", "NONE must not wipe credentials");
+        assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
+        assert_eq!(s.device_state, DeviceState::Active);
+    }
+    /// F-4: after a revoke, clear_revoked_state removes the dead device's
+    /// state (so a daemon start no longer exits on it and `login` can reach
+    /// it); any other state is left alone.
+    #[tokio::test]
+    async fn revoked_state_is_cleared_for_a_new_login_other_state_kept() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-f4");
+        assert!(
+            !state_store::clear_revoked_state("ws-f4").unwrap(),
+            "an active device's state must be kept"
+        );
+        assert!(state_store::load_workspace_state("ws-f4").is_ok());
+
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "revoked".into(),
+        )
+        .await
+        .unwrap();
+        assert!(state_store::clear_revoked_state("ws-f4").unwrap());
+        assert!(state_store::load_workspace_state("ws-f4").is_err());
+        assert!(!state_store::clear_revoked_state("ws-f4").unwrap());
+    }
+
+}
+
+/// Cert renewal tests (Sprint 19 Track 3 / PENDING-13, ADR-028 D1).
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    // --- renewal_sleep_secs: pure wake-time math ---
+
+    #[test]
+    fn renewal_sleep_secs_far_from_expiry_sleeps_until_the_window() {
+        // 600_000s (~6.9d) remaining, window is 241_920s (~2.8d) — sleep
+        // until remaining life drops to exactly the window.
+        assert_eq!(renewal_sleep_secs(600_000, 0), 600_000 - RENEWAL_WINDOW_SECS as u64);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_inside_the_window_is_zero() {
+        // 200_000s (~2.3d) remaining is already less than the 241_920s
+        // window — renew immediately, don't sleep.
+        assert_eq!(renewal_sleep_secs(200_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_already_expired_is_zero() {
+        assert_eq!(renewal_sleep_secs(-100_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_at_the_exact_boundary_is_zero() {
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS, 0), 0);
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS + 1, 0), 1);
+    }
+
+    // --- build_renewal_csr: same key, not a fresh one ---
+
+    /// PENDING-17: the renewal path must work for a TPM-backed device too —
+    /// `build_renewal_csr` loads whichever backend the device enrolled with,
+    /// and the resulting CSR has to be a valid, self-consistent CSR either
+    /// way. Exercises real hardware; skips when no TPM is reachable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_renewal_csr_works_with_a_tpm_backed_key() {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        if !crate::tpm::tpm_available() {
+            eprintln!("skipping: no accessible TPM on this machine");
+            return;
+        }
+
+        let (key_material, _public) = crate::tpm::generate().expect("generate TPM key");
+        let serialized =
+            crate::tpm::serialize_key_material(&key_material).expect("serialize key material");
+
+        // No software PEM at all — exactly how a TPM-enrolled device is stored.
+        let csr_pem = build_renewal_csr("", Some(&serialized), "tpm-renewal-host")
+            .expect("build renewal CSR from TPM key material");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
+        let (_, csr) =
+            X509CertificationRequest::from_der(&pem.contents).expect("parse CSR DER");
+        csr.verify_signature()
+            .expect("a TPM-signed renewal CSR must verify against its own public key");
+    }
+
+    #[test]
+    fn build_renewal_csr_reuses_the_same_key() {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let original_pem = key_pair.serialize_pem();
+        let original_pub_der = key_pair.public_key_der();
+
+        let csr_pem = build_renewal_csr(&original_pem, None, "test-host").expect("build CSR");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
+        let (_, csr) =
+            X509CertificationRequest::from_der(&pem.contents).expect("parse CSR DER");
+
+        assert_eq!(
+            csr.certification_request_info.subject_pki.raw,
+            original_pub_der.as_slice(),
+            "renewal CSR must carry the SAME public key as the original device \
+             key — a fresh key would defeat the server's fingerprint-pinning \
+             check (Track3-Renew-Reenroll.md D-A)"
+        );
+    }
+
+    // --- RENEW_SOON directive wakes the scheduler, nothing else ---
+
+    #[tokio::test]
+    async fn renew_soon_directive_wakes_the_renewal_scheduler() {
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                tpm_key_material: None,
+                ca_cert_pem: "CA".into(),
+                cert_expires_at: 1_700_000_000,
+                hostname: "host".into(),
+                os: "linux".into(),
+            });
+        }
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let resync = { state.read().await.cert_renewal_resync.clone() };
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRenewSoon,
+            "certificate renewal due soon".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        // Notify buffers a single permit even with no waiter yet, so a
+        // notified() call made AFTER notify_one() still resolves immediately
+        // — this is what actually proves the notification fired.
+        tokio::time::timeout(std::time::Duration::from_millis(100), resync.notified())
+            .await
+            .expect("cert_renewal_resync should have a pending notification");
+
+        let s = state.read().await;
+        assert_eq!(
+            s.device_state,
+            DeviceState::Active,
+            "RENEW_SOON must not change DeviceState — the device is still fully trusted"
+        );
+        assert_eq!(
+            s.device.as_ref().unwrap().certificate_pem,
+            "CERT",
+            "RENEW_SOON must not wipe credentials"
+        );
+    }
+
+    // --- Full e2e: attempt_cert_renewal against a REAL in-process TLS
+    // server. Every other test above verifies one piece of the wiring in
+    // isolation (the sleep math, the CSR reuses the same key, the notify
+    // fires) — this is the one test that proves those pieces are actually
+    // wired together correctly: real TLS handshake, real RenewCertRequest/
+    // Response wire types, real response parsing into RuntimeState, real
+    // save_renewed_cert disk write. build.rs enables server codegen (normally
+    // dead weight — this binary only ever dials OUT as a client) purely so
+    // this fake server can exist.
+
+    /// Only renew_cert does real work; every other RPC is unreachable in
+    /// this test and returns Unimplemented rather than panicking, so an
+    /// accidental call fails the test cleanly instead of aborting the task.
+    struct FakeRenewCertServer {
+        expected_device_id: String,
+        /// The reply — a real chain from `crate::test_pki` (certificate
+        /// audit bug 1: renewal replies are validated).
+        reply: crate::grpc::client_v1::RenewCertResponse,
+    }
+
+    /// A test PKI, a device key, and a renewed leaf for that key and
+    /// `device_id` (issued by the PKI's Workspace CA). Returns
+    /// (pki, key PEM, renewal reply).
+    fn real_renewal(
+        device_id: &str,
+    ) -> (
+        crate::test_pki::TestPki,
+        String,
+        crate::grpc::client_v1::RenewCertResponse,
+    ) {
+        let pki = crate::test_pki::TestPki::new();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let csr = rcgen::CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let reply = crate::grpc::client_v1::RenewCertResponse {
+            certificate_pem: pki.sign_device_csr(&csr, device_id),
+            workspace_ca_pem: pki.workspace_ca_pem.clone(),
+            intermediate_ca_pem: pki.intermediate_pem.clone(),
+            cert_expires_at: 9_999_999_999,
+        };
+        (pki, key.serialize_pem(), reply)
+    }
+
+    #[tonic::async_trait]
+    impl crate::grpc::client_v1::client_service_server::ClientService for FakeRenewCertServer {
+        async fn get_auth_config(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAuthConfigRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAuthConfigResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn initiate_auth(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::InitiateAuthRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::InitiateAuthResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn token_exchange(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::TokenExchangeRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::TokenExchangeResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn enroll_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::EnrollDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::EnrollDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_acl_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAclSnapshotRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAclSnapshotResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_transport_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetTransportSnapshotRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::GetTransportSnapshotResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn revoke_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RevokeDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RevokeDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn report_device_posture(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::ReportDevicePostureRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::ReportDevicePostureResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        async fn refresh_session(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RefreshSessionRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RefreshSessionResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn logout(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::LogoutRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::LogoutResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        type WatchChangesStream = crate::change_watch::HintStream;
+
+        async fn watch_changes(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::WatchChangesRequest>,
+        ) -> Result<tonic::Response<Self::WatchChangesStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        async fn renew_cert(
+            &self,
+            request: tonic::Request<crate::grpc::client_v1::RenewCertRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RenewCertResponse>, tonic::Status>
+        {
+            let req = request.into_inner();
+            if req.device_id != self.expected_device_id {
+                return Err(tonic::Status::not_found("unknown device"));
+            }
+            if req.csr_pem.is_empty() || req.access_token.is_empty() {
+                return Err(tonic::Status::invalid_argument("missing csr_pem/access_token"));
+            }
+            Ok(tonic::Response::new(self.reply.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_e2e_against_real_tls_server() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+
+        // Real TLS identity from the test PKI — connect_grpc always uses
+        // TLS, never plaintext, so a real handshake is part of what this
+        // test proves works. The saved anchors (Workspace CA + Intermediate)
+        // are the trust store, as after a real enrollment.
+        let device_id = "device-e2e-1".to_string();
+        let (pki, private_key_pem, reply) = real_renewal(&device_id);
+        let ca_pem = pki.device_ca_chain();
+        let (identity_cert, identity_key) = pki.controller_identity();
+        let server_identity = tonic::transport::Identity::from_pem(identity_cert, identity_key);
+        let renewed_cert = reply.certificate_pem.clone();
+
+        // Grab a free port, then release it — tonic binds it fresh. Small
+        // TOCTOU window, negligible in practice for a single-machine test.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let server_device_id = device_id.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(server_identity))
+                .unwrap()
+                .add_service(
+                    crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
+                        FakeRenewCertServer {
+                            expected_device_id: server_device_id,
+                            reply,
+                        },
+                    ),
+                )
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        // Let the server start listening before the client dials.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conf = config::ClientConf {
+            workspace: "ws-e2e-renewal".into(),
+            controller_address: format!("localhost:{}", addr.port()),
+            ..Default::default()
+        };
+
+        // Seed a state file so save_renewed_cert's load->mutate->save has
+        // something to load — mirrors seed_state_file in directive_tests.
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device_id.clone(),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&conf.workspace, &seeded).expect("seed state file");
+
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: device_id.clone(),
+                spiffe_id: crate::test_pki::device_spiffe_id(&device_id),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                tpm_key_material: None,
+                ca_cert_pem: ca_pem.clone(),
+                cert_expires_at: 1_000,
+                hostname: "e2e-host".into(),
+                os: "linux".into(),
+            });
+            s.session = Some(SessionInfo {
+                access_token: "fake-access-token".into(),
+                refresh_token: "fake-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+
+        attempt_cert_renewal(
+            &state,
+            &conf,
+            &device_id,
+            &private_key_pem,
+            None,
+            "e2e-host",
+            &ca_pem,
+        )
+        .await
+        .expect("attempt_cert_renewal against the real TLS server");
+
+        // In-memory state reflects the server's response.
+        let s = state.read().await;
+        let device = s.device.as_ref().unwrap();
+        assert_eq!(device.certificate_pem, renewed_cert);
+        // The saved anchors are never replaced by a renewal (bug 1).
+        assert_eq!(device.ca_cert_pem, ca_pem);
+        assert_eq!(device.cert_expires_at, 9_999_999_999);
+        drop(s);
+
+        // Disk reflects it too — save_renewed_cert actually ran, not just
+        // the in-memory update.
+        let on_disk = state_store::load_workspace_state(&conf.workspace).expect("reload state");
+        assert_eq!(on_disk.device.certificate_pem, renewed_cert);
+        assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
+        // The key never changes on renewal — that's the whole point of D-A.
+        assert_eq!(on_disk.device.private_key_pem, private_key_pem);
+    }
+
+    // ---- Certificate audit bug 1 (client): renewal can't swap the anchors ----
+    //
+    // RenewCert's reply used to be saved as-is, including a new "Workspace
+    // CA + Intermediate" pair, so whoever answered a renewal could replace
+    // the device's trust store. The reply must chain to the anchors saved at
+    // enrollment, for the device's own key and identity, and the anchors are
+    // never replaced.
+
+    struct RenewalOutcome {
+        result: Result<()>,
+        old_cert: String,
+        anchors: String,
+        memory: DeviceInfo,
+        disk: state_store::StoredDevice,
+    }
+
+    async fn renew_with_reply(reply: crate::test_controller::Reply) -> RenewalOutcome {
+        use crate::test_pki::{
+            device_key_and_csr, device_spiffe_id, AttackerPki, TestPki, DEVICE_ID,
+        };
+        let pki = Arc::new(TestPki::new());
+        let attacker = Arc::new(AttackerPki::new());
+        let ep = crate::test_controller::endpoint(
+            &pki,
+            &attacker,
+            pki.intermediate_pem.clone(),
+            pki.controller_identity(),
+            reply,
+        )
+        .await;
+        let (key_pem, csr) = device_key_and_csr();
+        let old_cert = pki.sign_device_csr(&csr, DEVICE_ID);
+        let anchors = pki.device_ca_chain();
+        let device = DeviceInfo {
+            id: DEVICE_ID.into(),
+            spiffe_id: device_spiffe_id(DEVICE_ID),
+            certificate_pem: old_cert.clone(),
+            private_key_pem: key_pem.clone(),
+            tpm_key_material: None,
+            ca_cert_pem: anchors.clone(),
+            cert_expires_at: 1_000,
+            hostname: "e2e-host".into(),
+            os: "linux".into(),
+        };
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device.id.clone(),
+                spiffe_id: device.spiffe_id.clone(),
+                certificate_pem: old_cert.clone(),
+                ca_cert_pem: anchors.clone(),
+                private_key_pem: key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&ep.conf.workspace, &seeded).expect("seed state file");
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(device);
+            s.session = Some(SessionInfo {
+                access_token: "renewal-access-token".into(),
+                refresh_token: "renewal-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+        let result = attempt_cert_renewal(
+            &state, &ep.conf, DEVICE_ID, &key_pem, None, "e2e-host", &anchors,
+        )
+        .await;
+        let memory = state.read().await.device.clone().unwrap();
+        let disk = state_store::load_workspace_state(&ep.conf.workspace)
+            .expect("reload state")
+            .device;
+        RenewalOutcome {
+            result,
+            old_cert,
+            anchors,
+            memory,
+            disk,
+        }
+    }
+
+    #[tokio::test]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn genuine_renewal_installs_the_new_cert_and_keeps_the_anchors() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let out = renew_with_reply(crate::test_controller::Reply::Genuine).await;
+        out.result.expect("genuine renewal");
+        assert_ne!(out.memory.certificate_pem, out.old_cert, "cert not renewed");
+        assert_eq!(out.disk.certificate_pem, out.memory.certificate_pem);
+        assert_eq!(out.memory.ca_cert_pem, out.anchors);
+        assert_eq!(out.disk.ca_cert_pem, out.anchors);
+    }
+
+    #[tokio::test]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn renewal_reply_not_under_the_saved_anchors_changes_nothing() {
+        use crate::test_controller::Reply;
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        for reply in [Reply::Forged, Reply::OtherPlatform, Reply::OtherKey] {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+            let out = renew_with_reply(reply).await;
+            let err = out.result.expect_err("renewal reply must be refused");
+            assert!(
+                format!("{err:#}").contains("renewed certificate rejected"),
+                "{err:#}"
+            );
+            assert_eq!(
+                out.memory.certificate_pem, out.old_cert,
+                "in-memory cert replaced"
+            );
+            assert_eq!(
+                out.memory.ca_cert_pem, out.anchors,
+                "in-memory anchors replaced"
+            );
+            assert_eq!(
+                out.disk.certificate_pem, out.old_cert,
+                "saved cert replaced"
+            );
+            assert_eq!(out.disk.ca_cert_pem, out.anchors, "saved anchors replaced");
+        }
+    }
+
+    #[test]
+    fn startup_loads_only_saved_state_anchored_in_the_platform_root() {
+        use crate::test_pki::{AttackerPki, TestPki};
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let pki = TestPki::new();
+        let attacker = AttackerPki::new();
+        let seed = |ca_cert_pem: String| {
+            let state = state_store::StoredWorkspaceState {
+                device: state_store::StoredDevice {
+                    id: "device-startup".into(),
+                    ca_cert_pem,
+                    private_key_pem: "KEY".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            state_store::save_workspace_state("ws-startup", &state).expect("seed state file");
+        };
+
+        assert!(
+            load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_none(),
+            "no state saved"
+        );
+        seed(pki.device_ca_chain());
+        assert!(load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_some());
+        assert!(
+            load_trusted_state("ws-startup", Err(anyhow::anyhow!("no root"))).is_none(),
+            "a build without a platform root must not load saved state"
+        );
+        for unanchored in [
+            TestPki::new().device_ca_chain(),
+            format!(
+                "{}\n{}",
+                attacker.workspace_ca_pem, attacker.fake_intermediate_pem
+            ),
+            "OLD-CA".to_string(),
+        ] {
+            seed(unanchored);
+            assert!(load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_none());
+        }
+    }
+
+    // ---- Sprint 21 B1: a renewed cert reaches an already-running tunnel ----------
+
+    const OLD_CERT: &str = "OLD-CERT";
+
+    /// A daemon with an enrolled device (cert OLD-CERT, persisted) and a
+    /// session, talking to the fake controller over real TLS. The fake only
+    /// renews `server_device_id`, so a different id makes renewal fail.
+    struct RenewalFixture {
+        _dir: tempfile::TempDir,
+        state: SharedState,
+        conf: config::ClientConf,
+        ca_pem: String,
+        device_id: String,
+        private_key_pem: String,
+        /// The certificate the fake controller renews to.
+        renewed_cert: String,
+    }
+
+    async fn renewal_fixture(server_device_id: &str) -> RenewalFixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        // The fake renews "device-b1" with a real chain from the test PKI.
+        let (pki, private_key_pem, reply) = real_renewal("device-b1");
+        let ca_pem = pki.device_ca_chain();
+        let (identity_cert, identity_key) = pki.controller_identity();
+        let server_identity = tonic::transport::Identity::from_pem(identity_cert, identity_key);
+        let renewed_cert = reply.certificate_pem.clone();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let expected_device_id = server_device_id.to_string();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(server_identity))
+                .unwrap()
+                .add_service(
+                    crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
+                        FakeRenewCertServer {
+                            expected_device_id,
+                            reply,
+                        },
+                    ),
+                )
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        // Wait until the fake controller accepts connections (no fixed sleep).
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let conf = config::ClientConf {
+            workspace: "ws-b1-renewal".into(),
+            controller_address: format!("localhost:{}", addr.port()),
+            ..Default::default()
+        };
+        let device_id = "device-b1".to_string();
+        state_store::save_workspace_state(
+            &conf.workspace,
+            &state_store::StoredWorkspaceState {
+                device: state_store::StoredDevice {
+                    id: device_id.clone(),
+                    certificate_pem: OLD_CERT.into(),
+                    private_key_pem: private_key_pem.clone(),
+                    cert_expires_at: 1_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("seed state file");
+
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: device_id.clone(),
+                spiffe_id: crate::test_pki::device_spiffe_id("device-b1"),
+                certificate_pem: OLD_CERT.into(),
+                private_key_pem: private_key_pem.clone(),
+                tpm_key_material: None,
+                ca_cert_pem: ca_pem.clone(),
+                cert_expires_at: 1_000,
+                hostname: "b1-host".into(),
+                os: "linux".into(),
+            });
+            s.session = Some(SessionInfo {
+                access_token: "fake-access-token".into(),
+                refresh_token: "fake-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+        RenewalFixture {
+            _dir: dir,
+            state,
+            conf,
+            ca_pem,
+            device_id,
+            private_key_pem,
+            renewed_cert,
+        }
+    }
+
+    impl RenewalFixture {
+        async fn renew<F, Fut>(&self, restart: F) -> Result<()>
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = Result<()>>,
+        {
+            renew_and_apply_to_tunnel(
+                &self.state,
+                &self.conf,
+                &self.device_id,
+                &self.private_key_pem,
+                None,
+                "b1-host",
+                &self.ca_pem,
+                restart,
+            )
+            .await
+        }
+    }
+
+    /// The receivers standing in for a running net_stack (kept alive for the
+    /// test so the data plane looks alive).
+    type NetStackStub = (
+        tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>,
+        tokio::sync::mpsc::Receiver<net_stack::ResourceCmd>,
+    );
+
+    /// Mark a tunnel as running, built (like handle_up) from the current
+    /// device.
+    async fn start_tunnel(state: &SharedState) -> NetStackStub {
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new()));
+        let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(8);
+        let mut s = state.write().await;
+        let acl = AclSnapshot::default();
+        let applied = effective_config(&acl, None, s.device.as_ref().unwrap());
+        s.acl_snapshot = Some(acl);
+        s.tun_handle = Some(Arc::new(TunHandle {
+            abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+            route_count: 0,
+            applied,
+            transport_tx: Arc::new(tx),
+            resource_tx: Arc::new(resource_tx),
+        }));
+        (rx, resource_rx)
+    }
+
+    /// Records each full restart (down→up) and the certificate the new
+    /// tunnel was built with.
+    #[derive(Clone, Default)]
+    struct Restarts(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Restarts {
+        fn certs(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// restart_tunnel_if_running with only the TUN work faked: the real
+    /// restart coordinator and the real Fix 01 decision run; the full
+    /// down→up is replaced by what handle_up does to the state — rebuild from
+    /// the CURRENT device and record the applied config.
+    async fn restart_with_fake_tun(state: SharedState, restarts: Restarts) -> Result<()> {
+        let coordinator = { state.read().await.tunnel_restart.clone() };
+        let work = move || {
+            let state = state.clone();
+            let restarts = restarts.clone();
+            async move {
+                run_restart_decision(
+                    &state,
+                    |_, _, _, _, _| {
+                        panic!("a renewed certificate is never a transport-only change")
+                    },
+                    // A renewed certificate is Structural: no resource hot-apply,
+                    // so the kernel is never touched (and no TUN exists here).
+                    &Mutex::new(None::<crate::tun::TunManager>),
+                    || async {
+                        let mut s = state.write().await;
+                        let device = s.device.clone().unwrap();
+                        let applied =
+                            effective_config(s.acl_snapshot.as_ref().unwrap(), None, &device);
+                        let handle = s.tun_handle.as_ref().unwrap();
+                        s.tun_handle = Some(Arc::new(TunHandle {
+                            abort: handle.abort.clone(),
+                            route_count: handle.route_count,
+                            applied,
+                            transport_tx: handle.transport_tx.clone(),
+                            resource_tx: handle.resource_tx.clone(),
+                        }));
+                        restarts.0.lock().unwrap().push(device.certificate_pem);
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        };
+        register_restart_request(&coordinator, work)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn applied_cert(state: &SharedState) -> String {
+        state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .certificate_pem
+            .clone()
+    }
+
+    /// Renewal with a running tunnel → exactly one restart, and the restarted
+    /// tunnel is built from the renewed certificate (not the old pool copy).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn renewal_restarts_a_running_tunnel_once_onto_the_new_certificate() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let _net_stack = start_tunnel(&f.state).await;
+        assert_eq!(applied_cert(&f.state).await, OLD_CERT);
+
+        let restarts = Restarts::default();
+        f.renew(|| restart_with_fake_tun(f.state.clone(), restarts.clone()))
+            .await
+            .expect("renewal succeeds");
+
+        assert_eq!(
+            restarts.certs(),
+            vec![f.renewed_cert.clone()],
+            "exactly one restart, with the new cert"
+        );
+        assert_eq!(applied_cert(&f.state).await, f.renewed_cert);
+        // Persisted too, before the restart used it.
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, f.renewed_cert);
+    }
+
+    /// Repeated or concurrent restart requests after a renewal (the renewal's
+    /// own, an ACL tick, a RENEW_SOON wake-up) restart the tunnel only once.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn repeated_restart_requests_after_renewal_restart_only_once() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let _net_stack = start_tunnel(&f.state).await;
+        let restarts = Restarts::default();
+
+        f.renew(|| async {
+            let (a, b) = tokio::join!(
+                restart_with_fake_tun(f.state.clone(), restarts.clone()),
+                restart_with_fake_tun(f.state.clone(), restarts.clone()),
+            );
+            a.and(b)
+        })
+        .await
+        .expect("renewal succeeds");
+        restart_with_fake_tun(f.state.clone(), restarts.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(restarts.certs(), vec![f.renewed_cert.clone()]);
+    }
+
+    /// No tunnel running → the real restart_tunnel_if_running does nothing:
+    /// no tunnel is started.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn renewal_without_a_running_tunnel_starts_nothing() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        f.renew(|| restart_tunnel_if_running(&f.state, &f.conf, &tun_slot))
+            .await
+            .expect("renewal succeeds");
+
+        assert!(tun_slot.lock().await.is_none(), "no tunnel was started");
+        let s = f.state.read().await;
+        assert!(s.tun_handle.is_none());
+        assert_eq!(s.device.as_ref().unwrap().certificate_pem, f.renewed_cert);
+    }
+
+    /// A failed renewal neither restarts the tunnel nor touches the current,
+    /// still-valid certificate (in memory or on disk).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn failed_renewal_neither_restarts_nor_replaces_the_certificate() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("some-other-device").await; // controller refuses ours
+        let _net_stack = start_tunnel(&f.state).await;
+        let restarts = Restarts::default();
+
+        let requested = std::sync::atomic::AtomicUsize::new(0);
+        let result = f
+            .renew(|| {
+                requested.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                restart_with_fake_tun(f.state.clone(), restarts.clone())
+            })
+            .await;
+
+        assert!(result.is_err(), "renewal must fail");
+        assert_eq!(
+            requested.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no restart may even be requested after a failed renewal"
+        );
+        assert!(
+            restarts.certs().is_empty(),
+            "no restart after a failed renewal"
+        );
+        assert_eq!(applied_cert(&f.state).await, OLD_CERT);
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            OLD_CERT
+        );
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, OLD_CERT);
+    }
+
+    // ---- B1 follow-up: the scheduler's own renewal→restart wiring ---------------
+
+    /// Mark a restart pass as already running, so every real
+    /// restart_tunnel_if_running request queues in `pending` (waiting for an
+    /// answer) instead of running: requests become countable.
+    async fn hold_restart_coordinator(state: &SharedState) {
+        state.read().await.tunnel_restart.lock().await.running = true;
+    }
+
+    async fn queued_restart_requests(state: &SharedState) -> usize {
+        state.read().await.tunnel_restart.lock().await.pending.len()
+    }
+
+    /// Answer every queued restart request with success (keeping the pass
+    /// "running", so a later request would queue and be counted too).
+    async fn answer_restart_requests(state: &SharedState) {
+        let waiters = std::mem::take(&mut state.read().await.tunnel_restart.lock().await.pending);
+        for waiter in waiters {
+            let _ = waiter.send(Ok(()));
+        }
+    }
+
+    /// Wait (bounded) for a scheduled renewal attempt to finish. An attempt
+    /// still running after 5 s is blocked on an unanswered restart request,
+    /// i.e. it requested a restart it should not have: fail, don't hang.
+    async fn finish(state: &SharedState, task: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+            Ok(joined) => joined.unwrap(),
+            Err(_) => panic!(
+                "renewal attempt did not finish: blocked on {} unexpected restart request(s)",
+                queued_restart_requests(state).await
+            ),
+        }
+    }
+
+    fn spawn_scheduled_renewal(f: &RenewalFixture) -> tokio::task::JoinHandle<Result<()>> {
+        let (state, conf) = (f.state.clone(), f.conf.clone());
+        let (device_id, key, ca) = (
+            f.device_id.clone(),
+            f.private_key_pem.clone(),
+            f.ca_pem.clone(),
+        );
+        tokio::spawn(async move {
+            let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+            scheduled_cert_renewal(
+                &state, &conf, &tun_slot, &device_id, &key, None, "b1-host", &ca,
+            )
+            .await
+        })
+    }
+
+    /// A successful scheduled renewal issues exactly one real
+    /// restart_tunnel_if_running request, after the new cert is in place.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn scheduled_renewal_requests_exactly_one_tunnel_restart() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        hold_restart_coordinator(&f.state).await;
+
+        let task = spawn_scheduled_renewal(&f);
+        let mut waited = 0;
+        while queued_restart_requests(&f.state).await == 0 {
+            assert!(
+                waited < 500,
+                "the scheduler never requested a tunnel restart"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            waited += 1;
+        }
+        assert_eq!(queued_restart_requests(&f.state).await, 1);
+        // The request comes after the renewed cert is in memory and on disk.
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            f.renewed_cert
+        );
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, f.renewed_cert);
+
+        answer_restart_requests(&f.state).await;
+        finish(&f.state, task)
+            .await
+            .expect("scheduled renewal succeeds");
+        // The attempt is over: any further (duplicate) request would be queued.
+        assert_eq!(
+            queued_restart_requests(&f.state).await,
+            0,
+            "exactly one restart request"
+        );
+    }
+
+    /// A failed scheduled renewal issues no restart request.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn failed_scheduled_renewal_requests_no_tunnel_restart() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("some-other-device").await; // controller refuses ours
+        hold_restart_coordinator(&f.state).await;
+
+        let result = finish(&f.state, spawn_scheduled_renewal(&f)).await;
+
+        assert!(result.is_err(), "renewal must fail");
+        assert_eq!(
+            queued_restart_requests(&f.state).await,
+            0,
+            "no restart request after a failed renewal"
+        );
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            OLD_CERT
+        );
+    }
+}
+
+/// FU-10: the tunnel comes back after a daemon restart only when the user left
+/// it up. The restore loop is driven with an injected "up" step (a real one
+/// needs a TUN device); the saved choice goes through the real state_store,
+/// redirected to a tempdir under STATE_DIR_GUARD.
+#[cfg(test)]
+mod tunnel_restore_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    const FAST: Duration = Duration::from_millis(5);
+
+    fn up_ok() -> IpcResponse {
+        IpcResponse {
+            ok: true,
+            kind: "Up".into(),
+            ..Default::default()
+        }
+    }
+
+    fn up_failed(error: &str) -> IpcResponse {
+        IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some(error.into()),
+            ..Default::default()
+        }
+    }
+
+    async fn runtime_with(wanted: bool, device_state: DeviceState) -> SharedState {
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.tunnel_wanted = wanted;
+            s.device_state = device_state;
+        }
+        state
+    }
+
+    /// A broken stop condition would otherwise make the restore loop (and the
+    /// test) run forever.
+    async fn bounded(restore: impl std::future::Future<Output = bool>) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), restore)
+            .await
+            .expect("the restore loop did not stop")
+    }
+
+    fn empty_slot() -> TunSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    /// Points state_store at `dir` and saves a state file whose saved choice
+    /// is `wanted`.
+    fn seed_saved_choice(dir: &TempDir, workspace: &str, wanted: bool) -> config::ClientConf {
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let stored = StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: "device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                ..Default::default()
+            },
+            tunnel_wanted: wanted,
+            ..Default::default()
+        };
+        state_store::save_workspace_state(workspace, &stored).expect("seed state file");
+        config::ClientConf {
+            workspace: workspace.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn saved_choice(workspace: &str) -> bool {
+        state_store::load_workspace_state(workspace)
+            .expect("load state")
+            .tunnel_wanted
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_left_up_is_restored() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { up_ok() }
+            },
+        ))
+        .await;
+        assert!(restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    /// Right after boot the controller is often unreachable: keep trying, and
+    /// let `status` show the last attempt's error meanwhile.
+    #[tokio::test]
+    async fn the_restore_retries_until_up_succeeds() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let state = state.clone();
+                let seen = &seen;
+                async move {
+                    let restore = state.read().await.tunnel_restore.clone();
+                    seen.lock().unwrap().push(restore);
+                    if n < 3 {
+                        up_failed("ACL sync failed: controller unreachable")
+                    } else {
+                        up_ok()
+                    }
+                }
+            },
+        ))
+        .await;
+        assert!(restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let unreachable = Some("ACL sync failed: controller unreachable".to_string());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(String::new()), unreachable.clone(), unreachable]
+        );
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_left_down_is_not_restored() {
+        let state = runtime_with(false, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { up_ok() }
+            },
+        ))
+        .await;
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_or_disabled_device_is_not_restored() {
+        for device_state in [DeviceState::ReEnrollRequired, DeviceState::Revoked] {
+            let state = runtime_with(true, device_state).await;
+            let calls = AtomicUsize::new(0);
+            let restored = bounded(restore_tunnel_with(
+                &state,
+                &empty_slot(),
+                FAST,
+                FAST,
+                || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async { up_ok() }
+                },
+            ))
+            .await;
+            assert!(!restored, "{device_state:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "{device_state:?}");
+        }
+    }
+
+    /// A directive seen during an attempt (the attempt's ACL sync) ends the
+    /// restore instead of retrying forever.
+    #[tokio::test]
+    async fn a_directive_during_the_restore_stops_it() {
+        let state = runtime_with(true, DeviceState::Active).await;
+        let calls = AtomicUsize::new(0);
+        let restored = bounded(restore_tunnel_with(
+            &state,
+            &empty_slot(),
+            FAST,
+            FAST,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let state = state.clone();
+                async move {
+                    state.write().await.device_state = DeviceState::ReEnrollRequired;
+                    up_failed("no device identity")
+                }
+            },
+        ))
+        .await;
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(state.read().await.tunnel_restore.is_none());
+    }
+
+    /// The user runs `down` while a restore attempt is in flight: the `down`
+    /// waits for that attempt, is saved, and the restore stops.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn a_down_during_the_restore_stops_it_and_is_saved() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_saved_choice(&dir, "fu10-down", true);
+        let state = runtime_with(true, DeviceState::Active).await;
+        let slot = empty_slot();
+        let calls = AtomicUsize::new(0);
+        let down_task = std::sync::Mutex::new(None);
+
+        let restored = bounded(restore_tunnel_with(&state, &slot, FAST, FAST, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (state, conf, slot) = (state.clone(), conf.clone(), slot.clone());
+            let down_task = &down_task;
+            async move {
+                let task = tokio::spawn(async move {
+                    handle_request(IpcRequest::Down, &state, &conf, &slot).await
+                });
+                // Give the `down` time to reach the intent lock this attempt
+                // holds: it must still be waiting when the attempt ends.
+                tokio::time::sleep(FAST * 4).await;
+                assert!(!task.is_finished(), "the down overtook the attempt");
+                *down_task.lock().unwrap() = Some(task);
+                up_failed("ACL sync failed: controller unreachable")
+            }
+        }))
+        .await;
+
+        let task = down_task.lock().unwrap().take().expect("down was sent");
+        assert!(task.await.unwrap().ok, "down succeeds");
+        assert!(!restored);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no attempt after the down");
+        assert!(!state.read().await.tunnel_wanted);
+        assert!(!saved_choice("fu10-down"), "the down is saved");
+    }
+
+    /// `up` saves the choice only when the tunnel came up; `down` always does.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn up_and_down_save_the_users_choice() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        let conf = seed_saved_choice(&dir, "fu10-ipc", false);
+        let state = runtime_with(false, DeviceState::Active).await;
+        let slot = empty_slot();
+
+        // No device in memory: `up` fails and the saved choice stays "down".
+        let up = handle_request(IpcRequest::Up, &state, &conf, &slot).await;
+        assert!(!up.ok);
+        assert!(!saved_choice("fu10-ipc"));
+        assert!(!state.read().await.tunnel_wanted);
+
+        // What a successful `up` or login records.
+        set_tunnel_wanted(&state, &conf, true).await;
+        assert!(saved_choice("fu10-ipc"));
+        assert!(state.read().await.tunnel_wanted);
+
+        let down = handle_request(IpcRequest::Down, &state, &conf, &slot).await;
+        assert!(down.ok);
+        assert!(!saved_choice("fu10-ipc"));
+        assert!(!state.read().await.tunnel_wanted);
+    }
+
+    /// Other saves keep the choice; a revoke or re-enroll marker clears it.
+    #[test]
+    fn the_saved_choice_survives_other_saves_and_not_a_directive() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().unwrap();
+        seed_saved_choice(&dir, "fu10-store", false);
+
+        state_store::save_tunnel_wanted("fu10-store", true).unwrap();
+        state_store::save_rotated_tokens("fu10-store", "a".into(), "r".into(), 1).unwrap();
+        state_store::save_renewed_cert("fu10-store", "C".into(), "CA".into(), 1).unwrap();
+        assert!(saved_choice("fu10-store"));
+
+        state_store::mark_device_state("fu10-store", DeviceState::ReEnrollRequired.as_marker())
+            .unwrap();
+        assert!(!saved_choice("fu10-store"));
+    }
+
+    #[test]
+    fn startup_reads_the_saved_choice_and_old_state_starts_down() {
+        let mut s = crate::runtime::RuntimeState::default();
+        populate_runtime(
+            &mut s,
+            &StoredWorkspaceState {
+                tunnel_wanted: true,
+                ..Default::default()
+            },
+        );
+        assert!(s.tunnel_wanted);
+
+        // State saved before FU-10 has no such field: the tunnel stays down.
+        let old: StoredWorkspaceState = serde_json::from_value(serde_json::json!({
+            "workspace": {}, "user": {}, "device": {}, "session": {}
+        }))
+        .unwrap();
+        assert!(!old.tunnel_wanted);
+    }
 }

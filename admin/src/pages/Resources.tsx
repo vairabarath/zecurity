@@ -4,12 +4,15 @@ import { useQuery } from "@apollo/client/react";
 import { AlertCircle, Plus, Users, Wifi, WifiOff } from "lucide-react";
 import {
   GetAllResourcesDocument,
+  GetIdpConnectionsDocument,
   GetRemoteNetworksDocument,
   ShieldStatus,
 } from "@/generated/graphql";
 import { Button } from "@/components/ui/button";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
+import { Capability, useCan } from "@/lib/capabilities";
 import { Skeleton } from "@/components/ui/skeleton";
+import { GroupOriginLabel } from "@/components/groups/GroupOriginLabel";
 import {
   EmptyState,
   ErrorState,
@@ -53,6 +56,7 @@ function formatPort(from: number, to: number) {
 export default function Resources() {
   const navigate = useNavigate();
   const location = useLocation();
+  const canWrite = useCan(Capability.NetworkWrite);
   // Lazy initializers read location.state at mount — avoids calling setState
   // inside an effect body (which causes cascading renders).
   const [showAdd, setShowAdd] = useState<boolean>(() => {
@@ -75,6 +79,15 @@ export default function Resources() {
       fetchPolicy: "cache-and-network",
       pollInterval: 30000,
     },
+  );
+
+  // Resolve SCIM connectionIds → display names so group pills render
+  // "Engineering · SCIM (Okta)" (reuses the existing GetIdpConnections).
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: "cache-and-network",
+  });
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
   );
 
   const resources = useMemo(() => data?.allResources ?? [], [data]);
@@ -118,6 +131,7 @@ export default function Resources() {
             </span>{" "}
             total
           </span>
+          {canWrite && (
           <Button
             onClick={() => setShowAdd(true)}
             disabled={networks.length === 0}
@@ -126,6 +140,7 @@ export default function Resources() {
             <Plus className="h-4 w-4" />
             Add Resource
           </Button>
+          )}
         </div>
       </div>
 
@@ -176,7 +191,7 @@ export default function Resources() {
                   : "Add the first resource and start protection from the console."
               }
               action={
-                networks.length > 0 ? (
+                networks.length > 0 && canWrite ? (
                   <Button onClick={() => setShowAdd(true)}>Add Resource</Button>
                 ) : undefined
               }
@@ -248,7 +263,14 @@ export default function Resources() {
                             to={`/groups/${g.id}`}
                             className="inline-flex items-center gap-1 rounded-full border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.10)] px-2 py-0.5 text-[11px] font-semibold text-[oklch(0.85_0.13_80)] transition hover:opacity-80"
                           >
-                            {g.name}
+                            <GroupOriginLabel
+                              group={g}
+                              connectionName={
+                                g.connectionId
+                                  ? connectionNameById.get(g.connectionId)
+                                  : undefined
+                              }
+                            />
                           </Link>
                         ))
                       )}
@@ -289,7 +311,7 @@ export default function Resources() {
 
       <CreateResourceModal
         key={showAdd ? (prefill ? JSON.stringify(prefill) : 'open') : 'closed'}
-        open={showAdd}
+        open={showAdd && canWrite}
         onOpenChange={(open) => {
           setShowAdd(open);
           if (!open) setPrefill(null);

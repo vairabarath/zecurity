@@ -7,11 +7,16 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -21,7 +26,9 @@ import (
 func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	// The store checks the shield belongs to this workspace first, so a
+	// foreign shield answers exactly like a missing one.
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, tc.TenantID, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("promoteDiscoveredService: get services: %w", err)
 	}
@@ -37,16 +44,31 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 		return nil, fmt.Errorf("promoteDiscoveredService: service %s/%d not found on shield %s", protocol, port, shieldID)
 	}
 
-	name := fmt.Sprintf("%s on %s", target.ServiceName, shieldID[:8])
+	// The resource lives in the discovering shield's network (FU-4).
+	rnID, shieldName, err := discovery.ShieldNetworkAndName(ctx, r.Pool, tc.TenantID, shieldID)
+	if err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: shield network: %w", err)
+	}
+
+	name := discovery.PromotedResourceName(target.ServiceName, protocol, port, shieldName)
 	row, err := resource.Create(ctx, r.Pool, tc.TenantID, resource.CreateInput{
-		Name:     name,
-		Host:     target.BoundIP,
-		Protocol: protocol,
-		PortFrom: port,
-		PortTo:   port,
+		RemoteNetworkID: rnID,
+		Name:            name,
+		Host:            target.BoundIP,
+		Protocol:        protocol,
+		PortFrom:        port,
+		PortTo:          port,
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return nil, apperr.UserErrorf("promoteDiscoveredService: %s/%d is already a resource (%q)", protocol, port, name)
+		}
 		return nil, fmt.Errorf("promoteDiscoveredService: create resource: %w", err)
+	}
+	r.auditAdmin(ctx, "resource.create", "resource", row.ID, map[string]any{"source": "discovery", "shield_id": shieldID, "protocol": protocol, "port": port})
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: notify policy change: %w", err)
 	}
 
 	return toResourceGQL(row), nil
@@ -54,11 +76,17 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 
 // TriggerScan is the resolver for the triggerScan field.
 func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error) {
+	tc := tenant.MustGet(ctx)
 	if len(targets) == 0 {
-		return "", fmt.Errorf("triggerScan: targets must not be empty")
+		return "", apperr.UserErrorf("triggerScan: targets must not be empty")
 	}
 	if len(ports) > 16 {
-		return "", fmt.Errorf("triggerScan: too many ports (max 16)")
+		return "", apperr.UserErrorf("triggerScan: too many ports (max 16)")
+	}
+	for _, t := range targets {
+		if err := discovery.CheckScanTarget(t); err != nil {
+			return "", fmt.Errorf("triggerScan: %q: %w", t, err)
+		}
 	}
 
 	requestID := uuid.New().String()
@@ -80,16 +108,38 @@ func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, 
 		},
 	}
 
-	if err := r.ConnectorRegistry.PushScanCommand(connectorID, msg); err != nil {
-		return "", fmt.Errorf("triggerScan: connector %s not connected: %w", connectorID, err)
+	// Bind the request to the connector before sending it, so only that
+	// connector's report is stored (FU-5). A connector outside the caller's
+	// workspace gets the same answer as an unconnected one (FU-3).
+	recorded, err := discovery.RecordScanRequest(ctx, r.Pool, tc.TenantID, connectorID, requestID)
+	if err != nil {
+		return "", fmt.Errorf("triggerScan: record request: %w", err)
+	}
+	if !recorded {
+		// Same form as PushScanCommand's refusals: the ID comes from the
+		// client, so it is quoted and truncated.
+		logID := connectorID
+		if len(logID) > 64 {
+			logID = logID[:64] + "…"
+		}
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_in_workspace", tc.TenantID, logID)
+		return "", fmt.Errorf("triggerScan: %w", connector.ErrConnectorNotAvailable)
+	}
+	// Only a connector of the caller's workspace can receive it (FU-3).
+	if err := r.ConnectorRegistry.PushScanCommand(tc.TenantID, connectorID, msg); err != nil {
+		if delErr := discovery.DeleteScanRequest(ctx, r.Pool, requestID); delErr != nil {
+			log.Printf("discovery: remove unsent scan request %s: %v", requestID, delErr)
+		}
+		return "", fmt.Errorf("triggerScan: %w", err)
 	}
 
+	r.auditAdmin(ctx, "scan.trigger", "connector", connectorID, map[string]any{"request_id": requestID, "targets": targets, "ports": ports})
 	return requestID, nil
 }
 
 // GetDiscoveredServices is the resolver for the getDiscoveredServices field.
 func (r *queryResolver) GetDiscoveredServices(ctx context.Context, shieldID string) ([]*graph.DiscoveredService, error) {
-	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, tenant.MustGet(ctx).TenantID, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("getDiscoveredServices: %w", err)
 	}
@@ -103,7 +153,7 @@ func (r *queryResolver) GetDiscoveredServices(ctx context.Context, shieldID stri
 
 // GetScanResults is the resolver for the getScanResults field.
 func (r *queryResolver) GetScanResults(ctx context.Context, requestID string) ([]*graph.ScanResult, error) {
-	results, err := discovery.GetScanResults(ctx, r.Pool, requestID)
+	results, err := discovery.GetScanResults(ctx, r.Pool, tenant.MustGet(ctx).TenantID, requestID)
 	if err != nil {
 		return nil, fmt.Errorf("getScanResults: %w", err)
 	}

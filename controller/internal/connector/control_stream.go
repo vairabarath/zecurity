@@ -7,14 +7,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	// clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -42,6 +44,14 @@ type LabelledRelayListSource interface {
 	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
 }
 
+// TransportChangeNotifier fires a transport-plane topology change (ADR-017)
+// when a connector's relay placement changes. Implemented by *transport.Notifier
+// (NotifyTopologyChange). A relay-placement change is connectivity, not
+// authorization, so it must NOT go through the policy notifier (Track B invariant).
+type TransportChangeNotifier interface {
+	NotifyTopologyChange(ctx context.Context, workspaceID string, connectorIDs []string) error
+}
+
 // PolicyChangeNotifier is the subset of policy.Notifier used by the
 // relay-placement handlers. Defined as an interface for testability.
 type PolicyChangeNotifier interface {
@@ -54,11 +64,38 @@ type PolicyChangeNotifier interface {
 type ConnectorRegistry struct {
 	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
+
+	// peerLists signs each shield's peer list (D21-R a2) and resource set
+	// (D21-R S); nil until SetShieldSigner. Set once at startup, read-only
+	// afterwards.
+	peerLists *peerListIssuer
+	// pushes runs the background peer-list and snapshot pushes (D21-R a2).
+	pushes *pushCoalescer
+
+	// live holds EVERY activated, not-yet-retired Control stream per
+	// connector — the authoritative one in clients plus any superseded stream
+	// a make-before-break renewal has not finished retiring. SignalRevoked
+	// delivers ConnectorRevoked to all of them. Guarded by mu; mutated only
+	// under lifecycleMu.
+	live map[string]map[*connectorStreamClient]struct{}
+
+	// lifecycleMu serialises each Control stream's ownership transition —
+	// (activation UPDATE + add) on open, (ownership check + remove +
+	// disconnect UPDATE) on close — so an old stream closing after a
+	// replacement stream registered can never remove the replacement or mark
+	// the connector disconnected (make-before-break certificate renewal).
+	// Separate from mu so readers (get, ClientsForWorkspace, broadcasts) never
+	// wait on a DB round-trip. Never held across notifications.
+	lifecycleMu sync.Mutex
 }
 
 // NewConnectorRegistry creates an empty registry.
 func NewConnectorRegistry() *ConnectorRegistry {
-	return &ConnectorRegistry{clients: make(map[string]*connectorStreamClient)}
+	return &ConnectorRegistry{
+		clients: make(map[string]*connectorStreamClient),
+		live:    make(map[string]map[*connectorStreamClient]struct{}),
+		pushes:  newPushCoalescer(maxConcurrentPushes, peerListPushTimeout),
+	}
 }
 
 // connectorSendQueueSize bounds a connector's outbound mailbox. A wedged connector
@@ -72,12 +109,168 @@ type connectorStreamClient struct {
 	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
+	trustDomain string
+
+	// Authorization contract (Phase A). authMu serialises the revoked flag
+	// with AuthorizationAck enqueueing, so no ack can be queued after
+	// ConnectorRevoked on the same stream. terminal is a one-slot mailbox the
+	// writer drains before outbound (ConnectorRevoked can't be dropped by a
+	// full outbound queue); terminalSent is closed once the writer has sent
+	// it, which ends the handler with the revoked marker. Both channels are
+	// nil for clients not created by Control (unit tests).
+	authMu       sync.Mutex
+	revoked      bool
+	terminal     chan *pb.ConnectorControlMessage
+	terminalSent chan struct{}
+
+	// lastReEnrollAt is when a ReEnroll was last enqueued on this stream (zero =
+	// never). Only the stream's recv loop (handleConnectorHealth) touches it.
+	lastReEnrollAt time.Time
+
+	// presentedCertNotAfter is the NotAfter of the certificate this stream
+	// authenticated with (verified by StreamSPIFFEInterceptor before Control
+	// runs); nil when unavailable. Set once when the stream opens.
+	presentedCertNotAfter *time.Time
+
+	// relayListMu serialises enqueueing a LabelledRelayList with recording its
+	// version, so relayListVersion is the list this stream receives last
+	// (FU-6). relayListSent is false until a list has been enqueued.
+	relayListMu      sync.Mutex
+	relayListSent    bool
+	relayListVersion uint64
+}
+
+// sendRelayList enqueues list and records its version. With onlyIfBehind, a
+// stream whose last enqueued list already has this version is skipped
+// (sent=false, err=nil): connectors re-probe their relays on every push, so a
+// repeat would cost a probe sweep for nothing.
+func (c *connectorStreamClient) sendRelayList(list *pb.LabelledRelayList, onlyIfBehind bool) (sent bool, err error) {
+	c.relayListMu.Lock()
+	defer c.relayListMu.Unlock()
+	if onlyIfBehind && c.relayListSent && c.relayListVersion == list.GetVersion() {
+		return false, nil
+	}
+	if err := c.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	}); err != nil {
+		return false, err
+	}
+	c.relayListSent, c.relayListVersion = true, list.GetVersion()
+	return true, nil
+}
+
+// reEnrollResendInterval throttles the renewal trigger: a connector inside its
+// renewal window gets at most one ReEnroll per stream per interval, so a slow or
+// failing renewal is re-asked without being spammed on every 15 s health report.
+// A successful renewal reconnects the stream with a fresh cert_not_after, which
+// clears the condition.
+const reEnrollResendInterval = 10 * time.Minute
+
+// presentedCertNotAfter returns the NotAfter of the leaf certificate the peer
+// authenticated this stream with, or nil when it is unavailable. It reads the
+// TLS peer state — the certificate StreamSPIFFEInterceptor verified against the
+// workspace CA — never a value the connector reports about itself.
+func presentedCertNotAfter(ctx context.Context) *time.Time {
+	certs, err := peerFromContext(ctx)
+	if err != nil || certs[0].NotAfter.IsZero() {
+		return nil
+	}
+	notAfter := certs[0].NotAfter
+	return &notAfter
+}
+
+// renewalExpiry is the expiry the renewal trigger acts on (Sprint 21 B2): the
+// earlier of the stored cert_not_after and the presented certificate's
+// NotAfter. RenewCert stores the new expiry before the connector has installed
+// anything, so after a lost or rejected response, or a connector crash before
+// it saved the certificate, the DB says "fresh" while the connector still
+// presents its old certificate. Using the earlier one keeps asking that
+// connector to renew. An unknown presented expiry is never taken as proof of
+// a renewal: the trigger then uses the stored expiry alone (pre-B2 behaviour).
+func renewalExpiry(stored, presented *time.Time) *time.Time {
+	switch {
+	case presented == nil:
+		return stored
+	case stored == nil || presented.Before(*stored):
+		return presented
+	default:
+		return stored
+	}
+}
+
+// renewalDue reports whether a connector certificate expiring at certNotAfter is
+// inside the renewal window. Unknown expiry (NULL) or a disabled window never
+// triggers.
+func renewalDue(certNotAfter *time.Time, now time.Time, window time.Duration) bool {
+	if certNotAfter == nil || window <= 0 {
+		return false
+	}
+	return certNotAfter.Sub(now) < window
+}
+
+// maybeSendReEnroll asks the connector to renew (existing ReEnrollSignal; the
+// connector then calls RenewCert) when its certificate is inside
+// CONNECTOR_RENEWAL_WINDOW, throttled per stream. The throttle is recorded only
+// when the message was actually enqueued, so a full mailbox retries on the next
+// health report. Callers invoke it only after the revocation-guarded health
+// UPDATE succeeded, so a revoked connector never receives ReEnroll.
+func (h *EnrollmentHandler) maybeSendReEnroll(client *connectorStreamClient, certNotAfter *time.Time, now time.Time) bool {
+	if !renewalDue(certNotAfter, now, h.Cfg.RenewalWindow) {
+		return false
+	}
+	if !client.lastReEnrollAt.IsZero() && now.Sub(client.lastReEnrollAt) < reEnrollResendInterval {
+		return false
+	}
+	if err := client.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_ReEnroll{ReEnroll: &shieldpb.ReEnrollSignal{}},
+	}); err != nil {
+		log.Printf("control stream: enqueue ReEnroll for connector %s: %v", client.connectorID, err)
+		return false
+	}
+	client.lastReEnrollAt = now
+	log.Printf("control stream: connector %s cert expires %s (inside renewal window %s) — ReEnroll sent",
+		client.connectorID, certNotAfter.UTC().Format(time.RFC3339), h.Cfg.RenewalWindow)
+	return true
 }
 
 // send enqueues a message for the writer goroutine. It never blocks the caller: if
 // the mailbox is full (connector not draining) it fails fast, so a wedged connector
 // can't stall a GraphQL resolver or the reconciler on the socket write. gRPC permits
 // only one concurrent Send, which runWriter (the sole sender) guarantees.
+// agentPolicyMessage is the AgentPolicy for this controller. It is ALWAYS
+// produced: authorization_acks is the authorization-contract capability
+// assertion (design §4.6) and must not depend on unrelated optional settings.
+// shield_renewal_window_secs is 0 ("not set": the connector keeps its default
+// window) unless a shield renewal window of a whole second or more is
+// configured.
+func (h *EnrollmentHandler) agentPolicyMessage() *pb.ConnectorControlMessage {
+	secs := int64(h.Cfg.ShieldRenewalWindow / time.Second)
+	if secs < 0 {
+		secs = 0
+	}
+	return &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_AgentPolicy{
+			AgentPolicy: &pb.AgentPolicy{
+				ShieldRenewalWindowSecs: uint64(secs),
+				AuthorizationAcks:       true,
+			},
+		},
+	}
+}
+
+// sendAgentPolicy enqueues the AgentPolicy on a newly opened Control stream.
+// It is the first message enqueued on the stream, so the capability reaches
+// the connector before any AuthorizationAck (FIFO).
+func (h *EnrollmentHandler) sendAgentPolicy(client *connectorStreamClient) {
+	msg := h.agentPolicyMessage()
+	if msg.GetAgentPolicy().GetShieldRenewalWindowSecs() == 0 {
+		log.Printf("control stream: no shield renewal window configured; connector %s keeps its default", client.connectorID)
+	}
+	if err := client.send(msg); err != nil {
+		log.Printf("control stream: send agent policy to connector %s: %v", client.connectorID, err)
+	}
+}
+
 func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
 	select {
 	case c.outbound <- msg:
@@ -92,10 +285,24 @@ func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
 // exit) or a Send fails (broken stream) — in which case the recv loop also observes
 // the error and tears the connection down. A blocking Send on a wedged connector
 // blocks only this goroutine; callers have already failed fast in send().
+//
+// A queued ConnectorRevoked (terminal) is sent before anything still waiting
+// in outbound; after sending it the writer stops and closes terminalSent so
+// the handler ends the stream with the revoked marker.
 func (c *connectorStreamClient) runWriter(ctx context.Context) {
 	for {
+		// Priority: a pending terminal message goes out first.
+		select {
+		case msg := <-c.terminal:
+			c.sendTerminal(msg)
+			return
+		default:
+		}
 		select {
 		case <-ctx.Done():
+			return
+		case msg := <-c.terminal:
+			c.sendTerminal(msg)
 			return
 		case msg := <-c.outbound:
 			if err := c.stream.Send(msg); err != nil {
@@ -106,16 +313,36 @@ func (c *connectorStreamClient) runWriter(ctx context.Context) {
 	}
 }
 
+// sendTerminal writes the terminal message; on success it signals the handler.
+func (c *connectorStreamClient) sendTerminal(msg *pb.ConnectorControlMessage) {
+	if err := c.stream.Send(msg); err != nil {
+		log.Printf("control stream: send ConnectorRevoked to connector %s failed: %v", c.connectorID, err)
+		return
+	}
+	log.Printf("control stream: ConnectorRevoked sent to connector %s", c.connectorID)
+	if c.terminalSent != nil {
+		close(c.terminalSent)
+	}
+}
+
 func (r *ConnectorRegistry) add(connectorID string, c *connectorStreamClient) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clients[connectorID] = c
 }
 
-func (r *ConnectorRegistry) remove(connectorID string) {
+// removeIfCurrent deletes connectorID's entry only when it is still c (stream
+// identity is the *connectorStreamClient pointer). It reports whether c was the
+// authoritative stream. A stream that was superseded by a newer one for the same
+// connector returns false and leaves the newer registration untouched.
+func (r *ConnectorRegistry) removeIfCurrent(connectorID string, c *connectorStreamClient) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.clients[connectorID] != c {
+		return false
+	}
 	delete(r.clients, connectorID)
+	return true
 }
 
 func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
@@ -150,7 +377,11 @@ func (r *ConnectorRegistry) ClientsForWorkspace(workspaceID string) []*connector
 // bumped only when the desired content actually changes, so the shield's
 // `generation <= last` gate dedups unchanged re-pushes and resolves out-of-order
 // deliveries (see F11). It is NOT wall-clock and not derived in this layer.
-func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*pb.ConnectorControlMessage, error) {
+//
+// It also carries the shield's controller-signed peer list (D21-R a2) when the
+// registry has a signer. A peer list that can't be built is logged and left
+// out: the snapshot still goes, and the shield keeps the peers it has.
+func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, r *ConnectorRegistry, shieldID string) (*pb.ConnectorControlMessage, error) {
 	snap, err := resource.BuildShieldSnapshot(ctx, db, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("buildSnapshotMsg: %w", err)
@@ -167,11 +398,27 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*
 		})
 	}
 
+	peers, err := r.peerListIssuer().build(ctx, db, shieldID)
+	if err != nil {
+		log.Printf("control stream: %v — snapshot for shield %s sent without a peer list", err, shieldID)
+		peers = nil
+	}
+	signedSet, err := r.peerListIssuer().signResourceSet(ctx, db, shieldID, snap.Generation, resources)
+	if err != nil {
+		log.Printf("control stream: %v — snapshot for shield %s sent unsigned: the shield won't apply it", err, shieldID)
+		signedSet = nil
+	}
+
 	return &pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
 			ResourceSnapshots: &pb.ResourceSnapshotBatch{
 				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
-					shieldID: {Resources: resources, Generation: snap.Generation},
+					shieldID: {
+						Resources:         resources,
+						Generation:        snap.Generation,
+						SignedPeerList:    peers,
+						SignedResourceSet: signedSet,
+					},
 				},
 			},
 		},
@@ -192,7 +439,7 @@ func PushSnapshotForShield(ctx context.Context, db *pgxpool.Pool, r *ConnectorRe
 	if c == nil {
 		return
 	}
-	msg, err := buildSnapshotMsg(ctx, db, shieldID)
+	msg, err := buildSnapshotMsg(ctx, db, r, shieldID)
 	if err != nil {
 		log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
 		return
@@ -247,37 +494,109 @@ func (r *ConnectorRegistry) PushResourceInstruction(
 	return nil
 }
 
-// PushScanCommand delivers a ScanCommand to a connected connector.
-// Returns an error if the connector is not currently connected.
-func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.ConnectorControlMessage) error {
+// ErrConnectorNotAvailable answers a scan aimed at a connector that is not
+// connected, doesn't exist or belongs to another workspace, with one user-safe
+// message for all of them (FU-3), so the answer reveals nothing about other
+// workspaces' connectors.
+var ErrConnectorNotAvailable = apperr.UserErrorf("connector not found or not connected")
+
+// PushScanCommand delivers a ScanCommand to workspaceID's connected
+// connector. The stream's tenant was set from the authenticated connector
+// record when it opened (Control), so a caller can only reach its own
+// workspace's connectors; anything else is ErrConnectorNotAvailable and nothing
+// is sent.
+//
+// A refusal is logged with its real reason, for operators only: the client
+// gets the same error either way. The connector ID comes from the client, so
+// it is quoted and truncated (no forged log lines). Scan targets aren't logged.
+func (r *ConnectorRegistry) PushScanCommand(workspaceID, connectorID string, msg *pb.ConnectorControlMessage) error {
 	c := r.get(connectorID)
-	if c == nil {
-		return fmt.Errorf("connector %s is not connected", connectorID)
+	switch {
+	case c == nil:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=not_connected",
+			workspaceID, truncateForLog(connectorID))
+		return ErrConnectorNotAvailable
+	case c.tenantID != workspaceID:
+		log.Printf("security: scan dispatch refused: workspace=%s connector=%q reason=foreign_workspace connector_workspace=%s",
+			workspaceID, truncateForLog(connectorID), c.tenantID)
+		return ErrConnectorNotAvailable
 	}
 	return c.send(msg)
 }
 
+// truncateForLog bounds a client-supplied value before it is logged.
+func truncateForLog(s string) string {
+	const max = 64
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}
+
 // BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
 // connected connector. A wedged connector whose send queue is full is logged
-// and skipped — the next broadcast (or the C4 push at reconnect) will catch
-// it up. The pool change that triggered this broadcast is the source of
-// truth in the relay store; if delivery to a connector is lost it will sync
-// when its stream re-opens.
+// and skipped — SyncRelayList (FU-6) or the C4 push at reconnect will catch it
+// up. The pool change that triggered this broadcast is the source of truth in
+// the relay store.
 func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
-	msg := &pb.ConnectorControlMessage{
-		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	for _, c := range r.relayListClients() {
+		if _, err := c.sendRelayList(list, false); err != nil {
+			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
+		}
 	}
+}
+
+// SyncRelayList (FU-6) sends list only to the connected streams whose last
+// enqueued list has a different version: one that missed a broadcast (failed
+// build, full send queue) or received two broadcasts out of order. Streams
+// already on this version get nothing. Returns how many streams were sent it.
+func (r *ConnectorRegistry) SyncRelayList(list *pb.LabelledRelayList) int {
+	n := 0
+	for _, c := range r.relayListClients() {
+		sent, err := c.sendRelayList(list, true)
+		if err != nil {
+			log.Printf("control stream: sync labelled relay list to connector %s: %v", c.connectorID, err)
+			continue
+		}
+		if sent {
+			n++
+		}
+	}
+	return n
+}
+
+// RunRelayListSync calls SyncRelayList with a freshly built list every
+// interval until ctx ends, so a relay list change that a post-commit broadcast
+// failed to deliver (drain, revoke, eviction) reaches every connected
+// connector within one interval.
+func (r *ConnectorRegistry) RunRelayListSync(ctx context.Context, src LabelledRelayListSource, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			list, err := src.BuildLabelledRelayList(ctx)
+			if err != nil {
+				log.Printf("relay list sync: build list: %v", err)
+				continue
+			}
+			if n := r.SyncRelayList(list); n > 0 {
+				log.Printf("relay list sync: sent list version %d to %d connector(s) that were behind", list.GetVersion(), n)
+			}
+		}
+	}
+}
+
+func (r *ConnectorRegistry) relayListClients() []*connectorStreamClient {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	clients := make([]*connectorStreamClient, 0, len(r.clients))
 	for _, c := range r.clients {
 		clients = append(clients, c)
 	}
-	r.mu.RUnlock()
-	for _, c := range clients {
-		if err := c.send(msg); err != nil {
-			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
-		}
-	}
+	return clients
 }
 
 // Control implements ConnectorService.Control — the persistent bidirectional stream.
@@ -292,25 +611,57 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Errorf(codes.PermissionDenied, "expected role %q, got %q", appmeta.SPIFFERoleConnector, role)
 	}
 
-	var connStatus, tenantID string
-	if err := h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id FROM connectors WHERE id = $1 AND trust_domain = $2`,
-		connectorID, trustDomain,
-	).Scan(&connStatus, &tenantID); err != nil {
-		return status.Errorf(codes.NotFound, "connector not found: %v", err)
+	// Authoritative lookup, split three ways (design §4.5 correction 1):
+	// absent → NotFound + unknown marker; revoked → PermissionDenied + revoked
+	// marker; any query failure → Unavailable, no marker (a DB failure is never
+	// reported as NotFound or as a terminal state).
+	state, rec, err := h.lookupConnector(ctx, connectorID, trustDomain)
+	if err != nil {
+		log.Printf("control stream: connector %s state lookup failed (state undetermined, no marker): %v", connectorID, err)
+		return rejectStream(stream, rejectUnavailable())
 	}
-	if connStatus == "revoked" {
-		return status.Error(codes.PermissionDenied, "connector is revoked")
+	if state != connectorStateAuthorized {
+		rej := rejectionFor(state, nil)
+		log.Printf("control stream: connector %s refused at open: %s", connectorID, describeRejection(rej))
+		return rejectStream(stream, rej)
 	}
+	tenantID := rec.tenantID
 
 	client := &connectorStreamClient{
-		stream:      stream,
-		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
-		connectorID: connectorID,
-		tenantID:    tenantID,
+		stream:                stream,
+		outbound:              make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID:           connectorID,
+		tenantID:              tenantID,
+		trustDomain:           trustDomain,
+		terminal:              make(chan *pb.ConnectorControlMessage, 1),
+		terminalSent:          make(chan struct{}),
+		presentedCertNotAfter: presentedCertNotAfter(ctx),
 	}
-	h.Registry.add(connectorID, client)
-	defer h.Registry.remove(connectorID)
+	if client.presentedCertNotAfter == nil {
+		log.Printf("control stream: connector %s: presented certificate expiry unavailable; renewal trigger uses the stored cert_not_after only", connectorID)
+	}
+
+	// Activation UPDATE + registration happen atomically under lifecycleMu, so
+	// an older stream for this connector closing concurrently either retires
+	// before this stream exists (a real gap) or finds it is no longer current.
+	becameActive, rej := h.activateStream(ctx, client)
+	if rej != nil {
+		return rejectStream(stream, rej)
+	}
+	if becameActive {
+		if h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+			}
+		}
+		// The connector now appears in the transport snapshot (with its tunnel
+		// address), so refresh the transport plane too — not just the ACL.
+		if h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after connector active connector=%s: %v", connectorID, err)
+			}
+		}
+	}
 
 	// A single writer goroutine owns stream.Send; every send goes through
 	// client.send (enqueue). This decouples resolvers and the reconciler from the
@@ -318,56 +669,28 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	// unblocks when ctx is cancelled (handler returns) or the Send fails.
 	go client.runWriter(ctx)
 
-	var becameActive bool
-	if err := h.Pool.QueryRow(ctx,
-		`WITH current AS (
-			     SELECT status
-			       FROM connectors
-			      WHERE id = $1
-			   ),
-			   updated AS (
-			     UPDATE connectors
-			        SET status = 'active',
-			            last_heartbeat_at = NOW(),
-			            updated_at = NOW()
-			      WHERE id = $1
-			      RETURNING id
-			   )
-			   SELECT current.status IS DISTINCT FROM 'active'
-			     FROM current, updated`,
-		connectorID,
-	).Scan(&becameActive); err != nil {
-		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
-	} else if becameActive && h.PolicyNotifier != nil {
-		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
-			log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
-		}
-	}
 	defer func() {
 		// Use background context — stream context is already cancelled at this point.
 		bg := context.Background()
-		var becameDisconnected bool
-		if err := h.Pool.QueryRow(bg,
-			`WITH current AS (
-				     SELECT status
-				       FROM connectors
-				      WHERE id = $1
-				   ),
-				   updated AS (
-				     UPDATE connectors
-				        SET status = 'disconnected',
-				            updated_at = NOW()
-				      WHERE id = $1
-				      RETURNING id
-				   )
-				   SELECT current.status IS DISTINCT FROM 'disconnected'
-				     FROM current, updated`,
-			connectorID,
-		).Scan(&becameDisconnected); err != nil {
-			log.Printf("control stream: mark connector %s disconnected: %v", connectorID, err)
-		} else if becameDisconnected && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
-				log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+		current, becameDisconnected := h.retireStream(bg, client)
+		if !current {
+			// Superseded by a newer stream for the same connector (e.g. a
+			// make-before-break certificate renewal): the newer stream owns the
+			// registry entry and the connector's status — leave both alone.
+			log.Printf("control stream: connector %s superseded stream closed (newer stream is authoritative)", connectorID)
+			return
+		}
+		if becameDisconnected {
+			if h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
+					log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+				}
+			}
+			// The connector drops out of the transport snapshot too.
+			if h.TransportNotifier != nil {
+				if err := h.TransportNotifier.NotifyTopologyChange(bg, tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after connector disconnect connector=%s: %v", connectorID, err)
+				}
 			}
 		}
 		log.Printf("control stream: connector %s disconnected", connectorID)
@@ -375,9 +698,14 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 
 	log.Printf("control stream: connector %s connected", connectorID)
 
-	// Flush gRPC headers by enqueuing an initial Ping (the writer sends it first,
-	// resolving the client-side .control().await immediately). Enqueue can't fail on
-	// a fresh empty mailbox; if it ever did, the recv loop would surface the break.
+	// AgentPolicy is the FIRST message on every stream: it carries the
+	// authorization-contract capability, which the connector requires before
+	// it accepts any AuthorizationAck (design §4.6). Enqueue can't fail on a
+	// fresh empty mailbox; it also flushes the gRPC headers, resolving the
+	// client-side .control().await.
+	h.sendAgentPolicy(client)
+
+	// Initial Ping (liveness/diagnostic only; never authorization).
 	if err := client.send(&pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_Ping{
 			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
@@ -386,17 +714,27 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
 	}
 
+	// Certificate audit bug 3: the authoritative revoked-shield list. The
+	// connector accepts no shields until it has applied it, so if it cannot be
+	// sent the stream is closed and the connector retries, rather than staying
+	// connected without it.
+	if err := h.sendShieldRevocations(ctx, client); err != nil {
+		log.Printf("control stream: send shield revocation list to connector %s: %v", connectorID, err)
+		return status.Errorf(codes.Unavailable, "shield revocation list unavailable: %v", err)
+	}
 	// ADR-016 C4: push the current eligible relay pool so the connector can
 	// pick a Tier 1 relay at startup without waiting for the next pool change.
 	if h.RelayListSrc != nil {
 		if list, err := h.RelayListSrc.BuildLabelledRelayList(ctx); err != nil {
 			log.Printf("control stream: build labelled relay list for connector %s: %v", connectorID, err)
-		} else if err := client.send(&pb.ConnectorControlMessage{
-			Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
-		}); err != nil {
+		} else if _, err := client.sendRelayList(list, false); err != nil {
 			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
 		}
 	}
+
+	// Note: the TransportSnapshot is NOT pushed here. The client is its sole
+	// consumer and fetches it via GetTransportSnapshot (poll + relay-failure
+	// re-poll, Phase C); connectors do not consume it.
 
 	// Deliver any instructions that queued while the connector was offline.
 	log.Printf("control stream: pushing pending instructions for connector %s", connectorID)
@@ -405,16 +743,57 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}
 	log.Printf("control stream: entering message loop for connector %s", connectorID)
 
+	// Recv runs in its own goroutine (grpc-go allows one RecvMsg goroutine
+	// concurrently with the writer's SendMsg) so the handler can also end the
+	// stream when the writer has delivered ConnectorRevoked. Messages are
+	// still processed one at a time, in order, by this goroutine.
+	type recvResult struct {
+		msg *pb.ConnectorControlMessage
+		err error
+	}
+	recvCh := make(chan recvResult, 1)
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			select {
+			case recvCh <- recvResult{msg: msg, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
 		log.Printf("control stream: waiting for message from connector %s", connectorID)
-		msg, err := stream.Recv()
-		if err == io.EOF {
-			log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
-			return nil
-		}
-		if err != nil {
-			log.Printf("control stream: connector %s stream error: %v", connectorID, err)
-			return err
+		var msg *pb.ConnectorControlMessage
+		select {
+		case <-client.terminalSent:
+			// ConnectorRevoked was written to this stream (SignalRevoked).
+			// End it with the authoritative revoked marker.
+			log.Printf("control stream: connector %s revoked — ConnectorRevoked delivered, closing control stream", connectorID)
+			return rejectStream(stream, rejectRevoked())
+		case <-ctx.Done():
+			// The stream is gone (connection closed, or the server stopping).
+			// The Recv goroutine may have returned without delivering its
+			// error, since both of its select cases were ready at once; waiting
+			// on recvCh alone then never ended, which held GracefulStop and
+			// deadlocked Stop until the process was killed (live E2E run
+			// 2026-10-30, O-8).
+			log.Printf("control stream: connector %s stream context ended: %v", connectorID, ctx.Err())
+			return ctx.Err()
+		case r := <-recvCh:
+			if r.err == io.EOF {
+				log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
+				return nil
+			}
+			if r.err != nil {
+				log.Printf("control stream: connector %s stream error: %v", connectorID, r.err)
+				return r.err
+			}
+			msg = r.msg
 		}
 
 		log.Printf("control stream: received message from connector %s, body type: %T", connectorID, msg.Body)
@@ -423,7 +802,13 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case nil:
 			log.Printf("control stream: connector %s body is NIL", connectorID)
 		case *pb.ConnectorControlMessage_ConnectorHealth:
-			h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
+			if rej := h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth); rej != nil {
+				// Revoked / unknown (marked), state undetermined
+				// (Unavailable, unmarked) or contract missing
+				// (FailedPrecondition, unmarked): tear down the stream.
+				log.Printf("control stream: connector %s health refused, closing control stream: %s", connectorID, describeRejection(rej))
+				return rejectStream(stream, rej)
+			}
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
@@ -451,6 +836,85 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}
 }
 
+// activateStream makes client the authoritative Control stream for its
+// connector: under the registry's lifecycleMu it marks the connector active
+// (revocation-guarded) and registers client. It reports whether the connector
+// transitioned into 'active' (the caller notifies, after the lock is
+// released). A revoked or deleted connector is never registered: the guarded
+// UPDATE matching nothing is classified by an authoritative follow-up lookup
+// into revoked (marker), unknown (marker) or undetermined (Unavailable, no
+// marker). A non-revocation DB error on the UPDATE itself is logged and the
+// stream is still registered — unchanged; it confers no authorization, since
+// only an AuthorizationAck after a successful guarded health UPDATE does.
+func (h *EnrollmentHandler) activateStream(ctx context.Context, client *connectorStreamClient) (bool, *authzRejection) {
+	h.Registry.lifecycleMu.Lock()
+	defer h.Registry.lifecycleMu.Unlock()
+
+	var becameActive bool
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (SELECT status FROM connectors WHERE id = $1),
+		     updated AS (
+		       UPDATE connectors
+		          SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW()
+		        WHERE id = $1
+		          AND status <> 'revoked'
+		          AND revoked_at IS NULL
+		       RETURNING id)
+		SELECT current.status IS DISTINCT FROM 'active' FROM current, updated;`,
+		client.connectorID,
+	).Scan(&becameActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, h.classifyRefusal(ctx, client, "activation")
+		}
+		log.Printf("control stream: mark connector %s active: %v", client.connectorID, err)
+		becameActive = false
+	}
+	h.Registry.add(client.connectorID, client)
+	h.Registry.trackLive(client.connectorID, client)
+	return becameActive, nil
+}
+
+// retireStream runs when client's Control stream ends. Under lifecycleMu it
+// checks whether client is still the authoritative stream; only then does it
+// remove the registry entry and mark the connector disconnected (only an
+// 'active' row transitions, so 'revoked' stays revoked). current=false means a
+// newer stream replaced client and nothing was changed. becameDisconnected
+// tells the caller to notify, after the lock is released.
+func (h *EnrollmentHandler) retireStream(ctx context.Context, client *connectorStreamClient) (current, becameDisconnected bool) {
+	h.Registry.lifecycleMu.Lock()
+	defer h.Registry.lifecycleMu.Unlock()
+
+	// The stream is ending: it can no longer receive ConnectorRevoked.
+	h.Registry.untrackLive(client.connectorID, client)
+	if !h.Registry.removeIfCurrent(client.connectorID, client) {
+		return false, false
+	}
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+			     SELECT status
+			       FROM connectors
+			      WHERE id = $1
+			   ),
+			   updated AS (
+			     UPDATE connectors
+			        SET status = 'disconnected',
+			            updated_at = NOW()
+			      WHERE id = $1
+			        AND status = 'active'
+			      RETURNING id
+			   )
+			   SELECT current.status IS DISTINCT FROM 'disconnected'
+			     FROM current, updated`,
+		client.connectorID,
+	).Scan(&becameDisconnected); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("control stream: mark connector %s disconnected: %v", client.connectorID, err)
+		}
+		return true, false
+	}
+	return true, becameDisconnected
+}
+
 // pushPendingInstructions sends any DB-pending instructions to a freshly connected connector.
 func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client *connectorStreamClient) error {
 	rows, err := h.Pool.Query(ctx,
@@ -471,7 +935,7 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 		// ADR-004 Phase 2: refresh this shield's cached desired-state snapshot.
 		// Sent for EVERY shield (even with nothing pending) so a shield that
 		// reboots later gets re-protected from the connector's cache.
-		if msg, err := buildSnapshotMsg(ctx, h.Pool, shieldID); err == nil {
+		if msg, err := buildSnapshotMsg(ctx, h.Pool, h.Registry, shieldID); err == nil {
 			if err := client.send(msg); err != nil {
 				log.Printf("control stream: send snapshot for shield %s: %v", shieldID, err)
 			}
@@ -525,10 +989,32 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 	return rows.Err()
 }
 
-func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
+// handleConnectorHealth processes an authorization-bearing heartbeat. It
+// returns nil to keep the stream, or the rejection the caller must end the
+// stream with.
+//
+// Authorization (design §4.3, D9): AuthorizationAck{heartbeat_seq} is enqueued
+// LAST and only when (1) heartbeat_seq ≥ 1, (2) the revocation-guarded UPDATE
+// returned a row (the connector is authorized now), and (3) any required ACL
+// push for this report was enqueued ahead of it on this FIFO stream. Every
+// other path sends no ack:
+//   - heartbeat_seq = 0 → FailedPrecondition, no marker, no DB write;
+//   - guarded UPDATE matched nothing (ErrNoRows conflates revoked/deleted) →
+//     authoritative follow-up lookup → revoked / unknown marker, or
+//     Unavailable (no marker) when the lookup fails;
+//   - any other DB error → stream kept, no ACL push, no ack; the next report
+//     retries;
+//   - ACL push failed, or the stream already carries ConnectorRevoked → no ack.
+func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) *authzRejection {
 	connectorID := client.connectorID
-	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
+	seq := r.GetHeartbeatSeq()
+	log.Printf("control stream: received health report connector=%s seq=%d version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, seq, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
+	if seq == 0 {
+		log.Printf("control stream: connector %s health report has heartbeat_seq=0 (no authorization contract) — not acknowledged", connectorID)
+		return rejectMissingSeq()
+	}
 	var connectorChanged bool
+	var certNotAfter *time.Time
 	err := h.Pool.QueryRow(ctx,
 		`WITH current AS (
 		     SELECT status, COALESCE(lan_addr, '') AS lan_addr
@@ -545,18 +1031,46 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		            last_heartbeat_at = NOW(),
 		            updated_at        = NOW()
 		      WHERE id = $5
-		      RETURNING id
+		        AND status NOT IN ('revoked', 'deleted')
+		        AND revoked_at IS NULL
+		      RETURNING id, cert_not_after
 		   )
 		   SELECT current.status IS DISTINCT FROM 'active'
-		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), '')
+		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), ''),
+		          updated.cert_not_after
 		     FROM current, updated`,
-		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
-	if err != nil {
-		log.Printf("control stream: update connector health %s: %v", connectorID, err)
-	} else if connectorChanged && h.PolicyNotifier != nil {
-		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-			log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged, &certNotAfter)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Guarded UPDATE matched nothing → revoked or deleted while the stream
+		// was open (or undetermined). Classify authoritatively; no ack.
+		return h.classifyRefusal(ctx, client, "health")
+	}
+	dbOK := err == nil
+	if !dbOK {
+		log.Printf("control stream: update connector health %s: %v — authorization undetermined: no ACL push, no AuthorizationAck for seq=%d", connectorID, err, seq)
+	} else if connectorChanged {
+		if h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+			}
 		}
+		// connectorChanged fires on a status or lan_addr change; lan_addr is the
+		// connector's tunnel address, which lives in the transport snapshot too —
+		// so refresh the transport plane as well (Q3: avoid a stale tunnel addr).
+		if h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after connector health connector=%s: %v", connectorID, err)
+			}
+		}
+		// D21-R (a2): a Connector that came back or changed address changes
+		// its network's signed peer lists. In the background: this ack must
+		// not wait for them.
+		pushPeerListsInBackground(h.Pool, h.Registry, connectorID)
+	}
+	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
+	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
+	if dbOK {
+		h.maybeSendReEnroll(client, renewalExpiry(certNotAfter, client.presentedCertNotAfter), time.Now())
 	}
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
 	// connector claims to be attached; empty means detached. The UPSERT returns
@@ -568,9 +1082,11 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
 			if err != nil {
 				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
-			} else if changed && h.PolicyNotifier != nil {
-				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-					log.Printf("control stream: notify policy change after relay placement connector=%s: %v", connectorID, err)
+			} else if changed && h.TransportNotifier != nil {
+				// Relay placement changed → transport-plane topology change for
+				// this connector only. Never the ACL (Track B invariant).
+				if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after relay placement connector=%s: %v", connectorID, err)
 				}
 			}
 		} else {
@@ -578,17 +1094,29 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
 			if err != nil {
 				log.Printf("control stream: delete relay placement from heartbeat connector=%s: %v", connectorID, err)
-			} else if changed && h.PolicyNotifier != nil {
-				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-					log.Printf("control stream: notify policy change after relay detach connector=%s: %v", connectorID, err)
+			} else if changed && h.TransportNotifier != nil {
+				if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after relay detach connector=%s: %v", connectorID, err)
 				}
 			}
 		}
 	}
 
-	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
-		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	if !dbOK {
+		return nil
 	}
+	// D9: the ACL push for this report is enqueued BEFORE the ack. A failed
+	// push (compile error, full mailbox) withholds the ack.
+	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
+		log.Printf("control stream: push ACL snapshot to connector %s: %v — AuthorizationAck withheld for seq=%d", connectorID, err, seq)
+		return nil
+	}
+	if err := client.sendAuthorizationAck(seq); err != nil {
+		log.Printf("control stream: AuthorizationAck seq=%d to connector %s not enqueued: %v", seq, connectorID, err)
+		return nil
+	}
+	log.Printf("control stream: AuthorizationAck enqueued connector=%s seq=%d", connectorID, seq)
+	return nil
 }
 
 func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {
@@ -619,9 +1147,9 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
 			return
 		}
-		if changed && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-				log.Printf("control stream: notify policy change after relay event connector=%s: %v", connectorID, err)
+		if changed && h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after relay event connector=%s: %v", connectorID, err)
 			}
 		}
 	case "disconnected":
@@ -630,9 +1158,9 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			log.Printf("control stream: delete relay placement from event connector=%s: %v", connectorID, err)
 			return
 		}
-		if changed && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-				log.Printf("control stream: notify policy change after relay detach event connector=%s: %v", connectorID, err)
+		if changed && h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after relay detach event connector=%s: %v", connectorID, err)
 			}
 		}
 	default:
@@ -641,7 +1169,7 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 }
 
 func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient, connectorVersion uint64) error {
-	if h.PolicyStore == nil || h.PolicyCache == nil || h.PolicyNotifier == nil {
+	if h.PolicyStore == nil || h.PolicyCache == nil || h.PostureStore == nil || h.PolicyNotifier == nil {
 		return nil
 	}
 
@@ -652,8 +1180,8 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	if !ok || pn == nil {
 		return nil
 	}
-	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, h.PolicyStore, pn, client.tenantID)
+	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*policy.CompiledACL, error) {
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PostureStore, pn, client.tenantID)
 	})
 	if err != nil {
 		return fmt.Errorf("compile ACL snapshot: %w", err)
@@ -676,9 +1204,9 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 }
 
 func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *connectorStreamClient, batch *pb.ShieldStatusBatch) {
-	var anyConnectorChanged bool
+	var anyConnectorChanged, anyLanIPChanged bool
 	for _, s := range batch.Shields {
-		connectorChanged, err := h.ShieldSvc.UpdateShieldHealth(
+		connectorChanged, lanIPChanged, err := h.ShieldSvc.UpdateShieldHealth(
 			ctx, s.ShieldId, client.connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
 		)
 		if err != nil {
@@ -688,34 +1216,63 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 		if connectorChanged {
 			anyConnectorChanged = true
 			log.Printf("control stream: shield %s moved to connector %s", s.ShieldId, client.connectorID)
+			// D21-R: the new Connector has no snapshot cached for this shield.
+			// Send one so the shield gets this Connector's generation baseline
+			// (a1) and a current signed peer list (a2) now, not on a later
+			// resource change. A LAN-IP change below pushes one anyway. In the
+			// background, off this Control stream's recv loop.
+			if h.Registry != nil && !lanIPChanged {
+				pushSnapshotInBackground(h.Pool, h.Registry, client.connectorID, s.ShieldId)
+			}
+		}
+		if lanIPChanged {
+			anyLanIPChanged = true
+			log.Printf("control stream: shield %s LAN IP changed to %q — re-synced resource hosts", s.ShieldId, s.LanIp)
+			// Sprint 20 Fix 18: the re-sync rewrote resources.host, so the shield
+			// must get the new host (its acks echo the rule it enforces, and an
+			// ack for the old host is ignored as stale).
+			if h.Registry != nil {
+				PushSnapshotForShield(ctx, h.Pool, h.Registry, client.connectorID, s.ShieldId)
+			}
 		}
 	}
-	if anyConnectorChanged && h.PolicyNotifier != nil {
+	// Either a connector move or a LAN-IP change alters the compiled ACL
+	// (connector move → routing; LAN-IP change → resource.host was re-synced), so
+	// bump the workspace ACL version once for the batch. The shield gets the new
+	// host from the snapshot pushed above.
+	if (anyConnectorChanged || anyLanIPChanged) && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-			log.Printf("control stream: notify after shield connector move tenant=%s: %v", client.tenantID, err)
+			log.Printf("control stream: notify after shield status change tenant=%s: %v", client.tenantID, err)
 		}
 	}
 }
 
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
-	var anyReaped bool
+	var anyChanged bool
 	for _, ack := range batch.Acks {
-		reaped, err := resource.RecordAck(
-			ctx, h.Pool, tenantID,
-			ack.ResourceId, ack.Status, ack.Error,
-			ack.VerifiedAt,
-		)
+		changed, err := resource.RecordAck(ctx, h.Pool, tenantID, resource.Ack{
+			ResourceID: ack.ResourceId,
+			Status:     ack.Status,
+			Error:      ack.Error,
+			VerifiedAt: ack.VerifiedAt,
+			ShieldID:   ack.ShieldId,
+			Host:       ack.Host,
+			Protocol:   ack.Protocol,
+			PortFrom:   int(ack.PortFrom),
+			PortTo:     int(ack.PortTo),
+		})
 		if err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 			continue
 		}
-		if reaped {
-			anyReaped = true
+		if changed {
+			anyChanged = true
 		}
 	}
-	// A reap physically removed a tombstoned resource from the ACL compiler's
-	// output — invalidate the workspace ACL snapshot once for the whole batch.
-	if anyReaped && h.PolicyNotifier != nil {
+	// An ack changed the ACL compiler's output (a tombstone reaped, or a resource
+	// re-routed between connector and shield, e.g. an unprotect completing) —
+	// invalidate the workspace ACL snapshot once for the whole batch (Fix 02).
+	if anyChanged && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
 			log.Printf("control stream: notify after reap tenant=%s: %v", tenantID, err)
 		}
@@ -724,13 +1281,21 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 
 // StreamSPIFFEInterceptor wraps the stream SPIFFE identity injection for Control RPCs.
 // The gRPC server must register this as a StreamInterceptor alongside the UnaryInterceptor.
-func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.StreamServerInterceptor {
+func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore, revChecker *RelayRevocationChecker) grpc.StreamServerInterceptor {
 	return func(
 		srv any,
 		ss grpc.ServerStream,
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
+		// ClientService streams (WatchChanges, FU-8) authenticate like its
+		// unary calls: a JWT plus device_id inside the request, checked by the
+		// handler. The device has no SPIFFE certificate on this connection.
+		// Mirrors UnarySPIFFEInterceptor's ClientService skip.
+		if strings.HasPrefix(info.FullMethod, "/client.v1.ClientService/") {
+			return handler(srv, ss)
+		}
+
 		ctx := ss.Context()
 
 		p, err := peerFromContext(ctx)
@@ -756,6 +1321,14 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		if role == appmeta.SPIFFERoleRelay {
 			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+			// PENDING-02: reject a revoked relay. Fail closed if revocation state
+			// is unavailable.
+			if revChecker == nil || !revChecker.Ready() {
+				return status.Error(codes.Unavailable, "relay revocation state unavailable")
+			}
+			if revChecker.IsRevoked(leaf.SerialNumber.Text(16)) {
+				return status.Error(codes.PermissionDenied, "relay certificate revoked")
 			}
 		}
 

@@ -7,21 +7,27 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/yourorg/ztna/controller/internal/models"
 )
 
 type ClientDevice struct {
-	ID           string  `json:"id"`
-	UserID       string  `json:"userId"`
-	Name         string  `json:"name"`
-	CommonName   string  `json:"commonName"`
-	Os           string  `json:"os"`
-	SpiffeID     *string `json:"spiffeId,omitempty"`
-	CertNotAfter *string `json:"certNotAfter,omitempty"`
-	LastSeenAt   *string `json:"lastSeenAt,omitempty"`
-	CreatedAt    string  `json:"createdAt"`
-	RevokedAt    *string `json:"revokedAt,omitempty"`
+	ID              string  `json:"id"`
+	UserID          string  `json:"userId"`
+	Name            string  `json:"name"`
+	CommonName      string  `json:"commonName"`
+	Os              string  `json:"os"`
+	SpiffeID        *string `json:"spiffeId,omitempty"`
+	CertNotAfter    *string `json:"certNotAfter,omitempty"`
+	LastSeenAt      *string `json:"lastSeenAt,omitempty"`
+	CreatedAt       string  `json:"createdAt"`
+	RevokedAt       *string `json:"revokedAt,omitempty"`
+	ApprovedAt      *string `json:"approvedAt,omitempty"`
+	ApprovedByEmail *string `json:"approvedByEmail,omitempty"`
+	ObservedCountry *string `json:"observedCountry,omitempty"`
+	ObservedNetwork *string `json:"observedNetwork,omitempty"`
+	ObservedAt      *string `json:"observedAt,omitempty"`
 }
 
 type Connector struct {
@@ -50,6 +56,27 @@ type ConnectorToken struct {
 	ConnectorID string `json:"connectorId"`
 }
 
+type CountryRule struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
+}
+
+type CountryRuleInput struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
+}
+
+type CreateIdpConnectionInput struct {
+	Provider     string  `json:"provider"`
+	DisplayName  string  `json:"displayName"`
+	Issuer       string  `json:"issuer"`
+	ClientID     string  `json:"clientId"`
+	ClientSecret string  `json:"clientSecret"`
+	DiscoveryURL *string `json:"discoveryUrl,omitempty"`
+	Scopes       *string `json:"scopes,omitempty"`
+	DomainHint   *string `json:"domainHint,omitempty"`
+}
+
 type CreateResourceInput struct {
 	RemoteNetworkID string  `json:"remoteNetworkId"`
 	Name            string  `json:"name"`
@@ -58,6 +85,42 @@ type CreateResourceInput struct {
 	Protocol        string  `json:"protocol"`
 	PortFrom        int     `json:"portFrom"`
 	PortTo          int     `json:"portTo"`
+}
+
+type DevicePostureObservation struct {
+	CheckID        string             `json:"checkId"`
+	Status         PostureCheckStatus `json:"status"`
+	ObservedAt     string             `json:"observedAt"`
+	CollectorError *string            `json:"collectorError,omitempty"`
+}
+
+type DevicePostureVisibility struct {
+	DeviceID         string                      `json:"deviceId"`
+	DeviceName       string                      `json:"deviceName"`
+	ProfileID        string                      `json:"profileId"`
+	Satisfied        bool                        `json:"satisfied"`
+	Stale            bool                        `json:"stale"`
+	FailureReason    *string                     `json:"failureReason,omitempty"`
+	EvaluatedAt      string                      `json:"evaluatedAt"`
+	ReportReceivedAt *string                     `json:"reportReceivedAt,omitempty"`
+	ReportAgeSeconds *int                        `json:"reportAgeSeconds,omitempty"`
+	Observations     []*DevicePostureObservation `json:"observations"`
+}
+
+type DeviceProfile struct {
+	ID             string                      `json:"id"`
+	Name           string                      `json:"name"`
+	Mode           DeviceProfileMode           `json:"mode"`
+	ManualTrust    bool                        `json:"manualTrust"`
+	Requirements   []*DeviceProfileRequirement `json:"requirements"`
+	BoundResources []*Resource                 `json:"boundResources"`
+}
+
+type DeviceProfileRequirement struct {
+	ID               string       `json:"id"`
+	CheckID          string       `json:"checkId"`
+	AllowUnsupported bool         `json:"allowUnsupported"`
+	Countries        *CountryRule `json:"countries,omitempty"`
 }
 
 type DiscoveredService struct {
@@ -71,13 +134,25 @@ type DiscoveredService struct {
 }
 
 type Group struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	Description *string        `json:"description,omitempty"`
-	Members     []*models.User `json:"members"`
-	Resources   []*Resource    `json:"resources"`
-	CreatedAt   string         `json:"createdAt"`
-	UpdatedAt   string         `json:"updatedAt"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Description  *string        `json:"description,omitempty"`
+	Members      []*models.User `json:"members"`
+	Resources    []*Resource    `json:"resources"`
+	CreatedAt    string         `json:"createdAt"`
+	UpdatedAt    string         `json:"updatedAt"`
+	Origin       string         `json:"origin"`
+	ExternalID   *string        `json:"externalId,omitempty"`
+	ConnectionID *string        `json:"connectionId,omitempty"`
+}
+
+type IdpTestResult struct {
+	Ok                 bool    `json:"ok"`
+	Issuer             *string `json:"issuer,omitempty"`
+	Message            *string `json:"message,omitempty"`
+	MappingState       string  `json:"mappingState"`
+	ScimEnabledAllowed bool    `json:"scimEnabledAllowed"`
+	Reason             *string `json:"reason,omitempty"`
 }
 
 type Invitation struct {
@@ -89,6 +164,20 @@ type Invitation struct {
 }
 
 type Mutation struct {
+}
+
+type PostureCheckDescriptor struct {
+	ID                         string `json:"id"`
+	Label                      string `json:"label"`
+	Platform                   string `json:"platform"`
+	AllowUnsupportedMeaningful bool   `json:"allowUnsupportedMeaningful"`
+}
+
+type PublicIdpConnection struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	DisplayName string `json:"displayName"`
+	Tier        string `json:"tier"`
 }
 
 type Query struct {
@@ -133,6 +222,51 @@ type ScanResult struct {
 	FirstSeen     string `json:"firstSeen"`
 }
 
+type ScimConflict struct {
+	ID                   string     `json:"id"`
+	WorkspaceID          string     `json:"workspaceId"`
+	ConnectionID         string     `json:"connectionId"`
+	UserID               string     `json:"userId"`
+	CanonicalKey         string     `json:"canonicalKey"`
+	ScimExternalID       *string    `json:"scimExternalId,omitempty"`
+	ScimUsernameSnapshot *string    `json:"scimUsernameSnapshot,omitempty"`
+	ScimEmailSnapshot    *string    `json:"scimEmailSnapshot,omitempty"`
+	Status               string     `json:"status"`
+	ResolutionReason     *string    `json:"resolutionReason,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	ResolvedAt           *time.Time `json:"resolvedAt,omitempty"`
+}
+
+type ScimProviderProfile struct {
+	Key                    string   `json:"key"`
+	DisplayName            string   `json:"displayName"`
+	DefaultSubjectClaim    string   `json:"defaultSubjectClaim"`
+	DefaultScimIdentifier  string   `json:"defaultScimIdentifier"`
+	SupportsCreate         bool     `json:"supportsCreate"`
+	SupportsDelete         bool     `json:"supportsDelete"`
+	SupportsPatch          bool     `json:"supportsPatch"`
+	PaginationOk           bool     `json:"paginationOk"`
+	SupportsProbeLifecycle bool     `json:"supportsProbeLifecycle"`
+	Quirks                 []string `json:"quirks"`
+}
+
+type ScimToken struct {
+	ID           string     `json:"id"`
+	WorkspaceID  string     `json:"workspaceId"`
+	ConnectionID string     `json:"connectionId"`
+	Label        *string    `json:"label,omitempty"`
+	CreatedBy    *string    `json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	LastUsedAt   *time.Time `json:"lastUsedAt,omitempty"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
+}
+
+type ScimTokenMintResult struct {
+	Token     *ScimToken `json:"token"`
+	Plaintext string     `json:"plaintext"`
+}
+
 type Shield struct {
 	ID              string       `json:"id"`
 	Name            string       `json:"name"`
@@ -152,13 +286,48 @@ type ShieldToken struct {
 	ShieldID string `json:"shieldId"`
 }
 
+type UpdateIdpConnectionInput struct {
+	DisplayName  *string `json:"displayName,omitempty"`
+	ClientID     *string `json:"clientId,omitempty"`
+	ClientSecret *string `json:"clientSecret,omitempty"`
+	DiscoveryURL *string `json:"discoveryUrl,omitempty"`
+	Scopes       *string `json:"scopes,omitempty"`
+	DomainHint   *string `json:"domainHint,omitempty"`
+}
+
 type UpdateResourceInput struct {
 	RemoteNetworkID *string `json:"remoteNetworkId,omitempty"`
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
+	Host            *string `json:"host,omitempty"`
 	Protocol        *string `json:"protocol,omitempty"`
 	PortFrom        *int    `json:"portFrom,omitempty"`
 	PortTo          *int    `json:"portTo,omitempty"`
+}
+
+type UpdateScimConfigInput struct {
+	SubjectClaim   *string `json:"subjectClaim,omitempty"`
+	ScimIdentifier *string `json:"scimIdentifier,omitempty"`
+	ScimEnabled    *bool   `json:"scimEnabled,omitempty"`
+}
+
+type WorkspaceIdpConnection struct {
+	ID             string      `json:"id"`
+	Protocol       IdpProtocol `json:"protocol"`
+	Provider       string      `json:"provider"`
+	DisplayName    string      `json:"displayName"`
+	Issuer         string      `json:"issuer"`
+	ClientID       *string     `json:"clientId,omitempty"`
+	DiscoveryURL   *string     `json:"discoveryUrl,omitempty"`
+	Scopes         string      `json:"scopes"`
+	DomainHint     *string     `json:"domainHint,omitempty"`
+	Status         string      `json:"status"`
+	Managed        bool        `json:"managed"`
+	LastSyncAt     *time.Time  `json:"lastSyncAt,omitempty"`
+	IdentityHealth string      `json:"identityHealth"`
+	SubjectClaim   string      `json:"subjectClaim"`
+	ScimIdentifier string      `json:"scimIdentifier"`
+	ScimEnabled    bool        `json:"scimEnabled"`
 }
 
 type WorkspaceListResult struct {
@@ -170,10 +339,84 @@ type WorkspaceLookupResult struct {
 	Workspace *WorkspacePublic `json:"workspace,omitempty"`
 }
 
+type WorkspacePermission struct {
+	WorkspaceID string  `json:"workspaceId"`
+	UserID      string  `json:"userId"`
+	Permission  string  `json:"permission"`
+	GrantedBy   *string `json:"grantedBy,omitempty"`
+}
+
 type WorkspacePublic struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Slug string `json:"slug"`
+}
+
+type Capability string
+
+const (
+	CapabilityConsoleRead   Capability = "CONSOLE_READ"
+	CapabilityNetworkWrite  Capability = "NETWORK_WRITE"
+	CapabilityAccessWrite   Capability = "ACCESS_WRITE"
+	CapabilityPostureWrite  Capability = "POSTURE_WRITE"
+	CapabilityDeviceWrite   Capability = "DEVICE_WRITE"
+	CapabilityDeviceAdmin   Capability = "DEVICE_ADMIN"
+	CapabilityIdentityAdmin Capability = "IDENTITY_ADMIN"
+	CapabilityMembersAdmin  Capability = "MEMBERS_ADMIN"
+)
+
+var AllCapability = []Capability{
+	CapabilityConsoleRead,
+	CapabilityNetworkWrite,
+	CapabilityAccessWrite,
+	CapabilityPostureWrite,
+	CapabilityDeviceWrite,
+	CapabilityDeviceAdmin,
+	CapabilityIdentityAdmin,
+	CapabilityMembersAdmin,
+}
+
+func (e Capability) IsValid() bool {
+	switch e {
+	case CapabilityConsoleRead, CapabilityNetworkWrite, CapabilityAccessWrite, CapabilityPostureWrite, CapabilityDeviceWrite, CapabilityDeviceAdmin, CapabilityIdentityAdmin, CapabilityMembersAdmin:
+		return true
+	}
+	return false
+}
+
+func (e Capability) String() string {
+	return string(e)
+}
+
+func (e *Capability) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = Capability(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid Capability", str)
+	}
+	return nil
+}
+
+func (e Capability) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *Capability) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e Capability) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
 }
 
 type ConnectorStatus string
@@ -230,6 +473,116 @@ func (e *ConnectorStatus) UnmarshalJSON(b []byte) error {
 }
 
 func (e ConnectorStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type DeviceProfileMode string
+
+const (
+	DeviceProfileModeAudit   DeviceProfileMode = "AUDIT"
+	DeviceProfileModeEnforce DeviceProfileMode = "ENFORCE"
+)
+
+var AllDeviceProfileMode = []DeviceProfileMode{
+	DeviceProfileModeAudit,
+	DeviceProfileModeEnforce,
+}
+
+func (e DeviceProfileMode) IsValid() bool {
+	switch e {
+	case DeviceProfileModeAudit, DeviceProfileModeEnforce:
+		return true
+	}
+	return false
+}
+
+func (e DeviceProfileMode) String() string {
+	return string(e)
+}
+
+func (e *DeviceProfileMode) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = DeviceProfileMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid DeviceProfileMode", str)
+	}
+	return nil
+}
+
+func (e DeviceProfileMode) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *DeviceProfileMode) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e DeviceProfileMode) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type IdpProtocol string
+
+const (
+	IdpProtocolOidc IdpProtocol = "OIDC"
+	IdpProtocolSaml IdpProtocol = "SAML"
+)
+
+var AllIdpProtocol = []IdpProtocol{
+	IdpProtocolOidc,
+	IdpProtocolSaml,
+}
+
+func (e IdpProtocol) IsValid() bool {
+	switch e {
+	case IdpProtocolOidc, IdpProtocolSaml:
+		return true
+	}
+	return false
+}
+
+func (e IdpProtocol) String() string {
+	return string(e)
+}
+
+func (e *IdpProtocol) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = IdpProtocol(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid IdpProtocol", str)
+	}
+	return nil
+}
+
+func (e IdpProtocol) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *IdpProtocol) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e IdpProtocol) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil
@@ -355,6 +708,67 @@ func (e NetworkLocation) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+type PostureCheckStatus string
+
+const (
+	PostureCheckStatusPass        PostureCheckStatus = "PASS"
+	PostureCheckStatusFail        PostureCheckStatus = "FAIL"
+	PostureCheckStatusUnsupported PostureCheckStatus = "UNSUPPORTED"
+	PostureCheckStatusUnknown     PostureCheckStatus = "UNKNOWN"
+	PostureCheckStatusError       PostureCheckStatus = "ERROR"
+)
+
+var AllPostureCheckStatus = []PostureCheckStatus{
+	PostureCheckStatusPass,
+	PostureCheckStatusFail,
+	PostureCheckStatusUnsupported,
+	PostureCheckStatusUnknown,
+	PostureCheckStatusError,
+}
+
+func (e PostureCheckStatus) IsValid() bool {
+	switch e {
+	case PostureCheckStatusPass, PostureCheckStatusFail, PostureCheckStatusUnsupported, PostureCheckStatusUnknown, PostureCheckStatusError:
+		return true
+	}
+	return false
+}
+
+func (e PostureCheckStatus) String() string {
+	return string(e)
+}
+
+func (e *PostureCheckStatus) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = PostureCheckStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid PostureCheckStatus", str)
+	}
+	return nil
+}
+
+func (e PostureCheckStatus) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *PostureCheckStatus) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e PostureCheckStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
 type RemoteNetworkStatus string
 
 const (
@@ -413,20 +827,26 @@ func (e RemoteNetworkStatus) MarshalJSON() ([]byte, error) {
 type Role string
 
 const (
-	RoleAdmin  Role = "ADMIN"
-	RoleMember Role = "MEMBER"
-	RoleViewer Role = "VIEWER"
+	RoleAdmin    Role = "ADMIN"
+	RoleViewer   Role = "VIEWER"
+	RoleDevops   Role = "DEVOPS"
+	RoleSecurity Role = "SECURITY"
+	RoleHelpdesk Role = "HELPDESK"
+	RoleMember   Role = "MEMBER"
 )
 
 var AllRole = []Role{
 	RoleAdmin,
-	RoleMember,
 	RoleViewer,
+	RoleDevops,
+	RoleSecurity,
+	RoleHelpdesk,
+	RoleMember,
 }
 
 func (e Role) IsValid() bool {
 	switch e {
-	case RoleAdmin, RoleMember, RoleViewer:
+	case RoleAdmin, RoleViewer, RoleDevops, RoleSecurity, RoleHelpdesk, RoleMember:
 		return true
 	}
 	return false

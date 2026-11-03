@@ -6,6 +6,9 @@
 #
 # The main zecurity-connector.service runs as the unprivileged 'zecurity' user
 # and cannot perform these operations itself.
+#
+# AUTO_UPDATE_ENABLED comes only from /etc/zecurity/connector.conf; the
+# --check-update run does nothing unless it is true (Sprint 20 Fix 11).
 
 [Unit]
 Description=ZECURITY Connector Auto-Update Check
@@ -17,5 +20,4 @@ Wants=network-online.target
 Type=oneshot
 User=root
 EnvironmentFile=-/etc/zecurity/connector.conf
-Environment=AUTO_UPDATE_ENABLED=true
 ExecStart=/usr/local/bin/zecurity-connector --check-update

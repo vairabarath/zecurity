@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"math/big"
 	"net"
 	"net/url"
@@ -12,35 +13,59 @@ import (
 
 	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
+	"github.com/yourorg/ztna/controller/internal/transport"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
 type fakeHeartbeatStore struct {
-	id              string
-	certSerial      string
-	certNotAfter    time.Time
-	version         string
-	hostname        string
-	observedIP      string
-	observedPort    int
-	addressScope    string
-	publicAddr      string
-	connectionCount uint32
-	maxConnections  uint32
-	err             error
-	workspaceIDs    []string // returned by ListWorkspacesForRelay
+	id                    string
+	certSerial            string
+	certNotAfter          time.Time
+	version               string
+	hostname              string
+	observedIP            string
+	observedPort          int
+	addressScope          string
+	publicAddr            string
+	connectionCount       uint32
+	maxConnections        uint32
+	err                   error
+	connectorsByWorkspace map[string][]string // returned (as ws→connIDs) by ListConnectorsForRelay
+	// Phase D: answer and calls of RevokedConnectorSPIFFEIDs.
+	revokedAnswer []string
+	revokedErr    error
+	revokedAsked  [][]string
+}
+
+func (s *fakeHeartbeatStore) RevokedConnectorSPIFFEIDs(_ context.Context, ids []string) ([]string, error) {
+	s.revokedAsked = append(s.revokedAsked, ids)
+	return s.revokedAnswer, s.revokedErr
 }
 
 type fakeNotifier struct {
-	called []string // workspace IDs NotifyPolicyChange was called with
-	err    error
+	called       []string
+	connectorIDs map[string][]string
+	err          error
 }
 
-func (n *fakeNotifier) NotifyPolicyChange(_ context.Context, workspaceID string) error {
+func (n *fakeNotifier) NotifyTopologyChange(
+	_ context.Context,
+	workspaceID string,
+	connectorIDs []string,
+) error {
 	n.called = append(n.called, workspaceID)
+
+	if n.connectorIDs == nil {
+		n.connectorIDs = make(map[string][]string)
+	}
+
+	// Copy the slice so the test does not retain caller-owned memory.
+	n.connectorIDs[workspaceID] = append([]string(nil), connectorIDs...)
+
 	return n.err
 }
 
@@ -51,7 +76,7 @@ func (s *fakeHeartbeatStore) EvaluateCapacityLabel(_ context.Context, relayID st
 	}, s.err
 }
 
-func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
+func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
 	s.id = id
 	s.certSerial = certSerial
 	s.certNotAfter = certNotAfter
@@ -70,15 +95,23 @@ func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, ti
 	return s.err
 }
 
-func (s *fakeHeartbeatStore) InsertProvisionedRelay(context.Context, string, string, []string, []string, string, time.Time, string, string) error {
-	return s.err
+func (s *fakeHeartbeatStore) LoadRelayByID(context.Context, string) (*RelayRow, error) {
+	return nil, ErrRelayNotFound
 }
 
-func (s *fakeHeartbeatStore) ListWorkspacesForRelay(_ context.Context, _ string) ([]string, error) {
+func (s *fakeHeartbeatStore) RelayCertStatus(context.Context, string, string) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (s *fakeHeartbeatStore) RecordRenewedCert(context.Context, string, string, string, time.Time) (int, error) {
+	return 0, ErrRelayNotFound
+}
+
+func (s *fakeHeartbeatStore) ListConnectorsForRelay(_ context.Context, _ string) (map[string][]string, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.workspaceIDs, nil
+	return s.connectorsByWorkspace, nil
 }
 
 func TestHeartbeatRecordsAuthenticatedRelay(t *testing.T) {
@@ -112,7 +145,7 @@ func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
 	})
 
 	// listen_port reported by relay — should override the hardcoded default.
-	got := observeRelayPeerAddress(ctx, 9093)
+	got := observeRelayPeerAddress(ctx, 9093, false)
 	if got.ObservedIP != "8.8.8.8" ||
 		got.ObservedPort != 54321 ||
 		got.Scope != "public" ||
@@ -121,15 +154,36 @@ func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
 	}
 
 	// Zero listen_port falls back to the hardcoded default.
-	gotFallback := observeRelayPeerAddress(ctx, 0)
+	gotFallback := observeRelayPeerAddress(ctx, 0, false)
 	if gotFallback.PublicAddr != "8.8.8.8:9093" {
 		t.Fatalf("expected fallback to default port, got: %+v", gotFallback)
 	}
 
 	// Non-default listen_port is used as-is.
-	gotCustom := observeRelayPeerAddress(ctx, 19093)
+	gotCustom := observeRelayPeerAddress(ctx, 19093, false)
 	if gotCustom.PublicAddr != "8.8.8.8:19093" {
 		t.Fatalf("expected custom port in PublicAddr, got: %+v", gotCustom)
+	}
+}
+
+// A private (RFC 1918) relay is advertised only with the development-only
+// WithPrivateRelayAddrs option; loopback never is.
+func TestObserveRelayPeerAddressPrivateOnlyWhenAllowed(t *testing.T) {
+	priv := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("192.168.1.49"), Port: 40000},
+	})
+	if got := observeRelayPeerAddress(priv, 9093, false); got.Scope != "private" || got.PublicAddr != "" {
+		t.Fatalf("default: private relay must not be advertised, got %+v", got)
+	}
+	got := observeRelayPeerAddress(priv, 9093, true)
+	if got.Scope != "private" || got.PublicAddr != "192.168.1.49:9093" {
+		t.Fatalf("allowed: want private scope advertised at 192.168.1.49:9093, got %+v", got)
+	}
+	loop := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000},
+	})
+	if got := observeRelayPeerAddress(loop, 9093, true); got.PublicAddr != "" {
+		t.Fatalf("loopback must never be advertised, got %+v", got)
 	}
 }
 
@@ -177,12 +231,12 @@ func relayHeartbeatContext(t *testing.T, role, contextRelayID, certificateRelayI
 
 // TestHeartbeat_NotifiesWorkspacesOnMetadataChange — Gap 2 regression.
 // Without Redis the cache layer always sets metadataChanged=true, so the
-// heartbeat handler must call NotifyPolicyChange for every workspace that
-// has connectors assigned to this relay.
+// heartbeat handler must call NotifyTopologyChange for every workspace that
+// has connectors assigned to this relay (transport plane — not the ACL).
 func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
-	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-alpha", "ws-beta"}}
+	store := &fakeHeartbeatStore{connectorsByWorkspace: map[string][]string{"ws-alpha": {"c1"}, "ws-beta": {"c2"}}}
 	notifier := &fakeNotifier{}
-	service := NewService(nil, store, time.Hour).WithPolicyNotifier(notifier)
+	service := NewService(nil, store, time.Hour).WithTransportNotifier(notifier)
 	notAfter := time.Now().UTC().Add(time.Hour)
 	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)
 
@@ -191,7 +245,7 @@ func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
 	}
 
 	if len(notifier.called) != 2 {
-		t.Fatalf("expected 2 NotifyPolicyChange calls, got %d: %v", len(notifier.called), notifier.called)
+		t.Fatalf("expected 2 NotifyTopologyChange calls, got %d: %v", len(notifier.called), notifier.called)
 	}
 	notified := make(map[string]bool, len(notifier.called))
 	for _, id := range notifier.called {
@@ -202,16 +256,223 @@ func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
 			t.Fatalf("workspace %q was not notified; got calls: %v", wantID, notifier.called)
 		}
 	}
+	expectedConnectors := map[string][]string{
+		"ws-alpha": {"c1"},
+		"ws-beta":  {"c2"},
+	}
+
+	for workspaceID, expected := range expectedConnectors {
+		actual := notifier.connectorIDs[workspaceID]
+
+		if len(actual) != len(expected) {
+			t.Fatalf(
+				"workspace %q connector count = %d, want %d: %v",
+				workspaceID,
+				len(actual),
+				len(expected),
+				actual,
+			)
+		}
+
+		for index := range expected {
+			if actual[index] != expected[index] {
+				t.Fatalf(
+					"workspace %q connectors = %v, want %v",
+					workspaceID,
+					actual,
+					expected,
+				)
+			}
+		}
+	}
+}
+
+// TestHeartbeat_MetadataChangeBumpsTransportNotPolicy proves AT-CORE at the
+// relay event boundary: the real transport notifier observes the topology
+// event while the independent ACL notifier remains unchanged.
+func TestHeartbeat_MetadataChangeBumpsTransportNotPolicy(t *testing.T) {
+	const workspaceID = "ws-isolation"
+
+	store := &fakeHeartbeatStore{
+		connectorsByWorkspace: map[string][]string{
+			workspaceID: {"conn-abc"},
+		},
+	}
+	transportNotifier := transport.NewNotifier(transport.NewSnapshotCache())
+	policyNotifier := policy.NewNotifier(policy.NewSnapshotCache())
+	service := NewService(nil, store, time.Hour).WithTransportNotifier(transportNotifier)
+	notAfter := time.Now().UTC().Add(time.Hour)
+	ctx := relayHeartbeatContext(
+		t,
+		appmeta.SPIFFERoleRelay,
+		testRelayID,
+		testRelayID,
+		notAfter,
+	)
+
+	if _, err := service.Heartbeat(ctx, &relaypb.HeartbeatRequest{
+		Version:  "1.0.0",
+		Hostname: "relay-a",
+	}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	if got := transportNotifier.Version(workspaceID); got != 1 {
+		t.Fatalf("transport version = %d, want 1", got)
+	}
+	if got := policyNotifier.Version(workspaceID); got != 0 {
+		t.Fatalf("policy version changed after relay metadata event: got %d, want 0", got)
+	}
 }
 
 // TestHeartbeat_NoNotifierDoesNotPanic — Gap 2 regression.
-// Heartbeat must succeed when no notifier is wired (nil guard in notifyRelayWorkspaces).
+// Heartbeat must succeed when no notifier is wired (nil guard in notifyRelayTopology).
 func TestHeartbeat_NoNotifierDoesNotPanic(t *testing.T) {
-	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-orphan"}}
+	store := &fakeHeartbeatStore{connectorsByWorkspace: map[string][]string{"ws-orphan": {"c1"}}}
 	service := NewService(nil, store, time.Hour) // no notifier
 	notAfter := time.Now().UTC().Add(time.Hour)
 	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)
 	if _, err := service.Heartbeat(ctx, &relaypb.HeartbeatRequest{Version: "1.0.0"}); err != nil {
 		t.Fatalf("Heartbeat with nil notifier: %v", err)
+	}
+}
+
+// countingHeartbeatStore counts Postgres heartbeat writes.
+type countingHeartbeatStore struct {
+	*fakeHeartbeatStore
+	recordCalls int
+}
+
+func (s *countingHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
+	s.recordCalls++
+	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt)
+}
+
+// TestHeartbeat_FirstHeartbeatAfterEvictionPersists — a relay evicted while its
+// Valkey throttle markers are still alive must be re-activated by its FIRST
+// heartbeat after returning, not up to RELAY_HEARTBEAT_DB_WRITE_INTERVAL later.
+// ClearHeartbeatThrottle (called by the expiry sweep on eviction) removes the
+// write-throttling markers but leaves the liveness key intact.
+func TestHeartbeat_FirstHeartbeatAfterEvictionPersists(t *testing.T) {
+	ctx := context.Background()
+	rdb := newProvisionTestValkey(t)
+	store := &countingHeartbeatStore{fakeHeartbeatStore: &fakeHeartbeatStore{}}
+	poolChanges := 0
+	service := NewService(nil, store, time.Hour).
+		WithHeartbeatCache(rdb, 5*time.Minute).
+		WithRelayPoolBroadcaster(func(context.Context) { poolChanges++ })
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	beat := func() {
+		t.Helper()
+		if _, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0", Hostname: "relay-a"}); err != nil {
+			t.Fatalf("Heartbeat: %v", err)
+		}
+	}
+
+	beat() // first ever: metadata unknown → persisted + broadcast
+	if store.recordCalls != 1 || poolChanges != 1 {
+		t.Fatalf("after first beat: recordCalls=%d poolChanges=%d, want 1/1", store.recordCalls, poolChanges)
+	}
+	beat() // unchanged metadata inside the 5-min window → throttled (Valkey only)
+	if store.recordCalls != 1 || poolChanges != 1 {
+		t.Fatalf("throttled beat wrote Postgres: recordCalls=%d poolChanges=%d, want 1/1", store.recordCalls, poolChanges)
+	}
+
+	// The expiry sweep evicts the relay and clears its throttle markers.
+	if err := service.ClearHeartbeatThrottle(ctx, testRelayID); err != nil {
+		t.Fatalf("ClearHeartbeatThrottle: %v", err)
+	}
+	if _, ok, err := service.LastHeartbeat(ctx, testRelayID); err != nil || !ok {
+		t.Fatalf("liveness key must survive throttle cleanup: ok=%v err=%v", ok, err)
+	}
+
+	beat() // first beat after eviction → persisted (re-activates) + relay list re-broadcast
+	if store.recordCalls != 2 {
+		t.Fatalf("first beat after eviction did not persist: recordCalls=%d, want 2", store.recordCalls)
+	}
+	if poolChanges != 2 {
+		t.Fatalf("first beat after eviction did not re-broadcast the relay list: poolChanges=%d, want 2", poolChanges)
+	}
+}
+
+// ── Connector-revocation Phase D ──────────────────────────────────────────
+
+const (
+	phaseDRevoked = "spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111"
+	phaseDActive  = "spiffe://ws-a.zecurity.in/connector/22222222-2222-4222-8222-222222222222"
+)
+
+// AD-2: both the throttled (Valkey) and the full heartbeat path answer the
+// revoked subset of the relay's registered connectors.
+func TestHeartbeat_ReturnsRevokedConnectorsOnBothPaths(t *testing.T) {
+	rdb := newProvisionTestValkey(t)
+	store := &countingHeartbeatStore{fakeHeartbeatStore: &fakeHeartbeatStore{revokedAnswer: []string{phaseDRevoked}}}
+	service := NewService(nil, store, time.Hour).WithHeartbeatCache(rdb, 5*time.Minute)
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	req := &relaypb.HeartbeatRequest{Version: "1.0.0", Hostname: "relay-a",
+		RegisteredConnectorSpiffeIds: []string{phaseDRevoked, phaseDActive}}
+
+	full, err := service.Heartbeat(hbCtx, req) // first beat → full path (Postgres write)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	throttled, err := service.Heartbeat(hbCtx, req) // unchanged → throttled early return
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if store.recordCalls != 1 {
+		t.Fatalf("expected one full and one throttled beat, recordCalls=%d", store.recordCalls)
+	}
+	for name, resp := range map[string]*relaypb.HeartbeatResponse{"full": full, "throttled": throttled} {
+		if len(resp.RevokedConnectorSpiffeIds) != 1 || resp.RevokedConnectorSpiffeIds[0] != phaseDRevoked {
+			t.Errorf("%s path: revoked = %v, want [%s]", name, resp.RevokedConnectorSpiffeIds, phaseDRevoked)
+		}
+	}
+	if len(store.revokedAsked) != 2 || len(store.revokedAsked[0]) != 2 {
+		t.Errorf("store asked %v, want the registered ids on each beat", store.revokedAsked)
+	}
+}
+
+// AD-2: a lookup failure answers an empty list (the relay keeps its sticky
+// set, D20) instead of failing the heartbeat; nothing registered → no lookup.
+func TestHeartbeat_RevokedLookupFailureAnswersEmpty(t *testing.T) {
+	store := &fakeHeartbeatStore{revokedErr: errors.New("db down")}
+	service := NewService(nil, store, time.Hour)
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	resp, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0",
+		RegisteredConnectorSpiffeIds: []string{phaseDRevoked}})
+	if err != nil {
+		t.Fatalf("a revoked-lookup failure must not fail the heartbeat: %v", err)
+	}
+	if len(resp.RevokedConnectorSpiffeIds) != 0 {
+		t.Fatalf("revoked = %v, want empty on lookup failure", resp.RevokedConnectorSpiffeIds)
+	}
+	store.revokedAsked = nil
+	if _, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0"}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if len(store.revokedAsked) != 0 {
+		t.Fatalf("no registered connectors must not query the store")
+	}
+}
+
+func TestParseConnectorSPIFFEID(t *testing.T) {
+	for raw, want := range map[string]string{
+		phaseDRevoked: "ws-a.zecurity.in|11111111-1111-4111-8111-111111111111",
+		"spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-11111111111A":   "ws-a.zecurity.in|11111111-1111-4111-8111-11111111111a",
+		"spiffe://ws-a.zecurity.in/relay/11111111-1111-4111-8111-111111111111":       "",
+		"spiffe://ws-a.zecurity.in/connector/not-a-uuid":                             "",
+		"spiffe:///connector/11111111-1111-4111-8111-111111111111":                   "",
+		"https://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111":    "",
+		"spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111/x": "",
+	} {
+		td, id, ok := parseConnectorSPIFFEID(raw)
+		got := ""
+		if ok {
+			got = td + "|" + id
+		}
+		if got != want {
+			t.Errorf("parse %q = %q, want %q", raw, got, want)
+		}
 	}
 }

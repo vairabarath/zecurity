@@ -14,6 +14,12 @@ type Claims struct {
 	TenantID string `json:"tenant_id"`
 	Role     string `json:"role"`
 	Email    string `json:"email"`
+	// IdentityGeneration ("gen") is the users.identity_generation the token was
+	// minted under (PENDING-04 Phase 5). Recognized here so the claim round-trips,
+	// but NOT enforced per-request: revocation is enforced at /auth/refresh
+	// (access tokens are ≤15m). A per-request check would add a DB/Valkey read to
+	// the hot path — see internal/identity/revocation.go for the rationale.
+	IdentityGeneration int `json:"gen,omitempty"`
 	jwt.RegisteredClaims
 }
 

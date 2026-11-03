@@ -62,7 +62,7 @@ func TestRefreshHandler_RefreshTokenExpired(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue a valid access token but do NOT store a refresh token in Redis.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com", 1)
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "old-token"})
@@ -82,12 +82,11 @@ func TestRefreshHandler_RefreshTokenMismatch(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue access token and store a refresh token in Redis.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
-	svc.issueRefreshToken(context.Background(), "user-1")
+	accessToken, _, refreshToken, _ := svc.IssueSession(context.Background(), "user-1", "tenant-1", "admin", "user-1@example.com", 1)
 
-	// Send a DIFFERENT refresh token in the cookie.
+	// Send the right session id with a DIFFERENT secret in the cookie.
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
-	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "wrong-token"})
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: sidOf(t, refreshToken) + ".wrong-secret"})
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -104,7 +103,7 @@ func TestRefreshHandler_Success(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue access token and refresh token.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com", 1)
 	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1")
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
@@ -140,5 +139,35 @@ func TestRefreshHandler_Success(t *testing.T) {
 	}
 	if claims.Role != "admin" {
 		t.Fatalf("expected role=admin, got %s", claims.Role)
+	}
+}
+
+// Certificate audit follow-up: the Rust client sent its refresh token to
+// /auth/refresh in the X-Refresh-Token header, over plain HTTP by default, so
+// anyone watching the network could take over the session. Clients now use
+// the RefreshSession RPC over the TLS channel pinned to their saved anchors,
+// and /auth/refresh accepts the refresh token only as the browser's httpOnly
+// cookie. A header-borne token must be refused and must not rotate anything.
+func TestRefreshHandler_RejectsHeaderRefreshToken(t *testing.T) {
+	rc, _ := newTestValkey(t)
+	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
+	handler := svc.RefreshHandler()
+
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
+	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1")
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	req.Header.Set("X-Refresh-Token", refreshToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("header-borne refresh token: expected 401, got %d", w.Code)
+	}
+	assertJSONError(t, w, "missing refresh token")
+	stored, found, err := rc.GetRefreshSession(context.Background(), "user-1", sidOf(t, refreshToken))
+	if err != nil || !found || stored.Token != refreshToken {
+		t.Fatalf("refresh session changed by a refused request: found=%v err=%v", found, err)
 	}
 }

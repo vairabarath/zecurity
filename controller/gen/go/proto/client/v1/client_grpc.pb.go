@@ -19,12 +19,18 @@ import (
 const _ = grpc.SupportPackageIsVersion8
 
 const (
-	ClientService_GetAuthConfig_FullMethodName  = "/client.v1.ClientService/GetAuthConfig"
-	ClientService_InitiateAuth_FullMethodName   = "/client.v1.ClientService/InitiateAuth"
-	ClientService_TokenExchange_FullMethodName  = "/client.v1.ClientService/TokenExchange"
-	ClientService_EnrollDevice_FullMethodName   = "/client.v1.ClientService/EnrollDevice"
-	ClientService_GetACLSnapshot_FullMethodName = "/client.v1.ClientService/GetACLSnapshot"
-	ClientService_RevokeDevice_FullMethodName   = "/client.v1.ClientService/RevokeDevice"
+	ClientService_GetAuthConfig_FullMethodName        = "/client.v1.ClientService/GetAuthConfig"
+	ClientService_InitiateAuth_FullMethodName         = "/client.v1.ClientService/InitiateAuth"
+	ClientService_TokenExchange_FullMethodName        = "/client.v1.ClientService/TokenExchange"
+	ClientService_EnrollDevice_FullMethodName         = "/client.v1.ClientService/EnrollDevice"
+	ClientService_RenewCert_FullMethodName            = "/client.v1.ClientService/RenewCert"
+	ClientService_GetACLSnapshot_FullMethodName       = "/client.v1.ClientService/GetACLSnapshot"
+	ClientService_GetTransportSnapshot_FullMethodName = "/client.v1.ClientService/GetTransportSnapshot"
+	ClientService_RevokeDevice_FullMethodName         = "/client.v1.ClientService/RevokeDevice"
+	ClientService_ReportDevicePosture_FullMethodName  = "/client.v1.ClientService/ReportDevicePosture"
+	ClientService_RefreshSession_FullMethodName       = "/client.v1.ClientService/RefreshSession"
+	ClientService_Logout_FullMethodName               = "/client.v1.ClientService/Logout"
+	ClientService_WatchChanges_FullMethodName         = "/client.v1.ClientService/WatchChanges"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -45,9 +51,22 @@ type ClientServiceClient interface {
 	// EnrollDevice — issue mTLS certificate for the client device.
 	// Requires valid access_token in request (not in gRPC metadata).
 	EnrollDevice(ctx context.Context, in *EnrollDeviceRequest, opts ...grpc.CallOption) (*EnrollDeviceResponse, error)
+	// RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+	// proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+	// ADR-028). The CSR's public key must match the fingerprint pinned at
+	// EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+	// legacy device with no pinned fingerprint are all denied identically —
+	// callers must fall back to EnrollDevice, never retry RenewCert.
+	RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error)
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(ctx context.Context, in *GetACLSnapshotRequest, opts ...grpc.CallOption) (*GetACLSnapshotResponse, error)
+	// GetTransportSnapshot — returns the workspace transport (connectivity)
+	// snapshot: per-connector relay coordinates keyed by remote_network_id
+	// (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+	// changes propagate without an authorization recompile. Validates
+	// access_token and device_id; default-deny if either is invalid.
+	GetTransportSnapshot(ctx context.Context, in *GetTransportSnapshotRequest, opts ...grpc.CallOption) (*GetTransportSnapshotResponse, error)
 	// RevokeDevice — mark a client device as revoked. Called by the CLI on
 	// logout; also usable by admin flows in the future. Best-effort from the
 	// CLI's perspective — logout must not block on this RPC. Authenticates
@@ -55,6 +74,35 @@ type ClientServiceClient interface {
 	// user + workspace. Removes the device's SPIFFE from subsequent ACL
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error)
+	ReportDevicePosture(ctx context.Context, in *ReportDevicePostureRequest, opts ...grpc.CallOption) (*ReportDevicePostureResponse, error)
+	// RefreshSession — exchange the (possibly expired) access token plus the
+	// single-use refresh token for a fresh pair, over the TLS channel pinned to
+	// the device's saved anchors. Replaces the client's use of the plain-HTTP
+	// /auth/refresh, which put both tokens on the wire in clear. Same session
+	// rules as /auth/refresh (rotation, lifecycle and generation checks,
+	// absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+	// must log in again.
+	RefreshSession(ctx context.Context, in *RefreshSessionRequest, opts ...grpc.CallOption) (*RefreshSessionResponse, error)
+	// Logout — end the caller's session server-side (delete its refresh
+	// session). Idempotent: succeeds whether or not a session existed, so it
+	// reveals nothing about session liveness. Replaces the client's plain-HTTP
+	// /auth/logout.
+	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
+	// WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+	// 2026-11-02). Carries only the workspace's current ACL and transport
+	// versions, never rules or topology: on a hint whose versions differ from
+	// its cached snapshots the client reconciles through GetACLSnapshot /
+	// GetTransportSnapshot, which stay authoritative. The first message is sent
+	// right after the server subscribes, so a change made before or during the
+	// client's last sync is never missed; later messages coalesce (latest
+	// versions only) and repeat about once a minute as a heartbeat. The client
+	// keeps its 60 s poll whether or not the stream is up.
+	// Same authentication as GetACLSnapshot (access_token + device_id). The
+	// stream ends with UNAUTHENTICATED when the access token expires, with
+	// FAILED_PRECONDITION when the device carries a directive (revoked,
+	// re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+	// the controller shuts down.
+	WatchChanges(ctx context.Context, in *WatchChangesRequest, opts ...grpc.CallOption) (ClientService_WatchChangesClient, error)
 }
 
 type clientServiceClient struct {
@@ -105,10 +153,30 @@ func (c *clientServiceClient) EnrollDevice(ctx context.Context, in *EnrollDevice
 	return out, nil
 }
 
+func (c *clientServiceClient) RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewCertResponse)
+	err := c.cc.Invoke(ctx, ClientService_RenewCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clientServiceClient) GetACLSnapshot(ctx context.Context, in *GetACLSnapshotRequest, opts ...grpc.CallOption) (*GetACLSnapshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetACLSnapshotResponse)
 	err := c.cc.Invoke(ctx, ClientService_GetACLSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) GetTransportSnapshot(ctx context.Context, in *GetTransportSnapshotRequest, opts ...grpc.CallOption) (*GetTransportSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTransportSnapshotResponse)
+	err := c.cc.Invoke(ctx, ClientService_GetTransportSnapshot_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +191,69 @@ func (c *clientServiceClient) RevokeDevice(ctx context.Context, in *RevokeDevice
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *clientServiceClient) ReportDevicePosture(ctx context.Context, in *ReportDevicePostureRequest, opts ...grpc.CallOption) (*ReportDevicePostureResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportDevicePostureResponse)
+	err := c.cc.Invoke(ctx, ClientService_ReportDevicePosture_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) RefreshSession(ctx context.Context, in *RefreshSessionRequest, opts ...grpc.CallOption) (*RefreshSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshSessionResponse)
+	err := c.cc.Invoke(ctx, ClientService_RefreshSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LogoutResponse)
+	err := c.cc.Invoke(ctx, ClientService_Logout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) WatchChanges(ctx context.Context, in *WatchChangesRequest, opts ...grpc.CallOption) (ClientService_WatchChangesClient, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ClientService_ServiceDesc.Streams[0], ClientService_WatchChanges_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &clientServiceWatchChangesClient{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type ClientService_WatchChangesClient interface {
+	Recv() (*ChangeHint, error)
+	grpc.ClientStream
+}
+
+type clientServiceWatchChangesClient struct {
+	grpc.ClientStream
+}
+
+func (x *clientServiceWatchChangesClient) Recv() (*ChangeHint, error) {
+	m := new(ChangeHint)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // ClientServiceServer is the server API for ClientService service.
@@ -143,9 +274,22 @@ type ClientServiceServer interface {
 	// EnrollDevice — issue mTLS certificate for the client device.
 	// Requires valid access_token in request (not in gRPC metadata).
 	EnrollDevice(context.Context, *EnrollDeviceRequest) (*EnrollDeviceResponse, error)
+	// RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+	// proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+	// ADR-028). The CSR's public key must match the fingerprint pinned at
+	// EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+	// legacy device with no pinned fingerprint are all denied identically —
+	// callers must fall back to EnrollDevice, never retry RenewCert.
+	RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error)
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error)
+	// GetTransportSnapshot — returns the workspace transport (connectivity)
+	// snapshot: per-connector relay coordinates keyed by remote_network_id
+	// (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+	// changes propagate without an authorization recompile. Validates
+	// access_token and device_id; default-deny if either is invalid.
+	GetTransportSnapshot(context.Context, *GetTransportSnapshotRequest) (*GetTransportSnapshotResponse, error)
 	// RevokeDevice — mark a client device as revoked. Called by the CLI on
 	// logout; also usable by admin flows in the future. Best-effort from the
 	// CLI's perspective — logout must not block on this RPC. Authenticates
@@ -153,6 +297,35 @@ type ClientServiceServer interface {
 	// user + workspace. Removes the device's SPIFFE from subsequent ACL
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error)
+	ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error)
+	// RefreshSession — exchange the (possibly expired) access token plus the
+	// single-use refresh token for a fresh pair, over the TLS channel pinned to
+	// the device's saved anchors. Replaces the client's use of the plain-HTTP
+	// /auth/refresh, which put both tokens on the wire in clear. Same session
+	// rules as /auth/refresh (rotation, lifecycle and generation checks,
+	// absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+	// must log in again.
+	RefreshSession(context.Context, *RefreshSessionRequest) (*RefreshSessionResponse, error)
+	// Logout — end the caller's session server-side (delete its refresh
+	// session). Idempotent: succeeds whether or not a session existed, so it
+	// reveals nothing about session liveness. Replaces the client's plain-HTTP
+	// /auth/logout.
+	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
+	// WatchChanges — advisory wake-up stream (FU-8, ADR-018 amendment
+	// 2026-11-02). Carries only the workspace's current ACL and transport
+	// versions, never rules or topology: on a hint whose versions differ from
+	// its cached snapshots the client reconciles through GetACLSnapshot /
+	// GetTransportSnapshot, which stay authoritative. The first message is sent
+	// right after the server subscribes, so a change made before or during the
+	// client's last sync is never missed; later messages coalesce (latest
+	// versions only) and repeat about once a minute as a heartbeat. The client
+	// keeps its 60 s poll whether or not the stream is up.
+	// Same authentication as GetACLSnapshot (access_token + device_id). The
+	// stream ends with UNAUTHENTICATED when the access token expires, with
+	// FAILED_PRECONDITION when the device carries a directive (revoked,
+	// re-enroll, renew-soon: the poll handles those), and with UNAVAILABLE when
+	// the controller shuts down.
+	WatchChanges(*WatchChangesRequest, ClientService_WatchChangesServer) error
 	mustEmbedUnimplementedClientServiceServer()
 }
 
@@ -172,11 +345,29 @@ func (UnimplementedClientServiceServer) TokenExchange(context.Context, *TokenExc
 func (UnimplementedClientServiceServer) EnrollDevice(context.Context, *EnrollDeviceRequest) (*EnrollDeviceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EnrollDevice not implemented")
 }
+func (UnimplementedClientServiceServer) RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenewCert not implemented")
+}
 func (UnimplementedClientServiceServer) GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetACLSnapshot not implemented")
 }
+func (UnimplementedClientServiceServer) GetTransportSnapshot(context.Context, *GetTransportSnapshotRequest) (*GetTransportSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTransportSnapshot not implemented")
+}
 func (UnimplementedClientServiceServer) RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevokeDevice not implemented")
+}
+func (UnimplementedClientServiceServer) ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportDevicePosture not implemented")
+}
+func (UnimplementedClientServiceServer) RefreshSession(context.Context, *RefreshSessionRequest) (*RefreshSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshSession not implemented")
+}
+func (UnimplementedClientServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Logout not implemented")
+}
+func (UnimplementedClientServiceServer) WatchChanges(*WatchChangesRequest, ClientService_WatchChangesServer) error {
+	return status.Errorf(codes.Unimplemented, "method WatchChanges not implemented")
 }
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 
@@ -263,6 +454,24 @@ func _ClientService_EnrollDevice_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_RenewCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).RenewCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_RenewCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).RenewCert(ctx, req.(*RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ClientService_GetACLSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetACLSnapshotRequest)
 	if err := dec(in); err != nil {
@@ -277,6 +486,24 @@ func _ClientService_GetACLSnapshot_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ClientServiceServer).GetACLSnapshot(ctx, req.(*GetACLSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_GetTransportSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTransportSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).GetTransportSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_GetTransportSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).GetTransportSnapshot(ctx, req.(*GetTransportSnapshotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -297,6 +524,81 @@ func _ClientService_RevokeDevice_Handler(srv interface{}, ctx context.Context, d
 		return srv.(ClientServiceServer).RevokeDevice(ctx, req.(*RevokeDeviceRequest))
 	}
 	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_ReportDevicePosture_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportDevicePostureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).ReportDevicePosture(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_ReportDevicePosture_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).ReportDevicePosture(ctx, req.(*ReportDevicePostureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_RefreshSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).RefreshSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_RefreshSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).RefreshSession(ctx, req.(*RefreshSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_Logout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LogoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).Logout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_Logout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).Logout(ctx, req.(*LogoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_WatchChanges_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchChangesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ClientServiceServer).WatchChanges(m, &clientServiceWatchChangesServer{ServerStream: stream})
+}
+
+type ClientService_WatchChangesServer interface {
+	Send(*ChangeHint) error
+	grpc.ServerStream
+}
+
+type clientServiceWatchChangesServer struct {
+	grpc.ServerStream
+}
+
+func (x *clientServiceWatchChangesServer) Send(m *ChangeHint) error {
+	return x.ServerStream.SendMsg(m)
 }
 
 // ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
@@ -323,14 +625,40 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ClientService_EnrollDevice_Handler,
 		},
 		{
+			MethodName: "RenewCert",
+			Handler:    _ClientService_RenewCert_Handler,
+		},
+		{
 			MethodName: "GetACLSnapshot",
 			Handler:    _ClientService_GetACLSnapshot_Handler,
+		},
+		{
+			MethodName: "GetTransportSnapshot",
+			Handler:    _ClientService_GetTransportSnapshot_Handler,
 		},
 		{
 			MethodName: "RevokeDevice",
 			Handler:    _ClientService_RevokeDevice_Handler,
 		},
+		{
+			MethodName: "ReportDevicePosture",
+			Handler:    _ClientService_ReportDevicePosture_Handler,
+		},
+		{
+			MethodName: "RefreshSession",
+			Handler:    _ClientService_RefreshSession_Handler,
+		},
+		{
+			MethodName: "Logout",
+			Handler:    _ClientService_Logout_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchChanges",
+			Handler:       _ClientService_WatchChanges_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/client/v1/client.proto",
 }

@@ -1,10 +1,17 @@
 use std::net::Ipv4Addr;
+use std::collections::HashMap;
 use std::sync::Once;
 
 use rcgen::{CertificateParams, KeyPair, SanType};
 
-use crate::daemon::{build_transports_by_resource, ordered_connectors_for_entry};
-use crate::grpc::client_v1::{AclConnector, AclEntry, AclRemoteNetwork};
+use crate::daemon::{
+    build_transports_by_resource, classify_applied, effective_config,
+    ordered_connectors_for_entry, resolve_entry_coords, ConfigDelta,
+};
+use crate::grpc::client_v1::{
+    AclConnector, AclEntry, AclRemoteNetwork, AclSnapshot, TransportConnector,
+    TransportRemoteNetwork, TransportSnapshot,
+};
 use crate::runtime::DeviceInfo;
 
 fn install_crypto_provider() {
@@ -41,6 +48,7 @@ fn test_device_info() -> DeviceInfo {
         spiffe_id: "spiffe://test.example/client/device1".to_string(),
         certificate_pem: cert_pem,
         private_key_pem: key_pem,
+        tpm_key_material: None,
         ca_cert_pem: issue_ca_bundle(),
         cert_expires_at: i64::MAX,
         hostname: "test-host".to_string(),
@@ -54,7 +62,7 @@ fn test_device_info() -> DeviceInfo {
 fn build_transports_empty_inputs_returns_empty_map() {
     install_crypto_provider();
     let device = test_device_info();
-    let result = build_transports_by_resource(&[], &[], &device);
+    let result = build_transports_by_resource(&[], &[], None, &device);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }
@@ -87,7 +95,7 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
@@ -129,7 +137,7 @@ async fn connector_with_relay_addr_builds_transport_with_relay() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.2".parse::<Ipv4Addr>().unwrap(), 443u16);
@@ -190,7 +198,7 @@ async fn two_connectors_different_relay_addrs_build_independently() {
         },
     ];
 
-    let result = build_transports_by_resource(&entries, &remote_networks, &device);
+    let result = build_transports_by_resource(&entries, &remote_networks, None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
 
@@ -242,4 +250,927 @@ fn shield_resource_uses_preferred_connector_id() {
         .next()
         .expect("connector selected");
     assert_eq!(connector.connector_id, "conn-holder");
+}
+
+// ── Track B routing decision (resolve_entry_coords) ─────────────────────────
+// Pure: no certs/network. Verifies transport-plane preference, ACL fallback,
+// and preferred-connector ordering.
+
+fn tp_entry(rn: &str, preferred: &str) -> AclEntry {
+    AclEntry {
+        remote_network_id: rn.to_string(),
+        preferred_connector_id: preferred.to_string(),
+        ..Default::default()
+    }
+}
+
+fn tp_acl_conn(id: &str, relay_addr: &str) -> AclConnector {
+    AclConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://td/connector/{id}"),
+        relay_addr: relay_addr.to_string(),
+        relay_spiffe_id: "spiffe://zecurity.in/relay/r".to_string(),
+    }
+}
+
+fn tp_transport_conn(id: &str, relay_addr: &str) -> TransportConnector {
+    TransportConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://td/connector/{id}"),
+        relay_addr: relay_addr.to_string(),
+        relay_spiffe_id: "spiffe://zecurity.in/relay/r".to_string(),
+    }
+}
+
+#[test]
+fn resolve_prefers_transport_plane_when_rn_present() {
+    let e = tp_entry("rn1", "");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")],
+    };
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![tp_transport_conn("c1", "relay-new:9093")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
+    assert_eq!(coords.len(), 1);
+    assert_eq!(coords[0].relay_addr, "relay-new:9093");
+}
+
+#[test]
+fn resolve_falls_back_to_acl_when_transport_lacks_rn() {
+    let e = tp_entry("rn1", "");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
+    assert_eq!(coords.len(), 1);
+    assert_eq!(coords[0].relay_addr, "relay-old:9093");
+}
+
+#[test]
+fn resolve_empty_when_neither_plane_has_rn() {
+    let e = tp_entry("rn-missing", "");
+    let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    assert!(resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new()).is_empty());
+}
+
+#[test]
+fn resolve_honors_preferred_connector_in_transport() {
+    let e = tp_entry("rn1", "c2");
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![
+            tp_transport_conn("c1", "r1:9093"),
+            tp_transport_conn("c2", "r2:9093"),
+        ],
+    };
+    let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
+    assert_eq!(coords.len(), 2);
+    assert_eq!(coords[0].connector_id, "c2");
+}
+
+// ── Empty-network delivery (Fix05-Empty-Network-Transport-Delivery) ─────────
+// The controller now emits a remote network with zero active connectors as a
+// PRESENT transport RN with an empty connector list. The client must read that
+// as "no reachable connector" — never fall back to the (stale) ACL list.
+
+#[test]
+fn resolve_present_empty_transport_rn_does_not_fall_back() {
+    let e = tp_entry("rn1", "c1");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")], // stale ACL still lists c1
+    };
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![], // explicit: no active connector
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    assert!(
+        resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new()).is_empty(),
+        "present-but-empty transport RN must resolve to no connector, not the ACL fallback"
+    );
+}
+
+#[tokio::test]
+async fn build_map_present_empty_rn_is_unreachable_and_others_unaffected() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entries = vec![
+        AclEntry {
+            address: "10.7.0.1".to_string(),
+            port: 80,
+            remote_network_id: "rn-empty".to_string(),
+            protocol: "tcp".to_string(),
+            ..Default::default()
+        },
+        AclEntry {
+            address: "10.8.0.1".to_string(),
+            port: 80,
+            remote_network_id: "rn-live".to_string(),
+            protocol: "tcp".to_string(),
+            ..Default::default()
+        },
+    ];
+    let acl_conn = |id: &str| AclConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://test.example/connector/{id}"),
+        ..Default::default()
+    };
+    // Stale ACL: both networks still list a connector.
+    let acl_rns = vec![
+        AclRemoteNetwork {
+            remote_network_id: "rn-empty".to_string(),
+            connectors: vec![acl_conn("c-gone")],
+            ..Default::default()
+        },
+        AclRemoteNetwork {
+            remote_network_id: "rn-live".to_string(),
+            connectors: vec![acl_conn("c-live")],
+            ..Default::default()
+        },
+    ];
+    let transport = TransportSnapshot {
+        version: 6,
+        remote_networks: vec![
+            TransportRemoteNetwork {
+                remote_network_id: "rn-empty".to_string(),
+                connectors: vec![],
+            },
+            TransportRemoteNetwork {
+                remote_network_id: "rn-live".to_string(),
+                connectors: vec![TransportConnector {
+                    connector_id: "c-live".to_string(),
+                    connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://test.example/connector/c-live".to_string(),
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let map = build_transports_by_resource(&entries, &acl_rns, Some(&transport), &device)
+        .expect("map builds");
+    let empty_key = ("10.7.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    let live_key = ("10.8.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    assert!(
+        map.get(&empty_key).expect("entry kept").is_none(),
+        "resource behind an empty network must have no transport (fail closed)"
+    );
+    assert!(
+        map.get(&live_key).expect("entry kept").is_some(),
+        "unrelated network must keep its transport"
+    );
+}
+
+/// The L3 sequence from the 2026-10-06 run, as seen by the early transport
+/// resync (which refreshes transport only — the cached ACL is stale).
+#[test]
+fn classify_last_connector_leaves_then_returns_with_stale_acl() {
+    let device = fake_device_info();
+    let acl_stale = AclSnapshot {
+        version: 14,
+        entries: vec![AclEntry {
+            address: "192.168.1.39".to_string(),
+            port: 51711,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "palace".to_string(),
+            preferred_connector_id: "manoj".to_string(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "palace".to_string(),
+            connectors: vec![tp_acl_conn("manoj", "")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let tp = |version: u64, conns: Vec<TransportConnector>| TransportSnapshot {
+        version,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "palace".to_string(),
+            connectors: conns,
+        }],
+    };
+    // v5: manoj is the only active connector (what the tunnel is running).
+    let applied = effective_config(&acl_stale, Some(&tp(5, vec![tp_transport_conn("manoj", "")])), &device);
+
+    // v6 from a FIXED controller: palace present, empty → hot-apply now.
+    let fixed = effective_config(&acl_stale, Some(&tp(6, vec![])), &device);
+    assert_eq!(classify_applied(&applied, &fixed), ConfigDelta::TransportOnly);
+    assert!(fixed.entries[0].coords.is_empty(), "no connector after the last one left");
+
+    // v6 from a PRE-FIX controller: palace absent → stale ACL fallback →
+    // NoChange (the 43 s bug). Pinned so the difference stays explicit.
+    let prefix = effective_config(
+        &acl_stale,
+        Some(&TransportSnapshot { version: 6, remote_networks: vec![] }),
+        &device,
+    );
+    assert_eq!(classify_applied(&applied, &prefix), ConfigDelta::NoChange);
+
+    // v7: manoj returns → TransportOnly back to exactly the original config.
+    let back = effective_config(&acl_stale, Some(&tp(7, vec![tp_transport_conn("manoj", "")])), &device);
+    assert_eq!(classify_applied(&fixed, &back), ConfigDelta::TransportOnly);
+    assert_eq!(back, applied);
+}
+
+// ── Fix 01 Phase 1: effective_config ───────────────────────────────────────
+
+fn fake_device_info() -> DeviceInfo {
+    DeviceInfo {
+        id: "device1".to_string(),
+        spiffe_id: "spiffe://test.example/client/device1".to_string(),
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nFAKE_CERT\n-----END CERTIFICATE-----\n".to_string(),
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nSUPER_SECRET_KEY\n-----END PRIVATE KEY-----\n".to_string(),
+        tpm_key_material: None,
+        ca_cert_pem: "-----BEGIN CERTIFICATE-----\nFAKE_CA\n-----END CERTIFICATE-----\n".to_string(),
+        cert_expires_at: i64::MAX,
+        hostname: "test-host".to_string(),
+        os: "linux".to_string(),
+    }
+}
+
+#[test]
+fn effective_config_metadata_differences_equal() {
+    let device = fake_device_info();
+    let acl1 = AclSnapshot {
+        version: 1,
+        workspace_id: "ws-1".to_string(),
+        revoked_connectors: vec![],
+        generated_at: 1000,
+        relay_addr: "global-relay-1:9093".to_string(),
+        relay_spiffe_id: "spiffe://global/relay/1".to_string(),
+        entries: vec![AclEntry {
+            resource_id: "res-1".to_string(),
+            name: "service-alpha".to_string(),
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            preferred_connector_id: String::new(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            name: "rn-name-1".to_string(),
+            connectors: vec![tp_acl_conn("c1", "relay-c1:9093")],
+        }],
+    };
+
+    let acl2 = AclSnapshot {
+        version: 2,
+        workspace_id: "ws-2".to_string(),
+        revoked_connectors: vec![],
+        generated_at: 2000,
+        relay_addr: "global-relay-2:9093".to_string(),
+        relay_spiffe_id: "spiffe://global/relay/2".to_string(),
+        entries: vec![AclEntry {
+            resource_id: "res-1".to_string(),
+            name: "service-alpha-renamed".to_string(),
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            preferred_connector_id: String::new(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            name: "rn-name-2".to_string(),
+            connectors: vec![tp_acl_conn("c1", "relay-c1:9093")],
+        }],
+    };
+
+    let cfg1 = effective_config(&acl1, None, &device);
+    let cfg2 = effective_config(&acl2, None, &device);
+    assert_eq!(cfg1, cfg2);
+}
+
+#[test]
+fn effective_config_shuffled_non_preferred_connectors_equal() {
+    let device = fake_device_info();
+    let acl = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            preferred_connector_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let tp1 = TransportSnapshot {
+        version: 1,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![
+                tp_transport_conn("c1", "relay-1:9093"),
+                tp_transport_conn("c2", "relay-2:9093"),
+                tp_transport_conn("c3", "relay-3:9093"),
+            ],
+        }],
+    };
+    let tp2 = TransportSnapshot {
+        version: 2,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![
+                tp_transport_conn("c3", "relay-3:9093"),
+                tp_transport_conn("c1", "relay-1:9093"),
+                tp_transport_conn("c2", "relay-2:9093"),
+            ],
+        }],
+    };
+
+    let cfg1 = effective_config(&acl, Some(&tp1), &device);
+    let cfg2 = effective_config(&acl, Some(&tp2), &device);
+    assert_eq!(cfg1, cfg2);
+}
+
+#[test]
+fn effective_config_preferred_connector_order_and_value_change() {
+    let device = fake_device_info();
+    let acl_pref_c2 = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            preferred_connector_id: "c2".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    // c2 is at position 1 in tp1, and position 0 in tp2
+    let tp1 = TransportSnapshot {
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![
+                tp_transport_conn("c1", "relay-1:9093"),
+                tp_transport_conn("c2", "relay-2:9093"),
+                tp_transport_conn("c3", "relay-3:9093"),
+            ],
+        }],
+        ..Default::default()
+    };
+    let tp2 = TransportSnapshot {
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![
+                tp_transport_conn("c2", "relay-2:9093"),
+                tp_transport_conn("c3", "relay-3:9093"),
+                tp_transport_conn("c1", "relay-1:9093"),
+            ],
+        }],
+        ..Default::default()
+    };
+
+    let cfg1 = effective_config(&acl_pref_c2, Some(&tp1), &device);
+    let cfg2 = effective_config(&acl_pref_c2, Some(&tp2), &device);
+    assert_eq!(
+        cfg1, cfg2,
+        "preferred connector order position in input should not change effective config"
+    );
+
+    let acl_pref_c1 = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            preferred_connector_id: "c1".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let cfg3 = effective_config(&acl_pref_c1, Some(&tp1), &device);
+    assert_ne!(
+        cfg1, cfg3,
+        "changing preferred_connector_id value must change effective config"
+    );
+}
+
+#[test]
+fn effective_config_entry_added_or_removed() {
+    let device = fake_device_info();
+    let e1 = AclEntry {
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        protocol: "tcp".to_string(),
+        allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+        remote_network_id: "rn-1".to_string(),
+        ..Default::default()
+    };
+    let e2 = AclEntry {
+        address: "10.0.0.2".to_string(),
+        port: 443,
+        protocol: "tcp".to_string(),
+        allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+        remote_network_id: "rn-1".to_string(),
+        ..Default::default()
+    };
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn-1".to_string(),
+        connectors: vec![tp_acl_conn("c1", "r:9093")],
+        ..Default::default()
+    };
+
+    let acl_base = AclSnapshot {
+        entries: vec![e1.clone()],
+        remote_networks: vec![rn.clone()],
+        ..Default::default()
+    };
+    let acl_added = AclSnapshot {
+        entries: vec![e1.clone(), e2],
+        remote_networks: vec![rn.clone()],
+        ..Default::default()
+    };
+    let acl_removed = AclSnapshot {
+        entries: vec![],
+        remote_networks: vec![rn],
+        ..Default::default()
+    };
+
+    let cfg_base = effective_config(&acl_base, None, &device);
+    let cfg_added = effective_config(&acl_added, None, &device);
+    let cfg_removed = effective_config(&acl_removed, None, &device);
+
+    assert_ne!(cfg_base, cfg_added);
+    assert_ne!(cfg_base, cfg_removed);
+}
+
+#[test]
+fn effective_config_connector_relay_or_tunnel_addr_changed() {
+    let device = fake_device_info();
+    let acl = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let tp_base = TransportSnapshot {
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![TransportConnector {
+                connector_id: "c1".to_string(),
+                connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                connector_spiffe: "spiffe://td/connector/c1".to_string(),
+                relay_addr: "relay-a:9093".to_string(),
+                relay_spiffe_id: "spiffe://r".to_string(),
+            }],
+        }],
+        ..Default::default()
+    };
+    let tp_relay_changed = TransportSnapshot {
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![TransportConnector {
+                connector_id: "c1".to_string(),
+                connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                connector_spiffe: "spiffe://td/connector/c1".to_string(),
+                relay_addr: "relay-b:9093".to_string(), // changed
+                relay_spiffe_id: "spiffe://r".to_string(),
+            }],
+        }],
+        ..Default::default()
+    };
+    let tp_tunnel_changed = TransportSnapshot {
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![TransportConnector {
+                connector_id: "c1".to_string(),
+                connector_tunnel_addr: "10.0.0.2:9092".to_string(), // changed
+                connector_spiffe: "spiffe://td/connector/c1".to_string(),
+                relay_addr: "relay-a:9093".to_string(),
+                relay_spiffe_id: "spiffe://r".to_string(),
+            }],
+        }],
+        ..Default::default()
+    };
+
+    let cfg_base = effective_config(&acl, Some(&tp_base), &device);
+    let cfg_relay = effective_config(&acl, Some(&tp_relay_changed), &device);
+    let cfg_tunnel = effective_config(&acl, Some(&tp_tunnel_changed), &device);
+
+    assert_ne!(cfg_base, cfg_relay);
+    assert_ne!(cfg_base, cfg_tunnel);
+}
+
+#[test]
+fn effective_config_renewal_lifecycle() {
+    let device = fake_device_info();
+    let acl_vn = AclSnapshot {
+        version: 10,
+        generated_at: 1000,
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![tp_acl_conn("c1", "relay:9093")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let tp_vn = TransportSnapshot {
+        version: 10,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![tp_transport_conn("c1", "relay:9093")],
+        }],
+    };
+
+    // vN+1: connector c1 is absent from the transport RN during renewal transition
+    let acl_vn_plus_1 = AclSnapshot {
+        version: 11,
+        generated_at: 1060,
+        entries: acl_vn.entries.clone(),
+        remote_networks: acl_vn.remote_networks.clone(),
+        ..Default::default()
+    };
+    let tp_vn_plus_1 = TransportSnapshot {
+        version: 11,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![], // c1 absent
+        }],
+    };
+
+    // vN+2: connector c1 restored, version is higher, generated_at is different
+    let acl_vn_plus_2 = AclSnapshot {
+        version: 12,
+        generated_at: 1120,
+        entries: acl_vn.entries.clone(),
+        remote_networks: acl_vn.remote_networks.clone(),
+        ..Default::default()
+    };
+    let tp_vn_plus_2 = TransportSnapshot {
+        version: 12,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![tp_transport_conn("c1", "relay:9093")],
+        }],
+    };
+
+    let cfg_vn = effective_config(&acl_vn, Some(&tp_vn), &device);
+    let cfg_vn_plus_1 = effective_config(&acl_vn_plus_1, Some(&tp_vn_plus_1), &device);
+    let cfg_vn_plus_2 = effective_config(&acl_vn_plus_2, Some(&tp_vn_plus_2), &device);
+
+    assert_ne!(cfg_vn, cfg_vn_plus_1);
+    assert_eq!(cfg_vn, cfg_vn_plus_2);
+}
+
+#[test]
+fn effective_config_excludes_unallowed_spiffe_entries() {
+    let device = fake_device_info();
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn-1".to_string(),
+        connectors: vec![tp_acl_conn("c1", "r:9093")],
+        ..Default::default()
+    };
+    let allowed_entry = AclEntry {
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        protocol: "tcp".to_string(),
+        allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+        remote_network_id: "rn-1".to_string(),
+        ..Default::default()
+    };
+    let unallowed_entry = AclEntry {
+        address: "10.0.0.2".to_string(),
+        port: 8080,
+        protocol: "tcp".to_string(),
+        allowed_spiffe_ids: vec!["spiffe://other.domain/client/other-device".to_string()],
+        remote_network_id: "rn-1".to_string(),
+        ..Default::default()
+    };
+
+    let acl_base = AclSnapshot {
+        entries: vec![allowed_entry.clone()],
+        remote_networks: vec![rn.clone()],
+        ..Default::default()
+    };
+    let acl_with_unallowed = AclSnapshot {
+        entries: vec![allowed_entry, unallowed_entry],
+        remote_networks: vec![rn],
+        ..Default::default()
+    };
+
+    let cfg_base = effective_config(&acl_base, None, &device);
+    let cfg_with_unallowed = effective_config(&acl_with_unallowed, None, &device);
+
+    assert_eq!(cfg_base, cfg_with_unallowed);
+}
+
+#[test]
+fn effective_config_identity_differences() {
+    let dev1 = fake_device_info();
+    let mut dev2 = fake_device_info();
+    dev2.certificate_pem =
+        "-----BEGIN CERTIFICATE-----\nDIFFERENT_CERT\n-----END CERTIFICATE-----\n".to_string();
+
+    let mut dev3 = fake_device_info();
+    dev3.spiffe_id = "spiffe://test.example/client/device3".to_string();
+
+    let acl = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![dev1.spiffe_id.clone(), dev3.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![tp_acl_conn("c1", "r:9093")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let cfg1 = effective_config(&acl, None, &dev1);
+    let cfg2 = effective_config(&acl, None, &dev2);
+    let cfg3 = effective_config(&acl, None, &dev3);
+
+    assert_ne!(cfg1, cfg2);
+    assert_ne!(cfg1, cfg3);
+}
+
+#[test]
+fn effective_config_debug_omits_private_key() {
+    let device = fake_device_info();
+    let acl = AclSnapshot {
+        entries: vec![AclEntry {
+            address: "10.0.0.1".to_string(),
+            port: 80,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "rn-1".to_string(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn-1".to_string(),
+            connectors: vec![tp_acl_conn("c1", "r:9093")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let cfg = effective_config(&acl, None, &device);
+    let debug_repr = format!("{:?}", cfg);
+
+    assert!(!debug_repr.contains("SUPER_SECRET_KEY"));
+    assert!(!debug_repr.contains("private_key_pem"));
+    assert!(debug_repr.contains(&device.spiffe_id));
+}
+
+// Fix 01 Phase 2-A (Test 8, real builder): one connector with invalid coords
+// makes the whole transport-map build fail (all-or-nothing). Hot-apply relies
+// on this: a failed build publishes nothing, so no partial map can reach the
+// running net_stack.
+#[tokio::test]
+async fn build_transports_is_all_or_nothing_on_invalid_connector_coords() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res1".to_string(),
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let good = TransportConnector {
+        connector_id: "good".to_string(),
+        connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+        connector_spiffe: "spiffe://test.example/connector/good".to_string(),
+        ..Default::default()
+    };
+    let bad = TransportConnector {
+        connector_id: "bad".to_string(),
+        connector_tunnel_addr: "not-an-address".to_string(),
+        connector_spiffe: "spiffe://test.example/connector/bad".to_string(),
+        ..Default::default()
+    };
+    let transport = TransportSnapshot {
+        version: 2,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn1".to_string(),
+            connectors: vec![good.clone(), bad],
+        }],
+    };
+    let result = build_transports_by_resource(&[entry.clone()], &[], Some(&transport), &device);
+    assert!(result.is_err(), "one invalid connector must fail the whole build");
+
+    let ok_transport = TransportSnapshot {
+        version: 3,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn1".to_string(),
+            connectors: vec![good],
+        }],
+    };
+    let map = build_transports_by_resource(&[entry], &[], Some(&ok_transport), &device).unwrap();
+    let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    assert_eq!(map[&key].as_ref().map(|v| v.len()), Some(1));
+}
+
+// ── F-1: decision-point log wording ──────────────────────────────────────
+//
+// The sync callers log before `run_restart_decision` classifies the change,
+// so their lines must not claim a restart; only the decision arms may. The
+// crate has no log-capture dependency, so this pins the wording against the
+// daemon source itself: each caller line exactly once, the old misleading
+// wording nowhere, and the genuine restart lines still present.
+
+const DAEMON_SRC: &str = include_str!("daemon.rs");
+
+#[test]
+fn caller_log_lines_say_evaluating_not_restarting() {
+    for line in [
+        "\"ACL changed, evaluating tunnel configuration\"",
+        "\"early transport resync: transport version changed, evaluating tunnel configuration\"",
+        "\"early transport resync: tunnel configuration apply failed\"",
+        "\"background sync: change detected, evaluating tunnel configuration\"",
+        "\"background sync: tunnel configuration apply failed\"",
+    ] {
+        assert_eq!(DAEMON_SRC.matches(line).count(), 1, "expected once: {line}");
+    }
+}
+
+#[test]
+fn misleading_restart_wording_is_gone() {
+    for old in [
+        "ACL changed, restarting VPN or tunnel",
+        "early transport resync: version changed, restarting tunnel",
+        "early transport resync: tunnel restart failed",
+        "background sync: version changed, restarting tunnel",
+        "background sync: tunnel restart failed",
+    ] {
+        assert!(
+            !DAEMON_SRC.contains(old),
+            "misleading log line still present: {old}"
+        );
+    }
+}
+
+#[test]
+fn genuine_restart_log_lines_unchanged() {
+    for line in [
+        "\"structural configuration change, restarting VPN\"",
+        "\"net_stack task is not running, restarting VPN\"",
+        "\"hot-apply not possible, falling back to full restart\"",
+        "\"resource apply failed after mutation, recovering with full restart\"",
+    ] {
+        assert!(
+            DAEMON_SRC.contains(line),
+            "restart log line missing: {line}"
+        );
+    }
+}
+
+// ── Connector-revocation Phase C ──────────────────────────────────────────
+
+fn revoked(ids: &[&str]) -> Vec<crate::grpc::client_v1::RevokedConnector> {
+    ids.iter()
+        .map(|id| crate::grpc::client_v1::RevokedConnector {
+            connector_id: id.to_string(),
+            connector_spiffe: format!("spiffe://td/connector/{id}"),
+        })
+        .collect()
+}
+
+/// AC-2: a revoked connector is dropped from BOTH planes — the transport
+/// plane (a stale transport snapshot may still list it) and the ACL plane.
+#[test]
+fn resolve_drops_revoked_connectors_from_both_planes() {
+    let e = tp_entry("rn1", "");
+    let blocked = std::collections::HashSet::from(["c1".to_string()]);
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![tp_transport_conn("c1", ""), tp_transport_conn("c2", "")],
+    };
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", ""), tp_acl_conn("c2", "")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+    let ids = |v: Vec<crate::daemon::ConnCoords>| v.into_iter().map(|c| c.connector_id).collect::<Vec<_>>();
+    assert_eq!(ids(resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &blocked)), vec!["c2"]);
+    let no_transport = HashMap::new();
+    assert_eq!(ids(resolve_entry_coords(&e, &rn_by_id, &no_transport, &blocked)), vec!["c2"]);
+}
+
+/// AC-2: the effective config (and so the transport map) excludes the ACL's
+/// revoked connectors; a resource left with only revoked connectors fails
+/// closed (no coords → Some(None) in the transport map).
+#[test]
+fn effective_config_excludes_revoked_and_fails_closed_when_none_left() {
+    let device = fake_device_info();
+    let mut entry = tp_entry("rn1", "");
+    entry.address = "10.9.0.1".into();
+    entry.port = 8080;
+    entry.protocol = "tcp".into();
+    entry.allowed_spiffe_ids = vec![device.spiffe_id.clone()];
+    let acl = AclSnapshot {
+        version: 2,
+        entries: vec![entry.clone()],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn1".into(),
+            name: String::new(),
+            connectors: vec![tp_acl_conn("c1", ""), tp_acl_conn("c2", "")],
+        }],
+        revoked_connectors: revoked(&["c1"]),
+        ..Default::default()
+    };
+    assert_eq!(crate::daemon::revoked_connector_ids(&acl), std::collections::HashSet::from(["c1".to_string()]));
+    let applied = effective_config(&acl, None, &device);
+    let coords: Vec<_> = applied.entries[0].coords.iter().map(|c| c.connector_id.as_str()).collect();
+    assert_eq!(coords, vec!["c2"]);
+
+    let all_revoked = AclSnapshot {
+        revoked_connectors: revoked(&["c1", "c2"]),
+        ..acl
+    };
+    let applied = effective_config(&all_revoked, None, &device);
+    assert!(applied.entries[0].coords.is_empty(), "only revoked connectors → no coords");
+}
+
+/// AC-6 (production wiring): the transport map builds per-connector pools
+/// with the EXACT connector identity — a connector without a SPIFFE id, or
+/// one outside the device's trust domain, can't get a direct pool (the build
+/// fails closed, all-or-nothing), and every transport carries its connector id.
+#[tokio::test]
+async fn transport_build_requires_an_exact_connector_identity() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res1".to_string(),
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = |spiffe: &str| AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: spiffe.to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let ok = build_transports_by_resource(&[entry.clone()], &[rn("spiffe://test.example/connector/conn1")], None, &device)
+        .expect("exact identity in the device trust domain builds");
+    let ts = ok.values().next().unwrap().as_ref().unwrap();
+    assert_eq!(ts[0].connector_id(), "conn1");
+    assert!(build_transports_by_resource(&[entry.clone()], &[rn("")], None, &device).is_err(), "empty identity");
+    assert!(
+        build_transports_by_resource(&[entry], &[rn("spiffe://other.example/connector/conn1")], None, &device).is_err(),
+        "foreign trust domain"
+    );
 }
