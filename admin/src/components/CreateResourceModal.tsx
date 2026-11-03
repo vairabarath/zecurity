@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { AlertTriangle, Info, Loader2, X, Server } from 'lucide-react'
 import { toast } from 'sonner'
+import { isValidResourceHost, RESOURCE_HOST_ERROR } from '@/lib/resourceHost'
 
 interface CreateResourceDefaults {
   remoteNetworkId?: string
@@ -76,6 +77,11 @@ export function CreateResourceModal({
 
     if (!name.trim() || !host.trim() || !portFrom || !remoteNetworkId) {
       setError('Please fill in all required fields')
+      return
+    }
+
+    if (!isValidResourceHost(host)) {
+      setError(RESOURCE_HOST_ERROR)
       return
     }
 
@@ -188,7 +194,7 @@ export function CreateResourceModal({
                 <Label className="flex items-center gap-2 text-sm font-semibold">
                   Host IP <span className="text-destructive">*</span>
                   <span className="text-xs font-normal text-muted-foreground">
-                    (must match a shield's LAN IP)
+                    (IPv4 address)
                   </span>
                 </Label>
                 <Input
@@ -199,7 +205,7 @@ export function CreateResourceModal({
                 />
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Info className="h-3 w-3" />
-                  <span>A shield must be installed on this machine.</span>
+                  <span>To protect it later, a shield must be installed on this machine.</span>
                 </div>
               </div>
 

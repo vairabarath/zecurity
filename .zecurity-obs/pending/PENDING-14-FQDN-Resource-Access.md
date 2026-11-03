@@ -12,7 +12,7 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** design note, **awaiting approval**; only O-4 (F0 timing) still open (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). Nothing is built.
+**Status:** design note, **awaiting approval** for F1–F4 (rewritten 2026-11-03; the 2026-07-03 version predated the shield, relay and posture work). **F0 built 2026-11-03** (approved by Sathiya; branch `fix/pending14-f0-host-ipv4`, see §9). F1–F4 not built.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
@@ -71,8 +71,8 @@ A resource's `host` is either an **IPv4 literal** (unchanged behaviour) or a **D
 
 ### 4.2 Controller and console
 
-- **Fix the silent failure (step F0, can ship on its own):** refuse a `host` that is neither an IPv4 literal nor a valid name. Refuse a name resource whose protocol isn't `tcp`. Each refusal has its own `apperr` code and test.
-- **Collision rule (F-6):** two resources with the same name and port in **different** remote networks of a workspace would be ambiguous for a client that may access both. The second is refused at save time with its own code (one name:port per workspace). Same name with a different port is fine.
+- **Fix the silent failure (step F0, built 2026-11-03, §9):** refuse a `host` that isn't an IPv4 literal, with a user-safe error (`apperr.UserError`; the package has messages, not codes) and tests. **F1** widens it to "an IPv4 literal or a valid name" and adds the TCP-only rule for names, each with its own sentinel error and test.
+- **Collision rule (F-6):** two resources with the same name and port in **different** remote networks of a workspace would be ambiguous for a client that may access both. The second is refused at save time with its own sentinel error (one name:port per workspace). Same name with a different port is fine.
 - **Protecting a name resource (F-5).** The controller can't resolve the name, because it isn't in the remote network, so `AutoMatchShield` (`lan_ip = host`) can't find the shield. Instead:
   - `protectResource` takes an optional `shieldId`. It is **required** for a name resource and must be an active shield in the resource's remote network.
   - The resource stores `host` = the name and `shield_id` = the chosen shield. IP resources keep today's auto-match and `lan_ip = host` rule unchanged.
@@ -160,7 +160,7 @@ So without the rule the v1 client design can't work, and with it it can. Still t
   | `240.0.0.0/4` (reserved) | unused anywhere | some OS stacks and apps refuse it; avoid |
 
   Chosen: names from `198.18.0.0/16`, responder `198.19.255.53`, refuse on overlap (§4.7). A config override can come later if a customer needs it.
-- **O-4: step F0 timing.** Ship the "refuse non-IP host" fix now, before the rest, so today's silent failure ends. It becomes "refuse an invalid host" when names land.
+- **O-4 (decided 2026-11-03):** ship F0 now, on its own (§9).
 
 ## 7. Tests (build gate)
 
@@ -173,8 +173,30 @@ So without the rule the v1 client design can't work, and with it it can. Still t
 
 | Phase | What | Depends on |
 |---|---|---|
-| **F0** | Controller: refuse an invalid host (non-IP for now), with codes and tests; console label | approval of O-4 |
+| **F0** ✅ | Controller: refuse an invalid host (non-IPv4 for now), with tests; console validation and label | built 2026-11-03 (§9) |
 | **F1** | Controller and console: name validation and normalisation, TCP-only rule, collision rule, protect with an explicit shield, shield instructions carry `lan_ip` | approval |
 | **F2** | Connector: resolve, filter, connect to the checked IP; shield route hands the resolved IP to the shield | F1 |
 | **F3** | Client: fake pool, capture, DNS responder, resolved wiring, status; installer polkit rule and uninstall (F-8); confirm resolved routes `~<name>` queries to the responder on the real `zecurity0` | F1 |
 | **F4** | Live lab run (§7), then one PR | F2, F3 |
+
+## 9. F0 record (2026-11-03)
+
+**What changed**
+- `controller/internal/resource/store.go`: new `NormalizeHost` and `ErrInvalidHost` (an `apperr.UserError`, so the console shows the message). `Create` and `Update` call it first.
+  - Accepted: an IPv4 literal; surrounding spaces are trimmed and the canonical form is stored.
+  - Refused: empty input, names, IPv6 (including IPv4-mapped and zone suffixes), ports or CIDRs, leading zeros, and `0.0.0.0`, `255.255.255.255` and multicast.
+  - `127.0.0.1` stays allowed, since a shield can protect a loopback-bound service.
+  - This replaces `Update`'s old "host must not be empty" check. That was a plain error, so the console masked it as a generic failure.
+  - All paths are covered, including `promoteDiscoveredService`: discovery can report a real IPv6 bound address, which now gets a clear refusal where it used to create an unreachable resource.
+- `controller/graph/resource.graphqls`: comments only (they aren't schema descriptions, so no codegen).
+- `admin/src/lib/resourceHost.ts`: a client-side mirror, used by the Create and Edit resource modals. The label is now "Host IP (IPv4 address)", and the create hint no longer says a shield is required.
+- **Consequence:** an existing resource whose stored host is invalid can't be edited until its host is fixed, because the console sends every field. Such a resource never worked anyway, and the project is pre-production.
+
+**Gates**
+- `go build ./...` and `go vet ./...` clean.
+- `go test -count=1 ./...` with every `*_TEST_DATABASE_URL` plus `AUTH_TEST_VALKEY_URL=redis://localhost:6379/15`: 1655 pass, 0 fail, 2 expected skips (`TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`). The first run without the Valkey URL skipped 12 more; they were re-run with it and pass.
+- `scripts/resource-test-fixture.sh`: resolvers and resource ok.
+- New tests: `TestNormalizeHost` (table) and `TestCreateUpdateRefuseInvalidHost` (DB-backed: nothing written on a refused create, nothing changed on a refused update, trimmed host stored).
+- Mutants: removing the check from `Create` or from `Update` each fails the new test.
+- Admin: 30 files / 242 tests (new `resourceHost.test.ts`, the same cases as the Go table), build ok. Lint is unchanged at 17; the one finding in a touched file (`CreateResourceModal.tsx` `as any`) is pre-existing on `main`.
+
