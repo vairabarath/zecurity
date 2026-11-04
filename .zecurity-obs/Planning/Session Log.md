@@ -10,6 +10,40 @@ tags:
 
 ---
 
+## 2026-11-04 — PENDING-16: Resource policies (R2 Console + R3 Live Verification)
+
+**What was done:**
+- Completed PENDING-16 end-to-end on `feat/pending16-resource-policies`.
+- **R2 (Admin Console):**
+  - Updated GraphQL operations in `admin/src/graphql/{queries,mutations}.graphql` for resource policies, preview, and safe profile deletion. Regenerated types via `npm run codegen`.
+  - Implemented `ResourcePolicies` page under `Policies` tabs with Default badge, profiles chip list, and associated resource count.
+  - Implemented `ResourcePolicyModal` with profile multiselect, disabled empty profiles, live preview device passing counts, and access reduction warning/confirmation.
+  - Added in-use device profile deletion guard (D-4) with detailed policy breakdown and empty policy warnings in `DeviceProfiles.tsx` and `EditDeviceProfileModal.tsx`.
+  - Added Resource Policy card to `ResourceDetail.tsx` with policy switcher, live preview, and access reduction confirmation.
+  - Added unit test suites (`ResourcePolicies.test.tsx`, `ResourceDetail.policy.test.tsx`, updated existing tests). Vitest passed 278/278 tests across 32 files. `tsc -b && vite build` succeeded cleanly.
+- **R3 (Live verification):**
+  - Reset local database via `docker compose down -v && docker compose up -d` applying all 52 migrations including `049_resource_policies.sql`.
+  - Verified `scripts/resource-test-fixture.sh`.
+  - Ran comprehensive 10-step live run script verifying:
+    1. Default policy auto-creation on workspace insert.
+    2. Auto-assignment of resources to Default policy on insert without policy_id.
+    3. Group access, membership, and device creation.
+    4. Posture report ingestion and evaluation.
+    5. Default policy (0 profiles) allows any device.
+    6. Policy switch to strict "Approved Only" profile cuts access in ACL snapshot.
+    7. Adding OR profile "Firewall On" restores access under OR rule.
+    8. Deleting in-use profile without confirmation refused (D-4); confirmed delete succeeds, widens policy to Any Device, and reports affected policies.
+    9. Deleting policy moves resources to Default policy atomically in DB.
+    10. Deleting Default policy is refused by server.
+  - All 10 live run steps passed with 100% success.
+- **Full Verification:**
+  - Controller Go test suite: 1677 pass, 0 fail, 2 expected skips.
+  - Admin Vitest: 32 files, 278 tests pass.
+  - Admin production build: `tsc -b && vite build` passed.
+  - Branch ready for PR with `[schema: reset DB]`.
+
+---
+
 ## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 2 (D): Disconnect Watcher → Transport Plane + M2-A worktree restoration
 
 **What was done:**

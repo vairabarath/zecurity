@@ -247,3 +247,43 @@ ALTER TABLE device_profiles DROP COLUMN mode;
   - `go build`, `go vet`, and `go test -count=1 ./...` with every DB and Valkey variable: 1677 pass / 0 fail / 2 expected skips. `scripts/resource-test-fixture.sh` ok.
   - Admin: codegen, `tsc`, 268 tests, build ok; lint unchanged (17, pre-existing).
 
+**R2: Console (2026-11-04).**
+- **Policies page (`admin/src/pages/Policies.tsx`):**
+  - Added tabs: "Resource Policies" (default) and "Device Profiles".
+- **Resource Policies view (`admin/src/pages/ResourcePolicies.tsx`):**
+  - Displays all resource policies with Default badge, profiles chip list, and associated resource count.
+  - Creation, editing, and deletion modals.
+  - Deletion modal warns that all associated resources will be moved to the Default policy.
+- **Resource Policy Modal (`admin/src/components/ResourcePolicyModal.tsx`):**
+  - Allows selecting profiles for a policy. Empty profiles (with zero requirements) are disabled with a tooltip explaining that empty profiles cannot be added.
+  - Live preview queries `PreviewResourcePolicy` showing how many devices will pass the selected profiles.
+  - Displays access reduction warning with an explicit confirmation checkbox if passing device count drops.
+- **Device Profiles safeguards (`admin/src/pages/DeviceProfiles.tsx`, `EditDeviceProfileModal.tsx`):**
+  - In-use profile deletion modal warns user of affected policies and whether any policy will become "Any device" (ungated). Requires confirmation per D-4.
+  - Last active requirement in an in-use profile cannot be toggled off.
+- **Resource Detail policy card (`admin/src/pages/ResourceDetail.tsx`):**
+  - Displays current policy, Default badge, and attached profiles.
+  - Policy switcher allows reassigning resource to another policy, featuring real-time preview and reduction confirmation.
+- **Frontend test suite:**
+  - Added `ResourcePolicies.test.tsx`, `ResourceDetail.policy.test.tsx`.
+  - Updated `DeviceProfiles.test.tsx`, `EditDeviceProfileModal.test.tsx`, `Policies.test.tsx`, `ResourceDetail.protect.test.tsx`.
+  - All 32 test files, 278 unit tests pass cleanly. `tsc -b && vite build` succeeds.
+
+**R3: Live verification (2026-11-04).**
+- **Clean database reset:**
+  - Ran `cd controller && docker compose down -v && docker compose up -d`.
+  - Confirmed `049_resource_policies.sql` applied cleanly along with all 52 migrations.
+  - Verified `scripts/resource-test-fixture.sh` succeeded.
+- **End-to-end verification (all 10 steps passed 100%):**
+  1. Default policy auto-created by database trigger on workspace creation (`is_default = true`).
+  2. Resource inserted without `policy_id` is auto-assigned to Default policy by `BEFORE INSERT` database trigger.
+  3. Setting up group access, member, and client device.
+  4. Device submits posture report (firewall pass, not approved); posture evaluated and cached.
+  5. Default policy with zero profiles allows any device (verified via ACL compiler snapshot).
+  6. Strict policy created with "Approved Only" profile; preview shows 0 of 1 devices passing; resource reassigned; access cut in ACL snapshot (`allowed_spiffe_ids` excluded).
+  7. Added OR profile "Firewall On"; preview shows 1 of 1 devices passing; access returned in ACL snapshot under OR rule.
+  8. In-use profile deletion guard (D-4): deleting profile in use without confirmation refused with descriptive error naming the policy; confirmed delete succeeded, reporting `RemovedFrom` and `NowAnyDevice`, widening access to Any Device.
+  9. Policy deletion moves resources back to Default policy atomically; verified in database.
+  10. Attempting to delete Default policy is refused by server (`posture.ErrDefaultPolicyFixed`).
+- **All R1, R2, and R3 phases complete. Ready for PR `[schema: reset DB]`.**
+
