@@ -22,7 +22,7 @@ const PROFILES = [
         allowUnsupported: false,
       },
     ],
-    boundResources: [],
+    policies: [],
   },
 ];
 

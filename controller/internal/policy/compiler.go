@@ -136,43 +136,17 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		})
 	}
 
-	// Posture batch fetching: profiles, bindings, and evaluations
+	// Posture (PENDING-16): each resource's policy requires zero or more
+	// device profiles; none means any device. One batch query each.
 	profiles, err := postureStore.ListProfiles(ctx, workspaceUUID)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: list posture profiles: %w", err)
 	}
-	bindings, err := postureStore.ListResourceBindingsForWorkspace(ctx, workspaceUUID)
+	resourceProfiles, err := postureStore.ResourceProfilesForWorkspace(ctx, workspaceUUID)
 	if err != nil {
-		return nil, fmt.Errorf("compile acl: list resource bindings: %w", err)
+		return nil, fmt.Errorf("compile acl: resource policy profiles: %w", err)
 	}
-
-	profileMap := make(map[uuid.UUID]posture.Profile)
-
-	for _, p := range profiles {
-		profileMap[p.ID] = p
-	}
-
-	enforceProfilesByResource := make(map[string][]posture.Profile)
-
-	for _, binding := range bindings {
-		profile, ok := profileMap[binding.ProfileID]
-		if !ok {
-			continue
-		}
-
-		if profile.Mode != posture.ModeEnforce {
-			continue
-		}
-
-		resourceID := binding.ResourceID.String()
-
-		enforceProfilesByResource[resourceID] =
-			append(
-				enforceProfilesByResource[resourceID],
-				profile,
-			)
-
-	}
+	requiredProfilesByResource := requiredProfiles(profiles, resourceProfiles)
 
 	allDeviceIDs := make(map[uuid.UUID]struct{})
 
@@ -228,10 +202,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 				entryDevices[device.DeviceID] = device.SPIFFEID
 			}
 		}
-		enforcedProfiles := enforceProfilesByResource[key.resourceID]
-
 		allowedSPIFFEs, pairValidUntil, isGated := applyPosture(
-			now, entryDevices, enforcedProfiles, evaluations,
+			now, entryDevices, requiredProfilesByResource[key.resourceID], evaluations,
 		)
 		if isGated && len(allowedSPIFFEs) > 0 {
 
@@ -322,19 +294,38 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 	}, nil
 }
 
-// Found evaluation for this profile, move to next profile
+// requiredProfiles maps each resource id to the device profiles its policy
+// requires (profile ids resolved against the workspace's profiles).
+func requiredProfiles(profiles []posture.Profile, resourceProfiles map[uuid.UUID][]uuid.UUID) map[string][]posture.Profile {
+	byID := make(map[uuid.UUID]posture.Profile, len(profiles))
+	for _, p := range profiles {
+		byID[p.ID] = p
+	}
+	out := make(map[string][]posture.Profile, len(resourceProfiles))
+	for resourceID, ids := range resourceProfiles {
+		for _, id := range ids {
+			if p, ok := byID[id]; ok {
+				out[resourceID.String()] = append(out[resourceID.String()], p)
+			}
+		}
+	}
+	return out
+}
 
+// applyPosture narrows a resource's devices to those that satisfy ANY of the
+// profiles its policy requires (fail closed: current profile revision, report
+// younger than posture.MaxReportAge). No profiles: every device, not gated.
 func applyPosture(
 	now time.Time,
 	entryDevices map[uuid.UUID]string,
-	enforcedProfiles []posture.Profile,
+	requiredProfiles []posture.Profile,
 	evaluations map[uuid.UUID][]posture.Evaluation,
 ) (
 	allowedSPIFFEs []string,
 	pairValidUntil time.Time,
 	isGated bool,
 ) {
-	if len(enforcedProfiles) == 0 {
+	if len(requiredProfiles) == 0 {
 		for _, spiffe := range entryDevices {
 			allowedSPIFFEs = append(allowedSPIFFEs, spiffe)
 		}
@@ -348,7 +339,7 @@ func applyPosture(
 
 		var deviceValidUntil time.Time
 
-		for _, profile := range enforcedProfiles {
+		for _, profile := range requiredProfiles {
 			for _, evaluation := range evaluations[deviceID] {
 
 				if evaluation.ProfileID != profile.ID {

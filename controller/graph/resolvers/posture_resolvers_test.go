@@ -32,7 +32,7 @@ func TestPostureMutationRequiresAdmin(t *testing.T) {
 			Requires: testRequires,
 		},
 	}))
-	body := []byte(`{"query":"mutation { bindResourceToProfile(profileId: \"00000000-0000-0000-0000-000000000001\", resourceId: \"00000000-0000-0000-0000-000000000002\") { id } }"}`)
+	body := []byte(`{"query":"mutation { setResourcePolicy(resourceId: \"00000000-0000-0000-0000-000000000001\", policyId: \"00000000-0000-0000-0000-000000000002\") { id } }"}`)
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -149,120 +149,90 @@ func TestDevicePostureVisibilityRequiresAdmin(t *testing.T) {
 	}
 }
 
-func TestPostureBindingResolversNotifyAndLoadBoundResources(t *testing.T) {
+// PENDING-16: resource policies replace the direct profile bindings.
+func TestResourcePolicyResolversNotifyAndLoad(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
+	ws := uuid.MustParse(f.tenantID)
 
-	profile, err := f.mr.PostureStore.CreateProfile(
-		f.ctx,
-		uuid.MustParse(f.tenantID),
-		"posture-resolver-"+uuid.NewString(),
-		true,
-	)
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, ws, "posture-resolver-"+uuid.NewString(), true)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
-			context.Background(),
-			uuid.MustParse(f.tenantID),
-			profile.ID,
-		)
-	})
-
+	if err := f.mr.PostureStore.AddRequirement(f.ctx, ws, profile.ID, posture.Requirement{CheckID: posture.CheckFirewall}); err != nil {
+		t.Fatalf("add requirement: %v", err)
+	}
 	resourceID := f.seedResource(t, "10.0.1.11", "unprotected")
 
-	gotProfile, err := f.mr.BindResourceToProfile(f.ctx, profile.ID.String(), resourceID)
+	pol, err := f.mr.CreateResourcePolicy(f.ctx, "Firewall on", nil)
 	if err != nil {
-		t.Fatalf("BindResourceToProfile: %v", err)
+		t.Fatalf("CreateResourcePolicy: %v", err)
 	}
-	if gotProfile.ID != profile.ID.String() {
-		t.Fatalf("bound profile ID = %q, want %q", gotProfile.ID, profile.ID)
+	if got := f.fires.Load(); got != 0 {
+		t.Fatalf("creating an empty policy fired the push hook %d times, want 0", got)
+	}
+	if _, err := f.mr.SetResourcePolicyProfiles(f.ctx, pol.ID, []string{profile.ID.String()}); err != nil {
+		t.Fatalf("SetResourcePolicyProfiles: %v", err)
 	}
 	if got := f.fires.Load(); got != 1 {
-		t.Fatalf("bind push hook fired %d times, want 1", got)
+		t.Fatalf("set profiles fired the push hook %d times, want 1", got)
 	}
-
-	dpr := &deviceProfileResolver{f.mr.Resolver}
-	resources, err := dpr.BoundResources(f.ctx, gotProfile)
-	if err != nil {
-		t.Fatalf("BoundResources: %v", err)
-	}
-	if len(resources) != 1 || resources[0].ID != resourceID {
-		t.Fatalf("bound resources = %#v, want resource %s", resources, resourceID)
-	}
-
-	if _, err := f.mr.BindResourceToProfile(f.ctx, profile.ID.String(), resourceID); err == nil ||
-		!strings.Contains(err.Error(), "duplicate resource binding") {
-		t.Fatalf("duplicate bind error = %v", err)
-	} else if presented := ErrorPresenter(f.ctx, err); presented.Message != "bindResourceToProfile: duplicate resource binding" {
-		t.Fatalf("presented duplicate error = %q", presented.Message)
-	}
-	if got := f.fires.Load(); got != 1 {
-		t.Fatalf("failed duplicate bind fired push hook; count = %d, want 1", got)
-	}
-
-	if _, err := f.mr.UnbindResourceFromProfile(f.ctx, profile.ID.String(), resourceID); err != nil {
-		t.Fatalf("UnbindResourceFromProfile: %v", err)
+	if _, err := f.mr.SetResourcePolicy(f.ctx, resourceID, pol.ID); err != nil {
+		t.Fatalf("SetResourcePolicy: %v", err)
 	}
 	if got := f.fires.Load(); got != 2 {
-		t.Fatalf("unbind push hook fired total %d times, want 2", got)
+		t.Fatalf("set resource policy fired the push hook %d times total, want 2", got)
 	}
 
-	resources, err = dpr.BoundResources(f.ctx, gotProfile)
-	if err != nil {
-		t.Fatalf("BoundResources after unbind: %v", err)
+	policies, err := (&deviceProfileResolver{f.mr.Resolver}).Policies(f.ctx, &graph.DeviceProfile{ID: profile.ID.String()})
+	if err != nil || len(policies) != 1 || policies[0].ID != pol.ID {
+		t.Fatalf("profile policies = %#v, %v; want [%s]", policies, err, pol.ID)
 	}
-	if len(resources) != 0 {
-		t.Fatalf("bound resources after unbind = %#v, want empty", resources)
+	resources, err := (&resourcePolicyResolver{f.mr.Resolver}).Resources(f.ctx, pol)
+	if err != nil || len(resources) != 1 || resources[0].ID != resourceID {
+		t.Fatalf("policy resources = %#v, %v; want [%s]", resources, err, resourceID)
+	}
+	got, err := (&resourceResolver{f.mr.Resolver}).Policy(f.ctx, &graph.Resource{ID: resourceID})
+	if err != nil || got.ID != pol.ID {
+		t.Fatalf("resource policy = %#v, %v; want %s", got, err, pol.ID)
 	}
 
-	if _, err := f.mr.UnbindResourceFromProfile(f.ctx, profile.ID.String(), resourceID); err == nil ||
-		!strings.Contains(err.Error(), "binding not found") {
-		t.Fatalf("missing unbind error = %v", err)
+	// Deleting the policy moves the resource back to the Default.
+	if ok, err := f.mr.DeleteResourcePolicy(f.ctx, pol.ID); err != nil || !ok {
+		t.Fatalf("DeleteResourcePolicy: %v %v", ok, err)
 	}
-	if got := f.fires.Load(); got != 2 {
-		t.Fatalf("failed unbind fired push hook; count = %d, want 2", got)
+	if got := f.fires.Load(); got != 3 {
+		t.Fatalf("delete policy fired the push hook %d times total, want 3", got)
+	}
+	got, err = (&resourceResolver{f.mr.Resolver}).Policy(f.ctx, &graph.Resource{ID: resourceID})
+	if err != nil || !got.IsDefault {
+		t.Fatalf("resource policy after delete = %#v, %v; want the Default", got, err)
 	}
 }
 
-func TestBindResourceToProfileRejectsEmptyEnforcedProfile(t *testing.T) {
+func TestSetResourcePolicyProfilesRejectsEmptyProfile(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
-	workspaceID := uuid.MustParse(f.tenantID)
+	ws := uuid.MustParse(f.tenantID)
 
-	profile, err := f.mr.PostureStore.CreateProfile(
-		f.ctx,
-		workspaceID,
-		"posture-empty-enforce-"+uuid.NewString(),
-		true,
-	)
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, ws, "posture-empty-"+uuid.NewString(), true)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(context.Background(), workspaceID, profile.ID)
-	})
-
-	if _, err := f.pool.Exec(
-		f.ctx,
-		`UPDATE device_profiles SET mode = 'enforce' WHERE id = $1`,
-		profile.ID,
-	); err != nil {
-		t.Fatalf("force invalid enforce profile: %v", err)
+	pol, err := f.mr.CreateResourcePolicy(f.ctx, "Empty profile probe", nil)
+	if err != nil {
+		t.Fatalf("CreateResourcePolicy: %v", err)
 	}
-
-	resourceID := f.seedResource(t, "10.0.1.12", "unprotected")
-	_, err = f.mr.BindResourceToProfile(f.ctx, profile.ID.String(), resourceID)
-	if err == nil || !strings.Contains(err.Error(), "requires at least one requirement") {
-		t.Fatalf("empty enforce bind error = %v", err)
+	_, err = f.mr.SetResourcePolicyProfiles(f.ctx, pol.ID, []string{profile.ID.String()})
+	if err == nil || ErrorPresenter(f.ctx, err).Message != posture.ErrEmptyProfileInPolicy.Error() {
+		t.Fatalf("empty profile in policy error = %v", err)
 	}
 	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("rejected empty enforce bind fired push hook %d times, want 0", got)
+		t.Fatalf("rejected empty profile fired the push hook %d times, want 0", got)
 	}
 }
 
-func TestBindResourceToProfileRejectsCrossWorkspaceProfile(t *testing.T) {
+func TestSetResourcePolicyProfilesRejectsCrossWorkspaceProfile(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
@@ -280,24 +250,23 @@ func TestBindResourceToProfileRejectsCrossWorkspaceProfile(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = f.pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, otherWorkspaceID)
 	})
-
-	profile, err := f.mr.PostureStore.CreateProfile(
-		f.ctx,
-		otherWorkspaceID,
-		"cross-workspace-profile",
-		true,
-	)
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-workspace-profile", true)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
-
-	resourceID := f.seedResource(t, "10.0.1.13", "unprotected")
-	_, err = f.mr.BindResourceToProfile(f.ctx, profile.ID.String(), resourceID)
-	if err == nil || !strings.Contains(err.Error(), "profile or resource not found") {
-		t.Fatalf("cross-workspace bind error = %v", err)
+	if err := f.mr.PostureStore.AddRequirement(f.ctx, otherWorkspaceID, profile.ID, posture.Requirement{CheckID: posture.CheckFirewall}); err != nil {
+		t.Fatalf("add requirement: %v", err)
+	}
+	pol, err := f.mr.CreateResourcePolicy(f.ctx, "Cross-workspace probe", nil)
+	if err != nil {
+		t.Fatalf("CreateResourcePolicy: %v", err)
+	}
+	_, err = f.mr.SetResourcePolicyProfiles(f.ctx, pol.ID, []string{profile.ID.String()})
+	if err == nil || ErrorPresenter(f.ctx, err).Message != "device profile not found" {
+		t.Fatalf("cross-workspace profile error = %v", err)
 	}
 	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("rejected cross-workspace bind fired push hook %d times, want 0", got)
+		t.Fatalf("rejected cross-workspace profile fired the push hook %d times, want 0", got)
 	}
 }
 
@@ -373,10 +342,10 @@ func TestDevicePostureVisibilityResolver(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			workspaceID,
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 

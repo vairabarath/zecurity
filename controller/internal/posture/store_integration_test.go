@@ -52,7 +52,7 @@ func TestStoreIntegration(t *testing.T) {
 	workspaceB := insertPostureTestWorkspace(t, ctx, pool, "posture-b")
 	deviceA := insertPostureTestDevice(t, ctx, pool, workspaceA, "a")
 	deviceB := insertPostureTestDevice(t, ctx, pool, workspaceB, "b")
-	resourceA := insertPostureTestResource(t, ctx, pool, workspaceB, "a")
+	resourceA := insertPostureTestResource(t, ctx, pool, workspaceA, "a")
 	resourceB := insertPostureTestResource(t, ctx, pool, workspaceB, "b")
 	store := NewStore(pool)
 
@@ -107,32 +107,14 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create empty profile: %v", err)
 	}
-	if _, err := store.UpdateProfileMode(ctx, workspaceA, emptyProfile.ID, ModeEnforce); !errors.Is(err, ErrEmptyEnforceProfile) {
-		t.Fatalf("enforce empty profile error = %v, want %v", err, ErrEmptyEnforceProfile)
+	// PENDING-16: an empty profile is never satisfied, so it can't be added to
+	// a resource policy (it would block every device).
+	policyA, err := store.CreateResourcePolicy(ctx, workspaceA, "Integration policy", nil)
+	if err != nil {
+		t.Fatalf("create resource policy: %v", err)
 	}
-	// Simulate an invalid profile by bypassing the store.
-	if _, err := pool.Exec(
-		ctx,
-		`
-		UPDATE device_profiles
-		SET mode = $2
-		WHERE workspace_id = $1
-		  AND id = $3
-		`,
-		workspaceA,
-		ModeEnforce,
-		emptyProfile.ID,
-	); err != nil {
-		t.Fatalf("force enforce mode: %v", err)
-	}
-
-	if _, err := store.CreateResourceBinding(
-		ctx,
-		workspaceA,
-		resourceA,
-		emptyProfile.ID,
-	); !errors.Is(err, ErrEmptyEnforceProfile) {
-		t.Fatalf("bind empty enforced profile error = %v, want %v", err, ErrEmptyEnforceProfile)
+	if _, err := store.SetResourcePolicyProfiles(ctx, workspaceA, policyA.ID, []uuid.UUID{emptyProfile.ID}); !errors.Is(err, ErrEmptyProfileInPolicy) {
+		t.Fatalf("empty profile in policy error = %v, want %v", err, ErrEmptyProfileInPolicy)
 	}
 	if err := store.AddRequirement(ctx, workspaceA, profile.ID, Requirement{
 		CheckID: "linux.disk.encryption",
@@ -261,8 +243,9 @@ func TestStoreIntegration(t *testing.T) {
 	if !evaluation.Satisfied || evaluation.ProfileRevision != profile.Revision {
 		t.Fatalf("re-evaluated profile = %#v, want satisfied revision %d", evaluation, profile.Revision)
 	}
-	if _, err := store.UpdateProfileMode(ctx, workspaceA, profile.ID, ModeEnforce); err != nil {
-		t.Fatalf("enforce profile: %v", err)
+	// PENDING-16: a profile a policy uses keeps at least one requirement.
+	if _, err := store.SetResourcePolicyProfiles(ctx, workspaceA, policyA.ID, []uuid.UUID{profile.ID}); err != nil {
+		t.Fatalf("require profile in policy: %v", err)
 	}
 	if err := store.RemoveRequirement(
 		ctx,
@@ -270,7 +253,7 @@ func TestStoreIntegration(t *testing.T) {
 		profile.ID,
 		"linux.disk.encryption",
 	); !errors.Is(err, ErrLastRequirement) {
-		t.Fatalf("remove last enforced requirement error = %v, want %v", err, ErrLastRequirement)
+		t.Fatalf("remove last requirement of an in-use profile error = %v, want %v", err, ErrLastRequirement)
 	}
 	requirements, err := store.ListRequirements(ctx, workspaceA, profile.ID)
 	if err != nil {
@@ -280,13 +263,12 @@ func TestStoreIntegration(t *testing.T) {
 		t.Fatalf("requirements len = %d, want 1", len(requirements))
 	}
 
-	if _, err := store.CreateResourceBinding(
-		ctx,
-		workspaceA,
-		resourceB,
-		profile.ID,
-	); !errors.Is(err, ErrWorkspaceMismatch) {
-		t.Fatalf("cross-workspace binding error = %v, want %v", err, ErrWorkspaceMismatch)
+	// Another workspace's resource can't be put in this workspace's policy.
+	if _, err := store.SetResourcePolicy(ctx, workspaceA, resourceB, policyA.ID); !errors.Is(err, ErrPolicyResourceGone) {
+		t.Fatalf("cross-workspace resource policy error = %v, want %v", err, ErrPolicyResourceGone)
+	}
+	if prev, err := store.SetResourcePolicy(ctx, workspaceA, resourceA, policyA.ID); err != nil || prev == policyA.ID {
+		t.Fatalf("set own resource policy: prev=%v err=%v", prev, err)
 	}
 
 	reason := "all required checks passed"

@@ -51,17 +51,19 @@ var expectedCapability = func() map[string]rbac.Capability {
 	put(rbac.ConsoleRead, `clientDevices remoteNetworks remoteNetwork connectors connector
 		shields shield resources allResources getDiscoveredServices getScanResults groups group
 		supportedPostureChecks deviceProfiles devicePostureVisibility idpConnections
-		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users`)
+		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users
+		resourcePolicies resourcePolicy previewResourcePolicy`)
 	put(rbac.NetworkWrite, `createRemoteNetwork deleteRemoteNetwork generateConnectorToken
 		revokeConnector deleteConnector generateShieldToken revokeShield deleteShield
 		createResource updateResource protectResource unprotectResource deleteResource
 		forceDeleteResource triggerScan promoteDiscoveredService`)
 	put(rbac.AccessWrite, `createGroup updateGroup deleteGroup addGroupMember removeGroupMember
 		assignResourceToGroup unassignResourceFromGroup`)
-	put(rbac.PostureWrite, `createDeviceProfile updateDeviceProfileMode
+	put(rbac.PostureWrite, `createDeviceProfile
 		updateDeviceProfileManualTrust addProfileRequirement removeProfileRequirement
-		deleteDeviceProfile bindResourceToProfile unbindResourceFromProfile
-		updateProfileRequirementCountries`)
+		deleteDeviceProfile updateProfileRequirementCountries
+		createResourcePolicy updateResourcePolicy setResourcePolicyProfiles
+		deleteResourcePolicy setResourcePolicy`)
 	put(rbac.DeviceWrite, `approveDevice unapproveDevice`)
 	put(rbac.DeviceAdmin, `revokeDevice`)
 	put(rbac.IdentityAdmin, `createIdpConnection updateIdpConnection setIdpConnectionStatus
@@ -179,7 +181,7 @@ func TestAllFieldsAuthorized(t *testing.T) {
 	// 73 console operations + setMemberRole (PENDING-19 §4.1)
 	// + updateProfileRequirementCountries (PENDING-20 G-10). A drop below
 	// means schema collection broke and a pass would be meaningless.
-	const wantGated = 75
+	const wantGated = 80 // PENDING-16: -3 (mode, bind, unbind), +8 (resource policies)
 	if gated != wantGated {
 		t.Fatalf("authz check found %d gated operations, want %d — schema collection broken or "+
 			"an operation was added/removed without updating expectedCapability", gated, wantGated)

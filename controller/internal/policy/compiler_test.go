@@ -11,8 +11,8 @@ import (
 func TestApplyPosture_EnforcedProfilesUseOR(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	deviceID := uuid.New()
-	profileOne := posture.Profile{ID: uuid.New(), Revision: 3, Mode: posture.ModeEnforce}
-	profileTwo := posture.Profile{ID: uuid.New(), Revision: 7, Mode: posture.ModeEnforce}
+	profileOne := posture.Profile{ID: uuid.New(), Revision: 3}
+	profileTwo := posture.Profile{ID: uuid.New(), Revision: 7}
 	receivedAt := now.Add(-time.Minute)
 
 	allowed, validUntil, gated := applyPosture(
@@ -53,7 +53,7 @@ func TestApplyPosture_EnforcedProfilesUseOR(t *testing.T) {
 func TestApplyPosture_FailsClosedForInvalidEvaluations(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	deviceID := uuid.New()
-	profile := posture.Profile{ID: uuid.New(), Revision: 4, Mode: posture.ModeEnforce}
+	profile := posture.Profile{ID: uuid.New(), Revision: 4}
 	receivedAt := now.Add(-time.Minute)
 	spiffe := "spiffe://example/client/device-1"
 
@@ -119,7 +119,7 @@ func TestApplyPosture_FailsClosedForInvalidEvaluations(t *testing.T) {
 	}
 }
 
-func TestApplyPosture_AuditOnlyProfilesDoNotGate(t *testing.T) {
+func TestApplyPosture_PolicyWithNoProfilesAllowsAnyDevice(t *testing.T) {
 	deviceID := uuid.New()
 	allowed, validUntil, gated := applyPosture(
 		time.Now(),
@@ -129,7 +129,7 @@ func TestApplyPosture_AuditOnlyProfilesDoNotGate(t *testing.T) {
 	)
 
 	if gated {
-		t.Fatal("audit-only/no-enforce profile set unexpectedly gated access")
+		t.Fatal("a policy with no profiles (any device) unexpectedly gated access")
 	}
 	if len(allowed) != 1 {
 		t.Fatalf("allowed SPIFFE IDs = %v, want one", allowed)
@@ -142,8 +142,8 @@ func TestApplyPosture_AuditOnlyProfilesDoNotGate(t *testing.T) {
 func TestApplyPosture_UsesLatestPassingProfileExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	deviceID := uuid.New()
-	profileOne := posture.Profile{ID: uuid.New(), Revision: 1, Mode: posture.ModeEnforce}
-	profileTwo := posture.Profile{ID: uuid.New(), Revision: 1, Mode: posture.ModeEnforce}
+	profileOne := posture.Profile{ID: uuid.New(), Revision: 1}
+	profileTwo := posture.Profile{ID: uuid.New(), Revision: 1}
 	firstReport := now.Add(-2 * time.Minute)
 	secondReport := now.Add(-time.Minute)
 

@@ -12,24 +12,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
 
 var (
 	ErrNotFound             = errors.New("posture record not found")
 	ErrDuplicateReport      = errors.New("duplicate posture report")
 	ErrDuplicateRequirement = errors.New("duplicate posture requirement")
-	ErrDuplicateBinding     = errors.New("duplicate posture resource binding")
 	ErrWorkspaceMismatch    = errors.New("workspace mismatch")
-	ErrLastRequirement      = errors.New("cannot remove the last requirement from an enforced profile")
-	ErrEmptyEnforceProfile  = errors.New("enforced profile must have at least one requirement")
-	ErrInvalidMode          = errors.New("invalid device profile mode")
+	ErrLastRequirement      = apperr.UserErrorf("cannot remove the last requirement of a device profile that resource policies use")
 	ErrInvalidProfileName   = errors.New("device profile name is required")
 	ErrNoVerificationMethod = errors.New("profile must have at least one verification method")
-)
-
-const (
-	ModeAudit   = "audit"
-	ModeEnforce = "enforce"
 )
 
 type Store struct {
@@ -76,7 +70,6 @@ type Profile struct {
 	ID                 uuid.UUID
 	WorkspaceID        uuid.UUID
 	Name               string
-	Mode               string
 	Revision           int64
 	ManualTrustEnabled bool
 	CreatedAt          time.Time
@@ -91,13 +84,6 @@ type Requirement struct {
 	// Countries is the rule of a CheckNetworkCountry requirement (stored in
 	// device_profile_requirements.params); nil for every other check.
 	Countries *CountryRule
-}
-
-type ResourceBinding struct {
-	ID          uuid.UUID
-	ResourceID  uuid.UUID
-	ProfileID   uuid.UUID
-	WorkspaceID uuid.UUID
 }
 
 type Evaluation struct {
@@ -361,7 +347,6 @@ func (s *Store) CreateProfile(
 		 RETURNING id,
 		           workspace_id,
 		           name,
-		           mode,
 		           revision,
 		           manual_trust_enabled,
 		           created_at,
@@ -373,7 +358,6 @@ func (s *Store) CreateProfile(
 		&profile.ID,
 		&profile.WorkspaceID,
 		&profile.Name,
-		&profile.Mode,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
@@ -429,7 +413,6 @@ func (s *Store) GetProfile(
 		`SELECT id,
 	        workspace_id,
 	        name,
-	        mode,
 	        revision,
 	        manual_trust_enabled,
 	        created_at,
@@ -443,7 +426,6 @@ func (s *Store) GetProfile(
 		&profile.ID,
 		&profile.WorkspaceID,
 		&profile.Name,
-		&profile.Mode,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
@@ -469,7 +451,6 @@ func (s *Store) ListProfiles(
 		`SELECT id,
 		        workspace_id,
 		        name,
-		        mode,
 		        revision,
 		        manual_trust_enabled,
 		        created_at,
@@ -493,7 +474,6 @@ func (s *Store) ListProfiles(
 			&profile.ID,
 			&profile.WorkspaceID,
 			&profile.Name,
-			&profile.Mode,
 			&profile.Revision,
 			&profile.ManualTrustEnabled,
 			&profile.CreatedAt,
@@ -508,98 +488,6 @@ func (s *Store) ListProfiles(
 		return nil, fmt.Errorf("iterate device profiles: %w", err)
 	}
 	return profiles, nil
-}
-
-func (s *Store) UpdateProfileMode(
-	ctx context.Context,
-	workspaceID,
-	profileID uuid.UUID,
-	mode string,
-) (*Profile, error) {
-	profile := &Profile{}
-
-	if mode != ModeAudit && mode != ModeEnforce {
-		return nil, ErrInvalidMode
-	}
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin update profile mode: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	var lockedProfileID uuid.UUID
-	err = tx.QueryRow(
-		ctx,
-		`SELECT id
-		   FROM device_profiles
-		  WHERE workspace_id = $1
-		    AND id = $2
-		  FOR UPDATE`,
-		workspaceID,
-		profileID,
-	).Scan(&lockedProfileID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock device profile: %w", err)
-	}
-
-	var requirementCount int
-	if err := tx.QueryRow(
-		ctx,
-		`SELECT COUNT(*)
-		   FROM device_profile_requirements
-		  WHERE profile_id = $1`,
-		lockedProfileID,
-	).Scan(&requirementCount); err != nil {
-		return nil, fmt.Errorf("count device profile requirements: %w", err)
-	}
-	if mode == ModeEnforce && requirementCount == 0 {
-		return nil, ErrEmptyEnforceProfile
-	}
-
-	err = tx.QueryRow(
-		ctx,
-		`UPDATE device_profiles
-		SET mode = $3,
-		updated_at = NOW()
-		WHERE workspace_id = $1
-		AND id = $2
-		RETURNING
-		 id,
-		workspace_id,
-		name,
-		mode,
-		revision,
-		manual_trust_enabled,
-		created_at,
-		updated_at;`,
-
-		workspaceID,
-		profileID,
-		mode,
-	).Scan(
-		&profile.ID,
-		&profile.WorkspaceID,
-		&profile.Name,
-		&profile.Mode,
-		&profile.Revision,
-		&profile.ManualTrustEnabled,
-		&profile.CreatedAt,
-		&profile.UpdatedAt,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("update device profile: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit update profile mode: %w", err)
-	}
-	return profile, nil
 }
 
 func (s *Store) UpdateProfileManualTrust(
@@ -630,7 +518,6 @@ func (s *Store) UpdateProfileManualTrust(
 		RETURNING id,
 		          workspace_id,
 		          name,
-		          mode,
 		          revision,
 		          manual_trust_enabled,
 		          created_at,
@@ -642,7 +529,6 @@ func (s *Store) UpdateProfileManualTrust(
 		&profile.ID,
 		&profile.WorkspaceID,
 		&profile.Name,
-		&profile.Mode,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
@@ -656,31 +542,6 @@ func (s *Store) UpdateProfileManualTrust(
 	}
 
 	return profile, nil
-}
-
-func (s *Store) DeleteProfile(
-	ctx context.Context,
-	workspaceID,
-	profileID uuid.UUID,
-) error {
-	cmdTag, err := s.pool.Exec(
-		ctx,
-		`DELETE FROM device_profiles
-	WHERE workspace_id = $1
-		AND id = $2
-	`,
-		workspaceID,
-		profileID,
-	)
-
-	if err != nil {
-		return fmt.Errorf("delete device profile: %w", err)
-	}
-
-	if cmdTag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 func (s *Store) AddRequirement(
@@ -776,13 +637,15 @@ func (s *Store) RemoveRequirement(
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock the profile row so mode/revision can't change while we work.
-	var mode string
+	// Lock the profile row first (PENDING-16 lock order: profile, then its
+	// policy links), so a concurrent "add to a policy" can't slip in between
+	// the in-use check and the delete.
+	var locked uuid.UUID
 
 	err = tx.QueryRow(
 		ctx,
 		`
-		SELECT mode
+		SELECT id
 		FROM device_profiles
 		WHERE workspace_id = $1
 		  AND id = $2
@@ -790,7 +653,7 @@ func (s *Store) RemoveRequirement(
 		`,
 		workspaceID,
 		profileID,
-	).Scan(&mode)
+	).Scan(&locked)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -835,9 +698,17 @@ func (s *Store) RemoveRequirement(
 		return fmt.Errorf("count requirements: %w", err)
 	}
 
-	// Enforced profiles must always have at least one requirement.
-	if mode == ModeEnforce && remaining == 0 {
-		return ErrLastRequirement
+	// A profile that resource policies use must keep at least one
+	// requirement: an empty profile is never satisfied, so it would block
+	// every device of those policies.
+	if remaining == 0 {
+		inUse, err := profileInUse(ctx, tx, profileID)
+		if err != nil {
+			return err
+		}
+		if inUse {
+			return ErrLastRequirement
+		}
 	}
 
 	// Bump the revision.
@@ -915,234 +786,6 @@ func (s *Store) ListRequirements(
 	}
 
 	return requirements, nil
-}
-
-func (s *Store) CreateResourceBinding(
-	ctx context.Context,
-	workspaceID,
-	resourceID,
-	profileID uuid.UUID,
-) (*ResourceBinding, error) {
-
-	tx, err := s.pool.Begin(ctx)
-
-	if err != nil {
-		return nil, fmt.Errorf("begin create resource binding: %w", err)
-	}
-
-	defer tx.Rollback(ctx)
-
-	binding := &ResourceBinding{}
-
-	var (
-		profileWorkspaceID uuid.UUID
-		mode               string
-	)
-
-	err = tx.QueryRow(
-		ctx,
-		`
-		SELECT workspace_id, mode
-		FROM device_profiles
-		WHERE id = $1
-		FOR UPDATE
-		`,
-		profileID,
-	).Scan(
-		&profileWorkspaceID,
-		&mode,
-	)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock device profile: %w", err)
-	}
-
-	if profileWorkspaceID != workspaceID {
-		return nil, ErrWorkspaceMismatch
-	}
-
-	var requirementCount int
-
-	err = tx.QueryRow(
-		ctx,
-		`
-		SELECT COUNT(*)
-		FROM device_profile_requirements
-		WHERE profile_id = $1
-		`,
-		profileID,
-	).Scan(&requirementCount)
-
-	if err != nil {
-		return nil, fmt.Errorf("count profile requirements: %w", err)
-	}
-
-	if mode == ModeEnforce && requirementCount == 0 {
-		return nil, ErrEmptyEnforceProfile
-	}
-
-	err = tx.QueryRow(
-		ctx,
-		`
-		INSERT INTO resource_profile_bindings (
-			resource_id,
-			profile_id,
-			workspace_id
-		)
-		SELECT
-			r.id,
-			p.id,
-			$1
-		FROM resources r
-		JOIN device_profiles p
-			ON p.id = $3
-		WHERE r.id = $2
-		  AND r.tenant_id = $1
-		  AND p.workspace_id = $1
-		RETURNING
-			id,
-			resource_id,
-			profile_id,
-			workspace_id
-		`,
-		workspaceID,
-		resourceID,
-		profileID,
-	).Scan(
-		&binding.ID,
-		&binding.ResourceID,
-		&binding.ProfileID,
-		&binding.WorkspaceID,
-	)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrWorkspaceMismatch
-	}
-
-	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, ErrDuplicateBinding
-		}
-		return nil, fmt.Errorf("create resource binding: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit create resource binding: %w", err)
-	}
-	return binding, nil
-}
-
-func (s *Store) DeleteResourceBinding(
-	ctx context.Context,
-	workspaceID,
-	resourceID,
-	profileID uuid.UUID,
-) error {
-
-	cmdTag, err := s.pool.Exec(
-		ctx,
-		`
-		DELETE FROM resource_profile_bindings
-		WHERE workspace_id = $1
-		  AND resource_id = $2
-		  AND profile_id = $3
-		`,
-		workspaceID,
-		resourceID,
-		profileID,
-	)
-
-	if err != nil {
-		return fmt.Errorf("delete resource binding: %w", err)
-	}
-
-	if cmdTag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-
-	return nil
-}
-
-func (s *Store) ListResourceBindings(
-	ctx context.Context,
-	workspaceID,
-	profileID uuid.UUID,
-) ([]ResourceBinding, error) {
-	rows, err := s.pool.Query(
-		ctx,
-		`SELECT id, resource_id, profile_id, workspace_id
-		   FROM resource_profile_bindings
-		  WHERE workspace_id = $1
-		    AND profile_id = $2
-		  ORDER BY resource_id`,
-		workspaceID,
-		profileID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list resource profile bindings: %w", err)
-	}
-	defer rows.Close()
-
-	bindings := make([]ResourceBinding, 0)
-	for rows.Next() {
-		var binding ResourceBinding
-		if err := rows.Scan(
-			&binding.ID,
-			&binding.ResourceID,
-			&binding.ProfileID,
-			&binding.WorkspaceID,
-		); err != nil {
-			return nil, fmt.Errorf("scan resource profile binding: %w", err)
-		}
-		bindings = append(bindings, binding)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate resource profile bindings: %w", err)
-	}
-
-	return bindings, nil
-}
-
-// ListResourceBindingsForWorkspace retrieves all resource profile bindings for a
-// workspace in a single batch query to avoid N+1 lookups during ACL compilation.
-func (s *Store) ListResourceBindingsForWorkspace(
-	ctx context.Context,
-	workspaceID uuid.UUID,
-) ([]ResourceBinding, error) {
-	rows, err := s.pool.Query(
-		ctx,
-		`SELECT id, resource_id, profile_id, workspace_id
-           FROM resource_profile_bindings
-          WHERE workspace_id = $1
-          ORDER BY resource_id`,
-		workspaceID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list resource profile bindings for workspace: %w", err)
-	}
-	defer rows.Close()
-
-	bindings := make([]ResourceBinding, 0)
-	for rows.Next() {
-		var binding ResourceBinding
-		if err := rows.Scan(
-			&binding.ID,
-			&binding.ResourceID,
-			&binding.ProfileID,
-			&binding.WorkspaceID,
-		); err != nil {
-			return nil, fmt.Errorf("scan resource profile binding: %w", err)
-		}
-		bindings = append(bindings, binding)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate resource profile bindings: %w", err)
-	}
-
-	return bindings, nil
 }
 
 func (s *Store) LatestEvaluation(

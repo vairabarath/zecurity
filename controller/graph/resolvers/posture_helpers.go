@@ -7,17 +7,20 @@ package resolvers
 // gqlgen only touches files it generates; hand-written files here are untouched.
 
 import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/posture"
-	"strings"
-	"time"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 func postureProfileToGQL(profile *posture.Profile) *graph.DeviceProfile {
 	return &graph.DeviceProfile{
 		ID:          profile.ID.String(),
 		Name:        profile.Name,
-		Mode:        graph.DeviceProfileMode(strings.ToUpper(profile.Mode)),
 		ManualTrust: profile.ManualTrustEnabled,
 	}
 }
@@ -77,5 +80,61 @@ func postureVisibilityToGQL(
 		ReportReceivedAt: fmtTimePtr(item.ReportReceivedAt),
 		ReportAgeSeconds: reportAge,
 		Observations:     observations,
+	}
+}
+
+// policyRefNames lists policy names for audit details.
+func policyRefNames(refs []posture.PolicyRef) []string {
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Name
+	}
+	return out
+}
+
+// PENDING-16 helpers.
+
+func policyWorkspace(ctx context.Context) (uuid.UUID, error) {
+	ws, err := uuid.Parse(tenant.MustGet(ctx).TenantID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+	return ws, nil
+}
+
+// parsePolicyID parses an id from the API; a malformed one is answered like a
+// missing one by the caller.
+func parsePolicyID(id string) (uuid.UUID, bool) {
+	u, err := uuid.Parse(id)
+	return u, err == nil
+}
+
+func parseIDs(ids []string) ([]uuid.UUID, bool) {
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, s := range ids {
+		u, err := uuid.Parse(s)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, u)
+	}
+	return out, true
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+func resourcePolicyToGQL(p *posture.ResourcePolicy) *graph.ResourcePolicy {
+	return &graph.ResourcePolicy{
+		ID:            p.ID.String(),
+		Name:          p.Name,
+		Description:   p.Description,
+		IsDefault:     p.IsDefault,
+		ResourceCount: p.ResourceCount,
 	}
 }

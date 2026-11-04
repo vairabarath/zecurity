@@ -131,7 +131,7 @@ export default function DeviceProfiles() {
       <div className="table-shell">
         <div className="table-scroll">
           <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4">
-            {["Name", "Requirements", "Bound Resources", "Actions"].map(
+            {["Name", "Requirements", "Used by policies", "Actions"].map(
               (label, index) => (
                 <div
                   key={label + index}
@@ -201,10 +201,10 @@ export default function DeviceProfiles() {
                     )}
                   </div>
                   <div className="text-[13px] font-semibold text-muted-foreground">
-                    {profile.boundResources.length === 0 ? (
+                    {profile.policies.length === 0 ? (
                       <span className="italic opacity-60">none</span>
                     ) : (
-                      profile.boundResources.length
+                      profile.policies.length
                     )}
                   </div>
 

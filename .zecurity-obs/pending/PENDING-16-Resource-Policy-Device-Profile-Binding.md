@@ -199,5 +199,51 @@ ALTER TABLE device_profiles DROP COLUMN mode;
 - **Deviations from the §4.1 sketch:**
   - no `revision` column (nothing would read it);
   - `NO ACTION` instead of `RESTRICT` on `resources.policy_id`, so a workspace delete still cascades.
-- **Until R1b lands, the Go posture code and its tests on this branch still use the dropped table and column**, so the branch isn't mergeable on its own.
+- R1b (below) brings the Go code in line.
+
+**R1b: backend (2026-11-04).**
+- **`internal/posture/resource_policy.go`**:
+  - Types `ResourcePolicy`, `PolicyRef`, `ProfileDeleteResult`, plus user-safe errors.
+  - `List`/`Get`/`Create`/`UpdateResourcePolicy`, `SetResourcePolicyProfiles`, `DeleteResourcePolicy`, `SetResourcePolicy`, `PolicyOfResource`, `ResourcesInPolicy`, `PoliciesUsingProfile`, and `ResourceProfilesForWorkspace` (the compiler's batch query).
+  - **Lock order:** profile rows (sorted), then the policy.
+  - **Delete-and-reassign:** under the policy row lock; a racing assignment waits on that lock, then fails as "not found".
+  - **`DeleteProfile(…, confirmInUse)`** refuses without confirmation with a `ProfileInUseError`. That error unwraps to a user-safe message naming the policies. With confirmation the result reports `RemovedFrom` and `NowAnyDevice`.
+- **`internal/posture` store:**
+  - `mode`, `UpdateProfileMode`, the binding functions, `ResourceSatisfied` and `ProfileResult.Mode` are removed.
+  - `RemoveRequirement` refuses a profile's last requirement only while a policy uses it (`ErrLastRequirement`, now user-safe).
+  - Evaluation itself is unchanged.
+- **Compiler:** `requiredProfiles(...)` from `ResourceProfilesForWorkspace` replaces the enforce-binding filter. `applyPosture` is unchanged except for parameter naming.
+- **`internal/policy/preview.go`:** `PreviewResourcePolicy` counts the devices the resources' groups allow, and those passing the proposed profiles, by calling `applyPosture` itself.
+- **GraphQL:**
+  - New `resource_policy.graphqls`, registered in `gqlgen.yml` and the admin `codegen.yml`.
+  - Posture schema: mode and bind/unbind removed; `DeviceProfile.policies`; `deleteDeviceProfile(confirmInUse)`.
+  - Resolvers:
+    - audit `resource_policy.create`, `.update` and `.profiles` (from/to), `resource.policy` (from/to), `resource_policy.delete` (moved resources), and `device_profile.delete` (removed from, now any device);
+    - `NotifyPolicyChange` on every access-changing write.
+  - gqlgen's import reorder was reverted; its `Resource()` declaration kept in `resource.resolvers.go`.
+- **Console (just enough for R1 to build):**
+  - the profiles query reads `policies`;
+  - the bind/unbind operations are removed;
+  - the capability map has the new mutations;
+  - the profile list shows "Used by policies".
+- **Tests:**
+  - **Ported** (same intent, on policies):
+    - change-hint approval;
+    - store integration (empty profile, last requirement, cross-workspace);
+    - workspace-consistency FKs;
+    - resolver notify/load, empty-profile and cross-workspace refusals;
+    - invalid-UUID refusals;
+    - the RBAC "forbidden" probe;
+    - `TestApplyPosture_PolicyWithNoProfilesAllowsAnyDevice`.
+  - **Schema authz table:** 80 gated operations (−3, +8).
+  - **New:**
+    - `TestResourcePolicyStore` (7 subtests);
+    - `TestDeleteResourcePolicyRacesAssignment` (seam `afterPolicyDeleteLock`);
+    - `TestResourcePolicy_CompileAndPreview`: Default allows; an approval-only policy denies; OR with a passing profile allows; delete sends the resource back to Default; preview counts;
+    - `TestResourcePolicyIsolation`: foreign, missing and malformed policy or resource give the same answer, change nothing and notify nothing;
+    - `TestResourcePolicyAudit`.
+  - **Mutants killed:** compiler ignores policy profiles; policy delete doesn't move resources; D-4 confirmation ignored; empty profile allowed in a policy.
+- **Gates:**
+  - `go build`, `go vet`, and `go test -count=1 ./...` with every DB and Valkey variable: 1677 pass / 0 fail / 2 expected skips. `scripts/resource-test-fixture.sh` ok.
+  - Admin: codegen, `tsc`, 268 tests, build ok; lint unchanged (17, pre-existing).
 

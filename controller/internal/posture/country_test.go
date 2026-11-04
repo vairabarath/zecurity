@@ -72,7 +72,7 @@ func TestCountryRuleAllows(t *testing.T) {
 func TestEvaluateProfileCountry(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	report := uuid.New()
-	profile := Profile{ID: uuid.New(), Mode: ModeEnforce, Revision: 1}
+	profile := Profile{ID: uuid.New(), Revision: 1}
 	rule := &CountryRule{Allow: []string{"IN"}, Deny: []string{"CN"}}
 	req := []Requirement{{CheckID: CheckNetworkCountry, Countries: rule}}
 	seen := func(country string, ago time.Duration) *NetworkObservation {

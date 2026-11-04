@@ -38,7 +38,6 @@ func NewEvaluator(store *Store, notifier PolicyNotifier) *Evaluator {
 
 type ProfileResult struct {
 	ProfileID uuid.UUID
-	Mode      string
 	Satisfied bool
 	Reason    string
 	Revision  int64
@@ -272,7 +271,6 @@ func EvaluateProfile(
 ) ProfileResult {
 	result := ProfileResult{
 		ProfileID: profile.ID,
-		Mode:      profile.Mode,
 		Revision:  profile.Revision,
 		ExpiresAt: reportReceivedAt.Add(MaxReportAge),
 	}
@@ -317,24 +315,6 @@ func EvaluateProfile(
 	result.Satisfied = true
 	result.Reason = "all requirements satisfied"
 	return result
-}
-
-func ResourceSatisfied(results []ProfileResult) bool {
-	hasEnforceProfile := false
-
-	for _, result := range results {
-		if result.Mode != ModeEnforce {
-			continue
-		}
-
-		hasEnforceProfile = true
-		if result.Satisfied {
-			return true
-		}
-	}
-
-	// Identity-only behavior applies when no enforce-mode profile exists.
-	return !hasEnforceProfile
 }
 
 func requirementSatisfied(

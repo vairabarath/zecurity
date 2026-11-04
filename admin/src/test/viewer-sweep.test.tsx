@@ -103,7 +103,7 @@ beforeEach(() => {
   })
   data.set(GetIdpConnectionsDocument, { idpConnections: [conn] })
   data.set(GetDeviceProfilesDocument, {
-    deviceProfiles: [{ __typename: 'DeviceProfile', id: 'dp-1', name: 'laptops', manualTrust: false, requirements: [], boundResources: [] }],
+    deviceProfiles: [{ __typename: 'DeviceProfile', id: 'dp-1', name: 'laptops', manualTrust: false, requirements: [], policies: [] }],
   })
   data.set(GetScimConflictsDocument, {
     scimConflicts: [

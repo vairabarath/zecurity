@@ -38,7 +38,7 @@ func TestEvaluateProfileStatusMatrix(t *testing.T) {
 			result := EvaluateProfile(
 				now,
 				now,
-				Profile{ID: uuid.New(), Mode: ModeEnforce, Revision: 4},
+				Profile{ID: uuid.New(), Revision: 4},
 				[]Requirement{{CheckID: CheckLUKS, AllowUnsupported: tt.allowUnsupported}},
 				map[string]Observation{CheckLUKS: {CheckID: CheckLUKS, Status: tt.status}},
 			)
@@ -54,7 +54,7 @@ func TestEvaluateProfileStatusMatrix(t *testing.T) {
 
 func TestEvaluateProfileFailsClosed(t *testing.T) {
 	now := time.Now().UTC()
-	profile := Profile{ID: uuid.New(), Mode: ModeEnforce, Revision: 1}
+	profile := Profile{ID: uuid.New(), Revision: 1}
 
 	tests := []struct {
 		name         string
@@ -107,28 +107,6 @@ func TestEvaluateProfileFailsClosed(t *testing.T) {
 			}
 			if !strings.Contains(result.Reason, tt.reason) {
 				t.Fatalf("reason = %q, want substring %q", result.Reason, tt.reason)
-			}
-		})
-	}
-}
-
-func TestResourceSatisfiedUsesEnforceOnlyOR(t *testing.T) {
-	tests := []struct {
-		name    string
-		results []ProfileResult
-		want    bool
-	}{
-		{"no enforce profiles", nil, true},
-		{"audit failure ignored", []ProfileResult{{Mode: ModeAudit, Satisfied: false}}, true},
-		{"audit pass cannot mask enforce failure", []ProfileResult{{Mode: ModeAudit, Satisfied: true}, {Mode: ModeEnforce, Satisfied: false}}, false},
-		{"one enforce winner", []ProfileResult{{Mode: ModeEnforce, Satisfied: false}, {Mode: ModeEnforce, Satisfied: true}}, true},
-		{"all enforce fail", []ProfileResult{{Mode: ModeEnforce, Satisfied: false}, {Mode: ModeEnforce, Satisfied: false}}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ResourceSatisfied(tt.results); got != tt.want {
-				t.Fatalf("ResourceSatisfied() = %v, want %v", got, tt.want)
 			}
 		})
 	}
