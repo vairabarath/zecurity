@@ -185,6 +185,16 @@ query GetAllResources {
       origin
       connectionId
     }
+    policy {
+      id
+      name
+      description
+      isDefault
+      profiles {
+        id
+        name
+      }
+    }
   }
 }
 
@@ -474,3 +484,48 @@ query GetScimConflicts($connectionId: ID!) {
     resolvedAt
   }
 }
+
+# --- Resource Policies (PENDING-16) ---
+query GetResourcePolicies {
+  resourcePolicies {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+    resources {
+      id
+      name
+    }
+  }
+}
+
+query GetResourcePolicy($id: ID!) {
+  resourcePolicy(id: $id) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+    resources {
+      id
+      name
+    }
+  }
+}
+
+query PreviewResourcePolicy($resourceIds: [ID!]!, $profileIds: [ID!]!) {
+  previewResourcePolicy(resourceIds: $resourceIds, profileIds: $profileIds) {
+    devices
+    passing
+  }
+}
+

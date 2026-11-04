@@ -22,7 +22,7 @@ const PROFILES = [
         allowUnsupported: false,
       },
     ],
-    policies: [],
+    policies: [] as { id: string; name: string }[],
   },
 ];
 
@@ -80,6 +80,28 @@ describe("DeviceProfiles", () => {
     await waitFor(() =>
       expect(screen.queryByText("Delete device profile")).not.toBeInTheDocument(),
     );
+  });
+
+  it("warns about affected policies when deleting an in-use profile (D-4)", async () => {
+    const inUseProfile = [
+      {
+        ...PROFILES[0],
+        policies: [{ id: "pol-1", name: "Strict Production" }],
+      },
+    ];
+    renderWithMocks(inUseProfile);
+    await screen.findByText("Managed Linux");
+
+    await userEvent.click(screen.getByText("Delete"));
+    expect(await screen.findByText("Delete device profile")).toBeInTheDocument();
+    expect(screen.getByText(/This profile is used by 1 policy:/)).toBeInTheDocument();
+    expect(screen.getByText("Strict Production")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Any policy left with no other profiles will become/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm & Delete" }),
+    ).toBeInTheDocument();
   });
 
   it("opens the edit modal for the clicked profile", async () => {

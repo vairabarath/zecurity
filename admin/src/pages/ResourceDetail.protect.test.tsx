@@ -3,7 +3,12 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { MockedProvider } from '@apollo/client/testing/react'
 import ResourceDetail from './ResourceDetail'
-import { GetAllResourcesDocument, GetShieldsDocument, ShieldStatus } from '@/generated/graphql'
+import {
+  GetAllResourcesDocument,
+  GetShieldsDocument,
+  GetResourcePoliciesDocument,
+  ShieldStatus,
+} from '@/generated/graphql'
 
 const RN = 'rn-1'
 const HOST = '192.168.1.41'
@@ -26,6 +31,14 @@ function resource(shield: null | { id: string; name: string; status: ShieldStatu
     shield: shield && { __typename: 'Shield', ...shield },
     remoteNetwork: { __typename: 'RemoteNetwork', id: RN, name: 'k2-net' },
     groups: [],
+    policy: {
+      __typename: 'ResourcePolicy' as const,
+      id: 'pol-1',
+      name: 'Default',
+      description: null,
+      isDefault: true,
+      profiles: [],
+    },
   }
 }
 
@@ -54,6 +67,11 @@ function renderDetail(res: ReturnType<typeof resource>, shields: ReturnType<type
     {
       request: { query: GetShieldsDocument, variables: { remoteNetworkId: RN } },
       result: { data: { shields } },
+      maxUsageCount: Number.POSITIVE_INFINITY,
+    },
+    {
+      request: { query: GetResourcePoliciesDocument },
+      result: { data: { resourcePolicies: [] } },
       maxUsageCount: Number.POSITIVE_INFINITY,
     },
   ]

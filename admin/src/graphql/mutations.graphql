@@ -451,3 +451,66 @@ mutation UpdateProfileRequirementCountries($profileId: ID!, $countries: CountryR
     }
   }
 }
+
+# --- Resource Policies (PENDING-16) ---
+mutation CreateResourcePolicy($name: String!, $description: String) {
+  createResourcePolicy(name: $name, description: $description) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation UpdateResourcePolicy($id: ID!, $name: String, $description: String) {
+  updateResourcePolicy(id: $id, name: $name, description: $description) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation SetResourcePolicyProfiles($id: ID!, $profileIds: [ID!]!) {
+  setResourcePolicyProfiles(id: $id, profileIds: $profileIds) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation DeleteResourcePolicy($id: ID!) {
+  deleteResourcePolicy(id: $id)
+}
+
+mutation SetResourcePolicy($resourceId: ID!, $policyId: ID!) {
+  setResourcePolicy(resourceId: $resourceId, policyId: $policyId) {
+    id
+    policy {
+      id
+      name
+      isDefault
+      profiles {
+        id
+        name
+      }
+    }
+  }
+}
+

@@ -30,6 +30,7 @@ type EditableProfile = {
     checkId: string;
     countries?: { allow: string[]; deny: string[] } | null;
   }[];
+  policies?: { id: string; name: string }[];
 };
 
 // PENDING-20: one-line summary of a profile's country rule, or null.
@@ -48,28 +49,48 @@ function DeleteDeviceProfileDialog({
   onConfirm,
   loading,
 }: {
-  profile: { id: string; name: string } | null;
+  profile: { id: string; name: string; policies: { id: string; name: string }[] } | null;
   onClose: () => void;
   onConfirm: () => void;
   loading: boolean;
 }) {
+  const inUse = (profile?.policies.length ?? 0) > 0;
   return (
     <Dialog open={!!profile} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete device profile</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-muted-foreground">
-          Are you sure you want to delete{" "}
-          <span className="font-semibold text-foreground">{profile?.name}</span>?
-          Devices bound through this profile will no longer be gated by it.
-        </p>
+        <div className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Are you sure you want to delete{" "}
+            <span className="font-semibold text-foreground">{profile?.name}</span>?
+          </p>
+          {inUse ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-amber-500 space-y-2">
+              <p className="font-semibold">
+                This profile is used by {profile?.policies.length}{" "}
+                {profile?.policies.length === 1 ? "policy" : "policies"}:
+              </p>
+              <p className="font-medium text-foreground">
+                {profile?.policies.map((p) => p.name).join(", ")}
+              </p>
+              <p className="text-xs">
+                Deleting it will remove it from these policies. Any policy left with no other profiles will become <strong>Any Device</strong> (allowing any device).
+              </p>
+            </div>
+          ) : (
+            <p>
+              Devices bound through this profile will no longer be gated by it.
+            </p>
+          )}
+        </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>
             Cancel
           </Button>
           <Button variant="destructive" onClick={onConfirm} disabled={loading}>
-            {loading ? "Deleting…" : "Delete"}
+            {loading ? "Deleting…" : inUse ? "Confirm & Delete" : "Delete"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -81,7 +102,7 @@ export default function DeviceProfiles() {
   const [showAdd, setShowAdd] = useState(false);
   const canWrite = useCan(Capability.PostureWrite);
   const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
-  const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string } | null>(null);
+  const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string; policies: { id: string; name: string }[] } | null>(null);
 
   const { data, loading, error, refetch } = useQuery(
     GetDeviceProfilesDocument,
@@ -217,6 +238,7 @@ export default function DeviceProfiles() {
                           name: profile.name,
                           manualTrust: profile.manualTrust,
                           requirements: profile.requirements,
+                          policies: profile.policies,
                         })
                       }
                       className="text-[13px] font-bold text-muted-foreground transition hover:text-foreground"
@@ -226,7 +248,13 @@ export default function DeviceProfiles() {
                     )}
                     {canWrite && (
                     <button
-                      onClick={() => setDeletingProfile({ id: profile.id, name: profile.name })}
+                      onClick={() =>
+                        setDeletingProfile({
+                          id: profile.id,
+                          name: profile.name,
+                          policies: profile.policies,
+                        })
+                      }
                       className="text-[13px] font-bold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
                     >
                       Delete
@@ -266,7 +294,12 @@ export default function DeviceProfiles() {
         onClose={() => setDeletingProfile(null)}
         onConfirm={() => {
           if (deletingProfile) {
-            deleteDeviceProfile({ variables: { id: deletingProfile.id } });
+            deleteDeviceProfile({
+              variables: {
+                id: deletingProfile.id,
+                confirmInUse: deletingProfile.policies.length > 0,
+              },
+            });
           }
         }}
       />

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@apollo/client/react'
 import {
@@ -8,6 +8,9 @@ import {
   DeleteResourceDocument,
   ForceDeleteResourceDocument,
   GetShieldsDocument,
+  GetResourcePoliciesDocument,
+  SetResourcePolicyDocument,
+  PreviewResourcePolicyDocument,
   ShieldStatus,
 } from '@/generated/graphql'
 import { protectTargetShield, hostShield, nameProtectTarget, type ShieldLike } from '@/lib/protectShield'
@@ -33,8 +36,8 @@ import {
   Wifi,
   Activity,
   FileText,
-  Plus,
   AlertTriangle,
+  ShieldCheck,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -83,7 +86,10 @@ export default function ResourceDetail() {
   // DNS-name resources (PENDING-14 F-5): the shield the admin chose to protect it.
   const [chosenShieldId, setChosenShieldId] = useState('')
   const canWrite = useCan(Capability.NetworkWrite)
-  const canAccessWrite = useCan(Capability.AccessWrite)
+  const canPostureWrite = useCan(Capability.PostureWrite)
+  const [changingPolicy, setChangingPolicy] = useState(false)
+  const [targetPolicyId, setTargetPolicyId] = useState('')
+  const [confirmPolicyReduction, setConfirmPolicyReduction] = useState(false)
 
   const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
@@ -91,6 +97,38 @@ export default function ResourceDetail() {
   })
 
   const resource = data?.allResources.find((r) => r.id === resourceId)
+
+  const { data: policiesData } = useQuery(GetResourcePoliciesDocument, {
+    skip: !resource,
+    fetchPolicy: 'cache-and-network',
+  })
+  const allPolicies = useMemo(() => policiesData?.resourcePolicies ?? [], [policiesData])
+
+  const [setResourcePolicy, { loading: settingPolicy }] = useMutation(SetResourcePolicyDocument, {
+    onCompleted: () => {
+      toast.success('Resource policy updated')
+      setChangingPolicy(false)
+      void refetch()
+    },
+    onError: (e) => toast.error(e.message),
+    refetchQueries: [{ query: GetAllResourcesDocument }],
+  })
+
+  const targetPolicy = allPolicies.find((p) => p.id === targetPolicyId)
+  const targetProfileIds = useMemo(() => targetPolicy?.profiles.map((p) => p.id) ?? [], [targetPolicy])
+  const shouldPreview = changingPolicy && !!targetPolicyId && targetPolicyId !== resource?.policy?.id
+
+  const { data: previewData, loading: previewLoading } = useQuery(PreviewResourcePolicyDocument, {
+    variables: {
+      resourceIds: resource ? [resource.id] : [],
+      profileIds: targetProfileIds,
+    },
+    skip: !shouldPreview || !resource,
+    fetchPolicy: 'cache-and-network',
+  })
+
+  const preview = previewData?.previewResourcePolicy
+  const hasReduction = !!preview && preview.devices > 0 && preview.passing < preview.devices
 
   // Shields of the resource's remote network: the protect target is chosen the
   // way the controller's MarkProtecting chooses it (Fix 10), not from the
@@ -668,23 +706,204 @@ export default function ResourceDetail() {
             </div>
           </div>
 
-          {canAccessWrite && (
           <div className="surface-card overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
-                <div className="text-[1.1rem] font-bold">Access policies</div>
-                <div className="mt-0.5 text-sm text-muted-foreground">No policies assigned yet</div>
+                <div className="text-[1.1rem] font-bold">Resource Policy</div>
+                <div className="mt-0.5 text-sm text-muted-foreground">
+                  Controls which devices can access this resource
+                </div>
               </div>
-              <Button size="sm" className="h-8 gap-1.5 rounded-lg text-xs font-bold">
-                <Plus className="h-3 w-3" />
-                Policy
-              </Button>
+              {canPostureWrite && !changingPolicy && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setTargetPolicyId(resource.policy?.id ?? '')
+                    setConfirmPolicyReduction(false)
+                    setChangingPolicy(true)
+                  }}
+                  className="h-8 gap-1.5 rounded-lg text-xs font-bold"
+                >
+                  <Pencil className="h-3 w-3" />
+                  Change Policy
+                </Button>
+              )}
             </div>
-            <div className="flex flex-col items-center justify-center px-5 py-10 text-center">
-              <p className="text-sm text-muted-foreground">Define a policy to control who can reach this resource.</p>
+
+            <div className="p-5 space-y-4">
+              {changingPolicy ? (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label htmlFor="resource-policy-select" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                      Select Policy
+                    </label>
+                    <select
+                      id="resource-policy-select"
+                      aria-label="Resource policy"
+                      value={targetPolicyId}
+                      onChange={(e) => {
+                        setTargetPolicyId(e.target.value)
+                        setConfirmPolicyReduction(false)
+                      }}
+                      className="flex h-10 w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    >
+                      {allPolicies.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} {p.isDefault ? '(Default)' : ''} — {p.profiles.length === 0 ? 'Any device' : `${p.profiles.length} profiles`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {targetPolicy && (
+                    <div className="rounded-lg border border-border bg-secondary/30 p-3 space-y-2">
+                      <div className="text-xs font-semibold text-muted-foreground">Required profiles:</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {targetPolicy.profiles.length === 0 ? (
+                          <span className="rounded-md border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
+                            Any device
+                          </span>
+                        ) : (
+                          targetPolicy.profiles.map((p) => (
+                            <span
+                              key={p.id}
+                              className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                            >
+                              <ShieldCheck className="h-3 w-3" />
+                              {p.name}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Preview before saving resource move */}
+                  {shouldPreview && (
+                    <div className="space-y-3 rounded-lg border border-border bg-secondary/20 p-3">
+                      <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
+                        <span>Enforcement Preview</span>
+                        {previewLoading && <Loader2 className="h-3 w-3 animate-spin" />}
+                      </div>
+
+                      {preview ? (
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium">
+                            <span className="font-bold text-foreground">{preview.passing}</span> of{' '}
+                            <span className="font-bold text-foreground">{preview.devices}</span> devices that can reach this resource today would pass
+                          </p>
+
+                          {hasReduction && (
+                            <div className="space-y-2 pt-1">
+                              <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-500">
+                                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                                <div>
+                                  {preview.devices - preview.passing} device(s) will lose access under this policy.
+                                </div>
+                              </div>
+
+                              <label className="flex items-start gap-2 cursor-pointer text-xs font-medium text-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={confirmPolicyReduction}
+                                  onChange={(e) => setConfirmPolicyReduction(e.target.checked)}
+                                  className="mt-0.5 h-3.5 w-3.5 rounded border-border text-primary focus:ring-primary"
+                                />
+                                <span>I understand that devices will lose access immediately.</span>
+                              </label>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Calculating evaluation…</p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setChangingPolicy(false)}
+                      disabled={settingPolicy}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        if (targetPolicyId && targetPolicyId !== resource.policy?.id) {
+                          void setResourcePolicy({
+                            variables: {
+                              resourceId: resource.id,
+                              policyId: targetPolicyId,
+                            },
+                          })
+                        } else {
+                          setChangingPolicy(false)
+                        }
+                      }}
+                      disabled={settingPolicy || (hasReduction && !confirmPolicyReduction)}
+                      className="gap-1.5"
+                    >
+                      {settingPolicy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      Apply Policy
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-bold text-foreground">
+                        {resource.policy?.name ?? 'Default'}
+                      </span>
+                      {resource.policy?.isDefault && (
+                        <span className="status-pill border-primary/30 bg-primary/10 text-primary text-[10px] font-bold py-0.5 px-2">
+                          Default
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {resource.policy?.description && (
+                    <p className="text-xs text-muted-foreground">
+                      {resource.policy.description}
+                    </p>
+                  )}
+
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
+                      Required Device Profiles
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {!resource.policy?.profiles || resource.policy.profiles.length === 0 ? (
+                        <span className="rounded-md border border-border bg-secondary/60 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                          Any device allowed (ungated)
+                        </span>
+                      ) : (
+                        resource.policy.profiles.map((p) => (
+                          <span
+                            key={p.id}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary"
+                          >
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                            {p.name}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                    {resource.policy?.profiles && resource.policy.profiles.length > 1 && (
+                      <p className="text-[11px] text-muted-foreground">
+                        OR — devices satisfying any of these profiles may connect.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
-          )}
         </div>
       </div>
 

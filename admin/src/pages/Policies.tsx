@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import DeviceProfiles from '@/pages/DeviceProfiles'
+import ResourcePolicies from '@/pages/ResourcePolicies'
 
-type Tab = 'device-profiles'
+type Tab = 'resource-policies' | 'device-profiles'
 
 const TAB_LABELS: Record<Tab, string> = {
-  'device-profiles': 'Device Policies',
+  'resource-policies': 'Resource Policies',
+  'device-profiles': 'Device Profiles',
 }
 
 export default function Policies() {
-  const [tab, setTab] = useState<Tab>('device-profiles')
+  const [tab, setTab] = useState<Tab>('resource-policies')
 
   return (
     <div className="space-y-6">
@@ -37,6 +39,7 @@ export default function Policies() {
         ))}
       </div>
 
+      {tab === 'resource-policies' && <ResourcePolicies />}
       {tab === 'device-profiles' && <DeviceProfiles />}
     </div>
   )
