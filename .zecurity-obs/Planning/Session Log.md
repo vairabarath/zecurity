@@ -10,6 +10,37 @@ tags:
 
 ---
 
+## 2026-11-04 — PENDING-10: Observability (Phases 1–4 Complete, Live-Verified, Promoted to Finished)
+
+**What was done:**
+- Implemented and verified `PENDING-10: Observability (Metrics, Tracing, Health)` across 4 sequential phases on `feat/pending10-observability`:
+- **Phase 1 — Health & Readiness Subsystem (`cad18733`):**
+  - Minimal public endpoints mounted on `:8080`: `/livez` (`{"status":"ok"}`), `/readyz` (`{"status":"ready"}`), `/healthz`, and `/health` (legacy).
+  - Component diagnostics restricted exclusively to internal management port (`:9102/healthz`).
+  - Added probe-storm caching (1s TTL) to prevent thundering herds from saturating downstream services.
+  - Implemented unit tests in `controller/internal/health/health_test.go` (7 tests pass).
+- **Phase 2 — Prometheus Metrics & Cardinality Invariants (`b1bd8034`):**
+  - Expanded `controller/internal/metrics/metrics.go` with fleet capacity, active relays/connectors, ACL compiler latency histograms, PKI cert runway countdowns, outbox event pipeline, and DB connection pool stats.
+  - Enforced strict low-cardinality invariant rule across all metrics (forbidden: tenant_id, workspace_id, resource_id, user_id, IPs, serial numbers).
+  - Verified via `TestMetrics_CardinalityInvariantRule` and 7 subsystem tests.
+- **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):**
+  - Created `controller/internal/telemetry/` with opt-in OTLP exporter (`OTEL_EXPORTER_OTLP_ENDPOINT`). Zero overhead and no-op provider when disabled.
+  - Added W3C TraceContext propagation across HTTP middleware and gRPC unary/stream interceptors.
+  - Instrumented Outbox event processor (`processEvent` creates `outbox.dispatch_<event_type>` spans).
+  - Tested in `telemetry_test.go` (4 tests pass) and wired in `controller/cmd/server/main.go`.
+- **Phase 4 — Alerts & Dashboards:**
+  - Prometheus alert definitions in `deploy/monitoring/alerts.yaml` (cert runway warnings/critical, relay capacity alerts, ACL latency, outbox backlogs and dead letters, DB pool exhaustion).
+  - Grafana dashboard in `deploy/monitoring/dashboards/zecurity_overview.json` with panels for Controller Health, Relay Fleet Capacity, Connector ACL Lag, PKI Runway Countdown, Outbox Throughput & Dead Letters, and DB Pool Utilization.
+- **Live Verification:**
+  - Ran live controller instance against local PostgreSQL 16 and Valkey 7.2.
+  - Verified public probes: `/livez` -> 200, `/readyz` -> 200.
+  - Verified private management probes: `/metrics` (Prometheus metrics exported with clean bounded labels) and `/healthz` (structured component diagnostics with latencies).
+- **Shipment:**
+  - Promoted `PENDING-10-Observability.md` to `.zecurity-obs/pending/finished/PENDING-10-Observability.md` with full architectural decisions, implementation notes, and live verification evidence.
+  - Updated `.zecurity-obs/pending/README.md`.
+
+---
+
 ## 2026-11-04 — PENDING-16: Resource policies (R2 Console + R3 Live Verification)
 
 **What was done:**

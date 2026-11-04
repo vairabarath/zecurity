@@ -1,0 +1,110 @@
+groups:
+  - name: zecurity-controller-pki
+    rules:
+      - alert: CertExpiryImminentWarning
+        expr: cert_runway_seconds < 1209600
+        for: 5m
+        labels:
+          severity: warning
+          component: pki
+        annotations:
+          summary: "Certificate expiry imminent (under 14 days runway)"
+          description: "Certificate '{{ $labels.cert_type }}' has {{ $value | humanizeDuration }} runway remaining before expiration."
+
+      - alert: CertExpiryImminentCritical
+        expr: cert_runway_seconds < 172800
+        for: 1m
+        labels:
+          severity: critical
+          component: pki
+        annotations:
+          summary: "Certificate expiry critical (under 48 hours runway)"
+          description: "Certificate '{{ $labels.cert_type }}' has {{ $value | humanizeDuration }} runway remaining! Immediate rotation required."
+
+      - alert: CertInvalid
+        expr: cert_valid == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: pki
+        annotations:
+          summary: "Certificate validity check failed"
+          description: "Certificate '{{ $labels.cert_type }}' is currently invalid or failed cryptographic/chain validation."
+
+  - name: zecurity-controller-fleet
+    rules:
+      - alert: RelayFleetNearCapacity
+        expr: relay_capacity_utilization_ratio > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: relay
+        annotations:
+          summary: "Relay fleet capacity utilization high (> 85%)"
+          description: "Relay fleet capacity utilization is at {{ $value | humanizePercentage }} for over 5 minutes."
+
+      - alert: ConnectorACLLagHigh
+        expr: histogram_quantile(0.95, sum(rate(connector_acl_lag_seconds_bucket[5m])) by (le)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: connector
+        annotations:
+          summary: "Connector ACL synchronization lag is high"
+          description: "p95 Connector ACL lag exceeds 5 seconds (current: {{ $value }}s)."
+
+  - name: zecurity-controller-policy
+    rules:
+      - alert: ACLCompileLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(acl_compile_duration_seconds_bucket[5m])) by (le)) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          component: policy
+        annotations:
+          summary: "ACL compilation latency high (> 250ms)"
+          description: "p95 ACL compiler duration is {{ $value }}s over the last 5 minutes."
+
+  - name: zecurity-controller-outbox
+    rules:
+      - alert: OutboxBacklogAccumulating
+        expr: outbox_events_pending > 500 or outbox_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: outbox
+        annotations:
+          summary: "Outbox event backlog accumulating"
+          description: "Outbox has {{ $value }} pending events or oldest pending event age exceeds 300s."
+
+      - alert: OutboxDeadLetterDetected
+        expr: increase(outbox_events_dead_letter_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: outbox
+        annotations:
+          summary: "Outbox dead letter events detected"
+          description: "Outbox events have transitioned to dead letter status (rate: {{ $value }} over 5m)."
+
+  - name: zecurity-controller-infrastructure
+    rules:
+      - alert: DatabasePoolExhausted
+        expr: db_pool_connections{state="acquired"} >= db_pool_connections{state="max"}
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "All {{ $value }} database connections are currently acquired/busy."
+
+      - alert: ControllerReadinessFailing
+        expr: probe_success{job=~".*controller.*readyz.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: controller
+        annotations:
+          summary: "Controller readiness probe failing"
+          description: "Controller instance has failed readiness checks for > 1m."
