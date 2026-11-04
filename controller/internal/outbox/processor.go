@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,12 @@ type Processor struct {
 	pollInterval   time.Duration
 	lockWindow     time.Duration
 	reaperInterval time.Duration
+	running        atomic.Bool
+}
+
+// IsRunning reports whether the processor background loops are actively executing.
+func (p *Processor) IsRunning() bool {
+	return p.running.Load()
 }
 
 type ProcessorOption func(*processorConfig)
@@ -256,6 +263,9 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 	if batchSize <= 0 {
 		return fmt.Errorf("outbox processor batch size must be positive")
 	}
+
+	p.running.Store(true)
+	defer p.running.Store(false)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)

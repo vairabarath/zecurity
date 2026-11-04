@@ -47,6 +47,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
+	"github.com/yourorg/ztna/controller/internal/health"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
@@ -455,7 +456,6 @@ func main() {
 		discoverylimit.ProtectHTTP(discoveryLimiter, discoveryIPs, discoverylimit.OpRESTAuth, authSvc.DiscoveryHandler()))
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
-	mux.Handle("/health", healthHandler())
 
 	if os.Getenv("ENV") == "development" {
 		mux.Handle("/playground", playground.Handler(appmeta.ProductName, "/graphql"))
@@ -606,6 +606,20 @@ func main() {
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
 	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
+
+	// Health & Readiness (PENDING-10 Phase 1).
+	// Bounded check timeouts and 1s result caching prevent probe storms from saturating downstream services.
+	// Public routes (:8080) return minimal status only; internal management (:9102) exposes detailed diagnostics.
+	healthRegistry := health.NewRegistry(health.DefaultCheckTimeout, health.DefaultCacheTTL)
+	healthRegistry.Register(health.NewDatabaseChecker(db.Pool))
+	healthRegistry.Register(health.NewValkeyChecker(connectorValkey))
+	healthRegistry.Register(health.NewPKIChecker(controllerRotator))
+	healthRegistry.Register(health.NewOutboxChecker(outboxProcessor))
+
+	mux.Handle("/livez", health.LivenessHandler())
+	mux.Handle("/readyz", healthRegistry.PublicReadinessHandler())
+	mux.Handle("/healthz", healthRegistry.PublicHealthzHandler())
+	mux.Handle("/health", healthRegistry.PublicHealthHandler())
 
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
 
@@ -813,6 +827,9 @@ func main() {
 	metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsMux.Handle("/healthz", healthRegistry.InternalDiagnosticsHandler())
+	metricsMux.Handle("/readyz", healthRegistry.InternalDiagnosticsHandler())
+	metricsMux.Handle("/livez", health.LivenessHandler())
 	metricsServer := &http.Server{
 		Addr:    metricsAddr,
 		Handler: metricsMux,
@@ -1009,18 +1026,6 @@ func (introspectionDisabler) MutateOperationContext(
 ) *gqlerror.Error {
 	opCtx.DisableIntrospection = true
 	return nil
-}
-
-func healthHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Pool.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
 }
 
 // mustProviderIdentity builds the Provider Identity Service from
