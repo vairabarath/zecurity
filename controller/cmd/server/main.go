@@ -65,6 +65,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/telemetry"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
@@ -86,9 +87,19 @@ func main() {
 	)
 
 	defer stop()
+
+	shutdownTracer, err := telemetry.Init(ctx, "zecurity-controller")
+	if err != nil {
+		log.Fatalf("telemetry init: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
+
 	workers := newWorkerSet()
 	var outboxStore *outbox.Outbox
-	var err error
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
@@ -629,8 +640,14 @@ func main() {
 			ClientAuth:     tls.RequestClientCert,
 			MinVersion:     tls.VersionTLS13,
 		})),
-		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
-		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
+		grpc.ChainUnaryInterceptor(
+			telemetry.UnaryServerInterceptor(),
+			connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker),
+		),
+		grpc.ChainStreamInterceptor(
+			telemetry.StreamServerInterceptor(),
+			connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker),
+		),
 	)
 
 	workers.Go("controller-rotator", func() {
@@ -912,7 +929,7 @@ func main() {
 	addr := ":" + envOr("PORT", "8080")
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: providerCORS(mux),
+		Handler: telemetry.HTTPMiddleware(providerCORS(mux)),
 	}
 	log.Printf("listening on %s", addr)
 

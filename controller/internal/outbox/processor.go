@@ -8,6 +8,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/yourorg/ztna/controller/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -161,8 +166,17 @@ func (p *Processor) processEvent(
 
 	leaseID := *evt.LeaseID
 
+	ctx, span := telemetry.StartSpan(ctx, "outbox.dispatch_"+evt.EventType,
+		trace.WithAttributes(
+			attribute.String("event.type", evt.EventType),
+			attribute.String("event.id", evt.ID.String()),
+		),
+	)
+	defer span.End()
+
 	err := p.registry.Dispatch(ctx, evt)
 	if err == nil {
+		span.SetStatus(codes.Ok, "")
 		if err := p.outbox.MarkDone(ctx, evt.ID, leaseID); err != nil {
 			return fmt.Errorf("mark event done: %w", err)
 		}
@@ -178,6 +192,8 @@ func (p *Processor) processEvent(
 
 		return nil
 	}
+
+	span.SetStatus(codes.Error, err.Error())
 
 	if errors.Is(err, ErrNoHandler) {
 		if markErr := p.outbox.MarkFailedTerminal(
