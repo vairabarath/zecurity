@@ -811,6 +811,63 @@ func main() {
 			}
 		}
 	})
+	workers.Go("fleet-metrics-observer", func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		// Run once immediately on start
+		updateMetrics := func() {
+			// 1. Database pool
+			stat := db.Pool.Stat()
+			metrics.SetDBPoolStats(stat.AcquiredConns(), stat.IdleConns(), stat.TotalConns(), stat.MaxConns())
+
+			// 2. Active relays and capacity
+			var relayCount int
+			var conns, maxCap int64
+			err := db.Pool.QueryRow(ctx, `
+				SELECT count(*), COALESCE(sum(connection_count), 0), COALESCE(sum(max_connections), 0)
+				FROM relays
+				WHERE status = 'active'
+			`).Scan(&relayCount, &conns, &maxCap)
+			if err == nil {
+				metrics.SetRelayFleetGauges(relayCount, uint32(conns), uint32(maxCap))
+			}
+
+			// 3. Active connectors count
+			var connCount int
+			err = db.Pool.QueryRow(ctx, `
+				SELECT count(*) FROM connectors
+				WHERE status = 'active' AND revoked_at IS NULL
+			`).Scan(&connCount)
+			if err == nil {
+				metrics.SetConnectorActiveCount(connCount)
+			}
+
+			// 4. Outbox pending events depth and oldest age
+			var outboxPending int
+			var oldestSeconds float64
+			err = db.Pool.QueryRow(ctx, `
+				SELECT count(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - min(created_at))), 0)
+				FROM outbox_events
+				WHERE status = 'pending'
+			`).Scan(&outboxPending, &oldestSeconds)
+			if err == nil {
+				metrics.SetOutboxQueueGauges(outboxPending, time.Duration(oldestSeconds)*time.Second)
+			}
+		}
+
+		updateMetrics()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				updateMetrics()
+			}
+		}
+	})
+
 	workers.Go("grpc-server", func() {
 
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)

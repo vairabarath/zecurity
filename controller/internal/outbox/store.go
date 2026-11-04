@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
 
 var (
@@ -61,6 +62,9 @@ func (o *Outbox) MarkFailedTerminal(
 	if tag.RowsAffected() == 0 {
 		return ErrStaleLease
 	}
+
+	metrics.RecordOutboxEventProcessed("dead_letter")
+	metrics.RecordOutboxDeadLetter()
 
 	return nil
 }
@@ -131,6 +135,8 @@ func (o *Outbox) Enqueue(
 	if err != nil {
 		return fmt.Errorf("enqueue outbox event: %w", err)
 	}
+
+	metrics.RecordOutboxEventPublished(evt.EventType)
 
 	return nil
 }
@@ -277,6 +283,8 @@ func (o *Outbox) MarkDone(
 		return ErrStaleLease
 	}
 
+	metrics.RecordOutboxEventProcessed("success")
+
 	return nil
 }
 
@@ -341,6 +349,8 @@ func (o *Outbox) MarkFailed(
 	if tag.RowsAffected() == 0 {
 		return ErrStaleLease
 	}
+
+	metrics.RecordOutboxEventProcessed("retryable_failure")
 
 	return nil
 }

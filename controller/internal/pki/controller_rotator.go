@@ -8,6 +8,8 @@ import (
 	"log"
 	"sync/atomic"
 	"time"
+
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
 
 // errNoCertificateConfigured is returned by GetCertificate if no certificate is loaded.
@@ -73,6 +75,7 @@ func NewControllerCertRotator(
 		notAfter:  notAfter,
 		issuedAt:  clock(),
 	})
+	metrics.SetCertRunway("controller_grpc", notBefore, notAfter, true)
 	return r
 }
 
@@ -156,6 +159,7 @@ func (r *ControllerCertRotator) rotate(ctx context.Context) error {
 		notAfter:  notAfter,
 		issuedAt:  now,
 	})
+	metrics.SetCertRunway("controller_grpc", notBefore, notAfter, true)
 	return nil
 }
 

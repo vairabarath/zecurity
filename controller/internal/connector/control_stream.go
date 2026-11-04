@@ -19,6 +19,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -1049,12 +1050,20 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Guarded UPDATE matched nothing → revoked or deleted while the stream
 		// was open (or undetermined). Classify authoritatively; no ack.
+		metrics.RecordConnectorHeartbeat("rejected")
 		return h.classifyRefusal(ctx, client, "health")
 	}
 	dbOK := err == nil
 	if !dbOK {
+		metrics.RecordConnectorHeartbeat("rejected")
 		log.Printf("control stream: update connector health %s: %v — authorization undetermined: no ACL push, no AuthorizationAck for seq=%d", connectorID, err, seq)
-	} else if connectorChanged {
+	} else {
+		metrics.RecordConnectorHeartbeat("ok")
+		if v, ok := h.PolicyNotifier.(interface{ Version(string) uint64 }); ok {
+			metrics.RecordConnectorACLLag(v.Version(client.tenantID), uint64(r.AclVersion))
+		}
+	}
+	if dbOK && connectorChanged {
 		if h.PolicyNotifier != nil {
 			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
 				log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)

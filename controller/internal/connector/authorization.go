@@ -25,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -232,6 +233,12 @@ func (r *ConnectorRegistry) trackLive(connectorID string, c *connectorStreamClie
 		r.live[connectorID] = set
 	}
 	set[c] = struct{}{}
+
+	total := 0
+	for _, s := range r.live {
+		total += len(s)
+	}
+	metrics.SetConnectorActiveStreams(total)
 }
 
 func (r *ConnectorRegistry) untrackLive(connectorID string, c *connectorStreamClient) {
@@ -242,6 +249,12 @@ func (r *ConnectorRegistry) untrackLive(connectorID string, c *connectorStreamCl
 	if len(set) == 0 {
 		delete(r.live, connectorID)
 	}
+
+	total := 0
+	for _, s := range r.live {
+		total += len(s)
+	}
+	metrics.SetConnectorActiveStreams(total)
 }
 
 // SignalRevoked delivers ConnectorRevoked on every live Control stream of

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
@@ -23,7 +24,12 @@ const defaultRelayPort = "9093"
 // must treat their resources as temporarily unavailable.
 //
 // Returns an error (and no snapshot) on any DB failure — callers must default-deny.
-func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture.Store, notifier *Notifier, workspaceID string) (*CompiledACL, error) {
+func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture.Store, notifier *Notifier, workspaceID string) (compiled *CompiledACL, err error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordACLCompile(time.Since(start), err)
+	}()
+
 	workspaceUUID, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: invalid workspace id: %w", err)
