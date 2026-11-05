@@ -1285,6 +1285,85 @@ async fn a_revocation_closes_the_gate_to_the_shield_synchronously() {
     drop(session);
 }
 
+/// Gate 4 follow-up (deferred at the FU-9 review): after its initial
+/// `Err(Aborted)` the stream to the Shield is over — every later poll is
+/// `None`, so HTTP/2 ends it instead of waiting for more frames.
+#[tokio::test]
+async fn after_the_abort_the_stream_to_the_shield_ends() {
+    let mut s = shield();
+    let token = CancellationToken::new();
+    let session = s
+        .hub
+        .open_relay_session_revocable(SHIELD, "10.0.0.9", 80, "tcp", &token)
+        .await
+        .unwrap();
+    let mut tunnel = s.tunnels.recv().await.unwrap();
+    token.cancel();
+    match futures_poll_once(&mut tunnel.from_connector) {
+        std::task::Poll::Ready(Some(Err(status))) => {
+            assert_eq!(status.code(), tonic::Code::Aborted)
+        }
+        other => panic!("expected the abort first: {other:?}"),
+    }
+    for _ in 0..3 {
+        assert!(
+            matches!(
+                futures_poll_once(&mut tunnel.from_connector),
+                std::task::Poll::Ready(None)
+            ),
+            "the stream to the shield did not end after its abort"
+        );
+    }
+    drop(session);
+}
+
+/// Gate 4 follow-up (deferred at the FU-9 review): a data frame already
+/// queued for the Shield when the session is revoked is discarded, not sent.
+/// Control: without the revocation the same queued frame is delivered.
+#[tokio::test]
+async fn a_frame_queued_before_the_revocation_is_discarded() {
+    for revoke in [false, true] {
+        let mut s = shield();
+        let token = CancellationToken::new();
+        let session = s
+            .hub
+            .open_relay_session_revocable(SHIELD, "10.0.0.9", 80, "tcp", &token)
+            .await
+            .unwrap();
+        let mut tunnel = s.tunnels.recv().await.unwrap();
+        // Queued as the device->shield task would, with no relay loop running.
+        session
+            .io
+            .outbound
+            .try_send(data(b"queued before the revocation"))
+            .unwrap();
+        if revoke {
+            token.cancel();
+        }
+        let first = futures_poll_once(&mut tunnel.from_connector);
+        match (revoke, first) {
+            (
+                false,
+                std::task::Poll::Ready(Some(Ok(TunnelFrame {
+                    frame: Some(Frame::Data(d)),
+                }))),
+            ) => assert_eq!(d, b"queued before the revocation"),
+            (true, std::task::Poll::Ready(Some(Err(status)))) => {
+                assert_eq!(status.code(), tonic::Code::Aborted);
+                assert!(
+                    matches!(
+                        futures_poll_once(&mut tunnel.from_connector),
+                        std::task::Poll::Ready(None)
+                    ),
+                    "the queued frame was sent after the abort"
+                );
+            }
+            (revoke, other) => panic!("revoke={revoke}: unexpected {other:?}"),
+        }
+        drop(session);
+    }
+}
+
 fn futures_poll_once(
     s: &mut ToShield,
 ) -> std::task::Poll<Option<Result<TunnelFrame, Status>>> {

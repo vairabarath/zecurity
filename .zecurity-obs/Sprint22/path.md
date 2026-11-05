@@ -930,3 +930,4 @@ Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). B
 - **L9:** pass.
 - **L7/L8:** the client-side tail after a revocation is **FU-16** (also on the connector route, so not FU-9).
 
+**Follow-up (2026-11-05, branch `test/fu9-gate4-linkage`):** the three gate-4 tests deferred at review were added: the stream ends after its abort, a queued frame is discarded, and the real-server HTTP/2 end with no relay loop. 3 mutants were killed. Details: PENDING-21 §11.

@@ -423,10 +423,17 @@ The list required by the approval is in §11 with the results.
 - **Memory:** the per-direction worst case is 64 MB per Shield connection and 128 MB per Connector at the default `shield_tunnel_limit` (512). These are budget figures; process memory was measured only in the spike (§5).
 - **Proto cleanup:** `TunnelData` and the old meaning of `TunnelOpened{ok: true}` remain in the proto as deprecated. Removing them as `reserved` is a follow-up decision (Sprint 22's proto rule is additive only).
 - **Mixed versions** fail cleanly but are not supported (§8.7). Connector and Shield must be upgraded together.
-- **Follow-up tests for the gate-4 linkage** (deferred at review, 2026-11-05; not blockers). The deterministic G1 test proves that `cancel()` closes the gate to the Shield without the relay loop running. These would extend it:
-  1. check that the stream to the Shield ends (`None`) after the initial `Err(Aborted)`;
-  2. queue a data frame before the cancel and check that it is discarded, not sent;
-  3. a real-server HTTP/2 version with the relay loop stopped: the Shield client must see the tunnel stream end. The real-server stress test today runs with the relay loop.
+- **Follow-up tests for the gate-4 linkage** (deferred at review, 2026-11-05; **added 2026-11-05**, branch `test/fu9-gate4-linkage`). They extend the deterministic G1 test, which proves that `cancel()` closes the gate to the Shield without the relay loop running:
+  1. `agent_tunnel::tests::after_the_abort_the_stream_to_the_shield_ends`: after the initial `Err(Aborted)`, every later poll is `None`.
+  2. `agent_tunnel::tests::a_frame_queued_before_the_revocation_is_discarded`: a data frame queued before the cancel is discarded, not sent. Control: without the cancel the same frame is delivered.
+  3. `agent_server::shield_server_tls_tests::a_revocation_ends_the_shields_stream_with_no_relay_loop`: over the real server and HTTP/2 with no relay loop, the Shield's tunnel stream ends `Aborted` after the revocation. Control: it stays open before.
+
+  Mutants, each caught:
+  - `done` not set after the abort: caught by tests 1 and 2.
+  - Queued frames handed out before the gate: caught by test 2.
+  - The tunnel abort not linked to the revocation (G1): caught by tests 1, 2 and 3, and by the original G1 test.
+
+  `cd connector && cargo test`: 317 passed, 0 failed, 1 ignored (the FU-9 lab harness).
 
 ## 12. Live lab validation (2026-11-04)
 
