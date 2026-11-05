@@ -2412,6 +2412,56 @@ mod shield_server_tls_tests {
         assert_eq!(closes, ROUNDS, "one TunnelClose per revoked tunnel");
     }
 
+    /// Gate 4 follow-up (deferred at the FU-9 review), over the real server
+    /// and HTTP/2 with **no relay loop running**: revoking the session ends
+    /// the Shield's tunnel stream by itself (`cancel()` closes the gate in
+    /// `ToShield`). Control: before the revocation the stream stays open.
+    #[tokio::test]
+    async fn a_revocation_ends_the_shields_stream_with_no_relay_loop() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let channel = shield_channel(&pki, server.addr).await;
+        let (out, out_rx) = mpsc::channel(8);
+        let mut replies = ShieldServiceClient::new(channel.clone())
+            .control(ReceiverStream::new(out_rx))
+            .await
+            .unwrap()
+            .into_inner();
+        health_round_trip(&out, &mut replies, false).await;
+        let token = CancellationToken::new();
+        let hub = r.tunnel_hub.clone();
+        let t = token.clone();
+        let opening = tokio::spawn(async move {
+            hub.open_relay_session_revocable(SHIELD_ID, "10.0.0.9", 22, "tcp", &t)
+                .await
+        });
+        let cid = loop {
+            if let Some(Body::TunnelOpen(open)) = next_reply(&mut replies).await.body {
+                break open.connection_id;
+            }
+        };
+        let (_up, mut down) = open_tunnel(channel.clone(), &cid).await.expect("bound");
+        // Held, never relayed: dropping it would abort the tunnel by itself.
+        let session = opening.await.unwrap().expect("opened");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), down.message())
+                .await
+                .is_err(),
+            "the tunnel stream ended before the revocation"
+        );
+        token.cancel();
+        let end = tokio::time::timeout(Duration::from_secs(2), down.message())
+            .await
+            .expect("the shield's tunnel stream must end without the relay loop");
+        match end {
+            Err(status) => assert_eq!(status.code(), tonic::Code::Aborted, "{status}"),
+            Ok(other) => panic!("expected an Aborted end, got {other:?}"),
+        }
+        drop(session);
+    }
+
     /// FU-9 review (reliable abort), over the real server: with the Shield's
     /// Control stream congested (it stops reading; megabytes of snapshots
     /// queued), 100 tunnels are revoked at once. Every session ends at once,
