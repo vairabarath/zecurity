@@ -124,17 +124,44 @@ Why this works:
   - The exporter therefore tails the tables, not the outbox.
 - **Cost:** appends to one stream are serialised per workspace. Under D-02 (one controller) and current volumes this is fine. The live run measures access-event insert latency.
 
-`canonical(row)` is a fixed, documented byte encoding that the webhook payload carries in full (P-6), so a customer can recompute the chain. It is: the fields in a fixed order, each length-prefixed, with `details` as Postgres `jsonb` text, which is deterministic.
+**Head rows exist before the first insert.** An `AFTER INSERT` trigger on `workspaces` creates both head rows. As a fallback, the chain trigger does `INSERT … ON CONFLICT DO NOTHING` and then `SELECT … FOR UPDATE`, so two first inserts can't race.
+
+**Lock order (deadlock rule).** The head lock is always the **last** lock a transaction takes: the audit insert is the last write before commit.
+
+- Today four paths call `RecordTx` inside a larger transaction: `member_role.go` (after `LockActiveAdmins`), `client_helpers.go` (device approval), `scim/conflict.go` and `outbox/recover.go`. All four already insert the audit row last.
+- Autocommit `Record` takes only the head lock.
+- So no cycle is possible. S1a adds a test that runs concurrent `Record` and `RecordTx` (member-role change) in one workspace.
+- The only non-default isolation level in the controller is a read-only RepeatableRead in `provider/read_handlers.go`, which never writes audit rows.
+
+**Canonical encoding (so a customer can recompute the chain).** `canonical(row)` is a fixed byte string:
+
+- the fields in a fixed order, each `len:value`;
+- NULL is its own marker (`-`), distinct from the empty string (`0:`);
+- timestamps are UTC epoch microseconds, never `timestamptz::text`, which depends on the session's `TimeZone` and `DateStyle`;
+- `details` is the exact `jsonb` text Postgres produced.
+
+A customer's JSON parser can't reproduce the `jsonb` text form. So every exported event carries **`details_canonical`**, the exact hashed string, next to the parsed `details` object.
+
+The `SECURITY DEFINER` functions (the chain trigger, purge and retention) pin `SET search_path = pg_catalog, public`, because they run as the owner.
 
 ### P-3. D-12: the app loses UPDATE and DELETE on audit tables
 
-- A new login role `ztna_app` is created by a docker-entrypoint init script (`.sh`, password from env), not by a SQL migration, because roles are cluster-wide and need a secret.
+- A new role `ztna_app` holds the app's privileges.
+  - Migration `051_` creates it **NOLOGIN** (an idempotent `DO` block, because roles are cluster-wide) and does all GRANTs.
+  - A compose init script `zz_app_role_login.sh` in `migrations/` runs after every `.sql` file. It sets `LOGIN PASSWORD` from env (`APP_DB_PASSWORD`).
+  - The DB-backed tests apply `migrations/*.sql` by glob into a fresh database (for example `resource/testdb_test.go`), so they get the role without the `.sh`. A D-12 test uses `SET ROLE ztna_app`.
 - Migrations still run as the owner `ztna`.
 - `ztna_app` gets normal DML on application tables. It gets only **INSERT and SELECT** on `audit_logs`, `connector_logs` and `provider_audit_logs`, and nothing direct on `audit_stream_heads`; only the definer trigger writes there.
 - `ALTER DEFAULT PRIVILEGES` covers future migrations.
 - The controller's `DATABASE_URL` switches to `ztna_app`. DB-backed tests that need DDL or TRUNCATE keep an owner URL.
 - Retention (P-4) and the D-13 tenant purge run through `SECURITY DEFINER` functions owned by `ztna`. They are the only delete paths.
 - `ON DELETE CASCADE` from `workspaces` still works, because referential actions run as the table owner.
+- **What changes:**
+  - the controller `DATABASE_URL` in `.env`, `.env.example` and the lab docs moves to `ztna_app`;
+  - `docker-compose.yml` gains `APP_DB_PASSWORD`;
+  - the CI Postgres service needs nothing new: its tests run as `ztna` and build their own databases from the `.sql` files;
+  - the ~240 `*_TEST_DATABASE_URL` uses keep the owner URL;
+  - everyone resets their local DB (`[schema: reset DB]`).
 
 ### P-4. Retention
 
@@ -142,6 +169,7 @@ Why this works:
 - **`access` stream:** a purge job deletes rows older than `ACCESS_LOG_RETENTION_DAYS` (default 90) in batches, through the definer function.
   - Before it deletes, it records the last purged `(seq, row_hash)` on the head row, so the chain stays verifiable from that checkpoint.
   - Whether the purge waits for export is open (O-2).
+- If the purge removes rows a sink has not delivered, the exporter **never skips silently**. It sends one `export.gap {from_seq, to_seq, checkpoint_hash}` event, so the SIEM can tell a retention gap from tampering, and then continues from the checkpoint.
 
 ### P-5. Exporter (inside the controller)
 
@@ -191,8 +219,11 @@ Common envelope:
 ```
 workspace_id, stream, seq, prev_hash, row_hash, occurred_at, recorded_at,
 action, outcome, actor{type,user_id,email}, target{type,id},
-subject{user_id,device_id,spiffe_id} (access only), details{…}
+subject{user_id,device_id,spiffe_id} (access only), details{…}, details_canonical, canonical
 ```
+
+- `details_canonical` is the exact hashed `jsonb` text.
+- `canonical` is the whole hashed byte string (P-2), base64-encoded. A verifier checks `row_hash = sha256(prev_hash || canonical)` and needs no Postgres knowledge.
 
 - **`admin` events:**
   - the `action`, target and `details` map straight from the row;
@@ -249,6 +280,7 @@ No passwords, tokens or codes go into `details`.
 | O-4 | Which adapters ship in v1: the webhook only, or the webhook plus **Splunk HEC** so the adapter interface is proven by a second real adapter? | **Webhook + Splunk HEC.** HEC is the most common target, and a second adapter keeps the interface honest. |
 | O-5 | Should a tenant-facing **Audit Log page** (read `audit_logs` in the admin console) ship with v1? Today tenants can't see their own audit trail at all. | **Yes, read-only, `CONSOLE_READ`.** It is small and lets admins check what is being exported. |
 | O-6 | Access-event loss when the control stream is down. Accept it in v1 and document it, or add a connector-side bounded buffer (a connector change, no proto change)? | **Accept and document for v1**, and open a follow-up. |
+| O-7 | Are **end-user client sign-in events** (client login, token refresh denied, sign-out, `internal/auth` serves both console and client) in v1, or only admin console sign-in? SIEMs usually correlate them with access events. | **Yes, include them** in the `admin` stream as `auth.*` with `actor.type=user` and a `client` flag. The volume is low. |
 
 ## 6. Build plan (after approval)
 
@@ -257,7 +289,7 @@ One PR, `[schema: reset DB]`, migration `051_`:
 1. **S1a, DB:** chain trigger and heads, D-12 role split, definer purge and retention functions. Tests cover chain continuity under concurrent inserts, rejected UPDATE and DELETE as `ztna_app`, and a purge checkpoint.
 2. **S1b, backend:** the P-9 audit gaps, the exporter worker and cursors, the adapter registry, the webhook adapter (plus HEC if O-4), the SSRF client, sealed secrets, the GraphQL sink API, and a chain verifier (`zecurity-controller audit verify --workspace …`).
 3. **S2, console:** the Audit export settings and, if O-5, the Audit Log page.
-4. **S3, live run:** a real connector and client produce access events. A local HTTPS receiver checks signatures, seq continuity and hash recomputation. Then: kill the receiver and confirm retry and catch-up with no gaps or duplicates beyond the at-least-once overlap; attempt UPDATE as `ztna_app` (refused); edit a row as the owner (the verifier reports the break).
+4. **S3, live run:** a real connector and client produce access events. The receiver's certificate is trusted through a dev-only CA-bundle setting (`AUDIT_EXPORT_DEV_CA_FILE`, `ENV=development`), next to the private-IP override. A local HTTPS receiver checks signatures, seq continuity and hash recomputation. Then: kill the receiver and confirm retry and catch-up with no gaps or duplicates beyond the at-least-once overlap; attempt UPDATE as `ztna_app` (refused); edit a row as the owner (the verifier reports the break).
 
 ---
 
