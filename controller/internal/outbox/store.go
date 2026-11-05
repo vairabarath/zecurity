@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/metrics"
+	"github.com/yourorg/ztna/controller/internal/telemetry"
 )
 
 var (
@@ -121,16 +122,18 @@ func (o *Outbox) Enqueue(
 			user_id,
 			correlation_id,
 			payload,
+			traceparent,
 			status,
 			retry_count,
 			next_attempt_at
 		)
-		VALUES ($1, $2, $3, $4, $5, 'pending', 0, NOW())`,
+		VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, NOW())`,
 		evt.EventType,
 		evt.WorkspaceID,
 		evt.UserID,
 		evt.CorrelationID,
 		evt.Payload,
+		telemetry.CaptureTraceparent(ctx),
 	)
 	if err != nil {
 		return fmt.Errorf("enqueue outbox event: %w", err)
@@ -180,6 +183,7 @@ func (o *Outbox) ClaimEvents(
 			o.user_id,
 			o.correlation_id,
 			o.payload,
+			o.traceparent,
 			o.status,
 			o.retry_count,
 			o.created_at,
@@ -208,6 +212,7 @@ func (o *Outbox) ClaimEvents(
 			&evt.UserID,
 			&evt.CorrelationID,
 			&evt.Payload,
+			&evt.Traceparent,
 			&evt.Status,
 			&evt.RetryCount,
 			&evt.CreatedAt,

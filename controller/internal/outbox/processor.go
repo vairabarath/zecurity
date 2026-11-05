@@ -166,12 +166,18 @@ func (p *Processor) processEvent(
 
 	leaseID := *evt.LeaseID
 
-	ctx, span := telemetry.StartSpan(ctx, "outbox.dispatch_"+evt.EventType,
+	// The dispatch span starts a new trace and links to the span that
+	// published the event, when one was recorded (PENDING-10).
+	spanOpts := []trace.SpanStartOption{
 		trace.WithAttributes(
 			attribute.String("event.type", evt.EventType),
 			attribute.String("event.id", evt.ID.String()),
 		),
-	)
+	}
+	if link, ok := telemetry.LinkFromTraceparent(evt.Traceparent); ok {
+		spanOpts = append(spanOpts, trace.WithLinks(link))
+	}
+	ctx, span := telemetry.StartSpan(ctx, "outbox.dispatch_"+evt.EventType, spanOpts...)
 	defer span.End()
 
 	err := p.registry.Dispatch(ctx, evt)

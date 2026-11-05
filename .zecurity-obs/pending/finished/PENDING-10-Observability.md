@@ -18,7 +18,7 @@ tags: [pending, adr, operations, observability, metrics, tracing, health]
 > **Status: IMPLEMENTED (2026-11-04).** All four phases of enterprise observability have been implemented, tested, and live-verified on branch `feat/pending10-observability`:
 > 1. **Phase 1 — Health & Readiness Subsystem (`cad18733`):** Minimal public probes on `:8080` (`/livez`, `/readyz`, `/healthz`, `/health`) and detailed internal diagnostics on `:9102` (`METRICS_ADDR`).
 > 2. **Phase 2 — Prometheus Metrics & Low-Cardinality Enforcement (`b1bd8034`):** Real-time fleet gauges, ACL compile histograms, PKI cert runway/validity, and outbox pipeline telemetry with strict zero-high-cardinality invariant.
-> 3. **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):** Opt-in OTLP exporter and W3C TraceContext propagation across HTTP and gRPC. Outbox dispatch spans start a new trace (see Post-live-test fixes).
+> 3. **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):** Opt-in OTLP exporter and W3C TraceContext propagation across HTTP and gRPC. Outbox dispatch spans start a new trace that links to the publishing request's span (`050_outbox_trace_context.sql`, see Post-live-test fixes).
 > 4. **Phase 4 — Alerts & Dashboards:** Prometheus alert definitions in `deploy/monitoring/alerts.yaml` and production Grafana dashboard in `deploy/monitoring/dashboards/zecurity_overview.json`.
 >
 > **Live test 2026-11-05 (Sathiya):** the first live run found alerts firing on a healthy controller, alerts and dashboard queries pointing at metrics that don't exist, HTTP/gRPC metrics never recorded and a tracing service name lost. All fixed and re-verified live the same day; see **Post-live-test fixes** at the end. Commit hashes above are from before the branch was rebased onto PR #177.
@@ -43,7 +43,7 @@ During the review of PENDING-10, the following core architectural decisions were
 - **Tracing Provider:** Tracing is strictly opt-in. The OTLP trace exporter connects only when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured.
 - **Zero Overhead:** When tracing is disabled, a no-op TracerProvider is utilized, avoiding exporter initialization, background workers, and network connections.
 - **W3C TraceContext:** Full propagation of `traceparent` across HTTP middleware and gRPC unary/streaming server interceptors.
-- **Outbox dispatch:** each dispatch runs in its own span (`outbox.dispatch_<event_type>`), which starts a **new trace**. The outbox doesn't store the publishing request's trace context, so the dispatch is not linked to the request that wrote the event. Linking them needs a trace-context column on `outbox_events` (a schema change, not done).
+- **Outbox dispatch:** each dispatch runs in its own span (`outbox.dispatch_<event_type>`), which starts a **new trace** with a **span link** to the span that published the event. `Enqueue` stores that span's W3C `traceparent` in `outbox_events.traceparent` (`050_outbox_trace_context.sql`); it stores NULL when tracing is disabled or the publishing context has no span. A link, not a parent: an event can be retried with backoff for hours after the request's trace ended. Only `traceparent` is stored; `tracestate` and baggage are client-supplied request data and never reach the database.
 
 ### Decision 3: Metric Cardinality Rule — Strictly Enforced Invariant
 - **Rule:** High-cardinality labels are forbidden with zero exceptions.
@@ -85,7 +85,7 @@ During the review of PENDING-10, the following core architectural decisions were
 - `Init(ctx, serviceName)`: Initializes OTLP gRPC trace exporter if `OTEL_EXPORTER_OTLP_ENDPOINT` is present; returns graceful shutdown hook.
 - `HTTPMiddleware(next)`: Extracts incoming W3C `traceparent` / `baggage` and records HTTP request spans.
 - `UnaryServerInterceptor()`, `StreamServerInterceptor()`: Extracts W3C headers from gRPC metadata and traces RPCs.
-- `outbox/processor.go`: Dispatches outbox events within an OpenTelemetry span (`outbox.dispatch_<event_type>`), a new root trace.
+- `outbox/processor.go`: Dispatches outbox events within an OpenTelemetry span (`outbox.dispatch_<event_type>`), a new root trace linked to the publishing span (`telemetry.CaptureTraceparent` / `LinkFromTraceparent` in `internal/telemetry/outbox.go`).
 - `OTEL_EXPORTER_OTLP_ENDPOINT` takes `host:port` or a URL (`http://…` is plaintext, `https://…` TLS); export errors are logged.
 
 ### 4. Alert Rules & Dashboard Deliverables
@@ -232,7 +232,7 @@ Live test on the real lab (controller with luffy's connector and the system clie
 - `service.name` was `unknown_service:controller`: merging `resource.Default()` with a semconv-v1.26 schema resource failed on the schema URL and the code fell back to the default. Service attributes are now schemaless; a merge error is logged.
 - `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` exported nothing, silently: the value went to `WithEndpoint`, which wants `host:port`. URLs are parsed now (`http` = plaintext, `https` = TLS); export errors are logged through `otel.SetErrorHandler`; startup logs the endpoint.
 - HTTP span names used the raw path (IDs in span names); they are now the route pattern, with `http.route` set.
-- The outbox trace-continuity claim was false: the dispatch span is a new root trace. The unused `InjectTraceContext`/`ExtractTraceContext` helpers and their test were removed, and the text above corrected. Real linking needs a trace-context column on `outbox_events`.
+- The outbox trace-continuity claim was false: the dispatch span is a new root trace. The unused `InjectTraceContext`/`ExtractTraceContext` helpers and their test were removed, and the text above corrected. Real linking needs a trace-context column on `outbox_events`: added afterwards, see *Outbox trace link* below.
 
 ### Fix: `/health` failed when Valkey was down
 **Issue:** `/health` used to be a database ping; it had become full readiness, so an external load balancer still probing it would drop the controller during a Valkey outage.
@@ -244,6 +244,15 @@ Live test on the real lab (controller with luffy's connector and the system clie
 ### Fix: security review after push (2026-11-05)
 - `internal/health/health.go` `Evaluate`: the checks ran in the triggering request's context, and the result is cached for every caller. A client aborting its `/readyz` request cancelled the checks and cached `not_ready` for 1 s, so repeated aborted probes could make a load balancer drop the controller. Checks now run in `context.WithoutCancel(ctx)` with the 2 s timeout. Test `TestEvaluate_CallerCancellationNotCached`.
 - `internal/telemetry/http.go`: spans recorded `http.target` (raw path, which carries invitation tokens on `/api/invitations/{token}`) and `http.host` (client-supplied Host). Both are gone; `http.route` (the pattern) remains. Asserted in `TestHTTPMiddleware_SpanNamedByRoute`.
+
+### Outbox trace link (2026-11-05) `[schema: reset DB]`
+- `controller/migrations/050_outbox_trace_context.sql`: nullable `outbox_events.traceparent TEXT`, with a CHECK for the W3C format.
+- `internal/telemetry/outbox.go`: `CaptureTraceparent(ctx)` injects only `traceparent`, through `propagation.TraceContext{}` and not the global propagator (no baggage), and with tracestate cleared. It returns nil when tracing is off, so a client-supplied `traceparent` isn't persisted on the disabled path. `LinkFromTraceparent` parses the stored value into a `trace.Link`.
+- `internal/outbox/store.go`: `Enqueue` writes it; `ClaimEvents` returns it. `processor.go`: the dispatch span gets `trace.WithLinks(...)`.
+- Publishers: both callers, `graph/resolvers/idp_helpers.go` (GraphQL) and `internal/scim/directory_service.go` (SCIM), enqueue with the HTTP request context, which goes through `telemetry.HTTPMiddleware`, so both are linked.
+- Tests: `TestOutboxTraceLinkIntegration` (stored traceparent = publishing span; dispatch span is a new root with exactly one link to it; no span means NULL and no link; the schema rejects a malformed value), `TestCaptureTraceparent` (tracestate not stored; round trip), `TestCaptureTraceparent_DisabledStoresNothing`, `TestLinkFromTraceparent_Invalid`.
+- Gate: full suite with every DB variable set, **1712 pass, 0 fail**, the same 2 skips.
+- Not live-checked in Jaeger yet: it needs a DB reset and a branch-built controller with a collector.
 
 ### Regression guards
 - `internal/metrics/monitoring_refs_test.go`: every metric and label used by `alerts.yaml` and the dashboards must be exported by the controller (`up` and `probe_success` allowed). It fails on the pre-fix files.

@@ -6,8 +6,8 @@
 //  2. When disabled, uses a global no-op provider with zero background workers,
 //     zero network connections, and negligible memory overhead.
 //  3. Implements W3C TraceContext propagation across HTTP, gRPC unary and gRPC
-//     streaming. Outbox dispatch spans start a new trace: the outbox does not
-//     store the publishing request's trace context.
+//     streaming. Outbox dispatch spans start a new trace with a span link to
+//     the publishing span; the outbox stores only its traceparent.
 package telemetry
 
 import (
