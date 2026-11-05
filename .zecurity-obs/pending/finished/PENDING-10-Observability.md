@@ -252,7 +252,10 @@ Live test on the real lab (controller with luffy's connector and the system clie
 - Publishers: both callers, `graph/resolvers/idp_helpers.go` (GraphQL) and `internal/scim/directory_service.go` (SCIM), enqueue with the HTTP request context, which goes through `telemetry.HTTPMiddleware`, so both are linked.
 - Tests: `TestOutboxTraceLinkIntegration` (stored traceparent = publishing span; dispatch span is a new root with exactly one link to it; no span means NULL and no link; the schema rejects a malformed value), `TestCaptureTraceparent` (tracestate not stored; round trip), `TestCaptureTraceparent_DisabledStoresNothing`, `TestLinkFromTraceparent_Invalid`.
 - Gate: full suite with every DB variable set, **1712 pass, 0 fail**, the same 2 skips.
-- Not live-checked in Jaeger yet: it needs a DB reset and a branch-built controller with a collector.
+- Live check PASS (2026-11-05): controller built from `main` at `b208a5b3`, fresh database (`049_` and `050_` applied), Jaeger all-in-one 1.62.0, `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`.
+  - Tracing on: an IdP connection create + `deleteIdpConnection(force: true)`, sent with a caller `traceparent`, published one `policy.invalidation.requested` event (processed, `done`). Its row stored `traceparent` = the caller's trace ID plus the controller's `POST /graphql` span ID.
+  - In Jaeger, the request trace has `POST /graphql` as `CHILD_OF` the caller's span. `outbox.dispatch_policy.invalidation.requested` is in a **new trace** with one `FOLLOWS_FROM` reference to that `POST /graphql` span; its `event.id` and `event.type` tags match the row.
+  - Tracing off (same request, caller `traceparent` sent): the event's `traceparent` is NULL.
 
 ### Regression guards
 - `internal/metrics/monitoring_refs_test.go`: every metric and label used by `alerts.yaml` and the dashboards must be exported by the controller (`up` and `probe_success` allowed). It fails on the pre-fix files.
@@ -267,7 +270,7 @@ Live test on the real lab (controller with luffy's connector and the system clie
   - `http_requests_total` labels: `/graphql`, `/readyz`, `GET /provider/relays/{id}`, `unmatched` (no IDs); `grpc_server_handled_total` for `client.v1.ClientService` calls.
   - Valkey paused: `/readyz` 503 (bounded 2 s), `/healthz` 503, `/health` 200. Postgres paused: `/health` 503. All 200 after unpause.
   - Jaeger: service `zecurity-controller` with both `localhost:4317` and `http://localhost:4317`; a request's span is the child of its `traceparent`; span names are routes.
-  - Outbox: one IdP connection create + delete published and processed one `policy.invalidation.requested` event; its dispatch span is a new root trace, as documented.
+  - Outbox: one IdP connection create + delete published and processed one `policy.invalidation.requested` event; its dispatch span is a new root trace, as documented at the time (before the outbox trace link; it now also links to the request, see *Outbox trace link*).
   - Dashboard: 21 of 22 queries return data; the remaining one is `probe_success` (blackbox exporter, not shipped).
   - Prometheus with the shipped rules, 7½ minutes after start: **0 alerts pending or firing**; runway/lifetime ratio 0.99 for all three certs.
   - Collector unreachable (`http://localhost:4399`): the export error is logged (`telemetry: traces export: … connection refused`).
