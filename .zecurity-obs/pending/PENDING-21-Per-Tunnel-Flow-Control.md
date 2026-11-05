@@ -1,8 +1,8 @@
 ---
 type: design-note
-status: implemented
+status: merged
 created: 2026-11-03
-updated: 2026-11-03
+updated: 2026-11-05
 tags:
   - pending
   - connector
@@ -294,7 +294,7 @@ The list required by the approval is in §11 with the results.
 
 ## 11. Implementation status (2026-11-03)
 
-**Implemented, not committed:** branch `feat/fu9-per-tunnel-flow-control`, base `main` `f5bd339f`. The design in §6–§8 is what was built.
+**Implemented and merged:** branch `feat/fu9-per-tunnel-flow-control` (commit `3545017f`), merged in PR #178 as `e07fe524` on 2026-11-05. The design in §6–§8 is what was built.
 
 ### Files
 - **Proto:** `proto/shield/v1/shield.proto`.

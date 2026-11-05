@@ -2,8 +2,8 @@
 type: investigation + fix record
 date: 2026-11-05
 author: Barath (M2) with Claude
-branch: fix/fu16-revocation-tail (uncommitted, base main e07fe524)
-status: measured, root causes found, client fix implemented and validated live; not committed
+branch: fix/fu16-revocation-tail (commit 9bd6c315, merged in PR #179 as 945dd7ac)
+status: measured, root causes found, client fix implemented, validated live and merged (PR #179)
 ---
 
 # FU-16: the tail after a tunnel ends (measurement, root cause, fix)
