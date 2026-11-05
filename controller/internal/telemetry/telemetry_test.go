@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/trace"
@@ -129,5 +132,36 @@ func TestUnaryServerInterceptor(t *testing.T) {
 	}
 	if handlerSpan == nil {
 		t.Fatalf("expected span in gRPC handler context")
+	}
+}
+
+// Span names use the ServeMux route pattern, never the raw path (IDs).
+func TestHTTPMiddleware_SpanNamedByRoute(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	prev := tracer
+	tracer = tp.Tracer(InstrumentationScope)
+	defer func() { tracer = prev }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /provider/relays/{id}", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("/graphql", func(w http.ResponseWriter, r *http.Request) {})
+	h := HTTPMiddleware(mux)
+
+	for _, c := range []struct{ method, target string }{
+		{http.MethodGet, "/provider/relays/7f9c2a11"},
+		{http.MethodPost, "/graphql"},
+		{http.MethodGet, "/nope/0b11d3"},
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(c.method, c.target, nil))
+	}
+
+	var names []string
+	for _, s := range rec.Ended() {
+		names = append(names, s.Name())
+	}
+	want := []string{"GET /provider/relays/{id}", "POST /graphql", "GET unmatched"}
+	if strings.Join(names, "|") != strings.Join(want, "|") {
+		t.Fatalf("span names = %v, want %v", names, want)
 	}
 }

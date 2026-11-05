@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"net/http"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,10 +26,9 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx := otel.GetTextMapPropagator().Extract(req.Context(), propagation.HeaderCarrier(req.Header))
 
-		spanName := req.Method + " " + req.URL.Path
 		ctx, span := Tracer().Start(
 			ctx,
-			spanName,
+			req.Method,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(
 				attribute.String("http.method", req.Method),
@@ -43,9 +43,25 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			statusCode:     http.StatusOK,
 		}
 
-		next.ServeHTTP(sw, req.WithContext(ctx))
+		inner := req.WithContext(ctx)
+		next.ServeHTTP(sw, inner)
 
-		span.SetAttributes(attribute.Int("http.status_code", sw.statusCode))
+		// The ServeMux sets Pattern on the request it receives (this same
+		// pointer, as long as the handlers in between pass it through). Name the
+		// span by route, not by raw path, which carries IDs.
+		route := inner.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		if strings.HasPrefix(route, req.Method+" ") {
+			span.SetName(route)
+		} else {
+			span.SetName(req.Method + " " + route)
+		}
+		span.SetAttributes(
+			attribute.String("http.route", route),
+			attribute.Int("http.status_code", sw.statusCode),
+		)
 		if sw.statusCode >= 500 {
 			span.SetStatus(codes.Error, http.StatusText(sw.statusCode))
 		} else {
