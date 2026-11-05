@@ -298,12 +298,33 @@ fn read_shell_vars(path: &Path) -> Option<HashMap<String, String>> {
     Some(map)
 }
 
+/// systemd's state of `ufw.service` (`active`, `inactive`, `failed`, ...).
+/// The unit is what loads ufw's rules at boot, so ufw.conf saying
+/// `ENABLED=yes` proves nothing while it isn't active: found live 2026-11-05
+/// on a host whose ufw.service was disabled, with INPUT policy ACCEPT and the
+/// check reporting PASS. `systemctl is-active` needs no privilege; it prints
+/// the state and exits non-zero for anything but active. None when systemctl
+/// can't be run or prints nothing.
+pub(crate) async fn ufw_service_state(runner: &dyn CommandRunner) -> Option<String> {
+    let out = runner
+        .run("systemctl", &["is-active", "ufw.service"])
+        .await
+        .ok()?;
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!state.is_empty()).then_some(state)
+}
+
 /// ufw's own configuration, for an iptables-legacy host whose rules the
 /// daemon can't read (`iptables` needs root's xtables lock, `ufw status`
-/// needs root). `ufw enable` / `ufw disable` keep `ENABLED` in step with the
-/// runtime state; a manual `iptables -P INPUT ACCEPT` is not seen. None when
-/// ufw isn't configured on the host.
-pub(crate) fn ufw_config_default_deny(root: &Path) -> Option<PostureCheck> {
+/// needs root, and `iptables-save` needs CAP_NET_RAW as well). It passes only
+/// when ufw.conf says enabled, the default input policy is DROP or REJECT, and
+/// `service` (see [`ufw_service_state`]) is `active`, i.e. the rules were
+/// loaded. A manual `iptables -P INPUT ACCEPT` after that is still not seen.
+/// `ufw enable` runs ufw-init itself and never starts the unit, so with the
+/// unit inactive (e.g. disabled) an enabled ufw fails closed until
+/// `systemctl enable --now ufw`: no unprivileged signal shows its rules.
+/// None when ufw isn't configured on the host.
+pub(crate) fn ufw_config_default_deny(root: &Path, service: Option<&str>) -> Option<PostureCheck> {
     let conf = read_shell_vars(&root.join("etc/ufw/ufw.conf"))?;
     let enabled = conf.get("ENABLED").map(String::as_str) == Some("yes");
     if !enabled {
@@ -316,14 +337,28 @@ pub(crate) fn ufw_config_default_deny(root: &Path) -> Option<PostureCheck> {
     let policy = read_shell_vars(&root.join("etc/default/ufw"))
         .and_then(|d| d.get("DEFAULT_INPUT_POLICY").cloned())
         .unwrap_or_default();
-    Some(match policy.as_str() {
-        "DROP" | "REJECT" => check(
+    Some(match (policy.as_str(), service) {
+        ("DROP" | "REJECT", Some("active")) => check(
             CHECK_ID_FIREWALL,
             CheckStatus::Pass,
             format!(
-                "ufw enabled per /etc/ufw/ufw.conf, default input policy {policy} \
-                 (iptables-legacy: runtime rules not readable)"
+                "ufw enabled per /etc/ufw/ufw.conf, default input policy {policy}, \
+                 ufw.service active (iptables-legacy: runtime rules not readable)"
             ),
+        ),
+        ("DROP" | "REJECT", Some(state)) => check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Fail,
+            format!(
+                "ufw enabled in /etc/ufw/ufw.conf but ufw.service is {state}, so its \
+                 rules can't be confirmed as loaded (fix: systemctl enable --now ufw)"
+            ),
+        ),
+        ("DROP" | "REJECT", None) => check(
+            CHECK_ID_FIREWALL,
+            CheckStatus::Fail,
+            "ufw enabled in /etc/ufw/ufw.conf but whether ufw.service loaded its \
+             rules can't be checked (systemctl unavailable)",
         ),
         _ => check(
             CHECK_ID_FIREWALL,
@@ -377,7 +412,8 @@ pub(crate) async fn collect_firewall(runner: Arc<dyn CommandRunner>, root: &Path
     }
 
     if legacy {
-        if let Some(c) = ufw_config_default_deny(root) {
+        let service = ufw_service_state(runner.as_ref()).await;
+        if let Some(c) = ufw_config_default_deny(root, service.as_deref()) {
             return c;
         }
     }
