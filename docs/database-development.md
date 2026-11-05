@@ -32,6 +32,7 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
 - **Local data is disposable** during this phase. `down -v` deletes everything in the local database: tenants, users, connectors, provider accounts.
 - The `-v` matters. Without it, the old volume survives and the new schema file is **not** applied.
 - **Symptom of forgetting:** errors like `column "…" does not exist` or `relation "…" does not exist` for something a recent PR added.
+- **Two database roles (since `051_`, PENDING-11 D-12).** `ztna` owns the schema: Postgres runs the schema files as `ztna`, and the DB-backed tests and `psql` use it. The controller runs as **`ztna_app`**, which may only INSERT and SELECT the audit tables (`audit_logs`, `connector_logs`, `provider_audit_logs`). `051_` creates `ztna_app`, and `zz_app_role_login.sh` gives it a password from `APP_DB_PASSWORD` (set in `docker-compose.yml`). After the reset, point `DATABASE_URL` in `controller/.env` at `ztna_app` (see `.env.example`). Keep the `*_TEST_DATABASE_URL` variables on `ztna`.
 - Valkey (`ztna_valkey`) holds only caches and rate-limit counters. Recreating it is harmless but usually unnecessary.
 
 ## 3. After a reset: getting back to a working setup
