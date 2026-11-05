@@ -18,8 +18,10 @@ tags: [pending, adr, operations, observability, metrics, tracing, health]
 > **Status: IMPLEMENTED (2026-11-04).** All four phases of enterprise observability have been implemented, tested, and live-verified on branch `feat/pending10-observability`:
 > 1. **Phase 1 — Health & Readiness Subsystem (`cad18733`):** Minimal public probes on `:8080` (`/livez`, `/readyz`, `/healthz`, `/health`) and detailed internal diagnostics on `:9102` (`METRICS_ADDR`).
 > 2. **Phase 2 — Prometheus Metrics & Low-Cardinality Enforcement (`b1bd8034`):** Real-time fleet gauges, ACL compile histograms, PKI cert runway/validity, and outbox pipeline telemetry with strict zero-high-cardinality invariant.
-> 3. **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):** Opt-in OTLP exporter, W3C TraceContext propagation across HTTP and gRPC, and asynchronous trace context continuation in outbox event dispatching.
+> 3. **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):** Opt-in OTLP exporter and W3C TraceContext propagation across HTTP and gRPC. Outbox dispatch spans start a new trace (see Post-live-test fixes).
 > 4. **Phase 4 — Alerts & Dashboards:** Prometheus alert definitions in `deploy/monitoring/alerts.yaml` and production Grafana dashboard in `deploy/monitoring/dashboards/zecurity_overview.json`.
+>
+> **Live test 2026-11-05 (Sathiya):** the first live run found alerts firing on a healthy controller, alerts and dashboard queries pointing at metrics that don't exist, HTTP/gRPC metrics never recorded and a tracing service name lost. All fixed and re-verified live the same day; see **Post-live-test fixes** at the end. Commit hashes above are from before the branch was rebased onto PR #177.
 
 ---
 
@@ -32,7 +34,7 @@ During the review of PENDING-10, the following core architectural decisions were
   - `/livez`: Minimal liveness check returning `200 {"status":"ok"}`. Strictly independent of the database and external dependencies.
   - `/readyz`: Minimal readiness check returning `200 {"status":"ready"}` or `503 {"status":"not_ready"}` with bounded timeout contexts.
   - `/healthz`: Minimal overall health check.
-  - `/health`: Preserved for backward compatibility.
+  - `/health`: Preserved for backward compatibility: it reflects the database only, as the old `db.Pool.Ping` handler did. Valkey, PKI or outbox problems show in `/readyz` and `/healthz`, not `/health`.
 - **Internal Port (`:9102` / `METRICS_ADDR`):**
   - Component diagnostics (Postgres connection pool, Valkey, PKI validity and runway, Outbox processor) are restricted exclusively to the private management listener.
   - No detailed diagnostics are exposed through unauthenticated public query parameters.
@@ -41,7 +43,7 @@ During the review of PENDING-10, the following core architectural decisions were
 - **Tracing Provider:** Tracing is strictly opt-in. The OTLP trace exporter connects only when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured.
 - **Zero Overhead:** When tracing is disabled, a no-op TracerProvider is utilized, avoiding exporter initialization, background workers, and network connections.
 - **W3C TraceContext:** Full propagation of `traceparent` across HTTP middleware and gRPC unary/streaming server interceptors.
-- **Asynchronous Trace Continuity:** Outbox dispatcher creates trace spans for asynchronous worker jobs, preserving trace context across process boundaries.
+- **Outbox dispatch:** each dispatch runs in its own span (`outbox.dispatch_<event_type>`), which starts a **new trace**. The outbox doesn't store the publishing request's trace context, so the dispatch is not linked to the request that wrote the event. Linking them needs a trace-context column on `outbox_events` (a schema change, not done).
 
 ### Decision 3: Metric Cardinality Rule — Strictly Enforced Invariant
 - **Rule:** High-cardinality labels are forbidden with zero exceptions.
@@ -61,19 +63,21 @@ During the review of PENDING-10, the following core architectural decisions were
 
 ### 2. Prometheus Metrics (`controller/internal/metrics/`)
 - **Fleet Metrics:**
-  - `relay_active_count`, `relay_capacity_total_max_sessions`, `relay_capacity_total_active_sessions`, `relay_capacity_utilization_ratio`
-  - `relay_heartbeats_total`, `relay_capacity_transitions_total`
-  - `connector_active_streams`, `connector_heartbeats_total`, `connector_acl_lag_seconds` (histogram)
+  - `relay_active_count` (relays with status active in the DB), `relay_capacity_max`, `relay_connections_total`, `relay_capacity_utilization_ratio`
+  - `relay_heartbeats_total{status}`, `relay_capacity_transitions_total{transition}`
+  - `connector_active_streams` (open control streams), `connector_active_count` (connectors with a heartbeat within the disconnect threshold), `connector_heartbeats_total{status}`, `connector_acl_lag_versions` (histogram, in ACL versions, not seconds)
 - **Engine Metrics:**
   - `acl_compile_duration_seconds` (histogram), `acl_compiles_total`
-  - `policy_notifications_total{subsystem="policy|transport"}`
+  - `policy_notifications_total{plane="policy|transport"}`
 - **PKI & Certificate Runway:**
-  - `cert_runway_seconds{entity="root_ca|intermediate_ca|controller_grpc"}`
-  - `cert_valid{entity="root_ca|intermediate_ca|controller_grpc"}`
-  - `pki_rotations_total{cert_type, status}`
+  - `cert_runway_seconds`, `cert_valid`, `cert_lifetime_seconds`, each `{entity="root_ca|intermediate_ca|controller_grpc"}`, computed at scrape time
+  - `pki_rotations_total{entity="controller_grpc", status="ok|error"}`
 - **Outbox Pipeline:**
-  - `outbox_events_published_total`, `outbox_events_processed_total{status}`
-  - `outbox_events_dead_letter_total`, `outbox_events_pending`, `outbox_oldest_pending_age_seconds`
+  - `outbox_events_published_total{event_type}`, `outbox_events_processed_total{status}`
+  - `outbox_dead_letter_total`, `outbox_events_pending`, `outbox_oldest_pending_age_seconds`
+- **HTTP & gRPC servers:**
+  - `http_requests_total{method, handler, status_code}`, `http_request_duration_seconds{handler}`; `handler` is the ServeMux route pattern (`unmatched` when none)
+  - `grpc_server_handled_total{grpc_service, grpc_method, grpc_code}`, `grpc_server_handling_seconds{grpc_service, grpc_method}`
 - **Database Connection Pool:**
   - `db_pool_connections{state="acquired|idle|total|max"}`
 
@@ -81,19 +85,21 @@ During the review of PENDING-10, the following core architectural decisions were
 - `Init(ctx, serviceName)`: Initializes OTLP gRPC trace exporter if `OTEL_EXPORTER_OTLP_ENDPOINT` is present; returns graceful shutdown hook.
 - `HTTPMiddleware(next)`: Extracts incoming W3C `traceparent` / `baggage` and records HTTP request spans.
 - `UnaryServerInterceptor()`, `StreamServerInterceptor()`: Extracts W3C headers from gRPC metadata and traces RPCs.
-- `outbox/processor.go`: Dispatches outbox events within an OpenTelemetry span (`outbox.dispatch_<event_type>`).
+- `outbox/processor.go`: Dispatches outbox events within an OpenTelemetry span (`outbox.dispatch_<event_type>`), a new root trace.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` takes `host:port` or a URL (`http://…` is plaintext, `https://…` TLS); export errors are logged.
 
 ### 4. Alert Rules & Dashboard Deliverables
 - `deploy/monitoring/alerts.yaml`:
-  - `CertExpiryImminentWarning` (< 14 days) and `CertExpiryImminentCritical` (< 48 hours)
+  - `CertExpiryImminentWarning` (under 1/4 of the cert's lifetime left) and `CertExpiryImminentCritical` (< 48 hours)
   - `CertInvalid` (cryptographic or chain failure)
   - `RelayFleetNearCapacity` (> 85% capacity for > 5m)
-  - `ConnectorACLLagHigh` (p95 sync lag > 5s)
+  - `ConnectorACLLagHigh` (p95 lag > 5 ACL versions)
   - `ACLCompileLatencyHigh` (p95 compile duration > 250ms)
   - `OutboxBacklogAccumulating` (> 500 events or oldest age > 300s)
   - `OutboxDeadLetterDetected` (> 0 dead letters)
   - `DatabasePoolExhausted` (all connections acquired for > 1m)
-  - `ControllerReadinessFailing` (readiness probe down > 1m)
+  - `ControllerReadinessFailing` (readiness probe down > 1m; needs a blackbox-exporter job probing `/readyz`, not shipped)
+- `deploy/monitoring/alerts_test.yaml`: promtool unit tests for the rules.
 - `deploy/monitoring/dashboards/zecurity_overview.json`:
   - Production Grafana dashboard with panels for Controller Health, Relay Fleet Capacity, Connector ACL Lag, PKI Runway Countdown, Outbox Throughput & Dead Letters, and DB Pool Utilization.
 
@@ -121,12 +127,12 @@ During the review of PENDING-10, the following core architectural decisions were
   - `TestHandler_ExpositionFormat` (PASS)
 - `controller/internal/telemetry/telemetry_test.go`:
   - `TestInit_DisabledByDefault` (PASS — verifies no-op when endpoint unset)
-  - `TestTraceContext_PropagationAcrossAsyncBoundaries` (PASS — verifies W3C inject/extract)
+  - `TestTraceContext_PropagationAcrossAsyncBoundaries` (removed in the post-live-test fixes with the unused inject/extract helpers)
   - `TestHTTPMiddleware_TracesRequest` (PASS)
   - `TestUnaryServerInterceptor` (PASS)
 - **Full Controller Test Suite:**
   - Ran `cd controller && go test ./...`
-  - Result: **100% Green, 0 Failures** across all controller packages.
+  - Result: **100% Green, 0 Failures** across all controller packages. **Correction:** this run set no `*_TEST_DATABASE_URL`, so the DB-backed tests skipped. The 2026-11-05 gate with every DB variable set is in Post-live-test fixes.
 
 ---
 
@@ -189,6 +195,70 @@ $ curl -s http://localhost:9103/healthz
   }
 }
 ```
+
+> **Correction (2026-11-05):** the `0` runway values for `intermediate_ca` and `root_ca` above were the bug the live test found, not healthy output: the CA gauges were pre-set to 0 and never updated, which fired `CertInvalid` and `CertExpiryImminentCritical`.
+
+---
+
+## Post-live-test fixes (2026-11-05)
+
+Live test on the real lab (controller with luffy's connector and the system client, Prometheus v2.53.2 loading `alerts.yaml`, Jaeger all-in-one 1.62.0). Branch rebased onto PR #177 (`8df26ced`); fixes in `f1f4be86` and `ce6ae2ca`.
+
+### Fix: CA cert gauges stuck at 0 (alerts fired on a healthy controller)
+**Issue:** `cert_runway_seconds` and `cert_valid` for `root_ca` and `intermediate_ca` were 0 forever, so `CertInvalid` and `CertExpiryImminentCritical` fired within two minutes of start.
+**Root cause:** `metrics.init()` pre-populated all three entities at 0; only `controller_grpc` was ever set (by the rotator). Runway was also computed once at set time, so it never fell between rotations.
+**Fix applied:** `internal/metrics/metrics.go`: the cert gauges are a custom collector that computes runway and validity at scrape time from recorded `notBefore`/`notAfter`; unrecorded entities are absent, not 0. New `cert_lifetime_seconds`. `internal/pki/service.go` `Init` records `root_ca` and `intermediate_ca` after the chain audit. New `pki_rotations_total{entity,status}` from the rotator.
+
+### Fix: `CertExpiryImminentWarning` pending forever for the controller cert
+**Issue:** the controller gRPC cert lives 7 days (configurable), always under the 14-day threshold.
+**Fix applied:** `alerts.yaml`: warning is `cert_runway_seconds / cert_lifetime_seconds < 0.25`. The rotator renews at 2/3 of the lifetime, so a healthy cert stays at about 1/3 or more. The 48 h critical stays as a backstop.
+
+### Fix: alerts that could never fire
+- `DatabasePoolExhausted`: `acquired >= max` matched nothing (the sides differ in the `state` label). Now `>= ignoring(state)`; promtool test with 25 of 25 acquired.
+- `ConnectorACLLagHigh`: read `connector_acl_lag_seconds_bucket`; the metric is `connector_acl_lag_versions` (versions, not seconds).
+- `OutboxDeadLetterDetected`: read `outbox_events_dead_letter_total`; the metric is `outbox_dead_letter_total`.
+- Annotations read `$labels.cert_type` (rendered `Certificate ''`); the label is `entity`.
+- `ControllerReadinessFailing` still needs a blackbox-exporter job (`probe_success`); documented in the rule, not shipped.
+
+### Fix: HTTP and gRPC metrics never recorded
+**Issue:** `http_requests_total`, `http_request_duration_seconds`, `grpc_server_handled_total` and `grpc_server_handling_seconds` were registered, but `RecordHTTPRequest`/`RecordGRPCCall` had no callers.
+**Fix applied:** `metrics.HTTPMiddleware` wraps the public mux directly (`main.go`) and labels by `Request.Pattern` (`unmatched` otherwise), never the raw path; methods fold to a fixed set. The telemetry gRPC interceptors record service, method and code.
+
+### Fix: `connector_active_count` counted stale rows
+**Issue:** reported 4 with 1 connector connected (3 rows with status `active` that never heartbeated).
+**Fix applied:** the fleet-metrics query also requires `last_heartbeat_at` within `CONNECTOR_DISCONNECT_THRESHOLD` in an active workspace (the disconnect watcher's predicate). `relay_active_count`'s help now says it is the DB status (relay liveness lives in Valkey).
+
+### Fix: tracing service name and endpoint
+- `service.name` was `unknown_service:controller`: merging `resource.Default()` with a semconv-v1.26 schema resource failed on the schema URL and the code fell back to the default. Service attributes are now schemaless; a merge error is logged.
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` exported nothing, silently: the value went to `WithEndpoint`, which wants `host:port`. URLs are parsed now (`http` = plaintext, `https` = TLS); export errors are logged through `otel.SetErrorHandler`; startup logs the endpoint.
+- HTTP span names used the raw path (IDs in span names); they are now the route pattern, with `http.route` set.
+- The outbox trace-continuity claim was false: the dispatch span is a new root trace. The unused `InjectTraceContext`/`ExtractTraceContext` helpers and their test were removed, and the text above corrected. Real linking needs a trace-context column on `outbox_events`.
+
+### Fix: `/health` failed when Valkey was down
+**Issue:** `/health` used to be a database ping; it had become full readiness, so an external load balancer still probing it would drop the controller during a Valkey outage.
+**Fix applied:** `PublicHealthHandler` follows the `database` component only.
+
+### Fix: dashboard queries
+12 of 22 queries returned nothing: six wrong metric names (`relay_capacity_total_*`, `connector_acl_lag_seconds` ×3, `pki_rotations_total` didn't exist, `outbox_events_dead_letter_total`), `{{cert_type}}` legends, the processed panel grouped by `event_type` (label is `status`), and the scrape-job regex. All fixed; the ACL lag panel is in versions. Cosmetic: log line "metrics listenin on" fixed.
+
+### Regression guards
+- `internal/metrics/monitoring_refs_test.go`: every metric and label used by `alerts.yaml` and the dashboards must be exported by the controller (`up` and `probe_success` allowed). It fails on the pre-fix files.
+- `deploy/monitoring/alerts_test.yaml`: promtool tests (healthy controller fires nothing; stuck rotation warns then goes invalid; pool exhaustion; dead letter; ACL lag).
+- Unit tests for the scrape-time cert collector, route-pattern HTTP labels and span names, endpoint forms, the service name, and `/health` with Valkey down.
+
+### Gate and live re-run (2026-11-05)
+- `go test -count=1 ./...` with every `*_TEST_DATABASE_URL` and `AUTH_TEST_VALKEY_URL` set: **1704 pass, 0 fail**, the 2 usual skips. `go vet` clean. promtool `check rules` and `test rules` pass.
+- Live, controller built from the branch tip (binary sha checked):
+  - cert gauges real for all three entities (CA runway in years, valid 1); `pki_rotations_total` present.
+  - `connector_active_count 1` = `connector_active_streams 1`.
+  - `http_requests_total` labels: `/graphql`, `/readyz`, `GET /provider/relays/{id}`, `unmatched` (no IDs); `grpc_server_handled_total` for `client.v1.ClientService` calls.
+  - Valkey paused: `/readyz` 503 (bounded 2 s), `/healthz` 503, `/health` 200. Postgres paused: `/health` 503. All 200 after unpause.
+  - Jaeger: service `zecurity-controller` with both `localhost:4317` and `http://localhost:4317`; a request's span is the child of its `traceparent`; span names are routes.
+  - Outbox: one IdP connection create + delete published and processed one `policy.invalidation.requested` event; its dispatch span is a new root trace, as documented.
+  - Dashboard: 21 of 22 queries return data; the remaining one is `probe_success` (blackbox exporter, not shipped).
+  - Prometheus with the shipped rules, 7½ minutes after start: **0 alerts pending or firing**; runway/lifetime ratio 0.99 for all three certs.
+  - Collector unreachable (`http://localhost:4399`): the export error is logged (`telemetry: traces export: … connection refused`).
+- Not tested: relay metrics (no relay in this lab); `connector_active_streams` dropping when the connector stops.
 
 ---
 
