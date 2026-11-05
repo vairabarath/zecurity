@@ -117,6 +117,15 @@ pub struct ConnectorConfig {
     #[serde(default = "default_relay_drain_timeout_secs")]
     pub relay_drain_timeout_secs: u64,
 
+    /// FU-9 (PENDING-21 §7): Shield-routed tunnels (active plus pending)
+    /// this Connector carries at once, across all Shields. Each can hold up
+    /// to 256 KB of unread data per direction (its HTTP/2 stream window), so
+    /// the default 512 bounds that at 128 MB per direction. Each Shield is
+    /// also limited to 256 (not configurable).
+    /// Over the limit a new tunnel is refused at once (SHIELD_TUNNEL_LIMIT).
+    #[serde(default = "default_shield_tunnel_limit")]
+    pub shield_tunnel_limit: usize,
+
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]
     pub auto_update_enabled: bool,
@@ -155,6 +164,10 @@ fn default_update_check_interval_secs() -> u64 {
 
 fn default_relay_inner_handshake_timeout_secs() -> u64 {
     DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS
+}
+
+fn default_shield_tunnel_limit() -> usize {
+    crate::agent_tunnel::DEFAULT_SHIELD_TUNNEL_LIMIT
 }
 
 fn default_relay_max_tunnel_streams() -> u32 {
@@ -208,5 +221,29 @@ impl ConnectorConfig {
         Figment::new()
             .merge(Env::raw().map(|key| key.as_str().to_ascii_lowercase().into()))
             .extract()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use figment::providers::{Format, Toml};
+
+    fn from_toml(toml: &str) -> ConnectorConfig {
+        Figment::new().merge(Toml::string(toml)).extract().unwrap()
+    }
+
+    /// FU-9 (decided 2026-11-04): the Connector-wide Shield tunnel limit is
+    /// 512 by default and configurable.
+    #[test]
+    fn shield_tunnel_limit_defaults_to_512_and_is_configurable() {
+        let cfg = from_toml("controller_addr = \"c:9090\"");
+        assert_eq!(cfg.shield_tunnel_limit, 512);
+        assert_eq!(
+            cfg.shield_tunnel_limit,
+            crate::agent_tunnel::DEFAULT_SHIELD_TUNNEL_LIMIT
+        );
+        let cfg = from_toml("controller_addr = \"c:9090\"\nshield_tunnel_limit = 64");
+        assert_eq!(cfg.shield_tunnel_limit, 64);
     }
 }

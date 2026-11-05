@@ -295,6 +295,41 @@ impl tower_service::Service<http::Uri> for SpiffeConnectorService {
     }
 }
 
+// FU-9 (PENDING-21 §8.6): HTTP/2 settings toward the Connector, the same as
+// its server's (connector/src/agent_server.rs). Every tunnel is its own
+// stream; the receive windows bound what stalled tunnels can hold, and the
+// connection window covers every tunnel's stream window so a stalled tunnel
+// never holds up another stream.
+/// Per-stream receive window (D-3).
+pub const H2_STREAM_WINDOW: u32 = 256 * 1024;
+/// Per-connection receive window (D-3). A ceiling, not preallocated memory.
+pub const H2_CONNECTION_WINDOW: u32 = 256 * 1024 * 1024;
+/// Streams besides tunnels: Control (two during a renewal handover),
+/// RenewCert, Goodbye — with margin.
+const H2_NON_TUNNEL_STREAMS: u64 = 16;
+/// Dead-peer detection, including an old connection kept only for its
+/// tunnels after a renewal.
+const H2_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const H2_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+// connection_window >= maximum_tunnels × per_tunnel_window + control_reserve.
+const _: () = assert!(
+    H2_CONNECTION_WINDOW as u64
+        >= (crate::tunnel::MAX_TUNNELS as u64 + H2_NON_TUNNEL_STREAMS) * H2_STREAM_WINDOW as u64
+);
+
+/// The FU-9 HTTP/2 settings on an endpoint (adaptive window off: it would
+/// grow the windows past the budget).
+pub fn tunnel_endpoint(endpoint: Endpoint) -> Endpoint {
+    endpoint
+        .initial_stream_window_size(H2_STREAM_WINDOW)
+        .initial_connection_window_size(H2_CONNECTION_WINDOW)
+        .http2_adaptive_window(false)
+        .http2_keep_alive_interval(H2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true)
+}
+
 /// Build a tonic Channel to Connector :9091 using SPIFFE-aware mTLS.
 ///
 /// Bypasses tonic's ClientTlsConfig (no rustls escape hatch in 0.14) via
@@ -327,8 +362,7 @@ pub async fn build_connector_channel(
 
     // http:// so tonic doesn't add its own TLS layer — TLS is in SpiffeConnectorService
     let grpc_addr = format!("http://{}", connector_addr);
-    Endpoint::from_shared(grpc_addr)
-        .context("invalid connector gRPC address")?
+    tunnel_endpoint(Endpoint::from_shared(grpc_addr).context("invalid connector gRPC address")?)
         .connect_with_connector(SpiffeConnectorService {
             tls: Arc::new(rustls_cfg),
             connector_addr: connector_addr.to_string(),

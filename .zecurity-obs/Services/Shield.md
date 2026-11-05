@@ -118,7 +118,17 @@ mTLS bidirectional stream to Connector :9091
 Stream carries (oneof):
   ShieldHealth — every heartbeat_interval_secs
   DiscoveryReport — every discovery_interval_secs (60s differential)
-  TunnelOpen/Data/Close — only on demand (Sprint 7)
+  TunnelOpen (Connector → Shield), TunnelOpened{ok:false} (Shield → Connector,
+  a tunnel it could not open), TunnelClose (Connector → Shield, abort a tunnel)
+
+Tunnels (FU-9, PENDING-21): each tunnel is its own ShieldService.Tunnel stream
+  on the same mTLS connection (first frame TunnelStart{connection_id}, then data,
+  then TunnelEnd). HTTP/2 flow control per stream: no stall cutoff, a slow
+  tunnel never holds up another or Control. At most 256 tunnels (active +
+  pending); the 257th is refused at once. UDP: one frame per datagram, newest
+  dropped when the 32-datagram queue is full. HTTP/2: 256 KB stream / 256 MB
+  connection window, adaptive off, keepalive 30 s / 20 s. On renewal new tunnels
+  use the new connection; old ones finish on the old one, which then closes.
 
 HeartbeatResponse { ok, re_enroll }
   → re_enroll=true → call renewal::renew_cert() → reconnect stream

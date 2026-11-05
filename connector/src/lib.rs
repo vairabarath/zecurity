@@ -36,6 +36,8 @@ mod renewal_consumers_tests;
 mod serving_gate_tests;
 pub mod session_registry;
 #[cfg(test)]
+mod fu9_lab;
+#[cfg(test)]
 pub mod test_support;
 pub mod tls;
 pub mod updater;

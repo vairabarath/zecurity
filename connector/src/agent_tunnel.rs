@@ -1,69 +1,308 @@
+//! Shield-routed tunnels (RDE): device sessions relayed through a Shield.
+//!
+//! FU-9 (PENDING-21): every tunnel has its own gRPC stream
+//! (`ShieldService.Tunnel`). The Control stream only coordinates: the
+//! Connector sends `TunnelOpen` on it, the Shield answers by opening a
+//! `Tunnel` stream whose first frame names the tunnel (`TunnelStart`), or
+//! reports a failure with `TunnelOpened{ok: false}`; an abort from the
+//! Connector also goes out on Control (`TunnelClose`), so it reaches the
+//! Shield even while the tunnel's own stream is stalled. Data never rides
+//! Control, so HTTP/2's per-stream flow control isolates the tunnels: a slow
+//! reader holds only its own stream's window, which pushes back to its
+//! sender. There is no stall cutoff and no queue that grows without bound.
+
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use tonic::Status;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::shield_proto::shield_control_message::Body;
-use crate::shield_proto::{ShieldControlMessage, TunnelClose, TunnelData, TunnelOpen};
+use crate::shield_proto::tunnel_frame::Frame;
+use crate::shield_proto::{ShieldControlMessage, TunnelClose, TunnelEnd, TunnelFrame, TunnelOpen};
 
+/// Largest TCP data frame (the device read buffer).
 const MAX_CHUNK: usize = 16 * 1024;
-/// Fix 14 (F48): how long a Shield chunk waits for room in a device's full
-/// tunnel queue (no progress at all) before the session is ended. Accepted
-/// limit (user, 2026-10-26): while it waits, the Shield's whole Control
-/// stream waits, so a device reading just under this pace delays the other
-/// sessions through that Shield; per-tunnel flow control is the follow-up.
-/// A total stall budget was tried and ended every steadily slower download.
-const DEVICE_STALL_LIMIT: Duration = Duration::from_secs(2);
-/// Fix 14 handover: how many Shield events a session may hold while they
-/// arrive on the Shield's newer stream before its older stream has ended.
-/// More ends the session (never drop and carry on).
-const EARLY_EVENT_LIMIT: usize = 256;
-/// ... and how many bytes, and for how long (the handover grace): a Shield
-/// that opens a second stream and never ends the first cannot make the
-/// Connector hold its data without bound.
-const EARLY_BYTES_LIMIT: usize = 1024 * 1024;
-/// Fix 14 handover: how long device data waits for the session's stream to
-/// be replaced after its send channel closed.
-const HANDOVER_SEND_GRACE: Duration = Duration::from_secs(15);
+/// D-3: tunnels (active plus pending) one Shield may have. The Shield
+/// enforces the same limit itself (`shield/src/tunnel.rs`).
+pub const MAX_TUNNELS_PER_SHIELD: usize = 256;
+/// Connector-wide default for `shield_tunnel_limit` (PENDING-21 §7, resource
+/// budget): tunnels (active plus pending) across all Shields.
+pub const DEFAULT_SHIELD_TUNNEL_LIMIT: usize = 512;
+/// How long an open waits for the Shield's `Tunnel` stream: the Shield's 5 s
+/// resource connect plus 5 s to open the stream.
+pub const TUNNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a new `Tunnel` stream has to send its `TunnelStart`.
+pub const TUNNEL_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Frames queued toward the Shield beyond HTTP/2's own window. TCP awaits
+/// room (backpressure); UDP drops the newest datagram when full (D-4).
+const TCP_TO_SHIELD_QUEUE: usize = 4;
+const UDP_TO_SHIELD_QUEUE: usize = 32;
+/// The device-side UDP framing caps a datagram here (as `relay_udp`).
+const MAX_DATAGRAM: usize = 65_535;
 /// F-7: upper bound for shutting the device stream down after a clean end
 /// (inner TLS close_notify, then FIN). The close_notify queues behind all data
-/// still in flight, so a slow reader needs as long as it takes to drain: 2 s
-/// cut every slow download's end. Cancellation ends it sooner.
+/// still in flight, so a slow reader needs as long as it takes to drain.
+/// Cancellation ends it sooner.
 const DEVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(120);
 
-// ---------------------------------------------------------------------------
-// Events dispatched from Shield → relay session
-// ---------------------------------------------------------------------------
+/// Device-facing error code when a tunnel limit refuses a session.
+pub const ERR_SHIELD_TUNNEL_LIMIT: &str = "SHIELD_TUNNEL_LIMIT";
 
-#[derive(Debug)]
-enum RelayEvent {
-    Opened { ok: bool, error: String },
-    Data(Vec<u8>),
-    Close(String),
+/// Why `open_relay_session` failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    Revoked,
+    NotConnected,
+    /// The Shield already has MAX_TUNNELS_PER_SHIELD tunnels.
+    ShieldLimit,
+    /// The Connector already has `shield_tunnel_limit` Shield tunnels.
+    ConnectorLimit(usize),
+    /// The Shield reported it could not open the tunnel.
+    Refused(String),
+    /// No `Tunnel` stream within TUNNEL_OPEN_TIMEOUT.
+    Timeout,
+    /// The Shield's Control stream or the session ended first.
+    Closed,
+    /// The device session's access was revoked (FU-15) before the tunnel
+    /// was open.
+    SessionRevoked,
+}
+
+impl OpenError {
+    /// Whether a tunnel limit refused the session.
+    pub fn is_limit(&self) -> bool {
+        matches!(self, OpenError::ShieldLimit | OpenError::ConnectorLimit(_))
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Revoked => write!(f, "shield is revoked"),
+            OpenError::NotConnected => write!(f, "shield not connected"),
+            OpenError::ShieldLimit => write!(
+                f,
+                "shield tunnel limit reached ({MAX_TUNNELS_PER_SHIELD} per shield): close a tunnel and retry"
+            ),
+            OpenError::ConnectorLimit(n) => write!(
+                f,
+                "shield tunnel limit reached ({n} per connector, shield_tunnel_limit): close a tunnel or raise the limit"
+            ),
+            OpenError::Refused(e) => write!(f, "shield rejected tunnel: {e}"),
+            OpenError::Timeout => write!(
+                f,
+                "shield did not open the tunnel stream within {}s",
+                TUNNEL_OPEN_TIMEOUT.as_secs()
+            ),
+            OpenError::Closed => write!(f, "tunnel session closed before the shield opened it"),
+            OpenError::SessionRevoked => write!(f, "session revoked while the tunnel was opening"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+/// Frames from the Shield on a tunnel's stream (a tonic `Streaming` in
+/// production).
+pub type InboundFrames = Pin<Box<dyn Stream<Item = Result<TunnelFrame, Status>> + Send>>;
+
+/// A bound tunnel stream, handed from the `Tunnel` handler to the session.
+pub struct TunnelIo {
+    inbound: InboundFrames,
+    outbound: mpsc::Sender<Result<TunnelFrame, Status>>,
+    /// When the certificate of the connection the stream runs on expires.
+    expires_at: tokio::time::Instant,
+}
+
+/// The `Tunnel` response stream: the session's frames to the Shield. When the
+/// session is aborted it ends with an error status at once, skipping what is
+/// still queued.
+pub struct ToShield {
+    rx: mpsc::Receiver<Result<TunnelFrame, Status>>,
+    /// The session's abort. For a device session it is a child of the
+    /// session's revocation token, so a revocation sets it inside `cancel()`.
+    abort: CancellationToken,
+    /// Wakes this stream when the abort is set.
+    aborted: Pin<Box<WaitForCancellationFutureOwned>>,
+    done: bool,
+}
+
+impl Stream for ToShield {
+    type Item = Result<TunnelFrame, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if this.done {
+            return Poll::Ready(None);
+        }
+        // FU-9 gate-4: the gate every frame to the Shield passes. The abort
+        // is read (one atomic load) before each frame is handed to HTTP/2: a
+        // frame is sent only if the abort was not yet set at that read, so no
+        // frame — whenever the device→shield task read or queued it — leaves
+        // once `cancel()` on the session's revocation token has returned.
+        // Queued frames are discarded.
+        let _ = this.aborted.as_mut().poll(cx); // registers the wake-up
+        if this.abort.is_cancelled() {
+            this.done = true;
+            return Poll::Ready(Some(Err(Status::aborted("tunnel ended by the connector"))));
+        }
+        this.rx.poll_recv(cx)
+    }
+}
+
+/// Most aborts a Shield's mailbox holds before its Control stream is ended
+/// instead (fail closed). Only tunnels with a stream at the Shield are
+/// posted, and while Control is not drained no new tunnel can get one, so
+/// in practice it holds at most about MAX_TUNNELS_PER_SHIELD.
+pub const ABORT_MAILBOX_CAP: usize = 2 * MAX_TUNNELS_PER_SHIELD;
+
+/// Aborts (`TunnelClose`) waiting to go to one Shield over Control.
+///
+/// FU-9 (reliable abort): an abort must never be dropped because Control is
+/// congested — the tunnel's own stream cannot carry it then (hyper sends
+/// nothing on a stream without window, not even its end). Posting never
+/// blocks and never fails: one entry per tunnel, bounded by
+/// ABORT_MAILBOX_CAP; past that the mailbox is marked overflowed and the
+/// Control stream draining it ends, which closes every tunnel of the Shield
+/// (F44). The Shield's current Control stream drains it with priority.
+#[derive(Debug, Default)]
+pub struct AbortMailbox {
+    pending: Mutex<Vec<TunnelClose>>,
+    overflowed: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl AbortMailbox {
+    pub(crate) fn post(&self, connection_id: &str, error: &str) {
+        {
+            let mut pending = self.pending.lock();
+            if pending.iter().any(|c| c.connection_id == connection_id) {
+                return;
+            }
+            if pending.len() >= ABORT_MAILBOX_CAP {
+                self.overflowed.store(true, Ordering::SeqCst);
+            } else {
+                pending.push(TunnelClose {
+                    connection_id: connection_id.to_string(),
+                    error: error.to_string(),
+                });
+            }
+        }
+        self.notify.notify_one();
+    }
+
+    /// Wait until something was posted.
+    pub async fn notified(&self) {
+        self.notify.notified().await
+    }
+
+    /// Take everything posted, in order, and whether the cap was passed since
+    /// the last take (the stream that sees it ends; the next one starts clean).
+    pub fn take(&self) -> (Vec<TunnelClose>, bool) {
+        let list = std::mem::take(&mut *self.pending.lock());
+        (list, self.overflowed.swap(false, Ordering::SeqCst))
+    }
+
+    /// Put back aborts that could not be sent (their stream ended); another
+    /// Control stream of the Shield delivers them.
+    pub fn restore(&self, mut unsent: Vec<TunnelClose>) {
+        {
+            let mut pending = self.pending.lock();
+            unsent.append(&mut pending);
+            *pending = unsent;
+        }
+        self.notify.notify_one();
+    }
+
+    /// Aborts waiting (tests).
+    #[cfg(test)]
+    pub fn pending_len(&self) -> usize {
+        self.pending.lock().len()
+    }
+}
+
+/// What `deliver_aborts` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Drained {
+    /// Everything posted went out.
+    Delivered,
+    /// The stream's queue closed: what was not sent is back in the mailbox.
+    StreamClosed,
+    /// Everything held went out, but the cap was passed: end the stream.
+    Overflowed,
+}
+
+/// Send a Shield's posted aborts on one Control stream's queue, in order.
+/// Awaits room (Control is the Shield's own stream, which it always reads);
+/// never drops one: if the queue closes, the rest go back to the mailbox for
+/// the Shield's next stream.
+pub async fn deliver_aborts(
+    mailbox: &AbortMailbox,
+    out: &mpsc::Sender<Result<ShieldControlMessage, Status>>,
+) -> Drained {
+    let (list, overflowed) = mailbox.take();
+    let mut list = list.into_iter();
+    while let Some(close) = list.next() {
+        let msg = ShieldControlMessage {
+            body: Some(Body::TunnelClose(close)),
+        };
+        if let Err(mpsc::error::SendError(Ok(ShieldControlMessage {
+            body: Some(Body::TunnelClose(close)),
+        }))) = out.send(Ok(msg)).await
+        {
+            let mut unsent = vec![close];
+            unsent.extend(list);
+            mailbox.restore(unsent);
+            return Drained::StreamClosed;
+        }
+    }
+    if overflowed {
+        Drained::Overflowed
+    } else {
+        Drained::Delivered
+    }
 }
 
 // ---------------------------------------------------------------------------
 // AgentTunnelHub
 // ---------------------------------------------------------------------------
 
-/// Manages tunnel sessions between device connections and Shield instances.
+/// Tunnel sessions between device connections and Shields.
 ///
-/// M3 creates this; M4 calls `open_relay_session` from device_tunnel.rs.
-/// agent_server.rs calls `register_shield`, `dispatch_*`, and `unregister_shield`
-/// as Shields connect / send messages / disconnect.
-#[derive(Clone, Debug, Default)]
+/// agent_server.rs registers Shields' Control streams (`register_shield`,
+/// `end_stream`), binds `Tunnel` streams (`attach`) and reports failures
+/// (`dispatch_opened`); device_tunnel.rs opens sessions
+/// (`open_relay_session`).
+#[derive(Clone, Debug)]
 pub struct AgentTunnelHub {
     /// One lock for registrations, sessions and revocations, so a shield
     /// revocation and a session being opened through that shield are
     /// serialized (certificate audit bug 3).
     state: Arc<Mutex<HubState>>,
+    /// `shield_tunnel_limit`: Shield tunnels across all Shields.
+    limit: Arc<AtomicUsize>,
+}
+
+impl Default for AgentTunnelHub {
+    fn default() -> Self {
+        Self {
+            state: Default::default(),
+            limit: Arc::new(AtomicUsize::new(DEFAULT_SHIELD_TUNNEL_LIMIT)),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -73,13 +312,9 @@ struct HubState {
     /// Fix 14 (F45): keyed by shield, owned by one stream — an older stream's
     /// cleanup must not remove a newer stream's registration.
     shield_txs: HashMap<String, (u64, mpsc::Sender<ShieldControlMessage>)>,
-    /// stream_id → the channel for sending to that live Control stream. A
-    /// session sends on its own stream (`RelayEntry::stream_id`), which may be
-    /// older than the Shield's current one until it is handed over.
-    stream_txs: HashMap<u64, mpsc::Sender<ShieldControlMessage>>,
-    /// connection_id → the session's Shield and stream, and the channel
-    /// routing events FROM that Shield back to the relay session. The hub
-    /// holds the only sender, so removing an entry ends the session.
+    /// shield_id → aborts to deliver to that Shield over Control.
+    abort_mailboxes: HashMap<String, Arc<AbortMailbox>>,
+    /// connection_id → the session, pending or bound.
     relay_sessions: HashMap<String, RelayEntry>,
     /// Revoked shields (terminal): never registered again, no new sessions.
     revoked: HashSet<String>,
@@ -88,57 +323,20 @@ struct HubState {
 #[derive(Debug)]
 struct RelayEntry {
     shield_id: String,
-    /// The Control stream the session's tunnel runs on (Fix 14, F44).
+    /// The Control stream the tunnel belongs to (F44): its unclean end ends
+    /// the tunnel; a clean handover moves the tunnel to the newer stream.
     stream_id: u64,
-    tx: mpsc::Sender<RelayEvent>,
-    /// Fix 14 handover: Shield events that must wait their turn — they came
-    /// on a newer stream before this session's stream ended, or while the
-    /// held ones are still being delivered (`flushing`).
-    early: VecDeque<RelayEvent>,
-    flushing: bool,
-    /// Bytes held in `early`, and since when it has been non-empty.
-    early_bytes: usize,
-    early_since: Option<tokio::time::Instant>,
+    udp: bool,
+    /// Set while pending: the waiting `open_relay_session` gets the bound
+    /// stream (or the Shield's refusal) through it. Taken once (single use).
+    pending: Option<oneshot::Sender<Result<TunnelIo, String>>>,
+    /// Cancelled to end the session abruptly (revocations, stream ends).
+    abort: CancellationToken,
 }
 
-impl RelayEntry {
-    /// Hold `event` until the handover delivers it. False — holding nothing —
-    /// once the held events would pass their count, byte or time limit.
-    fn hold(&mut self, event: RelayEvent) -> bool {
-        let bytes = match &event {
-            RelayEvent::Data(d) => d.len(),
-            _ => 0,
-        };
-        let now = tokio::time::Instant::now();
-        let since = *self.early_since.get_or_insert(now);
-        if self.early.len() >= EARLY_EVENT_LIMIT
-            || self.early_bytes + bytes > EARLY_BYTES_LIMIT
-            || now.duration_since(since) > HANDOVER_SEND_GRACE
-        {
-            return false;
-        }
-        self.early_bytes += bytes;
-        self.early.push_back(event);
-        true
-    }
-
-    /// The next held event, in order.
-    fn next_held(&mut self) -> Option<RelayEvent> {
-        let event = self.early.pop_front();
-        if let Some(RelayEvent::Data(d)) = &event {
-            self.early_bytes -= d.len();
-        }
-        if self.early.is_empty() {
-            self.early_since = None;
-        }
-        event
-    }
-
-    /// Events for this session must queue behind `early` rather than go
-    /// straight to the device: they came on another stream than the
-    /// session's, or held events are still being delivered.
-    fn must_queue(&self, from_stream: u64) -> bool {
-        self.stream_id != from_stream || self.flushing
+impl std::fmt::Debug for TunnelIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelIo").finish_non_exhaustive()
     }
 }
 
@@ -147,13 +345,22 @@ impl AgentTunnelHub {
         Self::default()
     }
 
+    /// Set `shield_tunnel_limit` (connector.conf). At least 1.
+    pub fn set_tunnel_limit(&self, limit: usize) {
+        self.limit.store(limit.max(1), Ordering::Relaxed);
+    }
+
+    /// Shield tunnels (active plus pending) right now.
+    pub fn tunnel_count(&self) -> usize {
+        self.state.lock().relay_sessions.len()
+    }
+
     // -----------------------------------------------------------------------
-    // Called by agent_server.rs when a Shield connects / disconnects
+    // Control streams
     // -----------------------------------------------------------------------
 
     /// Register stream `stream_id`'s channel that delivers ShieldControlMessages
-    /// to `shield_id`. Called by agent_server's `control()` after the Shield
-    /// connects; the newest stream becomes the Shield's current one.
+    /// to `shield_id`; the newest stream becomes the Shield's current one.
     /// Returns false, registering nothing, if the shield is revoked.
     #[must_use]
     pub fn register_shield(
@@ -166,28 +373,23 @@ impl AgentTunnelHub {
         if state.revoked.contains(&shield_id) {
             return false;
         }
-        state.stream_txs.insert(stream_id, tx.clone());
         state.shield_txs.insert(shield_id, (stream_id, tx));
         true
     }
 
-    /// Stream `stream_id` of `shield_id` ended. Fix 14:
+    /// Stream `stream_id` of `shield_id` ended.
     /// - F45: the Shield's registration is removed only if it is still this
     ///   stream's; a newer stream that registered first stays.
-    /// - Handover (D-1 = B): if the Shield ended this stream cleanly (`clean`:
-    ///   it half-closed it after sending everything) and a newer stream of the
-    ///   same Shield is already registered here, this stream's sessions move
-    ///   to the newer stream and keep running. The Shield does this on a
-    ///   certificate renewal (make before break).
-    /// - Otherwise (F44) every session on this stream ends now: its queued
-    ///   tunnel data died with the stream, so it must not carry on (a hole in
-    ///   its byte stream) nor hang.
+    /// - Renewal handover: if the Shield ended this stream cleanly (`clean`:
+    ///   it half-closed it) and a newer stream of the same Shield is
+    ///   registered, this stream's tunnels move to the newer stream. Their
+    ///   data runs on their own `Tunnel` streams, which are unaffected.
+    /// - Otherwise (F44) every tunnel of this stream ends now, pending opens
+    ///   included.
     ///
-    /// Returns the sessions handed over. Each must then get its held events
-    /// with `deliver_held_events`, after this stream's last message.
-    pub fn end_stream(&self, shield_id: &str, stream_id: u64, clean: bool) -> Vec<String> {
+    /// Returns how many tunnels were handed over.
+    pub fn end_stream(&self, shield_id: &str, stream_id: u64, clean: bool) -> usize {
         let mut state = self.state.lock();
-        state.stream_txs.remove(&stream_id);
         if state
             .shield_txs
             .get(shield_id)
@@ -206,244 +408,172 @@ impl AgentTunnelHub {
             .filter(|(_, e)| e.shield_id == shield_id && e.stream_id == stream_id)
             .map(|(cid, _)| cid.clone())
             .collect();
-        let mut handed_over = Vec::new();
+        let mut handed_over = 0;
         for cid in on_stream {
             match newer {
                 Some(newer) => {
-                    let entry = state.relay_sessions.get_mut(&cid).expect("listed above");
-                    entry.stream_id = newer;
-                    entry.flushing = !entry.early.is_empty();
-                    handed_over.push(cid);
+                    state
+                        .relay_sessions
+                        .get_mut(&cid)
+                        .expect("listed above")
+                        .stream_id = newer;
+                    handed_over += 1;
                 }
                 None => {
                     if let Some(entry) = state.relay_sessions.remove(&cid) {
-                        // Best effort: dropping the only sender ends the session anyway.
-                        let _ = entry
-                            .tx
-                            .try_send(RelayEvent::Close("shield stream ended".to_string()));
+                        entry.abort.cancel();
                     }
                 }
             }
         }
-        if !handed_over.is_empty() {
+        if !state.shield_txs.contains_key(shield_id) {
+            // No Control stream left: the Shield closes all its tunnels when
+            // its stream ends (F44), so no pending abort is still needed.
+            state.abort_mailboxes.remove(shield_id);
+        }
+        if handed_over > 0 {
             info!(
                 shield_id,
-                sessions = handed_over.len(),
-                "shield Control stream handed over: sessions kept"
+                tunnels = handed_over,
+                "shield Control stream handed over: tunnels kept"
             );
         }
         handed_over
     }
 
-    /// Deliver, in order, the Shield events a handed-over session held while
-    /// its old stream was ending. Later events keep queueing behind them
-    /// (`flushing`) until all are delivered.
-    pub async fn deliver_held_events(&self, connection_id: &str) {
-        loop {
-            let (tx, event) = {
-                let mut state = self.state.lock();
-                let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
-                    return;
-                };
-                match entry.next_held() {
-                    None => {
-                        entry.flushing = false;
-                        return;
-                    }
-                    Some(RelayEvent::Close(err)) => {
-                        let entry = state.relay_sessions.remove(connection_id).expect("present");
-                        let _ = entry.tx.try_send(RelayEvent::Close(err));
-                        return;
-                    }
-                    Some(event) => (entry.tx.clone(), event),
-                }
-            };
-            if !self.deliver(connection_id, &tx, event).await {
-                return;
-            }
-        }
-    }
-
     /// Revoke `shield_id` (certificate audit bug 3): unregister it, refuse it
-    /// from now on, and end every relay session through it — including one
-    /// still waiting for TunnelOpened. Idempotent.
+    /// from now on, and end every tunnel through it — including pending
+    /// opens. Idempotent.
     pub fn revoke_shield(&self, shield_id: &str) {
         let mut state = self.state.lock();
         state.revoked.insert(shield_id.to_string());
         state.shield_txs.remove(shield_id);
-        let ended: Vec<String> = state
-            .relay_sessions
-            .iter()
-            .filter(|(_, e)| e.shield_id == shield_id)
-            .map(|(cid, _)| cid.clone())
-            .collect();
-        for cid in ended {
-            if let Some(entry) = state.relay_sessions.remove(&cid) {
-                // Best effort: dropping the only sender ends the session anyway.
-                let _ = entry
-                    .tx
-                    .try_send(RelayEvent::Close("shield revoked".to_string()));
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Called by agent_server.rs to dispatch incoming Shield tunnel messages
-    // -----------------------------------------------------------------------
-
-    pub fn dispatch_opened(&self, connection_id: &str, ok: bool, error: String) {
-        if let Some(tx) = self.session_tx(connection_id) {
-            let _ = tx.try_send(RelayEvent::Opened { ok, error });
-        }
-    }
-
-    pub async fn dispatch_data(&self, connection_id: &str, data: Vec<u8>, from_stream: u64) {
-        let tx = {
-            let mut state = self.state.lock();
-            let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
-                return;
-            };
-            if entry.must_queue(from_stream) {
-                // Fix 14 handover: wait behind the session's older stream.
-                if entry.hold(RelayEvent::Data(data)) {
-                    return;
-                }
-                drop(state);
-                self.end_stuck_session(connection_id, None, "handover backlog over its limit");
-                return;
-            }
-            entry.tx.clone()
-        };
-        self.deliver(connection_id, &tx, RelayEvent::Data(data)).await;
-    }
-
-    /// Hand `event` to the session's device side. Fix 14 (F48): never drop a
-    /// chunk and carry on (a hole in the byte stream). If the device queue is
-    /// full, wait for room: that pauses this Shield's Control stream, which
-    /// pushes back to the resource (flow control). A device that makes no
-    /// progress for DEVICE_STALL_LIMIT ends its session. Returns whether the
-    /// session goes on.
-    async fn deliver(
-        &self,
-        connection_id: &str,
-        tx: &mpsc::Sender<RelayEvent>,
-        event: RelayEvent,
-    ) -> bool {
-        match tx.send_timeout(event, DEVICE_STALL_LIMIT).await {
-            Ok(()) => true,
-            Err(mpsc::error::SendTimeoutError::Closed(_)) => false,
-            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
-                self.end_stuck_session(
-                    connection_id,
-                    Some(tx),
-                    "device stalled with its tunnel queue full",
-                );
+        // Its Control streams are closed with the revocation; the Shield
+        // closes every tunnel when they end.
+        state.abort_mailboxes.remove(shield_id);
+        state.relay_sessions.retain(|_, e| {
+            if e.shield_id == shield_id {
+                e.abort.cancel();
                 false
+            } else {
+                true
             }
-        }
+        });
     }
 
-    /// End a session that cannot take more Shield data, and tell the Shield.
-    /// With `only_if`, only if it is still the session behind that channel.
-    /// Removing the entry drops the only sender: the device gets the chunks
-    /// already queued, then the end.
-    fn end_stuck_session(
-        &self,
-        connection_id: &str,
-        only_if: Option<&mpsc::Sender<RelayEvent>>,
-        reason: &'static str,
-    ) {
-        let shield_tx = {
-            let mut state = self.state.lock();
-            if !state
-                .relay_sessions
-                .get(connection_id)
-                .is_some_and(|e| only_if.is_none_or(|tx| e.tx.same_channel(tx)))
-            {
-                return;
-            }
-            let entry = state
-                .relay_sessions
-                .remove(connection_id)
-                .expect("checked above");
-            state.stream_txs.get(&entry.stream_id).cloned()
-        };
-        warn!(connection_id, reason, "ending the session");
-        if let Some(tx) = shield_tx {
-            let _ = tx.try_send(ShieldControlMessage {
-                body: Some(Body::TunnelClose(TunnelClose {
-                    connection_id: connection_id.to_string(),
-                    error: "device too slow".to_string(),
-                })),
-            });
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Shield answers
+    // -----------------------------------------------------------------------
 
-    pub fn dispatch_close(&self, connection_id: &str, error: String, from_stream: u64) {
+    /// The Shield (`from_shield`, its verified identity) reports on a tunnel
+    /// open over Control. FU-9: only a failure is reported this way; an
+    /// `ok = true` is the legacy, pre-FU-9 answer and fails the open too.
+    pub fn dispatch_opened(&self, from_shield: &str, connection_id: &str, ok: bool, error: String) {
         let mut state = self.state.lock();
         let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
             return;
         };
-        if entry.must_queue(from_stream) {
-            // Fix 14 handover: the close waits behind the held data. Past the
-            // limits, the session simply ends now.
-            if !entry.hold(RelayEvent::Close(error.clone())) {
-                let entry = state.relay_sessions.remove(connection_id).expect("present");
-                let _ = entry.tx.try_send(RelayEvent::Close(error));
-            }
+        if entry.shield_id != from_shield {
+            warn!(
+                connection_id,
+                from_shield, "ignored TunnelOpened for another shield's tunnel"
+            );
             return;
         }
-        // Remove session — Shield closed its side.
-        let entry = state.relay_sessions.remove(connection_id).expect("present");
-        let _ = entry.tx.try_send(RelayEvent::Close(error));
+        let Some(pending) = entry.pending.take() else {
+            return; // already bound: a stray answer
+        };
+        state.relay_sessions.remove(connection_id);
+        let error = if ok {
+            "shield does not support dedicated tunnel streams; upgrade the shield".to_string()
+        } else {
+            error
+        };
+        let _ = pending.send(Err(error));
     }
 
-    /// The channel to the Control stream `connection_id`'s tunnel runs on.
-    fn stream_sender(&self, connection_id: &str) -> Option<mpsc::Sender<ShieldControlMessage>> {
-        let state = self.state.lock();
-        let entry = state.relay_sessions.get(connection_id)?;
-        state.stream_txs.get(&entry.stream_id).cloned()
-    }
-
-    /// Send a device-side message for `connection_id` to its Shield. If the
-    /// session's stream closed under it (a handover in progress), retry on the
-    /// stream it moves to; give up when the session is gone or the grace
-    /// passes. The message that failed is retried, so none is lost or
-    /// reordered: everything sent before it went out on the old stream, which
-    /// the Shield reads to its end first.
-    async fn send_to_shield(&self, connection_id: &str, mut msg: ShieldControlMessage) -> bool {
-        let deadline = tokio::time::Instant::now() + HANDOVER_SEND_GRACE;
-        let mut failed: Option<mpsc::Sender<ShieldControlMessage>> = None;
-        loop {
-            let tx = self.stream_sender(connection_id);
-            match tx {
-                Some(tx) if !failed.as_ref().is_some_and(|f| f.same_channel(&tx)) => {
-                    match tx.send(msg).await {
-                        Ok(()) => return true,
-                        Err(mpsc::error::SendError(m)) => {
-                            msg = m;
-                            failed = Some(tx);
-                        }
-                    }
-                }
-                None if !self.state.lock().relay_sessions.contains_key(connection_id) => {
-                    return false;
-                }
-                _ => {}
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    /// Bind a new `Tunnel` stream from `shield_id` (its verified identity) to
+    /// the pending tunnel `connection_id`. The id must be pending, opened to
+    /// this Shield, and is accepted once. Returns the stream's response.
+    pub fn attach(
+        &self,
+        shield_id: &str,
+        connection_id: &str,
+        inbound: InboundFrames,
+        expires_at: tokio::time::Instant,
+    ) -> Result<ToShield, Status> {
+        let mut state = self.state.lock();
+        let entry = state
+            .relay_sessions
+            .get_mut(connection_id)
+            .ok_or_else(|| Status::not_found("unknown or expired tunnel"))?;
+        if entry.shield_id != shield_id {
+            // The other Shield's pending open is left alone.
+            warn!(
+                connection_id,
+                shield_id, "refused a tunnel stream for another shield's tunnel"
+            );
+            return Err(Status::permission_denied(
+                "tunnel belongs to another shield",
+            ));
         }
+        let pending = entry
+            .pending
+            .take()
+            .ok_or_else(|| Status::already_exists("tunnel already has a stream"))?;
+        let cap = if entry.udp {
+            UDP_TO_SHIELD_QUEUE
+        } else {
+            TCP_TO_SHIELD_QUEUE
+        };
+        let (outbound, rx) = mpsc::channel(cap);
+        let to_shield = ToShield {
+            rx,
+            abort: entry.abort.clone(),
+            aborted: Box::pin(entry.abort.clone().cancelled_owned()),
+            done: false,
+        };
+        let io = TunnelIo {
+            inbound,
+            outbound,
+            expires_at,
+        };
+        if pending.send(Ok(io)).is_err() {
+            // The open gave up in the same instant.
+            state.relay_sessions.remove(connection_id);
+            return Err(Status::not_found("unknown or expired tunnel"));
+        }
+        Ok(to_shield)
     }
 
-    fn session_tx(&self, connection_id: &str) -> Option<mpsc::Sender<RelayEvent>> {
+    /// Tell the Shield over Control to abort `connection_id` (best effort; the
+    /// tunnel's own stream also ends with an error).
+    fn abort_on_shield(&self, connection_id: &str, error: &str) {
+        let mut state = self.state.lock();
+        let Some(entry) = state.relay_sessions.get(connection_id) else {
+            return;
+        };
+        // A tunnel still pending has no stream at the Shield: its late
+        // stream is refused (NotFound) and the Shield closes its side.
+        if entry.pending.is_some() {
+            return;
+        }
+        let shield_id = entry.shield_id.clone();
+        state
+            .abort_mailboxes
+            .entry(shield_id)
+            .or_default()
+            .post(connection_id, error);
+    }
+
+    /// The abort mailbox of `shield_id`, drained by its Control stream.
+    pub fn abort_mailbox(&self, shield_id: &str) -> Arc<AbortMailbox> {
         self.state
             .lock()
-            .relay_sessions
-            .get(connection_id)
-            .map(|e| e.tx.clone())
+            .abort_mailboxes
+            .entry(shield_id.to_string())
+            .or_default()
+            .clone()
     }
 
     // -----------------------------------------------------------------------
@@ -452,86 +582,177 @@ impl AgentTunnelHub {
 
     /// Open a relay session through `shield_id` for the given destination.
     ///
-    /// Sends `TunnelOpen` to the Shield and waits for `TunnelOpened`.
-    /// Returns a `RelaySession` ready for bidirectional data relay.
-    ///
-    /// **M4 API contract** — do not change the signature without coordinating with M4:
-    /// ```ignore
-    /// let relay = agent_tunnel::open_relay_session(
-    ///     &hub, shield_id, destination, port, protocol
-    /// ).await?;
-    /// relay.relay_stream(stream).await?;
-    /// ```
-    pub async fn open_relay_session(
+    /// Admission is immediate: a revoked or absent Shield, or a full per-Shield
+    /// or per-Connector tunnel budget, refuses at once (`OpenError`). Then
+    /// `TunnelOpen` goes out on the Shield's Control stream and the session
+    /// waits, at most TUNNEL_OPEN_TIMEOUT, for its `Tunnel` stream.
+    /// Tests only: production device sessions must use
+    /// `open_relay_session_revocable`, so every tunnel is bound to its
+    /// session's revocation (FU-9 gate-4).
+    #[cfg(test)]
+    pub(crate) async fn open_relay_session(
         &self,
         shield_id: &str,
         destination: &str,
         port: u16,
         protocol: &str,
     ) -> Result<RelaySession> {
-        let connection_id = Uuid::new_v4().to_string();
+        self.open(shield_id, destination, port, protocol, None)
+            .await
+    }
 
-        // Register session channel before sending TunnelOpen — avoid race where
-        // Shield replies before we're listening. The revocation check and the
-        // registration happen under the hub lock, so a concurrent revocation
-        // either refuses this session or ends it (certificate audit bug 3).
-        let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(64);
+    /// `open_relay_session` for a device session whose access can be revoked
+    /// (FU-15) through `revoked`. FU-9 gate-4: the tunnel's abort is a child
+    /// of `revoked`, so revoking the session cancels the tunnel inside the
+    /// same `cancel()` call — while it is still opening, before its first
+    /// frame, or while it relays — and nothing more goes to the Shield (see
+    /// `ToShield`). A revocation during the open fails it at once.
+    pub async fn open_relay_session_revocable(
+        &self,
+        shield_id: &str,
+        destination: &str,
+        port: u16,
+        protocol: &str,
+        revoked: &CancellationToken,
+    ) -> Result<RelaySession> {
+        self.open(shield_id, destination, port, protocol, Some(revoked))
+            .await
+    }
+
+    async fn open(
+        &self,
+        shield_id: &str,
+        destination: &str,
+        port: u16,
+        protocol: &str,
+        revoked: Option<&CancellationToken>,
+    ) -> Result<RelaySession> {
+        let connection_id = Uuid::new_v4().to_string();
+        let udp = protocol.eq_ignore_ascii_case("udp");
+        let (pending_tx, pending_rx) = oneshot::channel();
+        let abort = match revoked {
+            Some(revoked) => revoked.child_token(),
+            None => CancellationToken::new(),
+        };
+        if abort.is_cancelled() {
+            // Revoked before anything was registered or sent.
+            return Err(OpenError::SessionRevoked.into());
+        }
+        // Admission and registration in one critical section, so neither a
+        // concurrent revocation nor concurrent opens get past the checks.
         let shield_tx = {
             let mut state = self.state.lock();
             if state.revoked.contains(shield_id) {
-                return Err(anyhow!("shield {} is revoked", shield_id));
+                return Err(OpenError::Revoked.into());
             }
             let (stream_id, shield_tx) = state
                 .shield_txs
                 .get(shield_id)
                 .cloned()
-                .ok_or_else(|| anyhow!("shield {} not connected", shield_id))?;
+                .ok_or(OpenError::NotConnected)?;
+            let limit = self.limit.load(Ordering::Relaxed);
+            if state.relay_sessions.len() >= limit {
+                return Err(OpenError::ConnectorLimit(limit).into());
+            }
+            let per_shield = state
+                .relay_sessions
+                .values()
+                .filter(|e| e.shield_id == shield_id)
+                .count();
+            if per_shield >= MAX_TUNNELS_PER_SHIELD {
+                return Err(OpenError::ShieldLimit.into());
+            }
             state.relay_sessions.insert(
                 connection_id.clone(),
                 RelayEntry {
                     shield_id: shield_id.to_string(),
                     stream_id,
-                    tx: event_tx,
-                    early: VecDeque::new(),
-                    flushing: false,
-                    early_bytes: 0,
-                    early_since: None,
+                    udp,
+                    pending: Some(pending_tx),
+                    abort: abort.clone(),
                 },
             );
             shield_tx
         };
+        let guard = SessionGuard {
+            hub: self.clone(),
+            connection_id: connection_id.clone(),
+            abort: abort.clone(),
+            settled: false,
+        };
 
-        shield_tx
-            .send(ShieldControlMessage {
-                body: Some(Body::TunnelOpen(TunnelOpen {
-                    connection_id: connection_id.clone(),
-                    destination: destination.to_string(),
-                    port: port as u32,
-                    protocol: protocol.to_string(),
-                })),
-            })
-            .await
-            .map_err(|_| anyhow!("shield {} send channel closed", shield_id))?;
-
-        // Wait for TunnelOpened (first event on this session).
-        match event_rx.recv().await {
-            Some(RelayEvent::Opened { ok: true, .. }) => {}
-            Some(RelayEvent::Opened { ok: false, error }) => {
-                self.state.lock().relay_sessions.remove(&connection_id);
-                return Err(anyhow!("shield rejected tunnel: {}", error));
+        let revocation = async {
+            match revoked {
+                Some(revoked) => revoked.cancelled().await,
+                None => std::future::pending().await,
             }
-            _ => {
-                self.state.lock().relay_sessions.remove(&connection_id);
-                return Err(anyhow!("tunnel session closed before TunnelOpened"));
+        };
+        let opening = tokio::time::timeout(TUNNEL_OPEN_TIMEOUT, async {
+            shield_tx
+                .send(ShieldControlMessage {
+                    body: Some(Body::TunnelOpen(TunnelOpen {
+                        connection_id: connection_id.clone(),
+                        destination: destination.to_string(),
+                        port: port as u32,
+                        protocol: protocol.to_string(),
+                    })),
+                })
+                .await
+                .map_err(|_| OpenError::Closed)?;
+            match pending_rx.await {
+                Ok(Ok(io)) => Ok(io),
+                Ok(Err(error)) => Err(OpenError::Refused(error)),
+                Err(_) => Err(OpenError::Closed),
             }
-        }
+        });
+        let opened = tokio::select! {
+            biased;
+            // The guard removes the pending tunnel; a stream the Shield opens
+            // for it later is refused (NotFound) and the Shield closes it.
+            _ = revocation => return Err(OpenError::SessionRevoked.into()),
+            opened = opening => opened,
+        };
+        let io = match opened {
+            Ok(Ok(io)) => io,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(OpenError::Timeout.into()),
+        };
 
         Ok(RelaySession {
             connection_id,
-            event_rx,
-            hub: self.clone(),
-            cancel_token: CancellationToken::new(),
+            udp,
+            io,
+            abort,
+            cancel_token: revoked.cloned().unwrap_or_default(),
+            guard,
         })
+    }
+}
+
+/// Removes the session from the hub when it ends, freeing its place in the
+/// tunnel budget. A session that did not end cleanly is aborted toward the
+/// Shield too.
+struct SessionGuard {
+    hub: AgentTunnelHub,
+    connection_id: String,
+    abort: CancellationToken,
+    /// The session ended cleanly, or its abort was already sent: dropping
+    /// only frees its place.
+    settled: bool,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.hub
+                .abort_on_shield(&self.connection_id, "session ended");
+            self.abort.cancel();
+        }
+        self.hub
+            .state
+            .lock()
+            .relay_sessions
+            .remove(&self.connection_id);
     }
 }
 
@@ -541,36 +762,61 @@ impl AgentTunnelHub {
 
 pub struct RelaySession {
     connection_id: String,
-    event_rx: mpsc::Receiver<RelayEvent>,
-    /// Device data goes to the session's current stream, looked up per send
-    /// (Fix 14 handover), never a sender captured at open time.
-    hub: AgentTunnelHub,
+    udp: bool,
+    io: TunnelIo,
+    /// The hub's abort for this session (revocation, Control stream end).
+    abort: CancellationToken,
+    /// FU-15: the device session's authorization was revoked.
     cancel_token: CancellationToken, // defaults to a token that's never cancelled
+    guard: SessionGuard,
+}
+
+/// How the Shield → device direction ended.
+#[derive(Debug, PartialEq)]
+enum End {
+    /// `TunnelEnd{}` from the Shield: the resource closed normally.
+    Clean,
+    /// FU-15 cancellation, hub abort, or certificate expiry.
+    Aborted(&'static str),
+    /// An error end from the Shield, a broken stream or device.
+    Failed,
+}
+
+/// Send `frame`, unless the session is stopped first. False when it was not
+/// sent.
+async fn send_frame(
+    out: &mpsc::Sender<Result<TunnelFrame, Status>>,
+    frame: Frame,
+    stop: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => false,
+        sent = out.send(Ok(TunnelFrame { frame: Some(frame) })) => sent.is_ok(),
+    }
 }
 
 impl RelaySession {
-    // -------------------------------------------------------------------
-    // Sprint 15 Phase 2: optional external cancellation, added as a builder
-    // method (not a relay_stream/open_relay_session parameter) specifically
-    // to respect the M4 API contract documented on open_relay_session above.
-    // -------------------------------------------------------------------
-
-    /// Attaches an external cancellation token so relay_stream's d2s child
-    /// task can independently notice cancellation, even if the caller's own
-    /// future (wrapping relay_stream in a select!) is dropped without ever
-    /// reaching relay_stream's own cleanup path. Optional — a caller that
-    /// never calls this keeps today's exact behavior.
+    /// Attaches an external cancellation token (FU-15: the session's
+    /// authorization was revoked). Optional — a caller that never calls this
+    /// keeps a token that is never cancelled.
     pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = token;
         self
     }
 
-    /// Bidirectionally relay between `stream` (device) and the Shield.
+    /// Bidirectionally relay between `stream` (device) and the Shield's
+    /// tunnel stream.
     ///
-    /// - Reads data from `stream` → sends `TunnelData` to Shield (max 16 KB chunks).
-    /// - Receives `TunnelData` events from Shield → writes to `stream`.
-    /// - Terminates on `TunnelClose` from either side or any IO error.
-    pub async fn relay_stream<S>(mut self, stream: S) -> Result<()>
+    /// - TCP: the byte stream in frames of up to 16 KB, each direction awaiting
+    ///   room (HTTP/2 backpressure). A clean end (`TunnelEnd{}`) shuts the
+    ///   device stream down (F-7); an error end drops it.
+    /// - UDP: the device stream carries `[u32 BE length][datagram]` frames
+    ///   (as the direct path); each datagram is one tunnel frame. A full queue
+    ///   toward the Shield drops the newest datagram (D-4).
+    /// - FU-15 cancel, Shield revocation, Control-stream end or certificate
+    ///   expiry abort the device stream and the Shield's side at once.
+    pub async fn relay_stream<S>(self, stream: S) -> Result<()>
     where
         S: tokio::io::AsyncRead
             + tokio::io::AsyncWrite
@@ -579,976 +825,253 @@ impl RelaySession {
             + Send
             + 'static,
     {
+        let RelaySession {
+            connection_id,
+            udp,
+            io,
+            abort,
+            cancel_token,
+            mut guard,
+        } = self;
+        let TunnelIo {
+            mut inbound,
+            outbound,
+            expires_at,
+        } = io;
+        // Stops the device → shield task. A child of the session's abort
+        // (itself a child of its revocation token): a revocation stops the
+        // task inside `cancel()`, and a session revoked before this point
+        // never forwards anything (the task checks first).
+        let stop = abort.child_token();
         let (mut reader, mut writer) = tokio::io::split(stream);
 
-        // Device → Shield in a separate task. It hands the read half back so a
-        // cancelled session can rejoin the stream and abort it (FU-15).
-        let hub = self.hub.clone();
-        let conn_id_d2s = self.connection_id.clone();
-        let d2s_token = self.cancel_token.clone();
-        let d2s = tokio::spawn(async move {
-            let mut buf = vec![0u8; MAX_CHUNK];
-            loop {
-                tokio::select! {
-                    // Revoked: hand the read half back without telling the
-                    // Shield anything more; the session is being torn down.
-                    _ = d2s_token.cancelled() => return reader,
-                    result = reader.read(&mut buf) => {
-                        match result {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                let msg = ShieldControlMessage {
-                                    body: Some(Body::TunnelData(TunnelData {
-                                        connection_id: conn_id_d2s.clone(),
-                                        data: buf[..n].to_vec(),
-                                    })),
-                                };
-                                // A send to a congested Shield must not keep
-                                // the read half from a revoked session's abort.
-                                let sent = tokio::select! {
-                                    sent = hub.send_to_shield(&conn_id_d2s, msg) => sent,
-                                    _ = d2s_token.cancelled() => return reader,
-                                };
-                                if !sent {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+        let d2s = {
+            let stop = stop.clone();
+            let out = outbound.clone();
+            let connection_id = connection_id.clone();
+            tokio::spawn(async move {
+                if stop.is_cancelled() {
+                    return reader;
                 }
-            }
-            // Notify Shield that the device closed its side.
-            let close = ShieldControlMessage {
-                body: Some(Body::TunnelClose(TunnelClose {
-                    connection_id: conn_id_d2s.clone(),
-                    error: String::new(),
-                })),
-            };
-            hub.send_to_shield(&conn_id_d2s, close).await;
-            reader
-        });
+                if udp {
+                    device_to_shield_udp(&mut reader, &out, &stop, &connection_id).await;
+                } else {
+                    device_to_shield_tcp(&mut reader, &out, &stop).await;
+                }
+                reader
+            })
+        };
+        drop(outbound);
 
-        // Shield → Device: relay events to the device stream. A cancel is
-        // honoured even while a write to a slow device is waiting (FU-15).
-        let mut clean_close = false;
-        let mut cancelled = false;
-        loop {
-            let event = tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    cancelled = true;
-                    break;
-                }
-                event = self.event_rx.recv() => event,
+        let expiry = tokio::time::sleep_until(expires_at);
+        tokio::pin!(expiry);
+        let end = loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => break End::Aborted("session revoked"),
+                _ = abort.cancelled() => break End::Aborted("tunnel ended by the connector"),
+                _ = &mut expiry => break End::Aborted("shield certificate expired"),
+                next = inbound.next() => next,
             };
-            let Some(event) = event else { break };
-            match event {
-                RelayEvent::Data(data) => {
-                    let written = tokio::select! {
-                        result = writer.write_all(&data) => result.is_ok(),
-                        _ = self.cancel_token.cancelled() => {
-                            cancelled = true;
-                            false
+            match next {
+                Some(Ok(TunnelFrame {
+                    frame: Some(Frame::Data(data)),
+                })) => {
+                    let write = async {
+                        if udp {
+                            let mut framed = Vec::with_capacity(4 + data.len());
+                            framed.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                            framed.extend_from_slice(&data);
+                            writer.write_all(&framed).await?;
+                            writer.flush().await
+                        } else {
+                            writer.write_all(&data).await
                         }
                     };
-                    if !written {
-                        break;
+                    let written = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => break End::Aborted("session revoked"),
+                        _ = abort.cancelled() => break End::Aborted("tunnel ended by the connector"),
+                        written = write => written,
+                    };
+                    if written.is_err() {
+                        break End::Failed;
                     }
                 }
-                RelayEvent::Close(err) => {
-                    if err.is_empty() {
-                        clean_close = true;
-                    } else {
-                        warn!(connection_id = %self.connection_id, error = %err, "shield closed tunnel with error");
+                Some(Ok(TunnelFrame {
+                    frame: Some(Frame::End(TunnelEnd { error })),
+                })) => {
+                    if error.is_empty() {
+                        break End::Clean;
                     }
-                    break;
+                    warn!(connection_id = %connection_id, error = %error, "shield closed tunnel with error");
+                    break End::Failed;
                 }
-                RelayEvent::Opened { .. } => {} // unexpected after session start
+                Some(Ok(other)) => {
+                    warn!(connection_id = %connection_id, frame = ?other.frame, "unexpected tunnel frame from shield");
+                    break End::Failed;
+                }
+                Some(Err(status)) => {
+                    warn!(connection_id = %connection_id, error = %status, "shield tunnel stream failed");
+                    break End::Failed;
+                }
+                None => {
+                    warn!(connection_id = %connection_id, "shield tunnel stream ended without TunnelEnd");
+                    break End::Failed;
+                }
             }
-        }
+        };
+        stop.cancel();
 
-        if cancelled {
-            // FU-15: authorization revoked. Abort the device stream so neither
-            // the connector's queue nor the client's is delivered after the
-            // cut. Dropping it would end it normally and deliver both.
-            match tokio::time::timeout(crate::abort_stream::ABORT_REJOIN_GRACE, d2s).await {
-                Ok(Ok(reader)) => reader.unsplit(writer).abort(),
-                _ => warn!(
-                    connection_id = %self.connection_id,
-                    "revoked session: device stream not aborted (device→shield task did not stop)"
-                ),
+        match end {
+            End::Aborted(reason) => {
+                // Abort the device stream so neither the connector's queue nor
+                // the client's is delivered after the cut (FU-15), and the
+                // Shield's side (Control TunnelClose + error on the stream).
+                guard.hub.abort_on_shield(&connection_id, reason);
+                abort.cancel();
+                guard.settled = true;
+                match tokio::time::timeout(crate::abort_stream::ABORT_REJOIN_GRACE, d2s).await {
+                    Ok(Ok(reader)) => reader.unsplit(writer).abort(),
+                    _ => warn!(
+                        connection_id = %connection_id,
+                        "aborted session: device stream not aborted (device→shield task did not stop)"
+                    ),
+                }
             }
-            // And end the Shield's side: it closes its resource connection and
-            // answers with a Close, which removes this session from the hub.
-            let close = ShieldControlMessage {
-                body: Some(Body::TunnelClose(TunnelClose {
-                    connection_id: self.connection_id.clone(),
-                    error: "session revoked".to_string(),
-                })),
-            };
-            let _ = tokio::time::timeout(
-                crate::abort_stream::ABORT_REJOIN_GRACE,
-                self.hub.send_to_shield(&self.connection_id, close),
-            )
-            .await;
-            return Ok(());
-        }
-
-        d2s.abort();
-        if clean_close {
-            // The resource closed normally: end the device stream properly. On
-            // a relayed stream this sends the inner TLS close_notify before the
-            // FIN; dropping the stream instead looked like a truncation, so the
-            // Client reset the app connection and the tail of every response
-            // was lost (live E2E run 2026-10-30, F-7). A failed or lost session
-            // still ends abruptly, so the Client can tell it from a normal end.
-            tokio::select! {
-                _ = tokio::time::timeout(DEVICE_SHUTDOWN_GRACE, writer.shutdown()) => {}
-                _ = self.cancel_token.cancelled() => {}
+            End::Failed => {
+                d2s.abort();
+                // The guard aborts the Shield's side; the device stream is
+                // dropped (abrupt, unlike a clean shutdown).
+            }
+            End::Clean => {
+                d2s.abort();
+                guard.settled = true;
+                // F-7: end the device stream properly (close_notify on a
+                // relayed stream), however slowly the reader drains.
+                tokio::select! {
+                    _ = tokio::time::timeout(DEVICE_SHUTDOWN_GRACE, writer.shutdown()) => {}
+                    _ = cancel_token.cancelled() => {}
+                }
             }
         }
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod stream_ownership_tests {
-    //! Fix 14: a Shield's relay sessions belong to the Control stream their
-    //! tunnel runs on (F44), and an older stream's cleanup never removes a
-    //! newer stream's registration (F45).
-
-    use super::*;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
-    const WAIT: Duration = Duration::from_secs(5);
-
-    /// A Shield on `rx` that accepts every tunnel.
-    fn accept_all(hub: AgentTunnelHub, mut rx: mpsc::Receiver<ShieldControlMessage>) {
-        tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
-                if let Some(Body::TunnelOpen(o)) = m.body {
-                    hub.dispatch_opened(&o.connection_id, true, String::new());
+async fn device_to_shield_tcp<R>(
+    reader: &mut R,
+    out: &mpsc::Sender<Result<TunnelFrame, Status>>,
+    stop: &CancellationToken,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = vec![0u8; MAX_CHUNK];
+    loop {
+        let read = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            read = reader.read(&mut buf) => read,
+        };
+        match read {
+            Ok(0) => {
+                send_frame(out, Frame::End(TunnelEnd::default()), stop).await;
+                return;
+            }
+            Ok(n) => {
+                if !send_frame(out, Frame::Data(buf[..n].to_vec()), stop).await {
+                    return;
                 }
             }
-        });
-    }
-
-    /// A device stream that records whether it was shut down (as opposed to
-    /// dropped): a relayed stream needs the shutdown to send close_notify.
-    struct ShutdownProbe {
-        inner: tokio::io::DuplexStream,
-        shut: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl crate::abort_stream::AbortStream for ShutdownProbe {
-        fn abort(&mut self) {}
-    }
-
-    impl crate::abort_stream::AbortStream for DrainGatedShutdown {
-        fn abort(&mut self) {}
-    }
-
-    /// A device stream that records whether it was aborted (FU-15) or shut
-    /// down. Writes go to a small duplex buffer, so a device that doesn't
-    /// read soon blocks the session's writes, like a slow client.
-    struct AbortProbe {
-        inner: tokio::io::DuplexStream,
-        aborted: Arc<std::sync::atomic::AtomicBool>,
-        shut: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl crate::abort_stream::AbortStream for AbortProbe {
-        fn abort(&mut self) {
-            self.aborted
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    impl tokio::io::AsyncRead for AbortProbe {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-        }
-    }
-
-    impl tokio::io::AsyncWrite for AbortProbe {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
-        }
-        fn poll_flush(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-        }
-        fn poll_shutdown(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            self.shut.store(true, std::sync::atomic::Ordering::SeqCst);
-            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
-        }
-    }
-
-    /// FU-15 (review): a revoked session is aborted even while its
-    /// device→shield task is stuck sending to a congested Shield.
-    #[tokio::test]
-    async fn a_revoked_session_aborts_while_the_shield_is_congested() {
-        let hub = AgentTunnelHub::new();
-        // Room for one message; the Shield reads the TunnelOpen, then stops.
-        let (tx, mut rx) = mpsc::channel(1);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        let shield_hub = hub.clone();
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            if let Some(ShieldControlMessage {
-                body: Some(Body::TunnelOpen(o)),
-            }) = rx.recv().await
-            {
-                shield_hub.dispatch_opened(&o.connection_id, true, String::new());
+            Err(e) => {
+                send_frame(
+                    out,
+                    Frame::End(TunnelEnd {
+                        error: e.to_string(),
+                    }),
+                    stop,
+                )
+                .await;
+                return;
             }
-            let _ = stop_rx.await; // keep the channel open, never read again
-            drop(rx);
-        });
-        let session = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
-            .await
-            .expect("opened");
-        let token = tokio_util::sync::CancellationToken::new();
-        let (mut device, relay_end) = tokio::io::duplex(64 * 1024);
-        let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let relay = tokio::spawn(session.with_cancel_token(token.clone()).relay_stream(
-            AbortProbe {
-                inner: relay_end,
-                aborted: aborted.clone(),
-                shut: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+async fn device_to_shield_udp<R>(
+    reader: &mut R,
+    out: &mpsc::Sender<Result<TunnelFrame, Status>>,
+    stop: &CancellationToken,
+    connection_id: &str,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut dropped: u64 = 0;
+    let mut last_log: Option<tokio::time::Instant> = None;
+    loop {
+        let datagram = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            datagram = read_datagram(reader) => datagram,
+        };
+        if stop.is_cancelled() {
+            return;
+        }
+        match datagram {
+            Ok(Some(d)) => match out.try_send(Ok(TunnelFrame {
+                frame: Some(Frame::Data(d)),
+            })) {
+                Ok(()) => {}
+                // D-4: the newest datagram is dropped; the tunnel never blocks.
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    dropped += 1;
+                    let now = tokio::time::Instant::now();
+                    if last_log.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                        last_log = Some(now);
+                        warn!(
+                            connection_id,
+                            dropped, "udp tunnel queue to the shield full: dropping datagrams"
+                        );
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
             },
-        ));
-        // Uploads the Shield won't take: separate reads, so the second send
-        // finds the Shield's channel full and the device→shield task blocks.
-        for _ in 0..4 {
-            device.write_all(&[1u8; 4096]).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        token.cancel();
-        tokio::time::timeout(WAIT, relay)
-            .await
-            .expect("a revoked session ends")
-            .unwrap()
-            .unwrap();
-        assert!(
-            aborted.load(std::sync::atomic::Ordering::SeqCst),
-            "aborted although the device→shield send was blocked"
-        );
-        let _ = stop_tx.send(());
-    }
-
-    /// FU-15: a session whose authorization is revoked aborts its device
-    /// stream (so neither side's queue is delivered after the cut) instead of
-    /// ending it normally, also while a write to a slow device is waiting.
-    #[tokio::test]
-    async fn a_revoked_session_aborts_its_device_stream() {
-        for slow_device in [false, true] {
-            let hub = AgentTunnelHub::new();
-            let (tx, mut rx) = mpsc::channel(64);
-            assert!(hub.register_shield(SHIELD.into(), 1, tx));
-            // A Shield that accepts the tunnel and reports the Close it gets.
-            let (closed_tx, mut closed_rx) = mpsc::channel::<String>(4);
-            let shield_hub = hub.clone();
-            tokio::spawn(async move {
-                while let Some(m) = rx.recv().await {
-                    match m.body {
-                        Some(Body::TunnelOpen(o)) => {
-                            shield_hub.dispatch_opened(&o.connection_id, true, String::new())
-                        }
-                        Some(Body::TunnelClose(c)) => {
-                            let _ = closed_tx.send(c.error).await;
-                        }
-                        _ => {}
-                    }
-                }
-            });
-            let session = hub
-                .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
-                .await
-                .expect("opened");
-            let connection_id = session.connection_id.clone();
-            let token = tokio_util::sync::CancellationToken::new();
-            // 1 KiB of device buffer: a device that doesn't read blocks writes.
-            let (_device, relay_end) = tokio::io::duplex(1024);
-            let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let shut = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let relay = tokio::spawn(session.with_cancel_token(token.clone()).relay_stream(
-                AbortProbe {
-                    inner: relay_end,
-                    aborted: aborted.clone(),
-                    shut: shut.clone(),
-                },
-            ));
-            if slow_device {
-                hub.dispatch_data(&connection_id, vec![7u8; 64 * 1024], 1)
-                    .await;
+            Ok(None) => {
+                send_frame(out, Frame::End(TunnelEnd::default()), stop).await;
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            token.cancel();
-            tokio::time::timeout(WAIT, relay)
-                .await
-                .expect("a revoked session ends at once")
-                .unwrap()
-                .unwrap();
-            assert!(
-                aborted.load(std::sync::atomic::Ordering::SeqCst),
-                "revoked session not aborted (slow device: {slow_device})"
-            );
-            assert!(
-                !shut.load(std::sync::atomic::Ordering::SeqCst),
-                "a revoked session must not end like a normal close"
-            );
-            let closed = tokio::time::timeout(WAIT, closed_rx.recv())
-                .await
-                .expect("the Shield is told the session is over");
-            assert_eq!(closed.as_deref(), Some("session revoked"));
-        }
-    }
-
-    impl tokio::io::AsyncRead for ShutdownProbe {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-        }
-    }
-
-    impl tokio::io::AsyncWrite for ShutdownProbe {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
-        }
-        fn poll_flush(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-        }
-        fn poll_shutdown(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            self.shut.store(true, std::sync::atomic::Ordering::SeqCst);
-            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
-        }
-    }
-
-    /// Runs one session that receives `data` and then a Close with `error`;
-    /// returns what the device read and whether its stream was shut down.
-    async fn session_end(error: &str) -> (Vec<u8>, bool) {
-        let hub = AgentTunnelHub::new();
-        let (tx, rx) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        accept_all(hub.clone(), rx);
-        let session = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
-            .await
-            .expect("opened");
-        let connection_id = session.connection_id.clone();
-        let (mut device, relay_end) = tokio::io::duplex(64 * 1024);
-        let shut = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let relay = tokio::spawn(session.relay_stream(ShutdownProbe {
-            inner: relay_end,
-            shut: shut.clone(),
-        }));
-        hub.dispatch_data(&connection_id, b"HTTP/1.0 200 OK\r\n\r\nbody".to_vec(), 1)
-            .await;
-        hub.dispatch_close(&connection_id, error.to_string(), 1);
-        tokio::time::timeout(WAIT, relay)
-            .await
-            .expect("session ends")
-            .unwrap()
-            .unwrap();
-        let mut got = Vec::new();
-        tokio::time::timeout(WAIT, device.read_to_end(&mut got))
-            .await
-            .expect("device sees the end")
-            .unwrap();
-        (got, shut.load(std::sync::atomic::Ordering::SeqCst))
-    }
-
-    /// F-7 (live E2E run 2026-10-30): a resource that closes normally ends the
-    /// device stream with a shutdown (close_notify on a relayed stream), after
-    /// all its data; a Shield-reported error still ends it abruptly.
-    #[tokio::test]
-    async fn a_clean_close_shuts_the_device_stream_down_an_error_does_not() {
-        let (got, shut) = session_end("").await;
-        assert_eq!(got, b"HTTP/1.0 200 OK\r\n\r\nbody");
-        assert!(shut, "a clean close must shut the device stream down");
-
-        let (_, shut) = session_end("resource reset").await;
-        assert!(!shut, "an error close must not look like a clean end");
-    }
-
-    /// A device stream whose shutdown completes only once the reader has
-    /// drained it, as a relayed stream's close_notify queues behind the data
-    /// still in flight. Records whether the shutdown completed.
-    struct DrainGatedShutdown {
-        inner: tokio::io::DuplexStream,
-        drained: Arc<std::sync::atomic::AtomicBool>,
-        waker: Arc<parking_lot::Mutex<Option<std::task::Waker>>>,
-        completed: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl tokio::io::AsyncRead for DrainGatedShutdown {
-        fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-        }
-    }
-
-    impl tokio::io::AsyncWrite for DrainGatedShutdown {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
-        }
-        fn poll_flush(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-        }
-        fn poll_shutdown(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            if !self.drained.load(std::sync::atomic::Ordering::SeqCst) {
-                *self.waker.lock() = Some(cx.waker().clone());
-                return std::task::Poll::Pending;
+            Err(e) => {
+                send_frame(out, Frame::End(TunnelEnd { error: e }), stop).await;
+                return;
             }
-            self.completed
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
         }
     }
+}
 
-    /// F-7: the close_notify queues behind data still in flight, so a reader
-    /// slower than the old 2 s grace must still get the clean end.
-    #[tokio::test(start_paused = true)]
-    async fn a_slow_reader_still_gets_the_clean_end() {
-        let hub = AgentTunnelHub::new();
-        let (tx, rx) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        accept_all(hub.clone(), rx);
-        let session = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 80, "tcp")
-            .await
-            .expect("opened");
-        let connection_id = session.connection_id.clone();
-        let (_device, relay_end) = tokio::io::duplex(1024);
-        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let waker = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
-        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let relay = tokio::spawn(session.relay_stream(DrainGatedShutdown {
-            inner: relay_end,
-            drained: drained.clone(),
-            waker: waker.clone(),
-            completed: completed.clone(),
-        }));
-        hub.dispatch_data(&connection_id, b"body".to_vec(), 1).await;
-        hub.dispatch_close(&connection_id, String::new(), 1);
-        // The slow reader takes 10 s to drain what is in flight.
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        drained.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(w) = waker.lock().take() {
-            w.wake();
-        }
-        tokio::time::timeout(WAIT, relay)
-            .await
-            .expect("session ends")
-            .unwrap()
-            .unwrap();
-        assert!(
-            completed.load(std::sync::atomic::Ordering::SeqCst),
-            "the shutdown must still complete after a slow drain"
-        );
+/// One `[u32 BE length][datagram]` frame from the device stream; None at a
+/// clean end of the stream.
+async fn read_datagram<R>(reader: &mut R) -> std::result::Result<Option<Vec<u8>>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut len = [0u8; 4];
+    match reader.read_exact(&mut len).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.to_string()),
     }
-
-    #[tokio::test]
-    async fn a_stream_end_closes_its_sessions_instead_of_hanging() {
-        let hub = AgentTunnelHub::new();
-        let (tx, rx) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        accept_all(hub.clone(), rx);
-        let session = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-            .await
-            .expect("opened");
-        let (mut device, relay_end) = tokio::io::duplex(1024);
-        let relay = tokio::spawn(session.relay_stream(relay_end));
-
-        hub.end_stream(SHIELD, 1, false);
-
-        tokio::time::timeout(WAIT, relay)
-            .await
-            .expect("the session must end when its stream ends")
-            .unwrap()
-            .ok();
-        let mut buf = [0u8; 8];
-        let n = tokio::time::timeout(WAIT, device.read(&mut buf))
-            .await
-            .expect("the device must see the end, not hang")
-            .unwrap_or(0);
-        assert_eq!(n, 0);
-        assert!(hub.state.lock().relay_sessions.is_empty());
-        assert!(!hub.state.lock().shield_txs.contains_key(SHIELD));
+    let len = u32::from_be_bytes(len) as usize;
+    if len > MAX_DATAGRAM {
+        return Err(format!("datagram length {len} over {MAX_DATAGRAM}"));
     }
-
-    #[tokio::test]
-    async fn an_older_streams_cleanup_keeps_the_newer_stream() {
-        let hub = AgentTunnelHub::new();
-        let (old_tx, old_rx) = mpsc::channel(64);
-        let (new_tx, new_rx) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, old_tx));
-        accept_all(hub.clone(), old_rx);
-        let on_old = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-            .await
-            .expect("opened on stream 1");
-        // Stream 2 registers before stream 1's end is noticed.
-        assert!(hub.register_shield(SHIELD.into(), 2, new_tx));
-        accept_all(hub.clone(), new_rx);
-        let on_new = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-            .await
-            .expect("opened on stream 2");
-
-        hub.end_stream(SHIELD, 1, false);
-
-        {
-            let state = hub.state.lock();
-            assert_eq!(
-                state.shield_txs.get(SHIELD).map(|(id, _)| *id),
-                Some(2),
-                "stream 1's cleanup removed stream 2"
-            );
-            assert!(!state.relay_sessions.contains_key(&on_old.connection_id));
-            assert!(state.relay_sessions.contains_key(&on_new.connection_id));
-        }
-        // Stream 2 still opens sessions.
-        hub.open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-            .await
-            .expect("stream 2 still serves");
-    }
-
-    #[tokio::test]
-    async fn a_stream_end_leaves_other_shields_alone() {
-        const OTHER: &str = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4";
-        let hub = AgentTunnelHub::new();
-        let (tx, rx) = mpsc::channel(64);
-        let (other_tx, other_rx) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        assert!(hub.register_shield(OTHER.into(), 1, other_tx));
-        accept_all(hub.clone(), rx);
-        accept_all(hub.clone(), other_rx);
-        let other = hub
-            .open_relay_session(OTHER, "10.0.0.8", 22, "tcp")
-            .await
-            .expect("opened");
-
-        hub.end_stream(SHIELD, 1, false);
-
-        assert!(hub
-            .state
-            .lock()
-            .relay_sessions
-            .contains_key(&other.connection_id));
-    }
+    let mut buf = vec![0u8; len];
+    reader
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(buf))
 }
 
 #[cfg(test)]
-mod handover_tests {
-    //! Fix 14, D-1 = B: on a clean end of a Shield's stream, while a newer
-    //! stream of the same Shield is registered, the sessions move to the newer
-    //! stream with no byte lost or reordered in either direction. Any other
-    //! end still closes them.
-
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
-    const WAIT: Duration = Duration::from_secs(5);
-
-    async fn open_on(
-        hub: &AgentTunnelHub,
-        shield_rx: &mut mpsc::Receiver<ShieldControlMessage>,
-    ) -> (String, RelaySession) {
-        let opener = hub.clone();
-        let opening = tokio::spawn(async move {
-            opener
-                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-                .await
-        });
-        let Some(Body::TunnelOpen(open)) = shield_rx.recv().await.unwrap().body else {
-            panic!("expected TunnelOpen");
-        };
-        hub.dispatch_opened(&open.connection_id, true, String::new());
-        (open.connection_id, opening.await.unwrap().expect("opened"))
-    }
-
-    async fn next_data(rx: &mut mpsc::Receiver<ShieldControlMessage>) -> Vec<u8> {
-        match tokio::time::timeout(WAIT, rx.recv()).await.expect("data in time") {
-            Some(ShieldControlMessage {
-                body: Some(Body::TunnelData(d)),
-            }) => d.data,
-            other => panic!("expected TunnelData, got {other:?}"),
-        }
-    }
-
-    async fn read_exact_n(device: &mut tokio::io::DuplexStream, n: usize) -> Vec<u8> {
-        let mut buf = vec![0u8; n];
-        tokio::time::timeout(WAIT, device.read_exact(&mut buf))
-            .await
-            .expect("bytes in time")
-            .expect("device open");
-        buf
-    }
-
-    #[tokio::test]
-    async fn a_clean_handover_keeps_the_session_in_order_both_ways() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, session) = open_on(&hub, &mut rx1).await;
-        let (mut device, relay_end) = tokio::io::duplex(1024);
-        let relay = tokio::spawn(session.relay_stream(relay_end));
-
-        // Shield → device on stream 1, and device → shield on stream 1.
-        hub.dispatch_data(&cid, vec![1], 1).await;
-        hub.dispatch_data(&cid, vec![2], 1).await;
-        device.write_all(b"a").await.unwrap();
-        assert_eq!(next_data(&mut rx1).await, b"a");
-
-        // The Shield opens stream 2 (renewal), switches to it and sends 3;
-        // that overtakes stream 1's last chunk, 4.
-        let (tx2, mut rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        hub.dispatch_data(&cid, vec![3], 2).await;
-        hub.dispatch_data(&cid, vec![4], 1).await;
-        // Stream 1 ends cleanly: the session moves to stream 2.
-        assert_eq!(hub.end_stream(SHIELD, 1, true), vec![cid.clone()]);
-        hub.deliver_held_events(&cid).await;
-        hub.dispatch_data(&cid, vec![5], 2).await;
-
-        assert_eq!(read_exact_n(&mut device, 5).await, vec![1, 2, 4, 3, 5]);
-        // Device → shield now goes out on stream 2.
-        device.write_all(b"b").await.unwrap();
-        assert_eq!(next_data(&mut rx2).await, b"b");
-        assert!(!relay.is_finished(), "the session must survive the handover");
-    }
-
-    #[tokio::test]
-    async fn device_data_whose_stream_closed_is_retried_on_the_new_stream() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (_cid, session) = open_on(&hub, &mut rx1).await;
-        let (mut device, relay_end) = tokio::io::duplex(1024);
-        let _relay = tokio::spawn(session.relay_stream(relay_end));
-        let (tx2, mut rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-
-        // Stream 1's queue is already closed (its task is draining) when the
-        // device sends: the send fails and must be retried, not lost.
-        rx1.close();
-        device.write_all(b"c").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(hub.end_stream(SHIELD, 1, true).len(), 1);
-        assert_eq!(next_data(&mut rx2).await, b"c");
-    }
-
-    #[tokio::test]
-    async fn a_clean_end_without_a_newer_stream_closes_the_session() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, _session) = open_on(&hub, &mut rx1).await;
-        assert!(hub.end_stream(SHIELD, 1, true).is_empty());
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    #[tokio::test]
-    async fn an_unclean_end_closes_the_session_even_with_a_newer_stream() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, _session) = open_on(&hub, &mut rx1).await;
-        let (tx2, _rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        assert!(hub.end_stream(SHIELD, 1, false).is_empty());
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    #[tokio::test]
-    async fn an_early_close_comes_after_the_held_data() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, mut session) = open_on(&hub, &mut rx1).await;
-        let (tx2, _rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        hub.dispatch_data(&cid, vec![7], 2).await;
-        hub.dispatch_close(&cid, String::new(), 2);
-        hub.dispatch_data(&cid, vec![6], 1).await;
-        assert_eq!(hub.end_stream(SHIELD, 1, true).len(), 1);
-        hub.deliver_held_events(&cid).await;
-
-        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![6]));
-        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![7]));
-        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Close(_))));
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    #[tokio::test]
-    async fn a_handover_backlog_over_its_byte_limit_ends_the_session() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, _session) = open_on(&hub, &mut rx1).await;
-        let (tx2, _rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        hub.dispatch_data(&cid, vec![0; EARLY_BYTES_LIMIT], 2).await;
-        assert!(hub.state.lock().relay_sessions.contains_key(&cid));
-        hub.dispatch_data(&cid, vec![0], 2).await;
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_handover_backlog_held_past_the_grace_ends_the_session() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, _session) = open_on(&hub, &mut rx1).await;
-        let (tx2, _rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        hub.dispatch_data(&cid, vec![0], 2).await;
-        tokio::time::advance(HANDOVER_SEND_GRACE + Duration::from_secs(1)).await;
-        hub.dispatch_data(&cid, vec![0], 2).await;
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    #[tokio::test]
-    async fn an_overlong_handover_backlog_ends_the_session() {
-        let hub = AgentTunnelHub::new();
-        let (tx1, mut rx1) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
-        let (cid, _session) = open_on(&hub, &mut rx1).await;
-        let (tx2, _rx2) = mpsc::channel(64);
-        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
-        for _ in 0..=EARLY_EVENT_LIMIT {
-            hub.dispatch_data(&cid, vec![0], 2).await;
-        }
-        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-}
-
-#[cfg(test)]
-mod backpressure_tests {
-    //! Fix 14 (F48): a full device queue ends the session; no chunk is
-    //! dropped while the session carries on.
-
-    use super::*;
-
-    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
-
-    async fn opened_session(
-        hub: &AgentTunnelHub,
-        shield_rx: &mut mpsc::Receiver<ShieldControlMessage>,
-    ) -> (String, RelaySession) {
-        let opener = hub.clone();
-        let opening = tokio::spawn(async move {
-            opener
-                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-                .await
-        });
-        let Some(Body::TunnelOpen(open)) = shield_rx.recv().await.unwrap().body else {
-            panic!("expected TunnelOpen");
-        };
-        hub.dispatch_opened(&open.connection_id, true, String::new());
-        (open.connection_id, opening.await.unwrap().expect("opened"))
-    }
-
-    /// A device that is merely slower than the resource gets every byte:
-    /// the chunk waits for room instead of being dropped.
-    #[tokio::test]
-    async fn a_slow_device_gets_every_chunk_in_order() {
-        let hub = AgentTunnelHub::new();
-        let (tx, mut shield_rx) = mpsc::channel(256);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
-
-        let feeder = {
-            let hub = hub.clone();
-            let cid = cid.clone();
-            tokio::spawn(async move {
-                for i in 0..200u8 {
-                    hub.dispatch_data(&cid, vec![i], 1).await;
-                }
-            })
-        };
-        for i in 0..200u8 {
-            if i % 50 == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            match session.event_rx.recv().await {
-                Some(RelayEvent::Data(d)) => assert_eq!(d, vec![i], "chunk {i}"),
-                _ => panic!("chunk {i} missing"),
-            }
-        }
-        feeder.await.unwrap();
-        assert!(hub.state.lock().relay_sessions.contains_key(&cid));
-    }
-
-    /// A device that is steadily slower than the resource (a WAN client) keeps
-    /// the session's queue full for the whole transfer. It must still get
-    /// every chunk, in order, for as long as the transfer lasts.
-    #[tokio::test(start_paused = true)]
-    async fn a_steadily_slower_device_completes_a_long_transfer() {
-        const CHUNKS: u32 = 3000; // 30 s at one chunk per 10 ms
-        let hub = AgentTunnelHub::new();
-        let (tx, mut shield_rx) = mpsc::channel(256);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
-        let reader = tokio::spawn(async move {
-            let mut got = 0u32;
-            while let Some(event) = session.event_rx.recv().await {
-                match event {
-                    RelayEvent::Data(d) => {
-                        assert_eq!(d, got.to_be_bytes().to_vec(), "chunk {got} out of order");
-                        got += 1;
-                    }
-                    _ => break,
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            got
-        });
-        for i in 0..CHUNKS {
-            hub.dispatch_data(&cid, i.to_be_bytes().to_vec(), 1).await;
-        }
-        assert!(
-            hub.state.lock().relay_sessions.contains_key(&cid),
-            "a merely slow device's session was ended"
-        );
-        hub.dispatch_close(&cid, String::new(), 1);
-        assert_eq!(reader.await.unwrap(), CHUNKS);
-    }
-
-    /// A device that stops reading ends its session after the stall limit;
-    /// the chunk is never dropped while the session carries on.
-    #[tokio::test(start_paused = true)]
-    async fn a_stalled_device_ends_the_session_instead_of_dropping_data() {
-        let hub = AgentTunnelHub::new();
-        let (tx, mut shield_rx) = mpsc::channel(256);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
-
-        for i in 0..64u8 {
-            hub.dispatch_data(&cid, vec![i], 1).await;
-        }
-        // The queue is full and the device reads nothing.
-        hub.dispatch_data(&cid, vec![64], 1).await;
-
-        assert!(
-            !hub.state.lock().relay_sessions.contains_key(&cid),
-            "the session carried on after a chunk could not be queued"
-        );
-        let Some(Body::TunnelClose(close)) = shield_rx.recv().await.unwrap().body else {
-            panic!("the shield was not told to close its side");
-        };
-        assert_eq!(close.connection_id, cid);
-        for i in 0..64u8 {
-            match session.event_rx.recv().await {
-                Some(RelayEvent::Data(d)) => assert_eq!(d, vec![i]),
-                _ => panic!("chunk {i} missing"),
-            }
-        }
-        assert!(session.event_rx.recv().await.is_none());
-    }
-}
-
-#[cfg(test)]
-mod revocation_tests {
-    //! Certificate audit bug 3: a revoked shield is refused by the hub and
-    //! every session through it ends.
-
-    use super::*;
-    use std::time::Duration;
-
-    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
-    const WAIT: Duration = Duration::from_secs(5);
-
-    #[test]
-    fn a_revoked_shield_cannot_register_again() {
-        let hub = AgentTunnelHub::new();
-        let (tx, _rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx.clone()));
-        hub.revoke_shield(SHIELD);
-        assert!(!hub.register_shield(SHIELD.into(), 1, tx));
-        assert!(!hub.state.lock().shield_txs.contains_key(SHIELD));
-    }
-
-    #[tokio::test]
-    async fn no_session_opens_through_a_revoked_shield() {
-        let hub = AgentTunnelHub::new();
-        let (tx, _rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        hub.revoke_shield(SHIELD);
-        let err = hub
-            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-            .await
-            .err()
-            .expect("refused");
-        assert!(err.to_string().contains("revoked"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn revocation_ends_a_session_waiting_for_tunnel_opened() {
-        let hub = AgentTunnelHub::new();
-        let (tx, mut rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
-        let opener = hub.clone();
-        let opening = tokio::spawn(async move {
-            opener
-                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
-                .await
-        });
-        // The shield received TunnelOpen but never answers.
-        let _open = tokio::time::timeout(WAIT, rx.recv())
-            .await
-            .expect("TunnelOpen sent");
-        hub.revoke_shield(SHIELD);
-        let result = tokio::time::timeout(WAIT, opening)
-            .await
-            .expect("open must end when the shield is revoked")
-            .unwrap();
-        assert!(result.is_err());
-        assert!(hub.state.lock().relay_sessions.is_empty());
-    }
-}
+#[path = "agent_tunnel_tests.rs"]
+pub(crate) mod tests;

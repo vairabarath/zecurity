@@ -433,8 +433,16 @@ where
         )
         .await;
 
+        // FU-9 gate-4: the tunnel is bound to this session's revocation token,
+        // so a revocation cancels it while it opens and before its first frame.
         match tunnel_hub
-            .open_relay_session(&shield_id, &dial_host, req.port, &req.protocol)
+            .open_relay_session_revocable(
+                &shield_id,
+                &dial_host,
+                req.port,
+                &req.protocol,
+                &cancel_token,
+            )
             .await
         {
             Ok(relay) => {
@@ -470,8 +478,20 @@ where
                     error = %e,
                     "tunnel_opened error"
                 );
+                // FU-9: its own failures, by type, before the shared mapping.
                 let (client_error, log_error) =
-                    shield_failure(&req.destination, &dial_host, &e.to_string());
+                    match e.downcast_ref::<crate::agent_tunnel::OpenError>() {
+                        // Gate-4: access revoked while the tunnel was opening.
+                        Some(crate::agent_tunnel::OpenError::SessionRevoked) => {
+                            (ERR_ACCESS_DENIED, format!("session_revoked: {e}"))
+                        }
+                        // Refused at once by the tunnel budget, not queued.
+                        Some(open_error) if open_error.is_limit() => (
+                            crate::agent_tunnel::ERR_SHIELD_TUNNEL_LIMIT,
+                            format!("shield_tunnel_limit: {e}"),
+                        ),
+                        _ => shield_failure(&req.destination, &dial_host, &e.to_string()),
+                    };
                 let response = TunnelResponse {
                     ok: false,
                     error: Some(client_error.to_string()),

@@ -1,82 +1,118 @@
+//! Shield side of Shield-routed tunnels.
+//!
+//! FU-9 (PENDING-21): the Connector asks for a tunnel with `TunnelOpen` on
+//! Control. The Shield connects to the resource, then opens a dedicated
+//! `ShieldService.Tunnel` stream (first frame `TunnelStart`) and relays the
+//! tunnel on it. HTTP/2 flow control is per stream, so a slow resource or a
+//! slow device holds up only its own tunnel: there is no stall cutoff and no
+//! unbounded queue. A tunnel that could not be opened is reported on Control
+//! (`TunnelOpened{ok: false}`); the Connector aborts a tunnel on Control
+//! (`TunnelClose`) or by ending its stream with an error.
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch, Mutex};
-use tokio::task::AbortHandle;
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::{mpsc, watch};
 use tokio::time::{timeout, Instant};
-use tracing::warn;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::Channel;
+use tonic::{Request, Streaming};
+use tracing::{debug, warn};
 
+use crate::proto::shield_control_message::Body;
+use crate::proto::shield_service_client::ShieldServiceClient;
+use crate::proto::tunnel_frame::Frame;
 use crate::proto::{
-    shield_control_message::Body, ShieldControlMessage, TunnelClose, TunnelData, TunnelOpened,
+    ShieldControlMessage, TunnelEnd, TunnelFrame, TunnelOpen, TunnelOpened, TunnelStart,
 };
 
+/// D-3: tunnels (active plus pending) this Shield runs at once. Must match the
+/// Connector's `MAX_TUNNELS_PER_SHIELD`; the HTTP/2 windows in `tls.rs` are
+/// sized for it.
+pub const MAX_TUNNELS: usize = 256;
 const MAX_CHUNK: usize = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long opening the tunnel's stream may take (an HTTP/2 stream limit
+/// would queue it silently; this bounds it).
+const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Fix 14 (F48): how long a chunk waits for room in a tunnel's full queue to
-/// the resource (no progress at all) before the tunnel is ended. Accepted
-/// limit (user, 2026-10-26): while it waits, the whole Control stream waits,
-/// so a resource reading just under this pace delays the other tunnels;
-/// per-tunnel flow control is the follow-up.
-const RESOURCE_STALL_LIMIT: Duration = Duration::from_secs(2);
-/// Fix 14 handover: how long a tunnel message waits for an upstream (a
-/// Control stream) while the Shield moves from one stream to the next.
+/// Frames queued toward the Connector beyond HTTP/2's own window. TCP awaits
+/// room (backpressure); UDP drops the newest datagram when full (D-4).
+const TCP_TO_CONNECTOR_QUEUE: usize = 4;
+const UDP_TO_CONNECTOR_QUEUE: usize = 32;
+/// Fix 14 handover: how long a refusal waits for an upstream (a Control
+/// stream) while the Shield moves from one stream to the next; also how long
+/// the old stream may take to drain.
 pub const HANDOVER_GRACE: Duration = Duration::from_secs(15);
 
-struct TunnelSession {
-    inbound_tx: mpsc::Sender<Bytes>,
-    /// The tunnel's read and write tasks, set once they are spawned. Aborting
-    /// them drops the resource socket (Fix 14).
-    tasks: Vec<AbortHandle>,
-}
+type Client = ShieldServiceClient<Channel>;
 
-impl TunnelSession {
-    fn new(inbound_tx: mpsc::Sender<Bytes>) -> Self {
-        Self {
-            inbound_tx,
-            tasks: Vec::new(),
-        }
-    }
-
-    fn abort(self) {
-        for task in self.tasks {
-            task.abort();
-        }
-    }
-}
-
-/// Shared tunnel session registry. Cloning is cheap (Arc reference count).
-///
-/// Fix 14 (D-1 = B): every message a tunnel sends to the Connector goes
-/// through the hub's one `upstream`, the current Control stream. The Shield
-/// pauses it (None) while it hands its tunnels over to a new stream, then
-/// points it at the new stream; tunnels never hold a stream of their own.
+/// The Shield's tunnels. Cloning is cheap (Arc reference counts).
 #[derive(Clone)]
 pub struct TunnelHub {
-    sessions: Arc<Mutex<HashMap<String, TunnelSession>>>,
+    /// connection_id → the tunnel's abort switch.
+    tunnels: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Tunnels admitted and not yet ended (pending ones included).
+    count: Arc<AtomicUsize>,
+    /// The current Control stream, for reporting tunnels that could not be
+    /// opened. None (paused) during a renewal handover.
     upstream: Arc<watch::Sender<Option<mpsc::Sender<ShieldControlMessage>>>>,
+    /// The client new tunnel streams are opened on: the newest connection.
+    /// A tunnel takes a clone only to open its stream and drops it at once,
+    /// so an old connection lives only as long as its streams (PENDING-21 §5
+    /// Experiment 2).
+    client: Arc<watch::Sender<Option<Client>>>,
 }
 
 pub fn new_hub() -> TunnelHub {
     TunnelHub {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        tunnels: Arc::new(Mutex::new(HashMap::new())),
+        count: Arc::new(AtomicUsize::new(0)),
         upstream: Arc::new(watch::channel(None).0),
+        client: Arc::new(watch::channel(None).0),
+    }
+}
+
+/// A place in the tunnel budget, freed when dropped.
+struct Permit(Arc<AtomicUsize>);
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl TunnelHub {
-    /// Point tunnel traffic at `upstream`, or pause it (None).
+    /// Point refusals at `upstream`, or pause them (None).
     pub fn set_upstream(&self, upstream: Option<mpsc::Sender<ShieldControlMessage>>) {
         self.upstream.send_replace(upstream);
     }
 
+    /// Open new tunnel streams on `client` (None: no new tunnels).
+    pub fn set_client(&self, client: Option<Client>) {
+        self.client.send_replace(client);
+    }
+
+    /// Tunnels admitted and not yet ended.
+    pub fn len(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    fn try_admit(&self) -> Option<Permit> {
+        self.count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_TUNNELS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Permit(self.count.clone()))
+    }
+
     /// Send `msg` on the current upstream. While paused, or if the stream
-    /// behind it closed, wait for the next one; the failed message is retried,
-    /// so none is lost or reordered. Gives up after HANDOVER_GRACE.
+    /// behind it closed, wait for the next one; gives up after HANDOVER_GRACE.
     async fn send_upstream(&self, mut msg: ShieldControlMessage) -> bool {
         let deadline = Instant::now() + HANDOVER_GRACE;
         let mut rx = self.upstream.subscribe();
@@ -95,501 +131,375 @@ impl TunnelHub {
         }
     }
 
-    /// Record a tunnel's tasks; if the tunnel was already ended, stop them.
-    async fn set_tasks(&self, connection_id: &str, tasks: Vec<AbortHandle>) {
-        let mut guard = self.sessions.lock().await;
-        match guard.get_mut(connection_id) {
-            Some(session) => session.tasks = tasks,
-            None => {
-                for task in tasks {
-                    task.abort();
-                }
-            }
+    /// Abort every tunnel (Fix 14, F44): the Control session they belong to
+    /// ended other than by a handover. Returns how many were aborted.
+    pub fn close_all(&self) -> usize {
+        let tunnels: Vec<_> = self.tunnels.lock().unwrap().drain().collect();
+        for (_, abort) in &tunnels {
+            abort.send_replace(true);
         }
-    }
-
-    /// The number of open tunnels.
-    pub async fn len(&self) -> usize {
-        self.sessions.lock().await.len()
-    }
-
-    /// End every tunnel and close its resource socket. Fix 14 (F44): called
-    /// when the Control stream these tunnels ran on ends other than by a
-    /// handover — their queued data died with it, so they must not carry on,
-    /// nor leak their sockets.
-    pub async fn close_all(&self) -> usize {
-        let sessions: Vec<TunnelSession> = self
-            .sessions
-            .lock()
-            .await
-            .drain()
-            .map(|(_, s)| s)
-            .collect();
-        let n = sessions.len();
-        for session in sessions {
-            session.abort();
-        }
-        n
-    }
-
-    fn close_msg(connection_id: &str, error: &str) -> ShieldControlMessage {
-        ShieldControlMessage {
-            body: Some(Body::TunnelClose(TunnelClose {
-                connection_id: connection_id.to_string(),
-                error: error.to_string(),
-            })),
-        }
+        tunnels.len()
     }
 }
 
-/// D21-R D: answer a TunnelOpen that the Shield won't open.
+/// Report a tunnel this Shield won't or couldn't open (D21-R D, limits,
+/// connect failures).
 pub async fn refuse_tunnel_open(hub: &TunnelHub, connection_id: &str, reason: &str) {
-    hub.send_upstream(tunnel_opened_msg(connection_id, false, reason))
-        .await;
-}
-
-/// Dispatch to TCP or UDP handler based on protocol field.
-pub async fn handle_tunnel_open(
-    hub: TunnelHub,
-    connection_id: String,
-    destination: String,
-    port: u32,
-    protocol: String,
-) {
-    if protocol == "udp" {
-        handle_tunnel_open_udp(hub, connection_id, destination, port).await;
-    } else {
-        handle_tunnel_open_tcp(hub, connection_id, destination, port).await;
-    }
-}
-
-async fn handle_tunnel_open_tcp(
-    hub: TunnelHub,
-    connection_id: String,
-    destination: String,
-    port: u32,
-) {
-    let addr = format!("{destination}:{port}");
-    let conn_id = connection_id.clone();
-
-    tokio::spawn(async move {
-        let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                hub.send_upstream(tunnel_opened_msg(&conn_id, false, &e.to_string()))
-                    .await;
-                return;
-            }
-            Err(_) => {
-                hub.send_upstream(tunnel_opened_msg(&conn_id, false, "connect timeout"))
-                    .await;
-                return;
-            }
-        };
-
-        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
-        hub.sessions
-            .lock()
-            .await
-            .insert(conn_id.clone(), TunnelSession::new(inbound_tx));
-
-        if !hub.send_upstream(tunnel_opened_msg(&conn_id, true, "")).await {
-            hub.sessions.lock().await.remove(&conn_id);
-            return;
-        }
-
-        let (mut reader, mut writer) = stream.into_split();
-        let hub_clone = hub.clone();
-        let conn_id_read = conn_id.clone();
-
-        let read_task = tokio::spawn(async move {
-            let mut buf = vec![0u8; MAX_CHUNK];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let msg = ShieldControlMessage {
-                            body: Some(Body::TunnelData(TunnelData {
-                                connection_id: conn_id_read.clone(),
-                                data: buf[..n].to_vec(),
-                            })),
-                        };
-                        if !hub_clone.send_upstream(msg).await {
-                            break;
-                        }
-                    }
-                }
-            }
-            hub_clone
-                .send_upstream(TunnelHub::close_msg(&conn_id_read, ""))
-                .await;
-            hub_clone.sessions.lock().await.remove(&conn_id_read);
-        });
-
-        let write_task = tokio::spawn(async move {
-            while let Some(data) = inbound_rx.recv().await {
-                if writer.write_all(&data).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        hub.set_tasks(&conn_id, vec![read_task.abort_handle(), write_task.abort_handle()])
-            .await;
-        let _ = tokio::join!(read_task, write_task);
-    });
-}
-
-/// UDP relay: each TunnelData proto message = one datagram.
-/// Idle timeout: 30s with no received datagram closes the session.
-async fn handle_tunnel_open_udp(
-    hub: TunnelHub,
-    connection_id: String,
-    destination: String,
-    port: u32,
-) {
-    let addr = format!("{destination}:{port}");
-    let conn_id = connection_id.clone();
-
-    tokio::spawn(async move {
-        let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(e) => {
-                hub.send_upstream(tunnel_opened_msg(&conn_id, false, &e.to_string()))
-                    .await;
-                return;
-            }
-        };
-        if let Err(e) = socket.connect(&addr).await {
-            hub.send_upstream(tunnel_opened_msg(&conn_id, false, &e.to_string()))
-                .await;
-            return;
-        }
-
-        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
-        hub.sessions
-            .lock()
-            .await
-            .insert(conn_id.clone(), TunnelSession::new(inbound_tx));
-
-        if !hub.send_upstream(tunnel_opened_msg(&conn_id, true, "")).await {
-            hub.sessions.lock().await.remove(&conn_id);
-            return;
-        }
-
-        let socket = Arc::new(socket);
-        let hub_clone = hub.clone();
-        let conn_id_read = conn_id.clone();
-        let socket_read = socket.clone();
-
-        // Resource → Connector: recv datagram → TunnelData
-        let read_task = tokio::spawn(async move {
-            let mut buf = vec![0u8; MAX_CHUNK];
-            loop {
-                match timeout(UDP_IDLE_TIMEOUT, socket_read.recv(&mut buf)).await {
-                    Ok(Ok(n)) => {
-                        let msg = ShieldControlMessage {
-                            body: Some(Body::TunnelData(TunnelData {
-                                connection_id: conn_id_read.clone(),
-                                data: buf[..n].to_vec(),
-                            })),
-                        };
-                        if !hub_clone.send_upstream(msg).await {
-                            break;
-                        }
-                    }
-                    _ => break, // idle timeout or socket error
-                }
-            }
-            hub_clone
-                .send_upstream(TunnelHub::close_msg(&conn_id_read, ""))
-                .await;
-            hub_clone.sessions.lock().await.remove(&conn_id_read);
-        });
-
-        // Connector → Resource: TunnelData → send datagram
-        let write_task = tokio::spawn(async move {
-            while let Some(data) = inbound_rx.recv().await {
-                if socket.send(&data).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        hub.set_tasks(&conn_id, vec![read_task.abort_handle(), write_task.abort_handle()])
-            .await;
-        let _ = tokio::join!(read_task, write_task);
-    });
-}
-
-pub async fn handle_tunnel_data(hub: TunnelHub, connection_id: &str, data: Vec<u8>) {
-    let Some(tx) = hub
-        .sessions
-        .lock()
-        .await
-        .get(connection_id)
-        .map(|s| s.inbound_tx.clone())
-    else {
-        return;
-    };
-    // Fix 14 (F48): never drop a chunk and carry on (a hole in the byte
-    // stream). If the queue is full, wait for room: that pauses this Control
-    // stream, which pushes back to the device (flow control). A resource that
-    // makes no progress for RESOURCE_STALL_LIMIT ends its tunnel.
-    match tx
-        .send_timeout(Bytes::from(data), RESOURCE_STALL_LIMIT)
-        .await
-    {
-        Err(mpsc::error::SendTimeoutError::Timeout(_)) => {}
-        Ok(()) | Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
-    }
-    {
-        let mut guard = hub.sessions.lock().await;
-        if !guard
-            .get(connection_id)
-            .is_some_and(|s| s.inbound_tx.same_channel(&tx))
-        {
-            return;
-        }
-        if let Some(session) = guard.remove(connection_id) {
-            session.abort();
-        }
-    }
-    warn!(connection_id, "resource stalled with its tunnel queue full: ending the tunnel");
-    // Not awaited here: the upstream may be paused for a handover, and this
-    // runs on the Control stream's reader.
-    let close = TunnelHub::close_msg(connection_id, "resource too slow");
-    tokio::spawn(async move { hub.send_upstream(close).await });
-}
-
-pub async fn handle_tunnel_close(hub: TunnelHub, connection_id: &str) {
-    hub.sessions.lock().await.remove(connection_id);
-}
-
-fn tunnel_opened_msg(connection_id: &str, ok: bool, error: &str) -> ShieldControlMessage {
-    ShieldControlMessage {
+    hub.send_upstream(ShieldControlMessage {
         body: Some(Body::TunnelOpened(TunnelOpened {
             connection_id: connection_id.to_string(),
-            ok,
-            error: error.to_string(),
+            ok: false,
+            error: reason.to_string(),
         })),
+    })
+    .await;
+}
+
+/// The Connector aborted `connection_id` (FU-15 revocation, its session
+/// ended): close the resource socket at once.
+pub fn abort_tunnel(hub: &TunnelHub, connection_id: &str) {
+    if let Some(abort) = hub.tunnels.lock().unwrap().remove(connection_id) {
+        abort.send_replace(true);
+    }
+}
+
+/// Start a tunnel for an admitted `TunnelOpen` (the caller has checked the
+/// CRL and the resource allowlist). Refused at once, on Control, when the
+/// Shield already runs MAX_TUNNELS tunnels or the id is in use.
+pub async fn handle_tunnel_open(hub: TunnelHub, open: TunnelOpen) {
+    let Some(permit) = hub.try_admit() else {
+        warn!(connection_id = %open.connection_id, "refused tunnel: shield tunnel limit reached");
+        refuse_tunnel_open(
+            &hub,
+            &open.connection_id,
+            &format!("shield tunnel limit reached ({MAX_TUNNELS} per shield)"),
+        )
+        .await;
+        return;
+    };
+    let (abort_tx, abort_rx) = watch::channel(false);
+    let in_use = {
+        let mut tunnels = hub.tunnels.lock().unwrap();
+        let in_use = tunnels.contains_key(&open.connection_id);
+        if !in_use {
+            tunnels.insert(open.connection_id.clone(), abort_tx.clone());
+        }
+        in_use
+    };
+    if in_use {
+        drop(permit);
+        refuse_tunnel_open(&hub, &open.connection_id, "tunnel id already in use").await;
+        return;
+    }
+    tokio::spawn(async move {
+        let _permit = permit;
+        let connection_id = open.connection_id.clone();
+        run_tunnel(&hub, open, abort_rx).await;
+        let mut tunnels = hub.tunnels.lock().unwrap();
+        if tunnels
+            .get(&connection_id)
+            .is_some_and(|tx| tx.same_channel(&abort_tx))
+        {
+            tunnels.remove(&connection_id);
+        }
+    });
+}
+
+enum Resource {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+}
+
+async fn connect_resource(open: &TunnelOpen) -> Result<Resource, String> {
+    let addr = format!("{}:{}", open.destination, open.port);
+    if open.protocol.eq_ignore_ascii_case("udp") {
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        socket.connect(&addr).await.map_err(|e| e.to_string())?;
+        Ok(Resource::Udp(socket))
+    } else {
+        match timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await {
+            Ok(Ok(s)) => Ok(Resource::Tcp(s)),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("connect timeout".to_string()),
+        }
+    }
+}
+
+/// Open the tunnel's stream on the current client. The client clone is
+/// dropped before this returns: a tunnel never keeps a client handle.
+async fn open_stream(
+    hub: &TunnelHub,
+    connection_id: &str,
+    queue: usize,
+) -> Result<(mpsc::Sender<TunnelFrame>, Streaming<TunnelFrame>), String> {
+    let Some(mut client) = hub.client.borrow().clone() else {
+        return Err("shield has no connector connection".to_string());
+    };
+    let (tx, rx) = mpsc::channel(queue);
+    tx.send(TunnelFrame {
+        frame: Some(Frame::Start(TunnelStart {
+            connection_id: connection_id.to_string(),
+        })),
+    })
+    .await
+    .expect("the receiver is held here");
+    let opened = timeout(
+        STREAM_OPEN_TIMEOUT,
+        client.tunnel(Request::new(ReceiverStream::new(rx))),
+    )
+    .await;
+    drop(client);
+    match opened {
+        Ok(Ok(response)) => Ok((tx, response.into_inner())),
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+            Err("connector does not support dedicated tunnel streams; upgrade the connector".into())
+        }
+        Ok(Err(status)) => Err(format!("tunnel stream refused: {}", status.message())),
+        Err(_) => Err("tunnel stream not opened in time".to_string()),
+    }
+}
+
+async fn run_tunnel(hub: &TunnelHub, open: TunnelOpen, mut abort: watch::Receiver<bool>) {
+    let connection_id = open.connection_id.clone();
+    let resource = tokio::select! {
+        _ = aborted(&mut abort) => return,
+        resource = connect_resource(&open) => resource,
+    };
+    let resource = match resource {
+        Ok(resource) => resource,
+        Err(e) => {
+            debug!(connection_id = %connection_id, error = %e, "tunnel not opened");
+            refuse_tunnel_open(hub, &connection_id, &e).await;
+            return;
+        }
+    };
+    let queue = match resource {
+        Resource::Tcp(_) => TCP_TO_CONNECTOR_QUEUE,
+        Resource::Udp(_) => UDP_TO_CONNECTOR_QUEUE,
+    };
+    let opened = tokio::select! {
+        _ = aborted(&mut abort) => {
+            // Aborted before the stream was up: reset the resource connection.
+            if let Resource::Tcp(stream) = &resource {
+                let _ = stream.set_zero_linger();
+            }
+            return;
+        }
+        opened = open_stream(hub, &connection_id, queue) => opened,
+    };
+    let (tx, inbound) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            debug!(connection_id = %connection_id, error = %e, "tunnel not opened");
+            if let Resource::Tcp(stream) = &resource {
+                let _ = stream.set_zero_linger();
+            }
+            refuse_tunnel_open(hub, &connection_id, &e).await;
+            return;
+        }
+    };
+    match resource {
+        Resource::Tcp(stream) => relay_tcp(&connection_id, stream, tx, inbound, abort).await,
+        Resource::Udp(socket) => relay_udp(&connection_id, socket, tx, inbound, abort).await,
+    }
+}
+
+/// Resolves once the tunnel is aborted (never, if its switch is gone).
+async fn aborted(abort: &mut watch::Receiver<bool>) {
+    if abort.wait_for(|a| *a).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+fn data_frame(d: Vec<u8>) -> TunnelFrame {
+    TunnelFrame {
+        frame: Some(Frame::Data(d)),
+    }
+}
+
+fn end_frame(error: String) -> TunnelFrame {
+    TunnelFrame {
+        frame: Some(Frame::End(TunnelEnd { error })),
+    }
+}
+
+/// TCP: each direction awaits room (HTTP/2 backpressure, then the resource
+/// socket's own). A clean end half-closes; an error or abort resets the
+/// resource connection.
+async fn relay_tcp(
+    connection_id: &str,
+    stream: TcpStream,
+    tx: mpsc::Sender<TunnelFrame>,
+    mut inbound: Streaming<TunnelFrame>,
+    mut abort: watch::Receiver<bool>,
+) {
+    let (mut rr, mut rw) = stream.into_split();
+    // Resource → Connector; ends by sending TunnelEnd (and dropping `tx`).
+    let r2c = async move {
+        let mut buf = vec![0u8; MAX_CHUNK];
+        loop {
+            match rr.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = tx.send(end_frame(String::new())).await;
+                    break;
+                }
+                Ok(n) => {
+                    if tx.send(data_frame(buf[..n].to_vec())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(end_frame(e.to_string())).await;
+                    break;
+                }
+            }
+        }
+        rr
+    };
+    // Connector → resource; Ok when the Connector ended cleanly.
+    let c2r = async {
+        loop {
+            match inbound.message().await {
+                Ok(Some(TunnelFrame {
+                    frame: Some(Frame::Data(d)),
+                })) => {
+                    if rw.write_all(&d).await.is_err() {
+                        return Err(());
+                    }
+                }
+                Ok(Some(TunnelFrame {
+                    frame: Some(Frame::End(TunnelEnd { error })),
+                })) if error.is_empty() => break,
+                Ok(None) => break,
+                Ok(Some(other)) => {
+                    warn!(connection_id, frame = ?other.frame, "tunnel ended by the connector");
+                    return Err(());
+                }
+                Err(status) => {
+                    debug!(connection_id, error = %status, "tunnel stream ended with an error");
+                    return Err(());
+                }
+            }
+        }
+        let _ = rw.shutdown().await;
+        Ok(())
+    };
+    let mut r2c = Box::pin(r2c);
+    let mut c2r = Box::pin(c2r);
+    let mut read_done = false;
+    let mut write_done = false;
+    let failed = loop {
+        tokio::select! {
+            _ = aborted(&mut abort) => break true,
+            _ = &mut r2c, if !read_done => {
+                read_done = true;
+                if write_done {
+                    break false;
+                }
+            }
+            res = &mut c2r, if !write_done => match res {
+                Ok(()) => {
+                    write_done = true;
+                    if read_done {
+                        break false;
+                    }
+                }
+                Err(()) => break true,
+            },
+        }
+    };
+    drop(c2r);
+    if failed {
+        // Reset the resource connection rather than end it normally: an
+        // aborted tunnel must not look complete to the resource. The write
+        // half must not send its FIN on drop (`forget`); the socket closes,
+        // with an RST, when the read half goes too.
+        let _ = rw.as_ref().set_zero_linger();
+        rw.forget();
+    }
+    drop(r2c);
+}
+
+/// UDP: one frame per datagram. Toward the Connector the queue is bounded
+/// and the newest datagram is dropped when it is full (D-4); 30 s without a
+/// datagram from the resource ends the tunnel.
+async fn relay_udp(
+    connection_id: &str,
+    socket: UdpSocket,
+    tx: mpsc::Sender<TunnelFrame>,
+    mut inbound: Streaming<TunnelFrame>,
+    mut abort: watch::Receiver<bool>,
+) {
+    let socket = Arc::new(socket);
+    let r2c = |tx: mpsc::Sender<TunnelFrame>| {
+        let socket = socket.clone();
+        async move {
+            let mut buf = vec![0u8; 65_535];
+            let mut dropped: u64 = 0;
+            let mut last_log: Option<Instant> = None;
+            loop {
+                match timeout(UDP_IDLE_TIMEOUT, socket.recv(&mut buf)).await {
+                    Ok(Ok(n)) => {
+                        match tx.try_send(data_frame(buf[..n].to_vec())) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                dropped += 1;
+                                let now = Instant::now();
+                                if last_log
+                                    .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                {
+                                    last_log = Some(now);
+                                    warn!(connection_id, dropped, "udp tunnel queue to the connector full: dropping datagrams");
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => return,
+                        }
+                    }
+                    // Idle or a socket error: end the tunnel.
+                    _ => {
+                        let _ = tx.send(end_frame(String::new())).await;
+                        return;
+                    }
+                }
+            }
+        }
+    };
+    let end_tx = tx.clone();
+    let c2r = async {
+        loop {
+            match inbound.message().await {
+                Ok(Some(TunnelFrame {
+                    frame: Some(Frame::Data(d)),
+                })) => {
+                    let _ = socket.send(&d).await;
+                }
+                // The device side ended: end ours too.
+                Ok(Some(TunnelFrame {
+                    frame: Some(Frame::End(TunnelEnd { error })),
+                })) if error.is_empty() => {
+                    let _ = end_tx.send(end_frame(String::new())).await;
+                    return;
+                }
+                Ok(None) => return,
+                Ok(Some(_)) | Err(_) => return,
+            }
+        }
+    };
+    let r2c = r2c(tx);
+    tokio::pin!(r2c);
+    tokio::pin!(c2r);
+    let mut r2c_done = false;
+    loop {
+        tokio::select! {
+            _ = aborted(&mut abort) => return,
+            _ = &mut c2r => return,
+            _ = &mut r2c, if !r2c_done => r2c_done = true,
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    //! Fix 14: a Control stream's end closes its tunnels and their resource
-    //! sockets (F44); a full resource queue waits for room rather than
-    //! dropping a chunk (F48); tunnel traffic follows the hub's
-    //! upstream across a handover (D-1 = B).
-
-    use super::*;
-    use tokio::net::TcpListener;
-
-    const WAIT: Duration = Duration::from_secs(5);
-
-    #[tokio::test]
-    async fn close_all_closes_the_resource_socket() {
-        let resource = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = resource.local_addr().unwrap().port();
-        let hub = new_hub();
-        let (up_tx, mut up_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(up_tx));
-        handle_tunnel_open(
-            hub.clone(),
-            "c1".into(),
-            "127.0.0.1".into(),
-            port as u32,
-            "tcp".into(),
-        )
-        .await;
-        let (mut socket, _) = timeout(WAIT, resource.accept()).await.unwrap().unwrap();
-        let opened = timeout(WAIT, up_rx.recv()).await.unwrap().unwrap();
-        assert!(matches!(opened.body, Some(Body::TunnelOpened(ref o)) if o.ok));
-        // Wait until the tunnel's tasks are recorded.
-        timeout(WAIT, async {
-            while hub
-                .sessions
-                .lock()
-                .await
-                .get("c1")
-                .is_none_or(|s| s.tasks.is_empty())
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(hub.close_all().await, 1);
-
-        let mut buf = [0u8; 8];
-        let n = timeout(WAIT, socket.read(&mut buf))
-            .await
-            .expect("the resource socket must close, not stay open")
-            .unwrap_or(0);
-        assert_eq!(n, 0);
-        assert!(hub.sessions.lock().await.is_empty());
-        // Both directions are gone: what the resource sends now goes nowhere.
-        let _ = socket.write_all(b"late").await;
-        if let Ok(Some(m)) = timeout(Duration::from_millis(300), up_rx.recv()).await {
-            panic!("a closed tunnel still relayed {m:?}");
-        }
-    }
-
-    async fn tunnel_without_reader(hub: &TunnelHub) -> mpsc::Receiver<Bytes> {
-        let (inbound_tx, inbound_rx) = mpsc::channel::<Bytes>(64);
-        hub.sessions
-            .lock()
-            .await
-            .insert("c1".into(), TunnelSession::new(inbound_tx));
-        inbound_rx
-    }
-
-    /// A resource that is merely slower than the device gets every byte.
-    #[tokio::test]
-    async fn a_slow_resource_gets_every_chunk_in_order() {
-        let hub = new_hub();
-        let mut inbound_rx = tunnel_without_reader(&hub).await;
-        let feeder = {
-            let hub = hub.clone();
-            tokio::spawn(async move {
-                for i in 0..200u8 {
-                    handle_tunnel_data(hub.clone(), "c1", vec![i]).await;
-                }
-            })
-        };
-        for i in 0..200u8 {
-            if i % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            assert_eq!(inbound_rx.recv().await.unwrap(), Bytes::from(vec![i]), "chunk {i}");
-        }
-        feeder.await.unwrap();
-        assert!(hub.sessions.lock().await.contains_key("c1"));
-    }
-
-    /// A resource that stops reading ends its tunnel after the stall limit;
-    /// no chunk is dropped while the tunnel carries on.
-    #[tokio::test(start_paused = true)]
-    async fn a_stalled_resource_ends_the_tunnel_instead_of_dropping_data() {
-        let hub = new_hub();
-        let mut inbound_rx = tunnel_without_reader(&hub).await;
-        let (up_tx, mut up_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(up_tx));
-        for i in 0..65u8 {
-            handle_tunnel_data(hub.clone(), "c1", vec![i]).await;
-        }
-
-        assert!(
-            hub.sessions.lock().await.get("c1").is_none(),
-            "the tunnel carried on after a chunk could not be queued"
-        );
-        let close = up_rx.recv().await.unwrap();
-        assert!(
-            matches!(close.body, Some(Body::TunnelClose(ref c)) if c.connection_id == "c1" && !c.error.is_empty()),
-            "the connector was not told: {close:?}"
-        );
-        for i in 0..64u8 {
-            assert_eq!(inbound_rx.recv().await.unwrap(), Bytes::from(vec![i]));
-        }
-        assert!(inbound_rx.recv().await.is_none());
-    }
-
-    /// A resource that is steadily slower than the device keeps the tunnel's
-    /// queue full for the whole upload. It must still get every chunk.
-    #[tokio::test(start_paused = true)]
-    async fn a_steadily_slower_resource_completes_a_long_upload() {
-        const CHUNKS: u32 = 3000; // 30 s at one chunk per 10 ms
-        let hub = new_hub();
-        let mut inbound_rx = tunnel_without_reader(&hub).await;
-        let reader = tokio::spawn(async move {
-            let mut got = 0u32;
-            while let Some(d) = inbound_rx.recv().await {
-                assert_eq!(d, Bytes::from(got.to_be_bytes().to_vec()), "chunk {got} out of order");
-                got += 1;
-                if got == CHUNKS {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            got
-        });
-        for i in 0..CHUNKS {
-            handle_tunnel_data(hub.clone(), "c1", i.to_be_bytes().to_vec()).await;
-        }
-        assert!(
-            hub.sessions.lock().await.contains_key("c1"),
-            "a merely slow resource's tunnel was ended"
-        );
-        assert_eq!(reader.await.unwrap(), CHUNKS);
-    }
-
-    fn data(n: u8) -> ShieldControlMessage {
-        ShieldControlMessage {
-            body: Some(Body::TunnelData(TunnelData {
-                connection_id: "c1".into(),
-                data: vec![n],
-            })),
-        }
-    }
-
-    fn data_of(m: ShieldControlMessage) -> u8 {
-        match m.body {
-            Some(Body::TunnelData(d)) => d.data[0],
-            other => panic!("expected TunnelData, got {other:?}"),
-        }
-    }
-
-    /// Handover: while paused, tunnel traffic waits; then it goes out on the
-    /// new upstream, in order.
-    #[tokio::test]
-    async fn paused_traffic_goes_out_on_the_next_upstream_in_order() {
-        let hub = new_hub();
-        let (old_tx, mut old_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(old_tx));
-        assert!(hub.send_upstream(data(1)).await);
-        hub.set_upstream(None);
-        let sender = {
-            let hub = hub.clone();
-            tokio::spawn(async move {
-                assert!(hub.send_upstream(data(2)).await);
-                assert!(hub.send_upstream(data(3)).await);
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!sender.is_finished(), "sent while paused");
-        let (new_tx, mut new_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(new_tx));
-        sender.await.unwrap();
-        assert_eq!(data_of(old_rx.recv().await.unwrap()), 1);
-        assert!(old_rx.try_recv().is_err(), "the old stream got data after the pause");
-        assert_eq!(data_of(new_rx.recv().await.unwrap()), 2);
-        assert_eq!(data_of(new_rx.recv().await.unwrap()), 3);
-    }
-
-    /// A message whose stream closed under it is retried on the next one.
-    #[tokio::test]
-    async fn a_message_whose_stream_closed_is_retried_on_the_next_one() {
-        let hub = new_hub();
-        let (old_tx, old_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(old_tx));
-        drop(old_rx);
-        let sender = {
-            let hub = hub.clone();
-            tokio::spawn(async move { hub.send_upstream(data(9)).await })
-        };
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let (new_tx, mut new_rx) = mpsc::channel(8);
-        hub.set_upstream(Some(new_tx));
-        assert!(sender.await.unwrap());
-        assert_eq!(data_of(new_rx.recv().await.unwrap()), 9);
-    }
-
-    /// No upstream within the grace: the message is given up.
-    #[tokio::test(start_paused = true)]
-    async fn with_no_upstream_a_message_is_given_up_after_the_grace() {
-        let hub = new_hub();
-        assert!(!hub.send_upstream(data(1)).await);
-    }
-}
+#[path = "tunnel_tests.rs"]
+mod tests;

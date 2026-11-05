@@ -22,6 +22,15 @@ service ShieldService {
 
   // Called by shield during best-effort graceful shutdown.
   rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
+
+  // FU-9 (PENDING-21): one stream per tunnel. The shield opens it after the
+  // Connector's TunnelOpen (on Control) and after connecting to the
+  // resource. First frame shield → connector: TunnelStart. Then data both
+  // ways, then TunnelEnd or the end of the stream. HTTP/2 flow control is
+  // per stream, so a slow tunnel never holds up another one or Control.
+  // Uses mTLS — the connection_id must be a pending tunnel the Connector
+  // opened to the shield of the peer certificate.
+  rpc Tunnel(stream TunnelFrame) returns (stream TunnelFrame);
 }
 
 message EnrollRequest {
@@ -158,11 +167,14 @@ message ShieldControlMessage {
     ResourceAck resource_ack = 5;
     Pong pong = 6;
     DiscoveryReport discovery_report = 7;
-    // Connector → Shield
+    // Connector → Shield: open a tunnel (FU-9: the shield answers by opening
+    // a Tunnel stream).
     TunnelOpen tunnel_open = 8;
-    // Shield → Connector
+    // Shield → Connector: FU-9 — only for a tunnel the shield could not open
+    // (ok = false). Success is the Tunnel stream itself.
     TunnelOpened tunnel_opened = 9;
-    // Bidirectional
+    // Deprecated by FU-9: tunnel data and closes travel on the Tunnel stream.
+    // Neither side sends or handles these any more.
     TunnelData tunnel_data = 10;
     TunnelClose tunnel_close = 11;
     // Connector → Shield
@@ -217,14 +229,33 @@ message TunnelOpened {
   string error = 3; // set only on failure
 }
 
+// Deprecated by FU-9 (see ShieldControlMessage.tunnel_data).
 message TunnelData {
   string connection_id = 1;
   bytes data = 2; // raw bytes (max 16 KB chunks)
 }
 
+// Deprecated by FU-9 (see ShieldControlMessage.tunnel_close).
 message TunnelClose {
   string connection_id = 1;
   string error = 2; // empty = clean close
+}
+
+// FU-9: a frame on a Tunnel stream.
+message TunnelFrame {
+  oneof frame {
+    TunnelStart start = 1; // first frame, shield → connector only
+    bytes data = 2; // TCP: up to 16 KB of the byte stream; UDP: exactly one datagram
+    TunnelEnd end = 3; // last frame of a direction
+  }
+}
+
+message TunnelStart {
+  string connection_id = 1; // from the Connector's TunnelOpen
+}
+
+message TunnelEnd {
+  string error = 1; // empty = clean end
 }
 
 message DiscoveredService {

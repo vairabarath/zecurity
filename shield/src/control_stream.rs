@@ -428,6 +428,8 @@ async fn run_once(
     // D21-R A′: a Connector the stored CRL lists gets nothing.
     refuse_listed_connector(crl, &connector_id)?;
     tunnel_hub.set_upstream(Some(out_tx.clone()));
+    // FU-9: tunnel streams open on this connection.
+    tunnel_hub.set_client(Some(client.clone()));
 
     info!(
         shield_id = %state.shield_id,
@@ -488,7 +490,7 @@ async fn run_once(
                         ).await {
                             None => {}
                             // The certificate was renewed: move to a stream
-                            // with it, keeping the tunnels (Fix 14, D-1 = B).
+                            // with it, keeping the tunnels (Fix 14, FU-9).
                             Some(Ok(())) => {
                                 if !hand_over(
                                     state,
@@ -509,7 +511,7 @@ async fn run_once(
                                     // (the tunnels are closed).
                                     return Ok(());
                                 }
-                                let tunnels = tunnel_hub.len().await;
+                                let tunnels = tunnel_hub.len();
                                 info!(
                                     shield_id = %state.shield_id,
                                     tunnels,
@@ -577,15 +579,20 @@ async fn run_once(
     }
 }
 
-/// Fix 14 (D-1 = B): after a renewal, move from the current Control stream to
-/// one opened with the new certificate, to the same Connector, keeping every
-/// tunnel (make before break). In order:
+/// Fix 14 (D-1 = B), FU-9: after a renewal, move from the current Control
+/// stream to one opened with the new certificate, to the same Connector,
+/// keeping every tunnel (make before break). In order:
 /// 1. open the new stream — the Connector registers it before answering;
-/// 2. pause tunnel traffic and half-close the old stream: the Connector gets
-///    everything sent on it, then its end, and hands the sessions over;
-/// 3. read the old stream to its end (the Connector's last device data comes
-///    on it) before reading anything from the new one;
-/// 4. resume tunnel traffic on the new stream.
+/// 2. make the new connection current for new tunnel streams, pause
+///    refusals, and half-close the old stream: the Connector moves the
+///    tunnels to the new stream;
+/// 3. read the old stream to its end (tunnel coordination the Connector
+///    queued on it, e.g. a TunnelOpen, still applies);
+/// 4. resume refusals on the new stream.
+///
+/// Tunnel data never rides Control: each tunnel keeps its own stream on the
+/// old connection, which closes after the last of them ends (no tunnel keeps
+/// a client handle).
 ///
 /// Returns false, changing nothing, when the new stream cannot be opened to
 /// the same Connector; the caller then reconnects as before. An error after
@@ -628,6 +635,10 @@ async fn hand_over(
     };
 
     hub.set_upstream(None);
+    // FU-9: new tunnels open on the new connection from now on. Tunnels
+    // already open keep running on the old one, which closes after its last
+    // stream ends (no tunnel keeps a client handle).
+    hub.set_client(Some(new_client.clone()));
     drop(std::mem::replace(out_tx, new_out_tx));
     let mut old_inbound = std::mem::replace(inbound, new_inbound);
     let old_client = std::mem::replace(client, new_client);
@@ -679,13 +690,12 @@ struct CloseTunnelsOnDrop(TunnelHub);
 
 impl Drop for CloseTunnelsOnDrop {
     fn drop(&mut self) {
-        let hub = self.0.clone();
-        tokio::spawn(async move {
-            let closed = hub.close_all().await;
-            if closed > 0 {
-                info!(closed, "Control stream ended: its tunnels were closed");
-            }
-        });
+        self.0.set_client(None);
+        self.0.set_upstream(None);
+        let closed = self.0.close_all();
+        if closed > 0 {
+            info!(closed, "Control stream ended: its tunnels were closed");
+        }
     }
 }
 
@@ -849,22 +859,17 @@ async fn handle_connector_msg(
                 .await;
                 return None;
             }
-            tunnel::handle_tunnel_open(
-                tunnel_hub,
-                open.connection_id,
-                open.destination,
-                open.port,
-                open.protocol,
-            )
-            .await;
+            tunnel::handle_tunnel_open(tunnel_hub, open).await;
             None
         }
-        Some(Body::TunnelData(data)) => {
-            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data).await;
-            None
-        }
+        // FU-9: the Connector aborted a tunnel (FU-15 revocation, its session
+        // ended). Tunnel data never comes on Control any more.
         Some(Body::TunnelClose(close)) => {
-            tunnel::handle_tunnel_close(tunnel_hub, &close.connection_id).await;
+            tunnel::abort_tunnel(&tunnel_hub, &close.connection_id);
+            None
+        }
+        Some(Body::TunnelData(_)) => {
+            debug!("ignored legacy TunnelData on Control");
             None
         }
         // D21-R (a2): peers come only from the controller-signed list in
@@ -2326,10 +2331,17 @@ mod tests {
                 port_from: port,
                 port_to: port,
             });
+        // Allowed: the Shield connects to the resource (FU-9: then it opens
+        // the tunnel's stream; this hub has no Connector client, so that
+        // part is reported as a failure).
         assert!(send!(open("t-2", port)).await.is_none());
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the resource is connected")
+            .unwrap();
         assert_eq!(
             opened(up_rx.recv().await.unwrap()),
-            ("t-2".to_string(), true)
+            ("t-2".to_string(), false)
         );
         let other = if port == u16::MAX { port - 1 } else { port + 1 };
         assert!(send!(open("t-3", other)).await.is_none());

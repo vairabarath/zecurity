@@ -278,6 +278,17 @@ mod bootstrap {
             Err(Status::unimplemented("not used in enrollment tests"))
         }
 
+        type TunnelStream = std::pin::Pin<
+            Box<dyn tokio_stream::Stream<Item = Result<fake::TunnelFrame, Status>> + Send>,
+        >;
+
+        async fn tunnel(
+            &self,
+            _request: Request<tonic::Streaming<fake::TunnelFrame>>,
+        ) -> Result<Response<Self::TunnelStream>, Status> {
+            Err(Status::unimplemented("not used in enrollment tests"))
+        }
+
         async fn goodbye(
             &self,
             _request: Request<fake::GoodbyeRequest>,
