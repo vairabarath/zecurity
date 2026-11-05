@@ -469,10 +469,12 @@ The list required by the approval is in §11 with the results.
 - **The reliable-abort change and the 512 default came after the live run** (2026-11-04, from the final review). They were validated by unit, real-server integration and mutation tests, not on the lab hosts. The live builds used the earlier `try_send` abort; L7 and L8 did not congest Control, so their results are unaffected.
 
 ### Untested
-- **Certificate expiry:** a tunnel's end at its connection certificate's expiry. L5's tunnel ended first.
-- **Dead-peer keepalive:** the HTTP/2 ping.
-- **UDP through a real client:** the client does not route UDP. UDP was exercised only by the namespace harness and unit tests.
-- **Mixed versions.**
+- **Certificate expiry:** a tunnel's end at its connection certificate's expiry. L5's tunnel ended first. *Tested live 2026-11-05 (LT-5): pass; the tunnel kept across a renewal ended ~5 s after the old certificate's recorded expiry.*
+- **Dead-peer keepalive:** the HTTP/2 ping. *Tested live 2026-11-05 (LT-1): detection passes (shield +39–46 s, connector +51 s); the failed tunnel's device stream ends gracefully instead of with a reset (FU-17).*
+- **UDP through a real client:** the client does not route UDP. UDP was exercised only by the namespace harness and unit tests. *Still untested.*
+- **Mixed versions.** *Tested live 2026-11-05 (LT-6): a pre-FU-9 shield gets a clear refusal on the connector, and the client errors in 10 ms with no hang.*
+
+Record: [[Sprint22/Live-Run-Gaps-2026-11-05]].
 
 ### Separate finding: FU-16 (not FU-9)
 **L7, a member removed mid-download, and L8:**

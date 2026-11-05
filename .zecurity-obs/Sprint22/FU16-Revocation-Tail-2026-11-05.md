@@ -217,6 +217,15 @@ on a closed connection, so the per-read gate is defence in depth. That's also wh
 
 ## Limitations
 
+> **Update 2026-11-05 (live run [[Sprint22/Live-Run-Gaps-2026-11-05]]):**
+> - The relay path, a connection lost without a close frame and a shield-route resource were tested live.
+> - Shield route (LT-4): pass.
+> - Lost without a close frame, by silent drop or SIGKILL (LT-2): the flow ends at the 30 s idle timeout, and the baseline client behaves the same. R1 applies only when the peer sends a close, not on an idle timeout.
+> - Relay path:
+>   - revocation and relay crash: pass;
+>   - a connector stop behind the relay: tails of 1.7–4.0 MB and a silent hang until +61–66 s, mainly because the connector does not close its relay connection on shutdown (FU-18).
+> - The items below are kept as written at the time.
+
 - **Relay path not measured live.** The lab run used the direct (connector) path. The
   relay path's connection-loss watch is covered by code review and shares
   `WatchedStream`; its reset is not watched (Trade-offs).
