@@ -12,10 +12,10 @@ import (
 )
 
 type mockChecker struct {
-	name     string
-	critical bool
-	status   ComponentStatus
-	err      error
+	name        string
+	critical    bool
+	status      ComponentStatus
+	err         error
 	invocations atomic.Int64
 }
 
@@ -280,5 +280,30 @@ func TestPublicHealth_DatabaseOnly(t *testing.T) {
 	db.status = ComponentStatus{Status: "down"}
 	if c := get(reg.PublicHealthHandler(), "/health"); c != http.StatusServiceUnavailable {
 		t.Fatalf("/health with database down = %d, want 503", c)
+	}
+}
+
+type ctxChecker struct{}
+
+func (ctxChecker) Name() string     { return "database" }
+func (ctxChecker) IsCritical() bool { return true }
+func (ctxChecker) Check(ctx context.Context) (ComponentStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return ComponentStatus{}, err
+	}
+	return ComponentStatus{Status: "up"}, nil
+}
+
+// A caller that aborts its probe must not cache "not_ready" for everyone else.
+func TestEvaluate_CallerCancellationNotCached(t *testing.T) {
+	reg := NewRegistry(time.Second, time.Minute)
+	reg.Register(ctxChecker{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := reg.Evaluate(ctx).Status; got != "ready" {
+		t.Fatalf("checks inherited the caller's cancellation: %s", got)
+	}
+	if got := reg.Evaluate(context.Background()).Status; got != "ready" {
+		t.Fatalf("cached status = %s, want ready", got)
 	}
 }

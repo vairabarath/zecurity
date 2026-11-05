@@ -30,10 +30,10 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			ctx,
 			req.Method,
 			trace.WithSpanKind(trace.SpanKindServer),
+			// No raw path (may carry IDs or tokens) and no client-supplied Host
+			// header: the route pattern is recorded below as http.route.
 			trace.WithAttributes(
 				attribute.String("http.method", req.Method),
-				attribute.String("http.target", req.URL.Path),
-				attribute.String("http.host", req.Host),
 			),
 		)
 		defer span.End()

@@ -111,7 +111,10 @@ func (r *Registry) Evaluate(ctx context.Context) *DiagnosticReport {
 		Components: make(map[string]ComponentStatus, len(r.checkers)),
 	}
 
-	checkCtx, cancel := context.WithTimeout(ctx, r.checkTimeout)
+	// The result is cached and served to every caller for cacheTTL, so the
+	// checks must not inherit the triggering request's cancellation: a client
+	// that aborts its probe would otherwise cache "not_ready" for everyone.
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.checkTimeout)
 	defer cancel()
 
 	type checkResult struct {

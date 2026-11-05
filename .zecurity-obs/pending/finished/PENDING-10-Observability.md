@@ -241,13 +241,17 @@ Live test on the real lab (controller with luffy's connector and the system clie
 ### Fix: dashboard queries
 12 of 22 queries returned nothing: six wrong metric names (`relay_capacity_total_*`, `connector_acl_lag_seconds` ×3, `pki_rotations_total` didn't exist, `outbox_events_dead_letter_total`), `{{cert_type}}` legends, the processed panel grouped by `event_type` (label is `status`), and the scrape-job regex. All fixed; the ACL lag panel is in versions. Cosmetic: log line "metrics listenin on" fixed.
 
+### Fix: security review after push (2026-11-05)
+- `internal/health/health.go` `Evaluate`: the checks ran in the triggering request's context, and the result is cached for every caller. A client aborting its `/readyz` request cancelled the checks and cached `not_ready` for 1 s, so repeated aborted probes could make a load balancer drop the controller. Checks now run in `context.WithoutCancel(ctx)` with the 2 s timeout. Test `TestEvaluate_CallerCancellationNotCached`.
+- `internal/telemetry/http.go`: spans recorded `http.target` (raw path, which carries invitation tokens on `/api/invitations/{token}`) and `http.host` (client-supplied Host). Both are gone; `http.route` (the pattern) remains. Asserted in `TestHTTPMiddleware_SpanNamedByRoute`.
+
 ### Regression guards
 - `internal/metrics/monitoring_refs_test.go`: every metric and label used by `alerts.yaml` and the dashboards must be exported by the controller (`up` and `probe_success` allowed). It fails on the pre-fix files.
 - `deploy/monitoring/alerts_test.yaml`: promtool tests (healthy controller fires nothing; stuck rotation warns then goes invalid; pool exhaustion; dead letter; ACL lag).
 - Unit tests for the scrape-time cert collector, route-pattern HTTP labels and span names, endpoint forms, the service name, and `/health` with Valkey down.
 
 ### Gate and live re-run (2026-11-05)
-- `go test -count=1 ./...` with every `*_TEST_DATABASE_URL` and `AUTH_TEST_VALKEY_URL` set: **1704 pass, 0 fail**, the 2 usual skips. `go vet` clean. promtool `check rules` and `test rules` pass.
+- `go test -count=1 ./...` with every `*_TEST_DATABASE_URL` and `AUTH_TEST_VALKEY_URL` set: **1705 pass (after the security-review fix), 0 fail**, the 2 usual skips. `go vet` clean. promtool `check rules` and `test rules` pass.
 - Live, controller built from the branch tip (binary sha checked):
   - cert gauges real for all three entities (CA runway in years, valid 1); `pki_rotations_total` present.
   - `connector_active_count 1` = `connector_active_streams 1`.

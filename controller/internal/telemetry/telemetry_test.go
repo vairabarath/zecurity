@@ -160,6 +160,13 @@ func TestHTTPMiddleware_SpanNamedByRoute(t *testing.T) {
 	for _, s := range rec.Ended() {
 		names = append(names, s.Name())
 	}
+	for _, sp := range rec.Ended() {
+		for _, kv := range sp.Attributes() {
+			if k := string(kv.Key); k == "http.target" || k == "http.host" {
+				t.Fatalf("span %s records %s=%s (raw path / client Host)", sp.Name(), k, kv.Value.Emit())
+			}
+		}
+	}
 	want := []string{"GET /provider/relays/{id}", "POST /graphql", "GET unmatched"}
 	if strings.Join(names, "|") != strings.Join(want, "|") {
 		t.Fatalf("span names = %v, want %v", names, want)
