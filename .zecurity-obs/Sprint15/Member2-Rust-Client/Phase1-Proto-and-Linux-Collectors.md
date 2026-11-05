@@ -225,3 +225,39 @@ not authoritative, config without legacy, legacy iptables error returned, ACCEPT
 input policy DROP (…)`, profile satisfied, tunnel 200; `sudo ufw disable` → `FAIL ufw disabled (/etc/ufw/ufw.conf)`,
 profile unsatisfied, tunnel refused.
 
+
+### Fix: the ufw config fallback passed with ufw.service inactive (2026-11-05, PENDING-16 live run)
+**Issue:** on this PC (iptables-legacy) the system client service reported `linux.firewall.active` PASS with
+`ufw enabled per /etc/ufw/ufw.conf, default input policy DROP (iptables-legacy: runtime rules not readable)`, while
+`ufw status` (root) said `inactive` and the live IPv4/IPv6 `INPUT` policy was `ACCEPT`. A profile requiring the
+firewall let an unprotected device through.
+
+**Root Cause:** the F-1 fallback above trusted `ufw.conf` alone; its accepted gap assumed `ENABLED` always tracks
+the runtime state. It doesn't when `ufw.service` is disabled: the config says `ENABLED=yes`, but nothing loads
+ufw's rules at boot (`systemctl show ufw` → `UnitFileState=disabled`, `ActiveState=inactive`). The daemon can't read
+the real rules: with only `CAP_NET_ADMIN` (as the daemon's user, via `setpriv`), `iptables -S` can't open
+`/run/xtables.lock` and `iptables-save` says `you must be root`; with `CAP_NET_RAW` added, `iptables-save` works.
+
+**Fix Applied (`client/src/posture.rs`; user decision: also require `ufw.service`, no new capability):**
+```rust
+// BEFORE: legacy → ufw_config_default_deny(root)        // ENABLED=yes + DROP|REJECT → PASS
+// AFTER:  legacy → ufw_config_default_deny(root, ufw_service_state(runner).await.as_deref())
+// ufw_service_state: `systemctl is-active ufw.service` stdout (unprivileged; exits 3 when not active)
+//   ENABLED=yes + DROP|REJECT + "active" → PASS "…, ufw.service active (…)"
+//   ENABLED=yes + DROP|REJECT + other    → FAIL "ufw enabled in /etc/ufw/ufw.conf but ufw.service is <state>,
+//                                            so its rules can't be confirmed as loaded (fix: systemctl enable --now ufw)"
+//   ENABLED=yes + DROP|REJECT + no state → FAIL "… can't be checked (systemctl unavailable)"
+//   ENABLED=no or ACCEPT                  → FAIL as before
+```
+Known limits (accepted): `ufw enable` runs `ufw-init` itself and never starts the unit (`frontend.set_enabled` →
+`start_firewall`), so with the unit inactive an enabled ufw fails closed until `systemctl enable --now ufw`; no
+unprivileged signal shows ufw's rules (`/run/ufw.lock` is made by any ufw command). A manual
+`iptables -P INPUT ACCEPT` after boot is still not seen.
+
+**Tests (`client/src/posture_tests.rs`):** the legacy fixture now has `ufw.service` active, so the PASS test means
+"running ufw passes" and asserts the detail; new: `inactive` / `failed` / `activating` → FAIL naming the state;
+`systemctl` missing or silent → FAIL. 2/2 mutants killed (service state ignored; systemd never asked). Client
+341 pass.
+
+**Live (2026-11-05, this PC, system `zecurity-client.service`):** before → `PASS ufw enabled per …`; after →
+`FAIL ufw enabled in /etc/ufw/ufw.conf but ufw.service is inactive, …`; a "Firewall on" profile previews 0 of 1.

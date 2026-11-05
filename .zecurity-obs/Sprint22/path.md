@@ -774,6 +774,15 @@ token reissue now asserts `no-store`.
 `Cache-Control: no-store`; `connector.create` / `connector.token.issue` / `connector.delete` /
 `device_profile.requirement.add` rows with actor and details, no token; logout + login → `Zecurity is up.`, exit 0.
 
+### Fix: the F-1 ufw config fallback passed with ufw.service inactive (2026-11-05)
+Found in the PENDING-16 live run on this PC (iptables-legacy): `linux.firewall.active` PASSed from `ufw.conf`
+(`ENABLED=yes`, `DROP`) while ufw was inactive and `INPUT` was `ACCEPT`, because `ufw.service` is disabled and nothing
+loads the rules at boot. `client/src/posture.rs`: the legacy config fallback now also needs `systemctl is-active
+ufw.service` = `active` (unprivileged; user decision, no new capability), else FAIL naming the state. An enabled ufw
+with the unit inactive fails closed until `systemctl enable --now ufw`. Client 341 pass, 2/2 mutants; live
+PASS → FAIL. Branch `fix/posture-ufw-service-active`. Details in
+`Sprint15/Member2-Rust-Client/Phase1-Proto-and-Linux-Collectors.md` → Post-Phase Fixes.
+
 ### Fix: live E2E run — connector restart outage (F-3) and `status` tunnel line (O-5)
 Found in journey 3 of the live E2E run (2026-10-29, record `Sprint22/Live-E2E-Run-2026-10-29.md`). Branch
 `fix/e2e-live-findings`.

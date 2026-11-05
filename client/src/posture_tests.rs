@@ -338,6 +338,10 @@ fn legacy_unprivileged_responses() -> HashMap<String, io::Result<Output>> {
         FakeCommandRunner::key("ufw", &["status"]),
         make_output(1, ""),
     );
+    responses.insert(
+        FakeCommandRunner::key("systemctl", &["is-active", "ufw.service"]),
+        make_output(0, "active\n"),
+    );
     responses
 }
 
@@ -373,7 +377,8 @@ async fn firewall_pass_on_legacy_host_with_ufw_enabled_by_config() {
             result.detail
         );
         assert!(
-            result.detail.contains("ufw enabled per /etc/ufw/ufw.conf"),
+            result.detail.contains("ufw enabled per /etc/ufw/ufw.conf")
+                && result.detail.contains("ufw.service active"),
             "{}",
             result.detail
         );
@@ -394,6 +399,49 @@ async fn firewall_fail_on_legacy_host_with_ufw_disabled_or_accepting() {
             "{enabled}/{policy}: {}",
             result.detail
         );
+    }
+}
+
+/// ufw.conf says enabled + DROP but ufw.service never ran (disabled unit), so
+/// no rules are loaded and inbound is open. Found live 2026-11-05: the check
+/// reported PASS on a host with INPUT policy ACCEPT. `systemctl is-active`
+/// prints the state and exits 3 for anything but active.
+#[tokio::test]
+async fn firewall_fail_on_legacy_host_when_ufw_service_not_active() {
+    for state in ["inactive", "failed", "activating"] {
+        let root = ufw_root("yes", "DROP");
+        let mut responses = legacy_unprivileged_responses();
+        responses.insert(
+            FakeCommandRunner::key("systemctl", &["is-active", "ufw.service"]),
+            make_output(3, &format!("{state}\n")),
+        );
+        let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), root.path()).await;
+        assert_eq!(result.status, CheckStatus::Fail as i32, "{state}: {}", result.detail);
+        assert!(
+            result.detail.contains(&format!("ufw.service is {state}")),
+            "{}",
+            result.detail
+        );
+    }
+}
+
+/// Without systemctl the config alone can't show the rules are loaded: fail
+/// closed rather than trust ufw.conf.
+#[tokio::test]
+async fn firewall_fail_on_legacy_host_when_ufw_service_state_unknown() {
+    for systemctl in [
+        Err(io::Error::from(io::ErrorKind::NotFound)),
+        make_output(1, ""),
+    ] {
+        let root = ufw_root("yes", "DROP");
+        let mut responses = legacy_unprivileged_responses();
+        responses.insert(
+            FakeCommandRunner::key("systemctl", &["is-active", "ufw.service"]),
+            systemctl,
+        );
+        let result = collect_firewall(Arc::new(FakeCommandRunner { responses }), root.path()).await;
+        assert_eq!(result.status, CheckStatus::Fail as i32, "{}", result.detail);
+        assert!(result.detail.contains("can't be checked"), "{}", result.detail);
     }
 }
 
