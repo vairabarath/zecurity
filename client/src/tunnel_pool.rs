@@ -482,7 +482,14 @@ impl TunnelPool {
             stable_id: conn.stable_id(),
             rx_at_open: conn.stats().udp_rx.datagrams,
         };
-        Ok((Box::new(tokio::io::join(recv, send)), probe))
+        // FU-16: the stream fails as soon as its connection is gone or it is
+        // reset, even while the relay is not reading (see stream_watch).
+        let stream = crate::stream_watch::WatchedStream::new(
+            tokio::io::join(crate::stream_watch::ResetAwareRecv(recv), send),
+            crate::stream_watch::quic_connection_gone(&conn),
+            true,
+        );
+        Ok((Box::new(stream), probe))
     }
 
     /// Fix 05-B: drop the pooled connection for `addr` from future selection
