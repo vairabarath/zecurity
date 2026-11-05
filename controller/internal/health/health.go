@@ -356,12 +356,15 @@ func (r *Registry) PublicHealthzHandler() http.Handler {
 	})
 }
 
-// PublicHealthHandler preserves backward compatibility for the legacy /health endpoint.
+// PublicHealthHandler preserves the legacy /health contract: it reflects the
+// database only (it used to be a bare db.Pool.Ping), so a Valkey, PKI or outbox
+// problem doesn't take a controller out of an external load balancer that
+// still probes /health. Use /readyz for full readiness.
 func (r *Registry) PublicHealthHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		report := r.Evaluate(req.Context())
 		w.Header().Set("Content-Type", "application/json")
-		if report.Status == "ready" {
+		if report.Components["database"].Status == "up" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		} else {

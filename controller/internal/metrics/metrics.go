@@ -22,6 +22,8 @@ package metrics
 import (
 	"math"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -98,7 +100,7 @@ var (
 
 	relayActiveCount = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "relay_active_count",
-		Help: "Number of active relays currently heartbeating within threshold.",
+		Help: "Relays with status active in the database (heartbeat freshness is tracked in Valkey, not here).",
 	})
 
 	relayConnectionsTotal = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -134,7 +136,7 @@ var (
 
 	connectorActiveCount = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "connector_active_count",
-		Help: "Number of active connectors registered in the database.",
+		Help: "Connectors in active workspaces with status active, not revoked, and a heartbeat within the disconnect threshold.",
 	})
 
 	connectorACLLag = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -144,15 +146,12 @@ var (
 	})
 
 	// ── PKI & Certificate Runway (PENDING-10 Phase 2) ───────────────────────
-	certRunway = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cert_runway_seconds",
-		Help: "Time remaining until certificate expiration in seconds.",
-	}, []string{"entity"}) // entity: "controller_grpc", "intermediate_ca", "root_ca"
-
-	certValid = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "cert_valid",
-		Help: "Certificate validity indicator (1 = valid and within validity window, 0 = expired, not yet valid, or missing).",
-	}, []string{"entity"}) // entity: "controller_grpc", "intermediate_ca", "root_ca"
+	// cert_runway_seconds, cert_valid and cert_lifetime_seconds are computed at
+	// scrape time by certs (below) so the runway keeps falling between rotations.
+	pkiRotations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pki_rotations_total",
+		Help: "Controller certificate rotation attempts by entity and outcome.",
+	}, []string{"entity", "status"}) // entity: "controller_grpc"; status: "ok", "error"
 
 	// ── Outbox Pipeline Metrics (PENDING-10 Phase 2) ────────────────────────
 	outboxEventsPublished = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -210,58 +209,63 @@ var (
 	}, []string{"grpc_service", "grpc_method"})
 )
 
+// appCollectors are the controller's own collectors (runtime collectors are
+// registered separately). Tests describe these to check that every metric the
+// alert rules and dashboard reference actually exists.
+var appCollectors = []prometheus.Collector{
+	// Reconciler
+	reconcileReports,
+	reconcileDriftDetected,
+	reconcileResyncs,
+	reconcileTombstonesReaped,
+	reconcileShieldsDrifting,
+	reconcileTombstonesPending,
+	discoveryRequests,
+	geoipDatabaseBuild,
+
+	// ACL Compiler
+	aclCompileDuration,
+	aclCompiles,
+	policyNotifications,
+
+	// Relay Fleet
+	relayHeartbeats,
+	relayActiveCount,
+	relayConnectionsTotal,
+	relayCapacityMax,
+	relayCapacityUtilization,
+	relayCapacityTransitions,
+
+	// Connector Fleet
+	connectorHeartbeats,
+	connectorActiveStreams,
+	connectorActiveCount,
+	connectorACLLag,
+
+	// PKI
+	certs,
+	pkiRotations,
+
+	// Outbox
+	outboxEventsPublished,
+	outboxEventsProcessed,
+	outboxEventsPending,
+	outboxDeadLetterTotal,
+	outboxOldestPendingAge,
+
+	// DB Pool
+	dbPoolConnections,
+
+	// HTTP & gRPC
+	httpRequests,
+	httpRequestDuration,
+	grpcCalls,
+	grpcDuration,
+}
+
 func init() {
+	registry.MustRegister(appCollectors...)
 	registry.MustRegister(
-		// Reconciler
-		reconcileReports,
-		reconcileDriftDetected,
-		reconcileResyncs,
-		reconcileTombstonesReaped,
-		reconcileShieldsDrifting,
-		reconcileTombstonesPending,
-		discoveryRequests,
-		geoipDatabaseBuild,
-
-		// ACL Compiler
-		aclCompileDuration,
-		aclCompiles,
-		policyNotifications,
-
-		// Relay Fleet
-		relayHeartbeats,
-		relayActiveCount,
-		relayConnectionsTotal,
-		relayCapacityMax,
-		relayCapacityUtilization,
-		relayCapacityTransitions,
-
-		// Connector Fleet
-		connectorHeartbeats,
-		connectorActiveStreams,
-		connectorActiveCount,
-		connectorACLLag,
-
-		// PKI
-		certRunway,
-		certValid,
-
-		// Outbox
-		outboxEventsPublished,
-		outboxEventsProcessed,
-		outboxEventsPending,
-		outboxDeadLetterTotal,
-		outboxOldestPendingAge,
-
-		// DB Pool
-		dbPoolConnections,
-
-		// HTTP & gRPC
-		httpRequests,
-		httpRequestDuration,
-		grpcCalls,
-		grpcDuration,
-
-		// Runtime
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -290,10 +294,10 @@ func init() {
 	outboxEventsProcessed.WithLabelValues("retryable_failure")
 	outboxEventsProcessed.WithLabelValues("dead_letter")
 
-	for _, entity := range []string{"controller_grpc", "intermediate_ca", "root_ca"} {
-		certRunway.WithLabelValues(entity)
-		certValid.WithLabelValues(entity)
-	}
+	// Cert series are NOT pre-populated: an entity nobody has reported yet is
+	// absent, never a 0 that reads as "expired and invalid".
+	pkiRotations.WithLabelValues("controller_grpc", "ok")
+	pkiRotations.WithLabelValues("controller_grpc", "error")
 
 	for _, state := range []string{"acquired", "idle", "total", "max"} {
 		dbPoolConnections.WithLabelValues(state)
@@ -302,10 +306,10 @@ func init() {
 
 // ── Reconciler instrumentation ──────────────────────────────────────────────
 
-func ReconcileReport()             { reconcileReports.Inc() }
-func DriftDetected(kind string)    { reconcileDriftDetected.WithLabelValues(kind).Inc() }
-func Resync()                      { reconcileResyncs.Inc() }
-func TombstoneReaped()             { reconcileTombstonesReaped.Inc() }
+func ReconcileReport()          { reconcileReports.Inc() }
+func DriftDetected(kind string) { reconcileDriftDetected.WithLabelValues(kind).Inc() }
+func Resync()                   { reconcileResyncs.Inc() }
+func TombstoneReaped()          { reconcileTombstonesReaped.Inc() }
 func SetReconcileGauges(drifting, pending int) {
 	reconcileShieldsDrifting.Set(float64(drifting))
 	reconcileTombstonesPending.Set(float64(pending))
@@ -378,7 +382,7 @@ func SetConnectorActiveStreams(count int) {
 	connectorActiveStreams.Set(float64(count))
 }
 
-// SetConnectorActiveCount updates the total count of active connectors in the workspace fleet.
+// SetConnectorActiveCount updates the count of live connectors (see the metric help).
 func SetConnectorActiveCount(count int) {
 	connectorActiveCount.Set(float64(count))
 }
@@ -393,20 +397,74 @@ func RecordConnectorACLLag(expectedVersion, reportedVersion uint64) {
 
 // ── PKI & Certificate Runway ────────────────────────────────────────────────
 
-// SetCertRunway updates runway (seconds to expiry) and validity indicator for a certificate entity.
+// SetCertRunway records the validity window of a certificate entity
+// ("controller_grpc", "intermediate_ca", "root_ca"). Runway and validity are
+// computed from it at every scrape, so they stay current between calls.
+// valid=false forces cert_valid to 0 (e.g. a failed chain check).
 func SetCertRunway(entity string, notBefore, notAfter time.Time, valid bool) {
-	now := time.Now().UTC()
-	runway := notAfter.Sub(now).Seconds()
-	if runway < 0 {
-		runway = 0
-	}
-	certRunway.WithLabelValues(entity).Set(runway)
+	certs.set(entity, certWindow{notBefore: notBefore, notAfter: notAfter, valid: valid})
+}
 
-	isValid := 0.0
-	if valid && now.After(notBefore) && now.Before(notAfter) {
-		isValid = 1.0
+// RecordPKIRotation counts a certificate rotation attempt.
+func RecordPKIRotation(entity string, err error) {
+	status := "ok"
+	if err != nil {
+		status = "error"
 	}
-	certValid.WithLabelValues(entity).Set(isValid)
+	pkiRotations.WithLabelValues(entity, status).Inc()
+}
+
+type certWindow struct {
+	notBefore, notAfter time.Time
+	valid               bool
+}
+
+// certCollector emits the cert gauges from the recorded windows at scrape time.
+type certCollector struct {
+	mu      sync.RWMutex
+	windows map[string]certWindow
+	now     func() time.Time
+
+	runway, valid, lifetime *prometheus.Desc
+}
+
+var certs = &certCollector{
+	windows:  map[string]certWindow{},
+	now:      time.Now,
+	runway:   prometheus.NewDesc("cert_runway_seconds", "Time remaining until certificate expiration in seconds (0 once expired).", []string{"entity"}, nil),
+	valid:    prometheus.NewDesc("cert_valid", "Certificate validity indicator (1 = valid and within its validity window, 0 = expired, not yet valid, or failed validation).", []string{"entity"}, nil),
+	lifetime: prometheus.NewDesc("cert_lifetime_seconds", "Total validity window (notAfter - notBefore) of the current certificate in seconds.", []string{"entity"}, nil),
+}
+
+func (c *certCollector) set(entity string, w certWindow) {
+	c.mu.Lock()
+	c.windows[entity] = w
+	c.mu.Unlock()
+}
+
+func (c *certCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.runway
+	ch <- c.valid
+	ch <- c.lifetime
+}
+
+func (c *certCollector) Collect(ch chan<- prometheus.Metric) {
+	now := c.now()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for entity, w := range c.windows {
+		runway := w.notAfter.Sub(now).Seconds()
+		if runway < 0 {
+			runway = 0
+		}
+		valid := 0.0
+		if w.valid && now.After(w.notBefore) && now.Before(w.notAfter) {
+			valid = 1.0
+		}
+		ch <- prometheus.MustNewConstMetric(c.runway, prometheus.GaugeValue, runway, entity)
+		ch <- prometheus.MustNewConstMetric(c.valid, prometheus.GaugeValue, valid, entity)
+		ch <- prometheus.MustNewConstMetric(c.lifetime, prometheus.GaugeValue, w.notAfter.Sub(w.notBefore).Seconds(), entity)
+	}
 }
 
 // ── Outbox Pipeline Metrics ─────────────────────────────────────────────────
@@ -449,6 +507,7 @@ func SetDBPoolStats(acquired, idle, total, max int32) {
 // ── HTTP & gRPC Server Metrics ──────────────────────────────────────────────
 
 // RecordHTTPRequest records an incoming HTTP request duration and status.
+// handler must be a route pattern, never a raw path (cardinality rule).
 func RecordHTTPRequest(method, handler, statusCode string, duration time.Duration) {
 	httpRequests.WithLabelValues(method, handler, statusCode).Inc()
 	httpRequestDuration.WithLabelValues(handler).Observe(duration.Seconds())
@@ -459,6 +518,55 @@ func RecordGRPCCall(service, method, code string, duration time.Duration) {
 	grpcCalls.WithLabelValues(service, method, code).Inc()
 	grpcDuration.WithLabelValues(service, method).Observe(duration.Seconds())
 }
+
+// HTTPMiddleware records http_requests_total and http_request_duration_seconds.
+// It must wrap the http.ServeMux directly: the mux sets Request.Pattern on the
+// request it receives, and the handler label is that route pattern ("unmatched"
+// when no route matched), never the raw path, which carries IDs. The method
+// label is folded to a fixed set for the same reason.
+func HTTPMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		handler := r.Pattern
+		if handler == "" {
+			handler = "unmatched"
+		}
+		RecordHTTPRequest(boundedMethod(r.Method), handler, strconv.Itoa(sw.status), time.Since(start))
+	})
+}
+
+func boundedMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return m
+	}
+	return "other"
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.status = code
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach Flush/Hijack on the real writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // ── Exposition ──────────────────────────────────────────────────────────────
 
@@ -474,4 +582,3 @@ func SetGeoIPBuild(build time.Time) {
 func Handler() http.Handler {
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }
-

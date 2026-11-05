@@ -5,12 +5,17 @@
 //  1. Tracing is opt-in: configured ONLY when OTEL_EXPORTER_OTLP_ENDPOINT is non-empty.
 //  2. When disabled, uses a global no-op provider with zero background workers,
 //     zero network connections, and negligible memory overhead.
-//  3. Implements W3C TraceContext propagation across HTTP, gRPC unary, gRPC streaming,
-//     and asynchronous outbox workers.
+//  3. Implements W3C TraceContext propagation across HTTP, gRPC unary and gRPC
+//     streaming. Outbox dispatch spans start a new trace: the outbox does not
+//     store the publishing request's trace context.
 package telemetry
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -62,15 +67,9 @@ func Init(ctx context.Context, serviceName string) (shutdown func(context.Contex
 		return func(context.Context) error { return nil }, nil
 	}
 
-	opts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(endpoint),
-	}
-
-	// Support insecure plaintext endpoint in local development / testing
-	if strings.EqualFold(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"), "true") ||
-		strings.HasPrefix(endpoint, "localhost") ||
-		strings.HasPrefix(endpoint, "127.0.0.1") {
-		opts = append(opts, otlptracegrpc.WithInsecure())
+	opts, err := exporterOptions(endpoint, os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"))
+	if err != nil {
+		return nil, err
 	}
 
 	exporter, err := otlptracegrpc.New(ctx, opts...)
@@ -78,17 +77,16 @@ func Init(ctx context.Context, serviceName string) (shutdown func(context.Contex
 		return nil, err
 	}
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceNameKey.String(serviceName),
-			attribute.String("platform", "zecurity"),
-		),
-	)
+	// Export failures are otherwise dropped silently by the batch processor.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		log.Printf("telemetry: %v", err)
+	}))
+
+	res, err := newResource(serviceName)
 	if err != nil {
-		res = resource.Default()
+		log.Printf("telemetry: resource: %v (exporting with service.name=%s only)", err, serviceName)
 	}
+	log.Printf("telemetry: tracing enabled, OTLP gRPC export to %s as service %s", endpoint, serviceName)
 
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
@@ -102,6 +100,50 @@ func Init(ctx context.Context, serviceName string) (shutdown func(context.Contex
 	return func(shutdownCtx context.Context) error {
 		return tp.Shutdown(shutdownCtx)
 	}, nil
+}
+
+// exporterOptions accepts OTEL_EXPORTER_OTLP_ENDPOINT as a URL
+// ("http://collector:4317", "https://...") or as a bare "host:port". A URL's
+// scheme decides TLS (http = plaintext); a bare host:port is plaintext only for
+// localhost/127.0.0.1 or when OTEL_EXPORTER_OTLP_INSECURE=true.
+func exporterOptions(endpoint, insecureEnv string) ([]otlptracegrpc.Option, error) {
+	insecure := strings.EqualFold(strings.TrimSpace(insecureEnv), "true")
+	if strings.Contains(endpoint, "://") {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT %q: want http(s)://host:port or host:port", endpoint)
+		}
+		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(u.Host)}
+		if u.Scheme == "http" || insecure {
+			opts = append(opts, otlptracegrpc.WithInsecure())
+		}
+		return opts, nil
+	}
+	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(endpoint)}
+	host := endpoint
+	if h, _, err := net.SplitHostPort(endpoint); err == nil {
+		host = h
+	}
+	if insecure || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+	return opts, nil
+}
+
+// newResource merges the SDK defaults with the service attributes. The service
+// attributes are schemaless so the merge can't fail on a schema-URL mismatch
+// between resource.Default() and the semconv package (which previously made the
+// code fall back to resource.Default() and report "unknown_service:controller").
+func newResource(serviceName string) (*resource.Resource, error) {
+	own := resource.NewSchemaless(
+		semconv.ServiceNameKey.String(serviceName),
+		attribute.String("platform", "zecurity"),
+	)
+	res, err := resource.Merge(resource.Default(), own)
+	if err != nil {
+		return own, err
+	}
+	return res, nil
 }
 
 // Tracer returns the standard controller tracer.
@@ -124,24 +166,4 @@ func StartSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) 
 // IsEnabled reports whether active OTLP exporting is configured.
 func IsEnabled() bool {
 	return isTracing
-}
-
-// ── Context Propagation Across Async Boundaries ─────────────────────────────
-
-// InjectTraceContext serializes W3C trace headers from ctx into a map.
-// Use this before writing asynchronous events (e.g., outbox events) to preserve
-// parent trace linkage across worker boundaries.
-func InjectTraceContext(ctx context.Context) map[string]string {
-	carrier := make(propagation.MapCarrier)
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	return map[string]string(carrier)
-}
-
-// ExtractTraceContext restores W3C trace context from a carrier map into ctx.
-// Use this in background workers (e.g., outbox consumers) to resume the parent span.
-func ExtractTraceContext(ctx context.Context, carrier map[string]string) context.Context {
-	if len(carrier) == 0 {
-		return ctx
-	}
-	return otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(carrier))
 }

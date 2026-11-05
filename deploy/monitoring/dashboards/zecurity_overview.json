@@ -40,7 +40,8 @@
       "id": 1,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "pluginVersion": "10.0.0",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "up{job=~\"controller.*\"}", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "up{job=~\".*controller.*\"}", "refId": "A" }],
+      "description": "Prometheus scrape of the controller metrics listener (127.0.0.1:9102 by default). The scrape job name must contain \"controller\".",
       "title": "Controller Liveness",
       "type": "stat"
     },
@@ -60,6 +61,7 @@
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "pluginVersion": "10.0.0",
       "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "probe_success{job=~\"controller-readyz.*\"}", "refId": "A" }],
+      "description": "Needs a blackbox-exporter job probing the public /readyz, named controller-readyz*. The controller doesn't export probe_success itself.",
       "title": "Controller Readiness",
       "type": "stat"
     },
@@ -141,10 +143,10 @@
       "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
       "pluginVersion": "10.0.0",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "relay_capacity_total_max_sessions", "legendFormat": "Fleet Max Capacity", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "relay_capacity_total_active_sessions", "legendFormat": "Fleet Active Sessions", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "relay_capacity_max", "legendFormat": "Fleet Max Capacity", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "relay_connections_total", "legendFormat": "Fleet Active Connections", "refId": "B" }
       ],
-      "title": "Relay Fleet Session Capacity vs Active",
+      "title": "Relay Fleet Capacity vs Active Connections",
       "type": "timeseries"
     },
     {
@@ -152,8 +154,8 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "Latency (s)", "axisPlacement": "auto", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1 },
-          "unit": "s"
+          "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "Lag (ACL versions)", "axisPlacement": "auto", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1 },
+          "unit": "short"
         }
       },
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 6 },
@@ -161,11 +163,11 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
       "pluginVersion": "10.0.0",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.50, sum(rate(connector_acl_lag_seconds_bucket[5m])) by (le))", "legendFormat": "p50 ACL Lag", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.95, sum(rate(connector_acl_lag_seconds_bucket[5m])) by (le))", "legendFormat": "p95 ACL Lag", "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.99, sum(rate(connector_acl_lag_seconds_bucket[5m])) by (le))", "legendFormat": "p99 ACL Lag", "refId": "C" }
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.50, sum(rate(connector_acl_lag_versions_bucket[5m])) by (le))", "legendFormat": "p50 ACL Lag", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.95, sum(rate(connector_acl_lag_versions_bucket[5m])) by (le))", "legendFormat": "p95 ACL Lag", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.99, sum(rate(connector_acl_lag_versions_bucket[5m])) by (le))", "legendFormat": "p99 ACL Lag", "refId": "C" }
       ],
-      "title": "Connector ACL Sync Lag Percentiles",
+      "title": "Connector ACL Sync Lag Percentiles (versions behind)",
       "type": "timeseries"
     },
     {
@@ -195,7 +197,7 @@
       "id": 8,
       "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "pluginVersion": "10.0.0",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "cert_runway_seconds", "legendFormat": "{{cert_type}} runway", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "cert_runway_seconds", "legendFormat": "{{entity}} runway", "refId": "A" }],
       "title": "Certificate Runway Remaining",
       "type": "stat"
     },
@@ -214,7 +216,7 @@
       "id": 9,
       "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "pluginVersion": "10.0.0",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "cert_valid", "legendFormat": "{{cert_type}} validity", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "cert_valid", "legendFormat": "{{entity}} validity", "refId": "A" }],
       "title": "Certificate Validity Status",
       "type": "stat"
     },
@@ -223,15 +225,15 @@
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "Rotations / min", "axisPlacement": "auto", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1 }
+          "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "Rotations / hour", "axisPlacement": "auto", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1 }
         }
       },
       "gridPos": { "h": 6, "w": 8, "x": 16, "y": 15 },
       "id": 10,
       "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } },
       "pluginVersion": "10.0.0",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(pki_rotations_total[5m]) * 60", "legendFormat": "{{cert_type}} ({{status}})", "refId": "A" }],
-      "title": "PKI Certificate Rotation Rate",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(increase(pki_rotations_total[1h])) by (entity, status)", "legendFormat": "{{entity}} ({{status}})", "refId": "A" }],
+      "title": "PKI Certificate Rotations (per hour)",
       "type": "timeseries"
     },
     {
@@ -255,7 +257,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(rate(outbox_events_published_total[5m])) by (event_type)", "legendFormat": "Published: {{event_type}}", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(rate(outbox_events_processed_total[5m])) by (event_type)", "legendFormat": "Processed: {{event_type}}", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(rate(outbox_events_processed_total[5m])) by (status)", "legendFormat": "Processed: {{status}}", "refId": "B" }
       ],
       "title": "Outbox Event Throughput (Published vs Processed)",
       "type": "timeseries"
@@ -348,7 +350,7 @@
       "id": 15,
       "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
       "pluginVersion": "10.0.0",
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(outbox_events_dead_letter_total)", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(outbox_dead_letter_total)", "refId": "A" }],
       "title": "Outbox Total Dead Letter Events",
       "type": "stat"
     }

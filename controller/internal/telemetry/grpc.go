@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -10,7 +12,24 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
+
+// splitMethod turns "/pkg.Service/Method" into ("pkg.Service", "Method").
+// FullMethod comes from registered service descriptors, so both are bounded.
+func splitMethod(full string) (string, string) {
+	full = strings.TrimPrefix(full, "/")
+	if i := strings.LastIndex(full, "/"); i >= 0 {
+		return full[:i], full[i+1:]
+	}
+	return "unknown", full
+}
+
+func recordGRPC(fullMethod string, err error, start time.Time) {
+	svc, method := splitMethod(fullMethod)
+	metrics.RecordGRPCCall(svc, method, status.Code(err).String(), time.Since(start))
+}
 
 type metadataCarrier metadata.MD
 
@@ -42,6 +61,7 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
+		start := time.Now()
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
 			md = metadata.MD{}
@@ -60,6 +80,7 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		defer span.End()
 
 		resp, err := handler(ctx, req)
+		recordGRPC(info.FullMethod, err, start)
 		if err != nil {
 			s, _ := status.FromError(err)
 			span.SetStatus(codes.Error, s.Message())
@@ -90,6 +111,7 @@ func StreamServerInterceptor() grpc.StreamServerInterceptor {
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
+		start := time.Now()
 		ctx := ss.Context()
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
@@ -115,6 +137,7 @@ func StreamServerInterceptor() grpc.StreamServerInterceptor {
 		}
 
 		err := handler(srv, ws)
+		recordGRPC(info.FullMethod, err, start)
 		if err != nil {
 			s, _ := status.FromError(err)
 			span.SetStatus(codes.Error, s.Message())

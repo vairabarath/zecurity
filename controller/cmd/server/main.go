@@ -850,14 +850,20 @@ func main() {
 				metrics.SetRelayFleetGauges(relayCount, uint32(conns), uint32(maxCap))
 			}
 
-			// 3. Active connectors count
+			// 3. Live connectors: same predicate the disconnect watcher uses, so
+			// rows that never heartbeated (or went quiet before the watcher ran)
+			// don't count.
 			var connCount int
 			err = db.Pool.QueryRow(ctx, `
 				SELECT count(*) FROM connectors
 				WHERE status = 'active' AND revoked_at IS NULL
-			`).Scan(&connCount)
+				  AND last_heartbeat_at >= NOW() - $1::interval
+				  AND tenant_id IN (SELECT id FROM workspaces WHERE status = 'active')
+			`, fmt.Sprintf("%d seconds", int(connectorCfg.DisconnectThreshold.Seconds()))).Scan(&connCount)
 			if err == nil {
 				metrics.SetConnectorActiveCount(connCount)
+			} else if ctx.Err() == nil {
+				log.Printf("fleet metrics: connector count: %v", err)
 			}
 
 			// 4. Outbox pending events depth and oldest age
@@ -911,7 +917,7 @@ func main() {
 
 	workers.Go("metrics-server", func() {
 
-		log.Printf("metrics listenin on %s/metrics", metricsAddr)
+		log.Printf("metrics listening on %s/metrics", metricsAddr)
 
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
@@ -929,7 +935,7 @@ func main() {
 	addr := ":" + envOr("PORT", "8080")
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: telemetry.HTTPMiddleware(providerCORS(mux)),
+		Handler: telemetry.HTTPMiddleware(providerCORS(metrics.HTTPMiddleware(mux))),
 	}
 	log.Printf("listening on %s", addr)
 

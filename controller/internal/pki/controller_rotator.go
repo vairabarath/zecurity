@@ -191,7 +191,9 @@ func (r *ControllerCertRotator) Run(ctx context.Context) {
 	for {
 		now := r.clock()
 		if r.needsRotation(now) {
-			if err := r.rotate(ctx); err != nil {
+			err := r.rotate(ctx)
+			metrics.RecordPKIRotation("controller_grpc", err)
+			if err != nil {
 				log.Printf("controller cert rotation failed: %v", err)
 
 				timer := time.NewTimer(backoff)

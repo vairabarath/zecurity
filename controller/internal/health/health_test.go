@@ -256,3 +256,29 @@ func TestOutboxChecker(t *testing.T) {
 		t.Fatalf("expected down when stopped, got %s %v", stStop.Status, errStop)
 	}
 }
+
+// /health keeps its pre-PENDING-10 contract (a database ping): a Valkey outage
+// makes /readyz and /healthz 503 but must not take /health down.
+func TestPublicHealth_DatabaseOnly(t *testing.T) {
+	reg := NewRegistry(time.Second, time.Nanosecond)
+	db := &mockChecker{name: "database", critical: true, status: ComponentStatus{Status: "up"}}
+	vk := &mockChecker{name: "valkey", critical: true, status: ComponentStatus{Status: "down"}}
+	reg.Register(db)
+	reg.Register(vk)
+
+	get := func(h http.Handler, path string) int {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		return rr.Code
+	}
+	if c := get(reg.PublicHealthHandler(), "/health"); c != http.StatusOK {
+		t.Fatalf("/health with valkey down = %d, want 200", c)
+	}
+	if c := get(reg.PublicReadinessHandler(), "/readyz"); c != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz with valkey down = %d, want 503", c)
+	}
+	db.status = ComponentStatus{Status: "down"}
+	if c := get(reg.PublicHealthHandler(), "/health"); c != http.StatusServiceUnavailable {
+		t.Fatalf("/health with database down = %d, want 503", c)
+	}
+}

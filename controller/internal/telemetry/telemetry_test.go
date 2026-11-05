@@ -2,12 +2,12 @@ package telemetry
 
 import (
 	"context"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -42,33 +42,42 @@ func TestInit_DisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestTraceContext_PropagationAcrossAsyncBoundaries(t *testing.T) {
-	_, err := Init(context.Background(), "test-controller")
+// The service attributes must survive the merge with resource.Default(); a
+// schema-URL conflict used to drop them ("unknown_service:controller").
+func TestNewResourceKeepsServiceName(t *testing.T) {
+	res, err := newResource("zecurity-controller")
 	if err != nil {
-		t.Fatalf("init: %v", err)
+		t.Fatalf("newResource: %v", err)
 	}
-
-	// Create a synthetic trace context
-	tp := otel.GetTracerProvider()
-	ctx, span := tp.Tracer("test").Start(context.Background(), "parent-worker")
-	defer span.End()
-
-	// Inject into carrier map (e.g. for Outbox Event or message queue)
-	carrier := InjectTraceContext(ctx)
-	if carrier == nil {
-		t.Fatalf("carrier is nil")
+	got, ok := res.Set().Value(semconv.ServiceNameKey)
+	if !ok || got.AsString() != "zecurity-controller" {
+		t.Fatalf("service.name = %q (present %v), want zecurity-controller", got.AsString(), ok)
 	}
+}
 
-	// Extract in a new background context (worker receiving the event)
-	workerCtx := ExtractTraceContext(context.Background(), carrier)
-
-	workerSpanCtx := trace.SpanContextFromContext(workerCtx)
-	parentSpanCtx := span.SpanContext()
-
-	// If parent had a valid trace ID, extracted context must have the identical TraceID
-	if parentSpanCtx.IsValid() {
-		if workerSpanCtx.TraceID() != parentSpanCtx.TraceID() {
-			t.Fatalf("expected extracted TraceID %s, got %s", parentSpanCtx.TraceID(), workerSpanCtx.TraceID())
+func TestExporterOptionsEndpointForms(t *testing.T) {
+	cases := []struct {
+		endpoint, insecureEnv string
+		wantOpts              int // WithEndpoint (+ WithInsecure)
+		wantErr               bool
+	}{
+		{"localhost:4317", "", 2, false},
+		{"127.0.0.1:4317", "", 2, false},
+		{"collector.internal:4317", "", 1, false},
+		{"collector.internal:4317", "true", 2, false},
+		{"http://localhost:4317", "", 2, false},
+		{"http://collector.internal:4317", "", 2, false},
+		{"https://collector.internal:4317", "", 1, false},
+		{"ftp://collector:4317", "", 0, true},
+		{"http://", "", 0, true},
+	}
+	for _, c := range cases {
+		opts, err := exporterOptions(c.endpoint, c.insecureEnv)
+		if (err != nil) != c.wantErr {
+			t.Fatalf("%s: err = %v, wantErr %v", c.endpoint, err, c.wantErr)
+		}
+		if len(opts) != c.wantOpts {
+			t.Fatalf("%s insecure=%q: %d options, want %d", c.endpoint, c.insecureEnv, len(opts), c.wantOpts)
 		}
 	}
 }
