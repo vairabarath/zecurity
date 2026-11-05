@@ -3666,3 +3666,13 @@ serves on `127.0.0.1:9102`.
   - A reserved-range clash is re-checked when the tunnel restarts.
   - Live check: pinned addresses unchanged across `systemctl restart zecurity-client`.
   - Branch `feat/pending14-stable-fake-addresses`.
+
+## 2026-11-05 — M2: FU-9 merged (PR #178); FU-16 tail measured, root-caused and fixed (not committed)
+- FU-9: PR #178 merged (`e07fe524`).
+- FU-16 on `fix/fu16-revocation-tail` (base `main` `e07fe524`), measured live (client on this PC, controller here, connector on inkyank):
+  - **Revocation tail:** curl's own `Recv-Q` at the cut (irreducible; a plain TCP RST does the same or worse). FU-8/FU-15 suspicion refuted.
+  - **Found and fixed:** after a lost QUIC connection, the client relayed quinn's buffered data at the app's pace (connector stop: 844–897 KB over ~34 s → 78 KB at 25 KB/s). A relay task blocked on a full app queue couldn't see a reset.
+  - **Fix:** `client/src/stream_watch.rs` plus a watch in `relay_tcp_to_quic_ctl`.
+  - **Gates:** 350/350 client tests; 3 mutants killed; clippy clean in the changed files.
+  - Record: `Sprint22/FU16-Revocation-Tail-2026-11-05.md`.
+- Not committed. Lab still up (`fu16-*` units, `fu16_live` DB, Valkey db 4, ufw rule, inkyank connector and servers): cleanup awaits OK.

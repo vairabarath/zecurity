@@ -271,10 +271,18 @@ impl RelayPool {
                     "inner Client-to-Connector TLS handshake: {e}"
                 ))
             })?;
-        Ok(Box::new(RelayFlowStream {
-            inner: tls_stream,
-            _flow: flow,
-        }))
+        // FU-16: the stream fails as soon as the relay connection is gone,
+        // even while the relay task is not reading. (A reset of this stream
+        // surfaces through TLS on the next read; zero-length watch reads are
+        // not passed into TLS, which would read records to answer them.)
+        Ok(Box::new(crate::stream_watch::WatchedStream::new(
+            RelayFlowStream {
+                inner: tls_stream,
+                _flow: flow,
+            },
+            crate::stream_watch::quic_connection_gone(&conn),
+            false,
+        )))
     }
 
     async fn get_or_connect(

@@ -1708,9 +1708,30 @@ async fn relay_tcp_to_quic_ctl(
                 match result {
                     Ok(n) if n > 0 => {
                         bytes_down += n as u64;
-                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() {
-                            end_reason = "client socket gone";
-                            break; // client-side channel closed (socket gone) — normal
+                        // FU-16: while waiting for room in the queue to the app
+                        // (a slow reader), also watch the tunnel. Its end —
+                        // transport gone or stream reset — fails the flow at
+                        // once: the poll loop then drops what is queued and
+                        // resets the app connection, instead of delivering the
+                        // rest at the app's pace (a stopped connector: 0.84 MB
+                        // over 30 s at 25 KB/s). The watch reads no data.
+                        let sent = tokio::select! {
+                            biased;
+                            error = crate::stream_watch::tunnel_ended(&mut recv) => Err(error),
+                            sent = quic_to_tcp_tx.send(quic_buf[..n].to_vec()) => Ok(sent.is_ok()),
+                        };
+                        match sent {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                end_reason = "client socket gone";
+                                break; // client-side channel closed (socket gone) — normal
+                            }
+                            Err(error) => {
+                                relay_failed = true;
+                                tracing::warn!(dest = %destination, port, error = %error, "tunnel ended while the app was not reading");
+                                end_reason = "tunnel ended while the app was not reading";
+                                break;
+                            }
                         }
                     }
                     Ok(_) => {
@@ -3868,5 +3889,349 @@ mod tests {
         let _h_new = lab.connect(40_204);
         lab_step(&mut lab, &mut pending, 5);
         assert_eq!(lab.spawned.len(), spawned_before + 1);
+    }
+
+    // ---- FU-16: the tunnel ends while the application reads slowly -------
+    //
+    // The relay task must see the end of its tunnel (transport gone, stream
+    // reset) even while its queue to the application is full, and must not
+    // relay what the transport still holds after it is gone.
+
+    use crate::stream_watch::{TransportGone, WatchedStream};
+    use std::pin::Pin;
+    const FU16_WAIT: Duration = Duration::from_secs(5);
+
+    /// The far end of a watched pipe: the "connector" side, plus switches for
+    /// "the QUIC connection is gone" and "the stream was reset".
+    struct WatchedPeer {
+        stream: DuplexStream,
+        gone: Option<tokio::sync::oneshot::Sender<()>>,
+        reset: Arc<std::sync::atomic::AtomicBool>,
+        reset_waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    }
+
+    impl WatchedPeer {
+        fn lose_transport(&mut self) {
+            let _ = self.gone.take().unwrap().send(());
+        }
+        fn reset_stream(&self) {
+            self.reset.store(true, Ordering::SeqCst);
+            if let Some(w) = self.reset_waker.lock().unwrap().take() {
+                w.wake();
+            }
+        }
+    }
+
+    /// A pipe whose zero-length read reports a reset, like `ResetAwareRecv`.
+    struct ResettablePipe {
+        inner: DuplexStream,
+        reset: Arc<std::sync::atomic::AtomicBool>,
+        reset_waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    }
+
+    impl AsyncRead for ResettablePipe {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.reset.load(Ordering::SeqCst) {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "reset",
+                )));
+            }
+            if buf.remaining() == 0 {
+                *self.reset_waker.lock().unwrap() = Some(cx.waker().clone());
+                return std::task::Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl tokio::io::AsyncWrite for ResettablePipe {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    struct WatchedPipeOpener {
+        peers: mpsc::UnboundedSender<WatchedPeer>,
+    }
+
+    #[async_trait::async_trait]
+    impl DirectOpener for WatchedPipeOpener {
+        async fn open(
+            &self,
+            _addr: SocketAddr,
+        ) -> std::result::Result<AuthenticatedStream, TunnelOpenError> {
+            let (near, far) = duplex(64 * 1024);
+            let (gone_tx, gone_rx) = tokio::sync::oneshot::channel::<()>();
+            let reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reset_waker = Arc::new(std::sync::Mutex::new(None));
+            let gone: TransportGone = Box::pin(async move {
+                let _ = gone_rx.await;
+            });
+            let _ = self.peers.send(WatchedPeer {
+                stream: far,
+                gone: Some(gone_tx),
+                reset: reset.clone(),
+                reset_waker: reset_waker.clone(),
+            });
+            Ok(Box::new(WatchedStream::new(
+                ResettablePipe {
+                    inner: near,
+                    reset,
+                    reset_waker,
+                },
+                gone,
+                true,
+            )))
+        }
+    }
+
+    /// A relay over a watched pipe; the app-facing queue holds `app_queue`
+    /// chunks and nobody reads it unless the test does.
+    async fn watched_relay(
+        app_queue: usize,
+    ) -> (
+        tokio::task::JoinHandle<Result<RelayEnd>>,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+        WatchedPeer,
+    ) {
+        let (tx, mut peers) = mpsc::unbounded_channel();
+        let t = Arc::new(ClientTransport::new(
+            Arc::new(WatchedPipeOpener { peers: tx }),
+            "127.0.0.1:9092".parse().unwrap(),
+            None,
+        ));
+        let (tcp_tx, tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let (quic_tx, quic_rx) = mpsc::channel::<Vec<u8>>(app_queue);
+        let task = tokio::spawn(relay_tcp_to_quic(
+            vec![t],
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            Arc::new(Notify::new()),
+        ));
+        let mut peer = peers.recv().await.unwrap();
+        accept_tunnel(&mut peer.stream).await;
+        (task, tcp_tx, quic_rx, peer)
+    }
+
+    /// Fill the app-facing queue (1 chunk) and leave the relay task blocked
+    /// sending the next one.
+    async fn block_on_full_app_queue(peer: &mut WatchedPeer) {
+        peer.stream.write_all(b"first").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        peer.stream.write_all(b"second").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    /// FU-16 (connector stop, measured: 30 s / 0.84 MB at 25 KB/s): the
+    /// transport is lost while the app reads nothing; the relay ends Failed at
+    /// once instead of waiting for room in the app queue.
+    #[tokio::test]
+    async fn a_lost_transport_ends_the_flow_while_the_app_queue_is_full() {
+        let (task, _tcp_tx, _quic_rx, mut peer) = watched_relay(1).await;
+        block_on_full_app_queue(&mut peer).await;
+        assert!(!task.is_finished(), "relay blocked on the full app queue");
+        peer.lose_transport();
+        let end = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("the relay must see the lost transport while blocked")
+            .unwrap()
+            .unwrap();
+        assert_eq!(end, RelayEnd::Failed);
+    }
+
+    /// FU-16 R2: a stream reset while the app reads nothing ends the flow at
+    /// once (Failed), without waiting for the app.
+    #[tokio::test]
+    async fn a_reset_ends_the_flow_while_the_app_queue_is_full() {
+        let (task, _tcp_tx, _quic_rx, mut peer) = watched_relay(1).await;
+        block_on_full_app_queue(&mut peer).await;
+        peer.reset_stream();
+        let end = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("the relay must see the reset while blocked")
+            .unwrap()
+            .unwrap();
+        assert_eq!(end, RelayEnd::Failed);
+    }
+
+    /// FU-16 R1: what the transport still holds when it is gone is not
+    /// relayed to the app.
+    #[tokio::test]
+    async fn data_held_by_a_lost_transport_is_not_relayed() {
+        let (task, _tcp_tx, mut quic_rx, mut peer) = watched_relay(64).await;
+        peer.stream.write_all(b"before").await.unwrap();
+        assert_eq!(quic_rx.recv().await.unwrap(), b"before");
+        peer.lose_transport();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = peer.stream.write_all(b"after").await;
+        let end = tokio::time::timeout(FU16_WAIT, task).await.unwrap().unwrap().unwrap();
+        assert_eq!(end, RelayEnd::Failed);
+        while let Ok(chunk) = quic_rx.try_recv() {
+            assert_ne!(chunk, b"after", "data held after the loss was relayed");
+        }
+    }
+
+    /// Regression: a watched flow delivers everything and ends Normal on the
+    /// connector's clean end; the watch never fires on a healthy tunnel.
+    #[tokio::test]
+    async fn a_watched_flow_delivers_everything_and_ends_normally() {
+        let (task, tcp_tx, mut quic_rx, mut peer) = watched_relay(4).await;
+        let reader = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while let Some(c) = quic_rx.recv().await {
+                got.extend(c);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            got
+        });
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        peer.stream.write_all(&body).await.unwrap();
+        drop(tcp_tx);
+        let WatchedPeer { stream, .. } = peer;
+        drop(stream); // clean end
+        let end = tokio::time::timeout(FU16_WAIT, task).await.unwrap().unwrap().unwrap();
+        assert_eq!(end, RelayEnd::Normal);
+        assert_eq!(reader.await.unwrap(), body);
+    }
+
+    /// FU-16 slow reader: the app keeps reading, one chunk every 600 ms, while
+    /// the connector has far more queued than that pace drains. A reset ends
+    /// the flow within 200 ms instead of at the app's next read, and at most
+    /// what was already in the app queue reaches the app afterwards. (A reader
+    /// that reads every few ms needs no watch: room appears before the reset
+    /// would matter. Measured with the watch arm removed: 50 ms passes.)
+    #[tokio::test]
+    async fn a_reset_ends_a_slow_readers_flow_without_draining_the_backlog() {
+        const APP_QUEUE: usize = 2;
+        let (task, _tcp_tx, mut quic_rx, peer) = watched_relay(APP_QUEUE).await;
+        let reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let after_reset = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = {
+            let (reset, after_reset) = (reset.clone(), after_reset.clone());
+            tokio::spawn(async move {
+                while quic_rx.recv().await.is_some() {
+                    if reset.load(Ordering::SeqCst) {
+                        after_reset.fetch_add(1, Ordering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
+            })
+        };
+        let WatchedPeer {
+            mut stream,
+            reset: peer_reset,
+            reset_waker,
+            gone: _gone,
+        } = peer;
+        let writer = tokio::spawn(async move {
+            let chunk = [7u8; 1024];
+            while stream.write_all(&chunk).await.is_ok() {}
+        });
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        reset.store(true, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        WatchedPeer {
+            stream: duplex(1).0,
+            gone: None,
+            reset: peer_reset,
+            reset_waker,
+        }
+        .reset_stream();
+        let end = tokio::time::timeout(FU16_WAIT, task).await.unwrap().unwrap().unwrap();
+        assert_eq!(end, RelayEnd::Failed);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "the reset took {:?} to end the flow",
+            started.elapsed()
+        );
+        tokio::time::timeout(FU16_WAIT, reader).await.unwrap().unwrap();
+        // The relay was blocked on the full queue with one chunk in hand.
+        assert!(
+            after_reset.load(Ordering::SeqCst) <= APP_QUEUE + 1,
+            "{} chunks reached the app after the reset",
+            after_reset.load(Ordering::SeqCst)
+        );
+        writer.abort();
+    }
+
+    /// FU-16 stress: 64 flows, each blocked on a full app queue with the
+    /// connector still writing; half lose their transport, half are reset.
+    /// Every relay ends Failed promptly, and every app queue stays bounded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_blocked_flows_all_end_when_their_tunnels_end() {
+        const FLOWS: usize = 64;
+        let mut flows = Vec::new();
+        for i in 0..FLOWS {
+            let (task, tcp_tx, quic_rx, mut peer) = watched_relay(1).await;
+            block_on_full_app_queue(&mut peer).await;
+            let WatchedPeer {
+                mut stream,
+                gone,
+                reset,
+                reset_waker,
+            } = peer;
+            let writer = tokio::spawn(async move {
+                let chunk = [i as u8; 1024];
+                while stream.write_all(&chunk).await.is_ok() {}
+            });
+            flows.push((task, tcp_tx, quic_rx, gone, reset, reset_waker, writer));
+        }
+        let started = tokio::time::Instant::now();
+        for (i, (_, _, _, gone, reset, reset_waker, _)) in flows.iter_mut().enumerate() {
+            let mut peer = WatchedPeer {
+                stream: duplex(1).0,
+                gone: gone.take(),
+                reset: reset.clone(),
+                reset_waker: reset_waker.clone(),
+            };
+            if i % 2 == 0 {
+                peer.lose_transport();
+            } else {
+                peer.reset_stream();
+            }
+        }
+        for (i, (task, _tcp_tx, mut quic_rx, _, _, _, writer)) in flows.into_iter().enumerate() {
+            let end = tokio::time::timeout(FU16_WAIT, task)
+                .await
+                .unwrap_or_else(|_| panic!("flow {i} did not end"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(end, RelayEnd::Failed, "flow {i}");
+            let mut queued = 0;
+            while quic_rx.try_recv().is_ok() {
+                queued += 1;
+            }
+            assert!(queued <= 1, "flow {i}: {queued} chunks in a 1-chunk queue");
+            writer.abort();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "64 flows took {:?} to end",
+            started.elapsed()
+        );
     }
 }

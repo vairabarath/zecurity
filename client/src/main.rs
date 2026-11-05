@@ -17,6 +17,7 @@ mod net_stack;
 mod relay_pool;
 mod runtime;
 mod state_store;
+mod stream_watch;
 mod transport;
 mod trust;
 mod tun;
