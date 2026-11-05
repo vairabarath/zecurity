@@ -92,6 +92,16 @@ func policyRefNames(refs []posture.PolicyRef) []string {
 	return out
 }
 
+// toResourcePolicyRefs maps the store's policy references to the API's,
+// never nil so an empty list serializes as [].
+func toResourcePolicyRefs(refs []posture.PolicyRef) []*graph.ResourcePolicyRef {
+	out := make([]*graph.ResourcePolicyRef, len(refs))
+	for i, r := range refs {
+		out[i] = &graph.ResourcePolicyRef{ID: r.ID.String(), Name: r.Name}
+	}
+	return out
+}
+
 // PENDING-16 helpers.
 
 func policyWorkspace(ctx context.Context) (uuid.UUID, error) {

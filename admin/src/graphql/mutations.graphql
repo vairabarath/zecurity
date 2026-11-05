@@ -271,7 +271,16 @@ mutation RemoveProfileRequirement($profileId: ID!, $checkId: String!) {
 }
 
 mutation DeleteDeviceProfile($id: ID!, $confirmInUse: Boolean) {
-  deleteDeviceProfile(id: $id, confirmInUse: $confirmInUse)
+  deleteDeviceProfile(id: $id, confirmInUse: $confirmInUse) {
+    removedFrom {
+      id
+      name
+    }
+    nowAnyDevice {
+      id
+      name
+    }
+  }
 }
 
 # --- Enterprise IdP Connection Onboarding (ADR-024 §0, Sprint 17 FE-0) -----

@@ -276,17 +276,17 @@ func (r *mutationResolver) UpdateProfileRequirementCountries(ctx context.Context
 // DeleteDeviceProfile is the resolver for the deleteDeviceProfile field.
 // PENDING-16 D-4: a profile that resource policies use is deleted only with
 // confirmInUse; the store then removes it from them in the same transaction.
-func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (bool, error) {
+func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (*graph.DeviceProfileDeletion, error) {
 	tc := tenant.MustGet(ctx)
 
 	workspaceID, err := uuid.Parse(tc.TenantID)
 	if err != nil {
-		return false, fmt.Errorf("invalid workspace id: %w", err)
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
 	}
 
 	profileUUID, err := uuid.Parse(id)
 	if err != nil {
-		return false, apperr.UserErrorf("invalid profile id")
+		return nil, apperr.UserErrorf("invalid profile id")
 	}
 
 	result, err := r.PostureStore.DeleteProfile(ctx, workspaceID, profileUUID, confirmInUse != nil && *confirmInUse)
@@ -294,11 +294,11 @@ func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string, c
 		var inUse *posture.ProfileInUseError
 		switch {
 		case errors.As(err, &inUse):
-			return false, err // user-safe: names the policies
+			return nil, err // user-safe: names the policies
 		case errors.Is(err, posture.ErrNotFound):
-			return false, apperr.UserErrorf("deleteDeviceProfile: profile not found")
+			return nil, apperr.UserErrorf("deleteDeviceProfile: profile not found")
 		default:
-			return false, fmt.Errorf("deleteDeviceProfile: %w", err)
+			return nil, fmt.Errorf("deleteDeviceProfile: %w", err)
 		}
 	}
 
@@ -307,9 +307,12 @@ func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string, c
 		"policies_now_any_device": policyRefNames(result.NowAnyDevice),
 	})
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("deleteDeviceProfile notify: %w", err)
+		return nil, fmt.Errorf("deleteDeviceProfile notify: %w", err)
 	}
-	return true, nil
+	return &graph.DeviceProfileDeletion{
+		RemovedFrom:  toResourcePolicyRefs(result.RemovedFrom),
+		NowAnyDevice: toResourcePolicyRefs(result.NowAnyDevice),
+	}, nil
 }
 
 // RemoveProfileRequirement is the resolver for the removeProfileRequirement field.

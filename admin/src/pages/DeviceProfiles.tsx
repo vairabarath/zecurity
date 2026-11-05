@@ -1,4 +1,5 @@
 import { toastMutationError } from "@/lib/mutationErrors";
+import { toast } from "sonner";
 import { useMemo, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMutation, useQuery } from "@apollo/client/react";
@@ -30,8 +31,21 @@ type EditableProfile = {
     checkId: string;
     countries?: { allow: string[]; deny: string[] } | null;
   }[];
-  policies?: { id: string; name: string }[];
+  policies?: ProfilePolicy[];
 };
+
+// A resource policy that uses the profile, with the ids of all its profiles.
+type ProfilePolicy = { id: string; name: string; profiles?: { id: string }[] };
+
+type DeletingProfile = { id: string; name: string; policies: ProfilePolicy[] };
+
+// D-4: the policies that would be left with no profiles once this profile is
+// removed from them; they then allow any device.
+function policiesLeftAnyDevice(profile: DeletingProfile): ProfilePolicy[] {
+  return profile.policies.filter((p) =>
+    (p.profiles ?? []).every((pp) => pp.id === profile.id),
+  );
+}
 
 // PENDING-20: one-line summary of a profile's country rule, or null.
 function countrySummary(requirements: EditableProfile["requirements"]): string | null {
@@ -49,12 +63,13 @@ function DeleteDeviceProfileDialog({
   onConfirm,
   loading,
 }: {
-  profile: { id: string; name: string; policies: { id: string; name: string }[] } | null;
+  profile: DeletingProfile | null;
   onClose: () => void;
   onConfirm: () => void;
   loading: boolean;
 }) {
   const inUse = (profile?.policies.length ?? 0) > 0;
+  const anyDevice = profile ? policiesLeftAnyDevice(profile) : [];
   return (
     <Dialog open={!!profile} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent>
@@ -76,8 +91,21 @@ function DeleteDeviceProfileDialog({
                 {profile?.policies.map((p) => p.name).join(", ")}
               </p>
               <p className="text-xs">
-                Deleting it will remove it from these policies. Any policy left with no other profiles will become <strong>Any Device</strong> (allowing any device).
+                Deleting it will remove it from these policies.
               </p>
+              {anyDevice.length > 0 ? (
+                <p className="text-xs">
+                  {anyDevice.length === 1 ? "This policy has" : "These policies have"} no other
+                  profiles and will become <strong>Any Device</strong> (allowing any device):{" "}
+                  <span className="font-medium text-foreground">
+                    {anyDevice.map((p) => p.name).join(", ")}
+                  </span>
+                </p>
+              ) : (
+                <p className="text-xs">
+                  Each of them keeps at least one other profile, so none will allow any device.
+                </p>
+              )}
             </div>
           ) : (
             <p>
@@ -102,7 +130,7 @@ export default function DeviceProfiles() {
   const [showAdd, setShowAdd] = useState(false);
   const canWrite = useCan(Capability.PostureWrite);
   const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
-  const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string; policies: { id: string; name: string }[] } | null>(null);
+  const [deletingProfile, setDeletingProfile] = useState<DeletingProfile | null>(null);
 
   const { data, loading, error, refetch } = useQuery(
     GetDeviceProfilesDocument,
@@ -116,7 +144,19 @@ export default function DeviceProfiles() {
     DeleteDeviceProfileDocument,
     {
     onError: toastMutationError,
-      onCompleted: () => {
+      onCompleted: (data) => {
+        const result = data.deleteDeviceProfile;
+        const removed = result.removedFrom.map((p) => p.name);
+        const anyDevice = result.nowAnyDevice.map((p) => p.name);
+        toast.success("Device profile deleted", {
+          description:
+            removed.length === 0
+              ? undefined
+              : `Removed from ${removed.join(", ")}.` +
+                (anyDevice.length > 0
+                  ? ` Now allowing any device: ${anyDevice.join(", ")}.`
+                  : ""),
+        });
         setDeletingProfile(null);
         refetch();
       },

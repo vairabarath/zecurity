@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
@@ -69,6 +70,59 @@ func presentedOrNil(f *isoFixture, err error) string {
 		return "<no error>"
 	}
 	return presented(f.a.ctx, err)
+}
+
+// D-4: a confirmed delete of a profile in use returns the policies it was
+// removed from and, of those, the ones left with no profiles (now any device).
+func TestDeleteDeviceProfileResultNamesPolicies(t *testing.T) {
+	f := newIsoFixture(t)
+	f.mr.PostureStore = posture.NewStore(f.pool)
+	ws := uuid.MustParse(f.a.id)
+	newProfile := func(name string) string {
+		p, err := f.mr.PostureStore.CreateProfile(f.a.ctx, ws, name, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.mr.PostureStore.AddRequirement(f.a.ctx, ws, p.ID, posture.Requirement{CheckID: posture.CheckFirewall}); err != nil {
+			t.Fatal(err)
+		}
+		return p.ID.String()
+	}
+	gone, other := newProfile("gone"), newProfile("other")
+	only, err := f.mr.CreateResourcePolicy(f.a.ctx, "Only gone", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := f.mr.CreateResourcePolicy(f.a.ctx, "Gone or other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.mr.SetResourcePolicyProfiles(f.a.ctx, only.ID, []string{gone}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.mr.SetResourcePolicyProfiles(f.a.ctx, both.ID, []string{gone, other}); err != nil {
+		t.Fatal(err)
+	}
+
+	confirm := true
+	res, err := f.mr.DeleteDeviceProfile(f.a.ctx, gone, &confirm)
+	if err != nil {
+		t.Fatalf("confirmed delete: %v", err)
+	}
+	names := func(refs []*graph.ResourcePolicyRef) map[string]string {
+		m := map[string]string{}
+		for _, r := range refs {
+			m[r.ID] = r.Name
+		}
+		return m
+	}
+	removed, anyDevice := names(res.RemovedFrom), names(res.NowAnyDevice)
+	if len(removed) != 2 || removed[only.ID] != "Only gone" || removed[both.ID] != "Gone or other" {
+		t.Fatalf("removedFrom = %v, want both policies", removed)
+	}
+	if len(anyDevice) != 1 || anyDevice[only.ID] != "Only gone" {
+		t.Fatalf("nowAnyDevice = %v, want only %q", anyDevice, "Only gone")
+	}
 }
 
 // Each resource-policy change writes an audit row with its action.

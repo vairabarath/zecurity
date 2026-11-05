@@ -287,3 +287,35 @@ ALTER TABLE device_profiles DROP COLUMN mode;
   10. Attempting to delete Default policy is refused by server (`posture.ErrDefaultPolicyFixed`).
 - **All R1, R2, and R3 phases complete. Ready for PR `[schema: reset DB]`.**
 
+
+**Post-R3 fixes and live run on the real system (2026-11-05).**
+- **Live run (real system):** PR head `dc072d6c` controller and console; the system `zecurity-client.service`
+  running the branch build; a connector installed on a lab host with the normal install script; a resource on that
+  host that serves only connections coming through the connector. Moving the resource to a policy the device fails
+  ended the open session in 30–52 ms (connector: `ACL diff: revoked sessions torn down`); adding an OR profile it
+  passes, a confirmed in-use profile delete, policy delete → Default and the console's policy edit (preview 0 of 1,
+  Save gated by the confirmation box) all behaved as specified. D-2 checked live: a DEVOPS member (NETWORK_WRITE, no
+  POSTURE_WRITE) is refused every policy write.
+- **Fix: `deleteDeviceProfile` didn't report what it changed.** The store computed the policies the profile was
+  removed from and those left with no profiles (`ProfileDeleteResult.RemovedFrom` / `NowAnyDevice`), but the
+  mutation returned `Boolean!` and only the audit row carried the lists, contrary to this record and the R1
+  summary. Now it returns `DeviceProfileDeletion { removedFrom, nowAnyDevice: [ResourcePolicyRef!]! }`
+  (`posture.graphqls`, `posture.resolvers.go`, `toResourcePolicyRefs`). Test
+  `TestDeleteDeviceProfileResultNamesPolicies` (a profile in two policies, one keeping another profile; the mutant
+  returning `RemovedFrom` as `nowAnyDevice` fails it).
+- **Fix: the console's delete dialog didn't say which policy becomes Any Device.** It said generically "any policy
+  left with no other profiles will become Any Device". `GetDeviceProfiles` now loads each policy's profile ids, and
+  the dialog names the policies left with no profiles, or says none will be. After the delete a toast reports the
+  server's result ("Removed from …. Now allowing any device: …"). Three new tests in `DeviceProfiles.test.tsx`
+  (the mutant naming every policy fails two).
+- **Not changed:** the in-use refusal has no `extensions.code`; no workspace GraphQL error carries one (`apperr`
+  has no codes), so it matches the rest of the API.
+- **Gates:** controller `go test -count=1 ./...` with every `*_TEST_DATABASE_URL` and the Valkey URL set: 1678 pass,
+  0 fail, the 2 usual stub skips; `scripts/resource-test-fixture.sh` with all variables: 170 pass, 1 stub skip. Console
+  281 tests pass, build passes, lint unchanged (17, as before). Live: the API returned
+  `removedFrom: [Gone or other, Only gone], nowAnyDevice: [Only gone]`; the console dialog named "Only gone" as becoming
+  Any Device and the toast showed the result.
+- **Tooling note:** under Go 1.27 the documented `go tool gqlgen generate --config graph/gqlgen.yml` fails with
+  `internal error: package "time" without types was imported …` (x/tools v0.44.0) and deletes
+  `graph/generated.go` and `graph/models_gen.go`. Running it as `GOTOOLCHAIN=go1.25.0 go tool gqlgen generate …` (the
+  module's `go` version) works; revert the import reorder it makes in `graph/resolvers/resource.resolvers.go`.

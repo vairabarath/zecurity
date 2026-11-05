@@ -115,6 +115,11 @@ type DeviceProfile struct {
 	Policies     []*ResourcePolicy           `json:"policies"`
 }
 
+type DeviceProfileDeletion struct {
+	RemovedFrom  []*ResourcePolicyRef `json:"removedFrom"`
+	NowAnyDevice []*ResourcePolicyRef `json:"nowAnyDevice"`
+}
+
 type DeviceProfileRequirement struct {
 	ID               string       `json:"id"`
 	CheckID          string       `json:"checkId"`
@@ -225,6 +230,11 @@ type ResourcePolicy struct {
 type ResourcePolicyPreview struct {
 	Devices int `json:"devices"`
 	Passing int `json:"passing"`
+}
+
+type ResourcePolicyRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type ScanResult struct {

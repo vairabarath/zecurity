@@ -374,6 +374,9 @@ query GetDeviceProfiles {
     policies {
       id
       name
+      profiles {
+        id
+      }
     }
   }
 }

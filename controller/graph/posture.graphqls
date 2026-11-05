@@ -42,6 +42,19 @@ type DeviceProfile {
   policies: [ResourcePolicy!]! @goField(forceResolver: true)
 }
 
+# PENDING-16 D-4: what deleting a device profile changed.
+type DeviceProfileDeletion {
+  # The resource policies the profile was removed from.
+  removedFrom: [ResourcePolicyRef!]!
+  # Those of them left with no profiles: they now allow any device.
+  nowAnyDevice: [ResourcePolicyRef!]!
+}
+
+type ResourcePolicyRef {
+  id: ID!
+  name: String!
+}
+
 type DevicePostureObservation {
   checkId: String!
   status: PostureCheckStatus!
@@ -103,10 +116,12 @@ extend type Mutation {
   # PENDING-16 D-4: a profile that resource policies use is deleted only with
   # confirmInUse: true; it is then removed from them (a policy left with no
   # profiles allows any device). Without it the request is refused, naming them.
+  # The result names the policies it was removed from and those now allowing
+  # any device.
   deleteDeviceProfile(
     id: ID!
     confirmInUse: Boolean = false
-  ): Boolean! @requires(capability: POSTURE_WRITE)
+  ): DeviceProfileDeletion! @requires(capability: POSTURE_WRITE)
 
   removeProfileRequirement(
     profileId: ID!

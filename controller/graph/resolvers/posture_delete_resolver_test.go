@@ -25,12 +25,14 @@ func TestDeleteDeviceProfile_Success(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 
-	ok, err := f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String(), nil)
+	res, err := f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String(), nil)
 	if err != nil {
 		t.Fatalf("DeleteDeviceProfile: %v", err)
 	}
-	if !ok {
-		t.Fatal("DeleteDeviceProfile returned false, want true")
+	// An unused profile: both lists present and empty (they serialize as []).
+	if res == nil || res.RemovedFrom == nil || res.NowAnyDevice == nil ||
+		len(res.RemovedFrom) != 0 || len(res.NowAnyDevice) != 0 {
+		t.Fatalf("DeleteDeviceProfile result = %+v, want empty lists", res)
 	}
 	if got := f.fires.Load(); got != 1 {
 		t.Fatalf("push hook fired %d times after successful delete, want 1", got)

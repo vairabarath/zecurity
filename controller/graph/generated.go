@@ -127,6 +127,11 @@ type ComplexityRoot struct {
 		Requirements func(childComplexity int) int
 	}
 
+	DeviceProfileDeletion struct {
+		NowAnyDevice func(childComplexity int) int
+		RemovedFrom  func(childComplexity int) int
+	}
+
 	DeviceProfileRequirement struct {
 		AllowUnsupported func(childComplexity int) int
 		CheckID          func(childComplexity int) int
@@ -327,6 +332,11 @@ type ComplexityRoot struct {
 		Passing func(childComplexity int) int
 	}
 
+	ResourcePolicyRef struct {
+		ID   func(childComplexity int) int
+		Name func(childComplexity int) int
+	}
+
 	ScanResult struct {
 		FirstSeen     func(childComplexity int) int
 		IP            func(childComplexity int) int
@@ -500,7 +510,7 @@ type MutationResolver interface {
 	UpdateDeviceProfileManualTrust(ctx context.Context, id string, enabled bool) (*DeviceProfile, error)
 	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) (*DeviceProfile, error)
 	UpdateProfileRequirementCountries(ctx context.Context, profileID string, countries CountryRuleInput) (*DeviceProfile, error)
-	DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (bool, error)
+	DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (*DeviceProfileDeletion, error)
 	RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*DeviceProfile, error)
 	CreateResourcePolicy(ctx context.Context, name string, description *string) (*ResourcePolicy, error)
 	UpdateResourcePolicy(ctx context.Context, id string, name *string, description *string) (*ResourcePolicy, error)
@@ -929,6 +939,19 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.DeviceProfile.Requirements(childComplexity), true
+
+	case "DeviceProfileDeletion.nowAnyDevice":
+		if e.ComplexityRoot.DeviceProfileDeletion.NowAnyDevice == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfileDeletion.NowAnyDevice(childComplexity), true
+	case "DeviceProfileDeletion.removedFrom":
+		if e.ComplexityRoot.DeviceProfileDeletion.RemovedFrom == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfileDeletion.RemovedFrom(childComplexity), true
 
 	case "DeviceProfileRequirement.allowUnsupported":
 		if e.ComplexityRoot.DeviceProfileRequirement.AllowUnsupported == nil {
@@ -2280,6 +2303,19 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.ResourcePolicyPreview.Passing(childComplexity), true
 
+	case "ResourcePolicyRef.id":
+		if e.ComplexityRoot.ResourcePolicyRef.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicyRef.ID(childComplexity), true
+	case "ResourcePolicyRef.name":
+		if e.ComplexityRoot.ResourcePolicyRef.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicyRef.Name(childComplexity), true
+
 	case "ScanResult.firstSeen":
 		if e.ComplexityRoot.ScanResult.FirstSeen == nil {
 			break
@@ -3128,6 +3164,16 @@ func (ec *executionContext) childFields_DeviceProfile(ctx context.Context, field
 	return nil, fmt.Errorf("no field named %q was found under type DeviceProfile", field.Name)
 }
 
+func (ec *executionContext) childFields_DeviceProfileDeletion(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "removedFrom":
+		return ec.fieldContext_DeviceProfileDeletion_removedFrom(ctx, field)
+	case "nowAnyDevice":
+		return ec.fieldContext_DeviceProfileDeletion_nowAnyDevice(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type DeviceProfileDeletion", field.Name)
+}
+
 func (ec *executionContext) childFields_DeviceProfileRequirement(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 	switch field.Name {
 	case "id":
@@ -3338,6 +3384,16 @@ func (ec *executionContext) childFields_ResourcePolicyPreview(ctx context.Contex
 		return ec.fieldContext_ResourcePolicyPreview_passing(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ResourcePolicyPreview", field.Name)
+}
+
+func (ec *executionContext) childFields_ResourcePolicyRef(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_ResourcePolicyRef_id(ctx, field)
+	case "name":
+		return ec.fieldContext_ResourcePolicyRef_name(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type ResourcePolicyRef", field.Name)
 }
 
 func (ec *executionContext) childFields_ScanResult(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -6560,6 +6616,70 @@ func (ec *executionContext) fieldContext_DeviceProfile_policies(_ context.Contex
 	return fc, nil
 }
 
+func (ec *executionContext) _DeviceProfileDeletion_removedFrom(ctx context.Context, field graphql.CollectedField, obj *DeviceProfileDeletion) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfileDeletion_removedFrom(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RemovedFrom, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*ResourcePolicyRef) graphql.Marshaler {
+			return ec.marshalNResourcePolicyRef2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyRefᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfileDeletion_removedFrom(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DeviceProfileDeletion",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicyRef(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DeviceProfileDeletion_nowAnyDevice(ctx context.Context, field graphql.CollectedField, obj *DeviceProfileDeletion) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfileDeletion_nowAnyDevice(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.NowAnyDevice, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*ResourcePolicyRef) graphql.Marshaler {
+			return ec.marshalNResourcePolicyRef2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyRefᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfileDeletion_nowAnyDevice(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DeviceProfileDeletion",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicyRef(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _DeviceProfileRequirement_id(ctx context.Context, field graphql.CollectedField, obj *DeviceProfileRequirement) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -9369,11 +9489,11 @@ func (ec *executionContext) _Mutation_deleteDeviceProfile(ctx context.Context, f
 			directive1 := func(ctx context.Context) (any, error) {
 				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
 				if err != nil {
-					var zeroVal bool
+					var zeroVal *DeviceProfileDeletion
 					return zeroVal, err
 				}
 				if ec.Directives.Requires == nil {
-					var zeroVal bool
+					var zeroVal *DeviceProfileDeletion
 					return zeroVal, errors.New("directive requires is not implemented")
 				}
 				return ec.Directives.Requires(ctx, nil, directive0, capability)
@@ -9382,8 +9502,8 @@ func (ec *executionContext) _Mutation_deleteDeviceProfile(ctx context.Context, f
 			next = directive1
 			return next
 		},
-		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
-			return ec.marshalNBoolean2bool(ctx, selections, v)
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfileDeletion) graphql.Marshaler {
+			return ec.marshalNDeviceProfileDeletion2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileDeletion(ctx, selections, v)
 		},
 		true,
 		true,
@@ -9396,7 +9516,7 @@ func (ec *executionContext) fieldContext_Mutation_deleteDeviceProfile(ctx contex
 		IsMethod:   true,
 		IsResolver: true,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return nil, errors.New("field of type Boolean does not have child fields")
+			return ec.childFields_DeviceProfileDeletion(ctx, field)
 		},
 	}
 	defer func() {
@@ -13547,6 +13667,52 @@ func (ec *executionContext) _ResourcePolicyPreview_passing(ctx context.Context, 
 }
 func (ec *executionContext) fieldContext_ResourcePolicyPreview_passing(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ResourcePolicyPreview", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicyRef_id(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicyRef) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicyRef_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicyRef_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicyRef", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicyRef_name(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicyRef) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicyRef_name(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicyRef_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicyRef", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _ScanResult_requestId(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
@@ -17714,6 +17880,50 @@ func (ec *executionContext) _DeviceProfile(ctx context.Context, sel ast.Selectio
 	return out
 }
 
+var deviceProfileDeletionImplementors = []string{"DeviceProfileDeletion"}
+
+func (ec *executionContext) _DeviceProfileDeletion(ctx context.Context, sel ast.SelectionSet, obj *DeviceProfileDeletion) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, deviceProfileDeletionImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("DeviceProfileDeletion")
+		case "removedFrom":
+			out.Values[i] = ec._DeviceProfileDeletion_removedFrom(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "nowAnyDevice":
+			out.Values[i] = ec._DeviceProfileDeletion_nowAnyDevice(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var deviceProfileRequirementImplementors = []string{"DeviceProfileRequirement"}
 
 func (ec *executionContext) _DeviceProfileRequirement(ctx context.Context, sel ast.SelectionSet, obj *DeviceProfileRequirement) graphql.Marshaler {
@@ -19692,6 +19902,50 @@ func (ec *executionContext) _ResourcePolicyPreview(ctx context.Context, sel ast.
 	return out
 }
 
+var resourcePolicyRefImplementors = []string{"ResourcePolicyRef"}
+
+func (ec *executionContext) _ResourcePolicyRef(ctx context.Context, sel ast.SelectionSet, obj *ResourcePolicyRef) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, resourcePolicyRefImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ResourcePolicyRef")
+		case "id":
+			out.Values[i] = ec._ResourcePolicyRef_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._ResourcePolicyRef_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var scanResultImplementors = []string{"ScanResult"}
 
 func (ec *executionContext) _ScanResult(ctx context.Context, sel ast.SelectionSet, obj *ScanResult) graphql.Marshaler {
@@ -21326,6 +21580,20 @@ func (ec *executionContext) marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋzt
 	return ec._DeviceProfile(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNDeviceProfileDeletion2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileDeletion(ctx context.Context, sel ast.SelectionSet, v DeviceProfileDeletion) graphql.Marshaler {
+	return ec._DeviceProfileDeletion(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNDeviceProfileDeletion2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileDeletion(ctx context.Context, sel ast.SelectionSet, v *DeviceProfileDeletion) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._DeviceProfileDeletion(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNDeviceProfileRequirement2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileRequirementᚄ(ctx context.Context, sel ast.SelectionSet, v []*DeviceProfileRequirement) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
@@ -21732,6 +22000,32 @@ func (ec *executionContext) marshalNResourcePolicyPreview2ᚖgithubᚗcomᚋyour
 		return graphql.Null
 	}
 	return ec._ResourcePolicyPreview(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNResourcePolicyRef2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyRefᚄ(ctx context.Context, sel ast.SelectionSet, v []*ResourcePolicyRef) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNResourcePolicyRef2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyRef(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNResourcePolicyRef2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyRef(ctx context.Context, sel ast.SelectionSet, v *ResourcePolicyRef) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ResourcePolicyRef(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx context.Context, v any) (Role, error) {
