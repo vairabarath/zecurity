@@ -15,7 +15,7 @@ tags: [pending, adr, operations, audit, siem, compliance]
 
 # PENDING-11: Audit logging and SIEM export
 
-**Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR.
+**Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR. **S1a built 2026-11-05** (fc3561c1 on local `feat/pending11-siem`: migration 051, `ztna_app`, `audit.VerifyStream`; gate 1719/0/2). Lock order: workspace FOR KEY SHARE, then head (found while testing: the FK check after a BEFORE trigger would otherwise deadlock against a workspace FOR UPDATE + audit transaction).
 **Base:** `main` (89655c83). Next migration: `051_`.
 **Scope:** its own epic. It also builds D-12 (DB-enforced append-only audit), which the Decision Record left to this phase.
 
