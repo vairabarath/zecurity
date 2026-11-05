@@ -182,7 +182,17 @@ func TestWorkspaceConsistency_DevicesShieldsAndProfiles(t *testing.T) {
 	// Consistent rows, including every SET NULL reference.
 	mustExec(t, ctx, pool, `UPDATE client_devices SET approved_at = now(), approved_by = $1 WHERE id = $2`, a.admin, a.dev)
 	mustExec(t, ctx, pool, `UPDATE resources SET shield_id = $1 WHERE id = $2`, a.shield, a.res)
-	mustExec(t, ctx, pool, `INSERT INTO resource_profile_bindings (resource_id, profile_id, workspace_id) VALUES ($1, $2, $3)`, a.res, a.prof, a.id)
+	// PENDING-16: a's resource is in a policy that requires a's profile.
+	var aPolicy string
+	if err := pool.QueryRow(ctx, `INSERT INTO resource_policies (workspace_id, name) VALUES ($1, 'p') RETURNING id::text`, a.id).Scan(&aPolicy); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	mustExec(t, ctx, pool, `INSERT INTO resource_policy_profiles (policy_id, profile_id, workspace_id) VALUES ($1, $2, $3)`, aPolicy, a.prof, a.id)
+	mustExec(t, ctx, pool, `UPDATE resources SET policy_id = $1 WHERE id = $2`, aPolicy, a.res)
+	var bDefault string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM resource_policies WHERE workspace_id = $1 AND is_default`, b.id).Scan(&bDefault); err != nil {
+		t.Fatalf("b's default policy: %v", err)
+	}
 	mustExec(t, ctx, pool, `INSERT INTO device_profile_evaluations (device_id, profile_id, workspace_id, satisfied, profile_revision, report_id)
 		VALUES ($1, $2, $3, true, 1, $4)`, a.dev, a.prof, a.id, a.report)
 
@@ -201,10 +211,10 @@ func TestWorkspaceConsistency_DevicesShieldsAndProfiles(t *testing.T) {
 			`UPDATE device_profile_evaluations SET profile_id = $1 WHERE device_id = $2`, []any{b.prof, a.dev}},
 		{"evaluation citing another workspace's report", "device_profile_evaluations_report_same_workspace_fkey",
 			`UPDATE device_profile_evaluations SET report_id = $1 WHERE device_id = $2`, []any{b.report, a.dev}},
-		{"binding of another workspace's resource", "resource_profile_bindings_resource_same_workspace_fkey",
-			`INSERT INTO resource_profile_bindings (resource_id, profile_id, workspace_id) VALUES ($1, $2, $3)`, []any{b.res, a.prof, a.id}},
-		{"binding to another workspace's profile", "resource_profile_bindings_profile_same_workspace_fkey",
-			`UPDATE resource_profile_bindings SET profile_id = $1 WHERE resource_id = $2`, []any{b.prof, a.res}},
+		{"resource in another workspace's policy", "resources_policy_same_workspace_fkey",
+			`UPDATE resources SET policy_id = $1 WHERE id = $2`, []any{bDefault, a.res}},
+		{"policy requiring another workspace's profile", "resource_policy_profiles_profile_same_workspace_fkey",
+			`UPDATE resource_policy_profiles SET profile_id = $1 WHERE policy_id = $2`, []any{b.prof, aPolicy}},
 		{"resource protected by another workspace's shield", "resources_shield_same_workspace_fkey",
 			`UPDATE resources SET shield_id = $1 WHERE id = $2`, []any{b.shield, a.res}},
 		{"shield on another workspace's connector", "shields_connector_same_workspace_fkey",
@@ -250,10 +260,10 @@ func TestWorkspaceConsistency_DevicesShieldsAndProfiles(t *testing.T) {
 	// Cascades: the profile takes its bindings and evaluations with it.
 	mustExec(t, ctx, pool, `DELETE FROM device_profiles WHERE id = $1`, a.prof)
 	var left int
-	_ = pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM resource_profile_bindings WHERE workspace_id = $1)
+	_ = pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM resource_policy_profiles WHERE workspace_id = $1)
 		+ (SELECT count(*) FROM device_profile_evaluations WHERE workspace_id = $1)`, a.id).Scan(&left)
 	if left != 0 {
-		t.Errorf("%d bindings/evaluations left after deleting their profile", left)
+		t.Errorf("%d policy links/evaluations left after deleting their profile", left)
 	}
 }
 

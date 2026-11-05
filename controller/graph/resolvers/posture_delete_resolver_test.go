@@ -25,12 +25,14 @@ func TestDeleteDeviceProfile_Success(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 
-	ok, err := f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String())
+	res, err := f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String(), nil)
 	if err != nil {
 		t.Fatalf("DeleteDeviceProfile: %v", err)
 	}
-	if !ok {
-		t.Fatal("DeleteDeviceProfile returned false, want true")
+	// An unused profile: both lists present and empty (they serialize as []).
+	if res == nil || res.RemovedFrom == nil || res.NowAnyDevice == nil ||
+		len(res.RemovedFrom) != 0 || len(res.NowAnyDevice) != 0 {
+		t.Fatalf("DeleteDeviceProfile result = %+v, want empty lists", res)
 	}
 	if got := f.fires.Load(); got != 1 {
 		t.Fatalf("push hook fired %d times after successful delete, want 1", got)
@@ -42,7 +44,7 @@ func TestDeleteDeviceProfile_NotFound(t *testing.T) {
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
 	// Non-existent profile ID
-	_, err := f.mr.DeleteDeviceProfile(f.ctx, uuid.NewString())
+	_, err := f.mr.DeleteDeviceProfile(f.ctx, uuid.NewString(), nil)
 	if err == nil || !strings.Contains(err.Error(), "profile not found") {
 		t.Fatalf("DeleteDeviceProfile non-existent error = %v, want 'profile not found'", err)
 	}
@@ -78,7 +80,7 @@ func TestDeleteDeviceProfile_NotFound(t *testing.T) {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
 
-	_, err = f.mr.DeleteDeviceProfile(f.ctx, otherProfile.ID.String())
+	_, err = f.mr.DeleteDeviceProfile(f.ctx, otherProfile.ID.String(), nil)
 	if err == nil || !strings.Contains(err.Error(), "profile not found") {
 		t.Fatalf("cross-workspace delete error = %v, want 'profile not found'", err)
 	}
@@ -102,8 +104,8 @@ func TestDeleteDeviceProfile_NoNotifyOnStoreError(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
-			context.Background(), workspaceID, profile.ID,
+		_, _ = f.mr.PostureStore.DeleteProfile(
+			context.Background(), workspaceID, profile.ID, true,
 		)
 	})
 
@@ -111,7 +113,7 @@ func TestDeleteDeviceProfile_NoNotifyOnStoreError(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(f.ctx)
 	cancel()
 
-	_, err = f.mr.DeleteDeviceProfile(cancelCtx, profile.ID.String())
+	_, err = f.mr.DeleteDeviceProfile(cancelCtx, profile.ID.String(), nil)
 	if err == nil {
 		t.Fatal("DeleteDeviceProfile with cancelled context should fail")
 	}

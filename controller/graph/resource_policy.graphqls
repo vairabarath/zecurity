@@ -1,0 +1,44 @@
+# PENDING-16: Resource → Resource Policy → Device Profiles.
+# Every resource is in exactly one policy; every workspace has one Default
+# ("any device" until profiles are set). A device passes a policy when it
+# satisfies ANY of its profiles; a policy with no profiles allows any device.
+
+type ResourcePolicy {
+  id: ID!
+  name: String!
+  description: String
+  isDefault: Boolean!
+  profiles: [DeviceProfile!]! @goField(forceResolver: true)
+  resources: [Resource!]! @goField(forceResolver: true)
+  resourceCount: Int!
+}
+
+# How many of the devices the resources' groups allow today would pass the
+# proposed profiles (D-3: replaces audit mode). Uses the ACL compiler's own
+# decision, so it matches what would be enforced.
+type ResourcePolicyPreview {
+  devices: Int!
+  passing: Int!
+}
+
+extend type Resource {
+  policy: ResourcePolicy! @goField(forceResolver: true)
+}
+
+extend type Query {
+  resourcePolicies: [ResourcePolicy!]! @requires(capability: CONSOLE_READ)
+  resourcePolicy(id: ID!): ResourcePolicy @requires(capability: CONSOLE_READ)
+  previewResourcePolicy(resourceIds: [ID!]!, profileIds: [ID!]!): ResourcePolicyPreview! @requires(capability: CONSOLE_READ)
+}
+
+extend type Mutation {
+  createResourcePolicy(name: String!, description: String): ResourcePolicy! @requires(capability: POSTURE_WRITE)
+  # The Default can't be renamed; its description and profiles can change.
+  updateResourcePolicy(id: ID!, name: String, description: String): ResourcePolicy! @requires(capability: POSTURE_WRITE)
+  # Replaces the policy's profiles; [] means any device. Empty profiles refused.
+  setResourcePolicyProfiles(id: ID!, profileIds: [ID!]!): ResourcePolicy! @requires(capability: POSTURE_WRITE)
+  # Moves the policy's resources to the Default, then deletes it. Default refused.
+  deleteResourcePolicy(id: ID!): Boolean! @requires(capability: POSTURE_WRITE)
+  # D-2: POSTURE_WRITE, not NETWORK_WRITE: it changes which devices may connect.
+  setResourcePolicy(resourceId: ID!, policyId: ID!): Resource! @requires(capability: POSTURE_WRITE)
+}

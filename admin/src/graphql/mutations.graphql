@@ -270,28 +270,17 @@ mutation RemoveProfileRequirement($profileId: ID!, $checkId: String!) {
   }
 }
 
-mutation BindResourceToProfile($profileId: ID!, $resourceId: ID!) {
-  bindResourceToProfile(profileId: $profileId, resourceId: $resourceId) {
-    id
-    boundResources {
+mutation DeleteDeviceProfile($id: ID!, $confirmInUse: Boolean) {
+  deleteDeviceProfile(id: $id, confirmInUse: $confirmInUse) {
+    removedFrom {
+      id
+      name
+    }
+    nowAnyDevice {
       id
       name
     }
   }
-}
-
-mutation UnbindResourceFromProfile($profileId: ID!, $resourceId: ID!) {
-  unbindResourceFromProfile(profileId: $profileId, resourceId: $resourceId) {
-    id
-    boundResources {
-      id
-      name
-    }
-  }
-}
-
-mutation DeleteDeviceProfile($id: ID!) {
-  deleteDeviceProfile(id: $id)
 }
 
 # --- Enterprise IdP Connection Onboarding (ADR-024 §0, Sprint 17 FE-0) -----
@@ -471,3 +460,66 @@ mutation UpdateProfileRequirementCountries($profileId: ID!, $countries: CountryR
     }
   }
 }
+
+# --- Resource Policies (PENDING-16) ---
+mutation CreateResourcePolicy($name: String!, $description: String) {
+  createResourcePolicy(name: $name, description: $description) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation UpdateResourcePolicy($id: ID!, $name: String, $description: String) {
+  updateResourcePolicy(id: $id, name: $name, description: $description) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation SetResourcePolicyProfiles($id: ID!, $profileIds: [ID!]!) {
+  setResourcePolicyProfiles(id: $id, profileIds: $profileIds) {
+    id
+    name
+    description
+    isDefault
+    resourceCount
+    profiles {
+      id
+      name
+    }
+  }
+}
+
+mutation DeleteResourcePolicy($id: ID!) {
+  deleteResourcePolicy(id: $id)
+}
+
+mutation SetResourcePolicy($resourceId: ID!, $policyId: ID!) {
+  setResourcePolicy(resourceId: $resourceId, policyId: $policyId) {
+    id
+    policy {
+      id
+      name
+      isDefault
+      profiles {
+        id
+        name
+      }
+    }
+  }
+}
+

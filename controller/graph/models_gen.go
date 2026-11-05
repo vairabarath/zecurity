@@ -108,12 +108,16 @@ type DevicePostureVisibility struct {
 }
 
 type DeviceProfile struct {
-	ID             string                      `json:"id"`
-	Name           string                      `json:"name"`
-	Mode           DeviceProfileMode           `json:"mode"`
-	ManualTrust    bool                        `json:"manualTrust"`
-	Requirements   []*DeviceProfileRequirement `json:"requirements"`
-	BoundResources []*Resource                 `json:"boundResources"`
+	ID           string                      `json:"id"`
+	Name         string                      `json:"name"`
+	ManualTrust  bool                        `json:"manualTrust"`
+	Requirements []*DeviceProfileRequirement `json:"requirements"`
+	Policies     []*ResourcePolicy           `json:"policies"`
+}
+
+type DeviceProfileDeletion struct {
+	RemovedFrom  []*ResourcePolicyRef `json:"removedFrom"`
+	NowAnyDevice []*ResourcePolicyRef `json:"nowAnyDevice"`
 }
 
 type DeviceProfileRequirement struct {
@@ -195,21 +199,42 @@ type RemoteNetwork struct {
 }
 
 type Resource struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Description    *string        `json:"description,omitempty"`
-	Host           string         `json:"host"`
-	Protocol       string         `json:"protocol"`
-	PortFrom       int            `json:"portFrom"`
-	PortTo         int            `json:"portTo"`
-	Status         string         `json:"status"`
-	ErrorMessage   *string        `json:"errorMessage,omitempty"`
-	AppliedAt      *string        `json:"appliedAt,omitempty"`
-	LastVerifiedAt *string        `json:"lastVerifiedAt,omitempty"`
-	CreatedAt      string         `json:"createdAt"`
-	Shield         *Shield        `json:"shield,omitempty"`
-	RemoteNetwork  *RemoteNetwork `json:"remoteNetwork"`
-	Groups         []*Group       `json:"groups"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Description    *string         `json:"description,omitempty"`
+	Host           string          `json:"host"`
+	Protocol       string          `json:"protocol"`
+	PortFrom       int             `json:"portFrom"`
+	PortTo         int             `json:"portTo"`
+	Status         string          `json:"status"`
+	ErrorMessage   *string         `json:"errorMessage,omitempty"`
+	AppliedAt      *string         `json:"appliedAt,omitempty"`
+	LastVerifiedAt *string         `json:"lastVerifiedAt,omitempty"`
+	CreatedAt      string          `json:"createdAt"`
+	Shield         *Shield         `json:"shield,omitempty"`
+	RemoteNetwork  *RemoteNetwork  `json:"remoteNetwork"`
+	Groups         []*Group        `json:"groups"`
+	Policy         *ResourcePolicy `json:"policy"`
+}
+
+type ResourcePolicy struct {
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	Description   *string          `json:"description,omitempty"`
+	IsDefault     bool             `json:"isDefault"`
+	Profiles      []*DeviceProfile `json:"profiles"`
+	Resources     []*Resource      `json:"resources"`
+	ResourceCount int              `json:"resourceCount"`
+}
+
+type ResourcePolicyPreview struct {
+	Devices int `json:"devices"`
+	Passing int `json:"passing"`
+}
+
+type ResourcePolicyRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type ScanResult struct {
@@ -473,61 +498,6 @@ func (e *ConnectorStatus) UnmarshalJSON(b []byte) error {
 }
 
 func (e ConnectorStatus) MarshalJSON() ([]byte, error) {
-	var buf bytes.Buffer
-	e.MarshalGQL(&buf)
-	return buf.Bytes(), nil
-}
-
-type DeviceProfileMode string
-
-const (
-	DeviceProfileModeAudit   DeviceProfileMode = "AUDIT"
-	DeviceProfileModeEnforce DeviceProfileMode = "ENFORCE"
-)
-
-var AllDeviceProfileMode = []DeviceProfileMode{
-	DeviceProfileModeAudit,
-	DeviceProfileModeEnforce,
-}
-
-func (e DeviceProfileMode) IsValid() bool {
-	switch e {
-	case DeviceProfileModeAudit, DeviceProfileModeEnforce:
-		return true
-	}
-	return false
-}
-
-func (e DeviceProfileMode) String() string {
-	return string(e)
-}
-
-func (e *DeviceProfileMode) UnmarshalGQL(v any) error {
-	str, ok := v.(string)
-	if !ok {
-		return fmt.Errorf("enums must be strings")
-	}
-
-	*e = DeviceProfileMode(str)
-	if !e.IsValid() {
-		return fmt.Errorf("%s is not a valid DeviceProfileMode", str)
-	}
-	return nil
-}
-
-func (e DeviceProfileMode) MarshalGQL(w io.Writer) {
-	fmt.Fprint(w, strconv.Quote(e.String()))
-}
-
-func (e *DeviceProfileMode) UnmarshalJSON(b []byte) error {
-	s, err := strconv.Unquote(string(b))
-	if err != nil {
-		return err
-	}
-	return e.UnmarshalGQL(s)
-}
-
-func (e DeviceProfileMode) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil

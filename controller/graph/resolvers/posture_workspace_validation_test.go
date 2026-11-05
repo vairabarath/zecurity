@@ -34,7 +34,7 @@ func TestDeleteDeviceProfileRejectsCrossWorkspaceProfile(t *testing.T) {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
 
-	_, err = f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String())
+	_, err = f.mr.DeleteDeviceProfile(f.ctx, profile.ID.String(), nil)
 	if err == nil || !strings.Contains(err.Error(), "deleteDeviceProfile: profile not found") {
 		t.Fatalf("cross-workspace delete error = %v", err)
 	}
@@ -48,7 +48,7 @@ func TestDeleteDeviceProfileRejectsInvalidUUID(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
-	_, err := f.mr.DeleteDeviceProfile(f.ctx, "not-a-uuid")
+	_, err := f.mr.DeleteDeviceProfile(f.ctx, "not-a-uuid", nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid profile id") {
 		t.Fatalf("invalid UUID delete error = %v", err)
 	}
@@ -151,30 +151,30 @@ func TestRemoveProfileRequirementRejectsInvalidProfileUUID(t *testing.T) {
 	}
 }
 
-// Invalid resource UUID for bind must fail before database access or notification.
-func TestBindResourceToProfileRejectsInvalidResourceUUID(t *testing.T) {
+// PENDING-16: a malformed resource or profile id is answered like a missing
+// one, before any write or notification.
+func TestSetResourcePolicyRejectsInvalidResourceUUID(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
-	_, err := f.mr.BindResourceToProfile(f.ctx, uuid.NewString(), "not-a-uuid")
-	if err == nil || !strings.Contains(err.Error(), "invalid resource id") {
-		t.Fatalf("invalid resource UUID bind error = %v", err)
+	_, err := f.mr.SetResourcePolicy(f.ctx, "not-a-uuid", uuid.NewString())
+	if err == nil || !strings.Contains(err.Error(), "resource not found") {
+		t.Fatalf("invalid resource UUID setResourcePolicy error = %v", err)
 	}
 	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("invalid resource UUID bind fired push hook %d times, want 0", got)
+		t.Fatalf("invalid resource UUID setResourcePolicy fired push hook %d times, want 0", got)
 	}
 }
 
-// Invalid resource UUID for unbind must fail before database access or notification.
-func TestUnbindResourceFromProfileRejectsInvalidResourceUUID(t *testing.T) {
+func TestSetResourcePolicyProfilesRejectsInvalidProfileUUID(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
-	_, err := f.mr.UnbindResourceFromProfile(f.ctx, uuid.NewString(), "not-a-uuid")
-	if err == nil || !strings.Contains(err.Error(), "invalid resource id") {
-		t.Fatalf("invalid resource UUID unbind error = %v", err)
+	_, err := f.mr.SetResourcePolicyProfiles(f.ctx, uuid.NewString(), []string{"not-a-uuid"})
+	if err == nil || !strings.Contains(err.Error(), "device profile not found") {
+		t.Fatalf("invalid profile UUID setResourcePolicyProfiles error = %v", err)
 	}
 	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("invalid resource UUID unbind fired push hook %d times, want 0", got)
+		t.Fatalf("invalid profile UUID setResourcePolicyProfiles fired push hook %d times, want 0", got)
 	}
 }

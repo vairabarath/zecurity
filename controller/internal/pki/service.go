@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
 
 // x509 and time are used in the Service interface method signatures.
@@ -205,6 +207,12 @@ func Init(ctx context.Context, pool *pgxpool.Pool) (Service, error) {
 	if err := auditCAConstraints(rootCert, svc.intermediateKey.cert); err != nil {
 		return nil, err // fail closed — controller refuses to start
 	}
+
+	// PENDING-10: CA runway/validity for the cert gauges and alerts. The
+	// collector recomputes runway at every scrape from these windows.
+	metrics.SetCertRunway("root_ca", rootCert.NotBefore, rootCert.NotAfter, true)
+	ic := svc.intermediateKey.cert
+	metrics.SetCertRunway("intermediate_ca", ic.NotBefore, ic.NotAfter, true)
 
 	return svc, nil
 }

@@ -47,6 +47,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
+	"github.com/yourorg/ztna/controller/internal/health"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
@@ -64,6 +65,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/telemetry"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
@@ -85,9 +87,19 @@ func main() {
 	)
 
 	defer stop()
+
+	shutdownTracer, err := telemetry.Init(ctx, "zecurity-controller")
+	if err != nil {
+		log.Fatalf("telemetry init: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = shutdownTracer(shutdownCtx)
+	}()
+
 	workers := newWorkerSet()
 	var outboxStore *outbox.Outbox
-	var err error
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
@@ -455,7 +467,6 @@ func main() {
 		discoverylimit.ProtectHTTP(discoveryLimiter, discoveryIPs, discoverylimit.OpRESTAuth, authSvc.DiscoveryHandler()))
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
-	mux.Handle("/health", healthHandler())
 
 	if os.Getenv("ENV") == "development" {
 		mux.Handle("/playground", playground.Handler(appmeta.ProductName, "/graphql"))
@@ -607,6 +618,20 @@ func main() {
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
 	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
 
+	// Health & Readiness (PENDING-10 Phase 1).
+	// Bounded check timeouts and 1s result caching prevent probe storms from saturating downstream services.
+	// Public routes (:8080) return minimal status only; internal management (:9102) exposes detailed diagnostics.
+	healthRegistry := health.NewRegistry(health.DefaultCheckTimeout, health.DefaultCacheTTL)
+	healthRegistry.Register(health.NewDatabaseChecker(db.Pool))
+	healthRegistry.Register(health.NewValkeyChecker(connectorValkey))
+	healthRegistry.Register(health.NewPKIChecker(controllerRotator))
+	healthRegistry.Register(health.NewOutboxChecker(outboxProcessor))
+
+	mux.Handle("/livez", health.LivenessHandler())
+	mux.Handle("/readyz", healthRegistry.PublicReadinessHandler())
+	mux.Handle("/healthz", healthRegistry.PublicHealthzHandler())
+	mux.Handle("/health", healthRegistry.PublicHealthHandler())
+
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
 
 	grpcServer := grpc.NewServer(
@@ -615,8 +640,14 @@ func main() {
 			ClientAuth:     tls.RequestClientCert,
 			MinVersion:     tls.VersionTLS13,
 		})),
-		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
-		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
+		grpc.ChainUnaryInterceptor(
+			telemetry.UnaryServerInterceptor(),
+			connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker),
+		),
+		grpc.ChainStreamInterceptor(
+			telemetry.StreamServerInterceptor(),
+			connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker),
+		),
 	)
 
 	workers.Go("controller-rotator", func() {
@@ -797,6 +828,69 @@ func main() {
 			}
 		}
 	})
+	workers.Go("fleet-metrics-observer", func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
+		// Run once immediately on start
+		updateMetrics := func() {
+			// 1. Database pool
+			stat := db.Pool.Stat()
+			metrics.SetDBPoolStats(stat.AcquiredConns(), stat.IdleConns(), stat.TotalConns(), stat.MaxConns())
+
+			// 2. Active relays and capacity
+			var relayCount int
+			var conns, maxCap int64
+			err := db.Pool.QueryRow(ctx, `
+				SELECT count(*), COALESCE(sum(connection_count), 0), COALESCE(sum(max_connections), 0)
+				FROM relays
+				WHERE status = 'active'
+			`).Scan(&relayCount, &conns, &maxCap)
+			if err == nil {
+				metrics.SetRelayFleetGauges(relayCount, uint32(conns), uint32(maxCap))
+			}
+
+			// 3. Live connectors: same predicate the disconnect watcher uses, so
+			// rows that never heartbeated (or went quiet before the watcher ran)
+			// don't count.
+			var connCount int
+			err = db.Pool.QueryRow(ctx, `
+				SELECT count(*) FROM connectors
+				WHERE status = 'active' AND revoked_at IS NULL
+				  AND last_heartbeat_at >= NOW() - $1::interval
+				  AND tenant_id IN (SELECT id FROM workspaces WHERE status = 'active')
+			`, fmt.Sprintf("%d seconds", int(connectorCfg.DisconnectThreshold.Seconds()))).Scan(&connCount)
+			if err == nil {
+				metrics.SetConnectorActiveCount(connCount)
+			} else if ctx.Err() == nil {
+				log.Printf("fleet metrics: connector count: %v", err)
+			}
+
+			// 4. Outbox pending events depth and oldest age
+			var outboxPending int
+			var oldestSeconds float64
+			err = db.Pool.QueryRow(ctx, `
+				SELECT count(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - min(created_at))), 0)
+				FROM outbox_events
+				WHERE status = 'pending'
+			`).Scan(&outboxPending, &oldestSeconds)
+			if err == nil {
+				metrics.SetOutboxQueueGauges(outboxPending, time.Duration(oldestSeconds)*time.Second)
+			}
+		}
+
+		updateMetrics()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				updateMetrics()
+			}
+		}
+	})
+
 	workers.Go("grpc-server", func() {
 
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
@@ -813,6 +907,9 @@ func main() {
 	metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsMux.Handle("/healthz", healthRegistry.InternalDiagnosticsHandler())
+	metricsMux.Handle("/readyz", healthRegistry.InternalDiagnosticsHandler())
+	metricsMux.Handle("/livez", health.LivenessHandler())
 	metricsServer := &http.Server{
 		Addr:    metricsAddr,
 		Handler: metricsMux,
@@ -820,7 +917,7 @@ func main() {
 
 	workers.Go("metrics-server", func() {
 
-		log.Printf("metrics listenin on %s/metrics", metricsAddr)
+		log.Printf("metrics listening on %s/metrics", metricsAddr)
 
 		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
@@ -838,7 +935,7 @@ func main() {
 	addr := ":" + envOr("PORT", "8080")
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: providerCORS(mux),
+		Handler: telemetry.HTTPMiddleware(providerCORS(metrics.HTTPMiddleware(mux))),
 	}
 	log.Printf("listening on %s", addr)
 
@@ -1009,18 +1106,6 @@ func (introspectionDisabler) MutateOperationContext(
 ) *gqlerror.Error {
 	opCtx.DisableIntrospection = true
 	return nil
-}
-
-func healthHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Pool.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
 }
 
 // mustProviderIdentity builds the Provider Identity Service from

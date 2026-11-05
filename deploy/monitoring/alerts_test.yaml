@@ -1,0 +1,110 @@
+# promtool unit tests for alerts.yaml. Run from this directory:
+#   docker run --rm -v "$PWD":/w -w /w --entrypoint promtool prom/prometheus:v2.53.2 test rules alerts_test.yaml
+rule_files: [alerts.yaml]
+evaluation_interval: 15s
+tests:
+  # Healthy controller: 7-day controller cert just past its 2/3 rotation point
+  # (~1/3 left), CAs with years left. Nothing may fire.
+  - interval: 15s
+    input_series:
+      - series: 'cert_runway_seconds{entity="controller_grpc"}'
+        values: '201600x40'          # 56 h
+      - series: 'cert_lifetime_seconds{entity="controller_grpc"}'
+        values: '608400x40'          # 7 d + 1 h backdate
+      - series: 'cert_valid{entity="controller_grpc"}'
+        values: '1x40'
+      - series: 'cert_runway_seconds{entity="root_ca"}'
+        values: '315000000x40'
+      - series: 'cert_lifetime_seconds{entity="root_ca"}'
+        values: '315576000x40'
+      - series: 'cert_valid{entity="root_ca"}'
+        values: '1x40'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: CertExpiryImminentWarning, exp_alerts: []}
+      - {eval_time: 10m, alertname: CertExpiryImminentCritical, exp_alerts: []}
+      - {eval_time: 10m, alertname: CertInvalid, exp_alerts: []}
+
+  # Rotation stuck: controller cert down to 1/5 of its lifetime, then expired.
+  - interval: 15s
+    input_series:
+      - series: 'cert_runway_seconds{entity="controller_grpc"}'
+        values: '121680x40 0x20'
+      - series: 'cert_lifetime_seconds{entity="controller_grpc"}'
+        values: '608400x60'
+      - series: 'cert_valid{entity="controller_grpc"}'
+        values: '1x40 0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: CertExpiryImminentWarning
+        exp_alerts:
+          - exp_labels: {severity: warning, component: pki, entity: controller_grpc}
+            exp_annotations:
+              summary: "Certificate past 3/4 of its lifetime"
+              description: "Certificate 'controller_grpc' has 20% of its lifetime left. The controller cert should have rotated at 2/3; check the controller-rotator logs and pki_rotations_total{status=\"error\"}."
+      - eval_time: 14m
+        alertname: CertInvalid
+        exp_alerts:
+          - exp_labels: {severity: critical, component: pki, entity: controller_grpc}
+            exp_annotations:
+              summary: "Certificate validity check failed"
+              description: "Certificate 'controller_grpc' is expired, not yet valid, or failed validation."
+
+  # Pool exhausted: acquired == max == 25.
+  - interval: 15s
+    input_series:
+      - series: 'db_pool_connections{state="acquired"}'
+        values: '25x10'
+      - series: 'db_pool_connections{state="max"}'
+        values: '25x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DatabasePoolExhausted
+        exp_alerts:
+          - exp_labels: {severity: critical, component: database}
+            exp_annotations:
+              summary: "Database connection pool exhausted"
+              description: "All 25 database connections are currently acquired/busy."
+
+  # Pool busy but not exhausted.
+  - interval: 15s
+    input_series:
+      - series: 'db_pool_connections{state="acquired"}'
+        values: '24x10'
+      - series: 'db_pool_connections{state="max"}'
+        values: '25x10'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: DatabasePoolExhausted, exp_alerts: []}
+
+  # One dead-lettered outbox event.
+  - interval: 15s
+    input_series:
+      - series: 'outbox_dead_letter_total'
+        values: '0x8 1x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OutboxDeadLetterDetected
+        exp_alerts:
+          - exp_labels: {severity: critical, component: outbox}
+            exp_annotations:
+              summary: "Outbox dead letter events detected"
+              description: "Outbox events have transitioned to dead letter status (rate: 1 over 5m)."
+
+  # Connector ACL lag: p95 well above 5 versions for 5+ minutes.
+  - interval: 15s
+    input_series:
+      - series: 'connector_acl_lag_versions_bucket{le="5"}'
+        values: '0+0x60'
+      - series: 'connector_acl_lag_versions_bucket{le="10"}'
+        values: '0+0x60'
+      - series: 'connector_acl_lag_versions_bucket{le="25"}'
+        values: '0+10x60'
+      - series: 'connector_acl_lag_versions_bucket{le="+Inf"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ConnectorACLLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, component: connector}
+            exp_annotations:
+              summary: "Connector ACL synchronization lag is high"
+              description: "p95 connector ACL lag exceeds 5 versions (current: 24.25)."

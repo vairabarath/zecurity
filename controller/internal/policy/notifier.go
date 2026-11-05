@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
 
 // Notifier tracks a monotonic policy version per workspace and invalidates
@@ -74,6 +76,7 @@ func (n *Notifier) NotifyPolicyChange(_ context.Context, workspaceID string) err
 
 	v.Add(1)
 	n.cache.Invalidate(workspaceID)
+	metrics.RecordPolicyNotification("policy")
 
 	// Fire the proactive-push hook after the version is bumped and the cache is
 	// invalidated, so a hook that recompiles observes the new version and a cold

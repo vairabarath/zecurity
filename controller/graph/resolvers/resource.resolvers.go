@@ -287,3 +287,8 @@ func (r *queryResolver) AllResources(ctx context.Context) ([]*graph.Resource, er
 	}
 	return result, nil
 }
+
+// Resource returns graph.ResourceResolver implementation.
+func (r *Resolver) Resource() graph.ResourceResolver { return &resourceResolver{r} }
+
+type resourceResolver struct{ *Resolver }

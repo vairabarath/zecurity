@@ -10,7 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { AlertTriangle, Loader2, Plug, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Info, Loader2, Plug, ShieldCheck, X } from "lucide-react";
 import { toast } from "sonner";
 import { CountryRuleEditor } from "@/components/CountryRuleEditor";
 import { COUNTRY_CHECK_ID } from "@/lib/countries";
@@ -32,6 +32,7 @@ interface EditDeviceProfileModalProps {
       checkId: string;
       countries?: { allow: string[]; deny: string[] } | null;
     }[];
+    policies?: { id: string; name: string }[];
   } | null;
   onSuccess?: () => void;
 }
@@ -42,9 +43,19 @@ export function EditDeviceProfileModal({
   profile,
   onSuccess,
 }: EditDeviceProfileModalProps) {
-  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(() =>
+    profile
+      ? new Set(
+          profile.requirements
+            .map((r) => r.checkId)
+            .filter((id) => id !== COUNTRY_CHECK_ID),
+        )
+      : new Set(),
+  );
   // PENDING-20: the country check is edited with its own lists.
-  const [countryRule, setCountryRule] = useState<CountryRuleValue>(EMPTY_COUNTRY_RULE);
+  const [countryRule, setCountryRule] = useState<CountryRuleValue>(() =>
+    profile ? originalCountryRule(profile) : EMPTY_COUNTRY_RULE,
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -80,7 +91,16 @@ export function EditDeviceProfileModal({
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
   });
 
+  const inUse = (profile?.policies?.length ?? 0) > 0;
+  const totalActiveRequirements = checkedIds.size + (countryRule.enabled ? 1 : 0);
+
   function toggleCheck(checkId: string) {
+    if (checkedIds.has(checkId) && inUse && totalActiveRequirements <= 1) {
+      toast.error(
+        `Cannot remove the last requirement while this profile is in use by ${profile?.policies?.length} policy (${profile?.policies?.map((p) => p.name).join(", ")}).`,
+      );
+      return;
+    }
     setCheckedIds((prev) => {
       const next = new Set(prev);
       if (next.has(checkId)) next.delete(checkId);
@@ -97,6 +117,13 @@ export function EditDeviceProfileModal({
     e.preventDefault();
     setError(null);
     if (!profile) return;
+
+    if (inUse && checkedIds.size === 0 && !countryRule.enabled) {
+      setError(
+        `Cannot remove all requirements while this profile is in use by ${profile.policies?.length} policy (${profile.policies?.map((p) => p.name).join(", ")}).`,
+      );
+      return;
+    }
 
     if (countryProblem) {
       setError(countryProblem);
@@ -189,6 +216,18 @@ export function EditDeviceProfileModal({
               </p>
             </div>
 
+            {inUse && (
+              <div className="flex items-start gap-2.5 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-muted-foreground">
+                <Info className="h-4 w-4 shrink-0 mt-0.5 text-primary" />
+                <span>
+                  This profile is in use by {profile.policies!.length}{' '}
+                  {profile.policies!.length === 1 ? 'policy' : 'policies'} (
+                  {profile.policies!.map((p) => p.name).join(', ')}). Its last requirement cannot be
+                  removed.
+                </span>
+              </div>
+            )}
+
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label className="text-sm font-semibold">Verification Requirements</Label>
@@ -211,6 +250,7 @@ export function EditDeviceProfileModal({
                     <Switch
                       checked={checkedIds.has(check.id)}
                       onCheckedChange={() => toggleCheck(check.id)}
+                      disabled={inUse && totalActiveRequirements <= 1 && checkedIds.has(check.id)}
                       aria-label={check.label}
                     />
                   </div>
@@ -262,6 +302,7 @@ export function EditDeviceProfileModal({
                     <Switch
                       checked={checkedIds.has(check.id)}
                       onCheckedChange={() => toggleCheck(check.id)}
+                      disabled={inUse && totalActiveRequirements <= 1 && checkedIds.has(check.id)}
                       aria-label={check.label}
                     />
                   </div>

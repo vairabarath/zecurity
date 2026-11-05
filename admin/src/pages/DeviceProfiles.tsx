@@ -1,4 +1,5 @@
 import { toastMutationError } from "@/lib/mutationErrors";
+import { toast } from "sonner";
 import { useMemo, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMutation, useQuery } from "@apollo/client/react";
@@ -30,7 +31,21 @@ type EditableProfile = {
     checkId: string;
     countries?: { allow: string[]; deny: string[] } | null;
   }[];
+  policies?: ProfilePolicy[];
 };
+
+// A resource policy that uses the profile, with the ids of all its profiles.
+type ProfilePolicy = { id: string; name: string; profiles?: { id: string }[] };
+
+type DeletingProfile = { id: string; name: string; policies: ProfilePolicy[] };
+
+// D-4: the policies that would be left with no profiles once this profile is
+// removed from them; they then allow any device.
+function policiesLeftAnyDevice(profile: DeletingProfile): ProfilePolicy[] {
+  return profile.policies.filter((p) =>
+    (p.profiles ?? []).every((pp) => pp.id === profile.id),
+  );
+}
 
 // PENDING-20: one-line summary of a profile's country rule, or null.
 function countrySummary(requirements: EditableProfile["requirements"]): string | null {
@@ -48,28 +63,62 @@ function DeleteDeviceProfileDialog({
   onConfirm,
   loading,
 }: {
-  profile: { id: string; name: string } | null;
+  profile: DeletingProfile | null;
   onClose: () => void;
   onConfirm: () => void;
   loading: boolean;
 }) {
+  const inUse = (profile?.policies.length ?? 0) > 0;
+  const anyDevice = profile ? policiesLeftAnyDevice(profile) : [];
   return (
     <Dialog open={!!profile} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete device profile</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-muted-foreground">
-          Are you sure you want to delete{" "}
-          <span className="font-semibold text-foreground">{profile?.name}</span>?
-          Devices bound through this profile will no longer be gated by it.
-        </p>
+        <div className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Are you sure you want to delete{" "}
+            <span className="font-semibold text-foreground">{profile?.name}</span>?
+          </p>
+          {inUse ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-amber-500 space-y-2">
+              <p className="font-semibold">
+                This profile is used by {profile?.policies.length}{" "}
+                {profile?.policies.length === 1 ? "policy" : "policies"}:
+              </p>
+              <p className="font-medium text-foreground">
+                {profile?.policies.map((p) => p.name).join(", ")}
+              </p>
+              <p className="text-xs">
+                Deleting it will remove it from these policies.
+              </p>
+              {anyDevice.length > 0 ? (
+                <p className="text-xs">
+                  {anyDevice.length === 1 ? "This policy has" : "These policies have"} no other
+                  profiles and will become <strong>Any Device</strong> (allowing any device):{" "}
+                  <span className="font-medium text-foreground">
+                    {anyDevice.map((p) => p.name).join(", ")}
+                  </span>
+                </p>
+              ) : (
+                <p className="text-xs">
+                  Each of them keeps at least one other profile, so none will allow any device.
+                </p>
+              )}
+            </div>
+          ) : (
+            <p>
+              Devices bound through this profile will no longer be gated by it.
+            </p>
+          )}
+        </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>
             Cancel
           </Button>
           <Button variant="destructive" onClick={onConfirm} disabled={loading}>
-            {loading ? "Deleting…" : "Delete"}
+            {loading ? "Deleting…" : inUse ? "Confirm & Delete" : "Delete"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -81,7 +130,7 @@ export default function DeviceProfiles() {
   const [showAdd, setShowAdd] = useState(false);
   const canWrite = useCan(Capability.PostureWrite);
   const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
-  const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string } | null>(null);
+  const [deletingProfile, setDeletingProfile] = useState<DeletingProfile | null>(null);
 
   const { data, loading, error, refetch } = useQuery(
     GetDeviceProfilesDocument,
@@ -95,7 +144,19 @@ export default function DeviceProfiles() {
     DeleteDeviceProfileDocument,
     {
     onError: toastMutationError,
-      onCompleted: () => {
+      onCompleted: (data) => {
+        const result = data.deleteDeviceProfile;
+        const removed = result.removedFrom.map((p) => p.name);
+        const anyDevice = result.nowAnyDevice.map((p) => p.name);
+        toast.success("Device profile deleted", {
+          description:
+            removed.length === 0
+              ? undefined
+              : `Removed from ${removed.join(", ")}.` +
+                (anyDevice.length > 0
+                  ? ` Now allowing any device: ${anyDevice.join(", ")}.`
+                  : ""),
+        });
         setDeletingProfile(null);
         refetch();
       },
@@ -131,7 +192,7 @@ export default function DeviceProfiles() {
       <div className="table-shell">
         <div className="table-scroll">
           <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4">
-            {["Name", "Requirements", "Bound Resources", "Actions"].map(
+            {["Name", "Requirements", "Used by policies", "Actions"].map(
               (label, index) => (
                 <div
                   key={label + index}
@@ -201,10 +262,10 @@ export default function DeviceProfiles() {
                     )}
                   </div>
                   <div className="text-[13px] font-semibold text-muted-foreground">
-                    {profile.boundResources.length === 0 ? (
+                    {profile.policies.length === 0 ? (
                       <span className="italic opacity-60">none</span>
                     ) : (
-                      profile.boundResources.length
+                      profile.policies.length
                     )}
                   </div>
 
@@ -217,6 +278,7 @@ export default function DeviceProfiles() {
                           name: profile.name,
                           manualTrust: profile.manualTrust,
                           requirements: profile.requirements,
+                          policies: profile.policies,
                         })
                       }
                       className="text-[13px] font-bold text-muted-foreground transition hover:text-foreground"
@@ -226,7 +288,13 @@ export default function DeviceProfiles() {
                     )}
                     {canWrite && (
                     <button
-                      onClick={() => setDeletingProfile({ id: profile.id, name: profile.name })}
+                      onClick={() =>
+                        setDeletingProfile({
+                          id: profile.id,
+                          name: profile.name,
+                          policies: profile.policies,
+                        })
+                      }
                       className="text-[13px] font-bold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
                     >
                       Delete
@@ -266,7 +334,12 @@ export default function DeviceProfiles() {
         onClose={() => setDeletingProfile(null)}
         onConfirm={() => {
           if (deletingProfile) {
-            deleteDeviceProfile({ variables: { id: deletingProfile.id } });
+            deleteDeviceProfile({
+              variables: {
+                id: deletingProfile.id,
+                confirmInUse: deletingProfile.policies.length > 0,
+              },
+            });
           }
         }}
       />

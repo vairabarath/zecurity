@@ -14,6 +14,7 @@ import (
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -104,6 +105,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	// tell the relay which of its registered connectors are revoked.
 	revoked := s.revokedConnectorSubset(ctx, relayID, req.RegisteredConnectorSpiffeIds)
 	if !shouldWriteDB {
+		metrics.RecordRelayHeartbeat("accepted")
 		return &relaypb.HeartbeatResponse{
 			ServerTimeUnix:            time.Now().UTC().Unix(),
 			NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
@@ -127,6 +129,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		receivedAt,
 	); err != nil {
 		log.Printf("relay heartbeat: record %s: %v", relayID, err)
+		metrics.RecordRelayHeartbeat("rejected")
 		if errors.Is(err, ErrRelayNotFound) {
 			return nil, status.Error(codes.NotFound, "Relay registration not found")
 		}
@@ -143,6 +146,9 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		// label promotion next heartbeat. Log and continue.
 		log.Printf("relay heartbeat: evaluate capacity label %s: %v", relayID, evalErr)
 	}
+	if transition.PreviousLabel != "" && transition.NewLabel != "" && transition.PreviousLabel != transition.NewLabel {
+		metrics.RecordRelayCapacityTransition(fmt.Sprintf("%s_to_%s", transition.PreviousLabel, transition.NewLabel))
+	}
 	if transition.Promoted {
 		log.Printf("relay heartbeat: capacity label promoted relay=%s %s -> %s",
 			relayID, transition.PreviousLabel, transition.NewLabel)
@@ -156,6 +162,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 			s.onPoolChange(ctx)
 		}
 	}
+	metrics.RecordRelayHeartbeat("accepted")
 	return &relaypb.HeartbeatResponse{
 		ServerTimeUnix:            time.Now().UTC().Unix(),
 		NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),

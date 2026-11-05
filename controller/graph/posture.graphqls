@@ -1,8 +1,3 @@
-enum DeviceProfileMode {
-  AUDIT
-  ENFORCE
-}
-
 enum PostureCheckStatus {
   PASS
   FAIL
@@ -41,10 +36,23 @@ input CountryRuleInput {
 type DeviceProfile {
   id: ID!
   name: String!
-  mode: DeviceProfileMode!
   manualTrust: Boolean! @deprecated(reason: "Not enforced. Require the zecurity.device.approved check instead (ADR-030).")
   requirements: [DeviceProfileRequirement!]! @goField(forceResolver: true)
-  boundResources: [Resource!]! @goField(forceResolver: true)
+  # PENDING-16: the resource policies that require this profile.
+  policies: [ResourcePolicy!]! @goField(forceResolver: true)
+}
+
+# PENDING-16 D-4: what deleting a device profile changed.
+type DeviceProfileDeletion {
+  # The resource policies the profile was removed from.
+  removedFrom: [ResourcePolicyRef!]!
+  # Those of them left with no profiles: they now allow any device.
+  nowAnyDevice: [ResourcePolicyRef!]!
+}
+
+type ResourcePolicyRef {
+  id: ID!
+  name: String!
 }
 
 type DevicePostureObservation {
@@ -83,11 +91,6 @@ extend type Mutation {
     manualTrust: Boolean = true
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
-  updateDeviceProfileMode(
-    id: ID!
-    mode: DeviceProfileMode!
-  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
-
   # Deprecated (ADR-030): manualTrust is not enforced; require
   # zecurity.device.approved instead.
   updateDeviceProfileManualTrust(
@@ -110,22 +113,18 @@ extend type Mutation {
     countries: CountryRuleInput!
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
+  # PENDING-16 D-4: a profile that resource policies use is deleted only with
+  # confirmInUse: true; it is then removed from them (a policy left with no
+  # profiles allows any device). Without it the request is refused, naming them.
+  # The result names the policies it was removed from and those now allowing
+  # any device.
   deleteDeviceProfile(
     id: ID!
-  ): Boolean! @requires(capability: POSTURE_WRITE)
+    confirmInUse: Boolean = false
+  ): DeviceProfileDeletion! @requires(capability: POSTURE_WRITE)
 
   removeProfileRequirement(
     profileId: ID!
     checkId: String!
-  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
-
-  bindResourceToProfile(
-    profileId: ID!
-    resourceId: ID!
-  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
-
-  unbindResourceFromProfile(
-    profileId: ID!
-    resourceId: ID!
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 }

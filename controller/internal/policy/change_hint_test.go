@@ -92,11 +92,16 @@ func TestDeviceApproval_WakesHintStreamAndAuthorizesThroughSnapshot(t *testing.T
 	if err := pstore.AddRequirement(ctx, ws, profile.ID, posture.Requirement{CheckID: posture.CheckDeviceApproved}); err != nil {
 		t.Fatalf("add requirement: %v", err)
 	}
-	if _, err := pstore.UpdateProfileMode(ctx, ws, profile.ID, posture.ModeEnforce); err != nil {
-		t.Fatalf("enforce profile: %v", err)
+	// PENDING-16: the resource's policy requires the profile.
+	pol, err := pstore.CreateResourcePolicy(ctx, ws, "Company devices only", nil)
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
 	}
-	if _, err := pstore.CreateResourceBinding(ctx, ws, res, profile.ID); err != nil {
-		t.Fatalf("bind profile: %v", err)
+	if _, err := pstore.SetResourcePolicyProfiles(ctx, ws, pol.ID, []uuid.UUID{profile.ID}); err != nil {
+		t.Fatalf("set policy profiles: %v", err)
+	}
+	if _, err := pstore.SetResourcePolicy(ctx, ws, res, pol.ID); err != nil {
+		t.Fatalf("set resource policy: %v", err)
 	}
 	if err := pstore.InsertReport(ctx, ws, dev, posture.Report{
 		ReportID:      uuid.NewString(),

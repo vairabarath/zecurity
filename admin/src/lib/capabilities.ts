@@ -40,14 +40,17 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   unassignResourceFromGroup: Capability.AccessWrite,
   // POSTURE_WRITE — Security
   createDeviceProfile: Capability.PostureWrite,
-  updateDeviceProfileMode: Capability.PostureWrite,
   updateDeviceProfileManualTrust: Capability.PostureWrite,
   addProfileRequirement: Capability.PostureWrite,
   removeProfileRequirement: Capability.PostureWrite,
   deleteDeviceProfile: Capability.PostureWrite,
-  bindResourceToProfile: Capability.PostureWrite,
-  unbindResourceFromProfile: Capability.PostureWrite,
   updateProfileRequirementCountries: Capability.PostureWrite, // PENDING-20 G-10
+  // PENDING-16 resource policies (D-2: assigning a resource is POSTURE_WRITE too)
+  createResourcePolicy: Capability.PostureWrite,
+  updateResourcePolicy: Capability.PostureWrite,
+  setResourcePolicyProfiles: Capability.PostureWrite,
+  deleteResourcePolicy: Capability.PostureWrite,
+  setResourcePolicy: Capability.PostureWrite,
   // DEVICE_WRITE — Helpdesk
   approveDevice: Capability.DeviceWrite,
   unapproveDevice: Capability.DeviceWrite,

@@ -25,10 +25,10 @@ func TestAddProfileRequirement_UnknownCheck(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -58,10 +58,10 @@ func TestRemoveProfileRequirement_UnknownCheck(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -92,10 +92,10 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -134,10 +134,10 @@ func TestAddProfileRequirement_Success(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -168,10 +168,10 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -195,7 +195,7 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 	}
 }
 
-func TestRemoveProfileRequirement_LastEnforceRejected(t *testing.T) {
+func TestRemoveProfileRequirement_LastRequirementOfProfileInUseRejected(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	f.mr.Resolver.PostureStore = posture.NewStore(f.pool)
 
@@ -209,10 +209,10 @@ func TestRemoveProfileRequirement_LastEnforceRejected(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = f.mr.PostureStore.DeleteProfile(
+		_, _ = f.mr.PostureStore.DeleteProfile(
 			context.Background(),
 			uuid.MustParse(f.tenantID),
-			profile.ID,
+			profile.ID, true,
 		)
 	})
 
@@ -226,20 +226,21 @@ func TestRemoveProfileRequirement_LastEnforceRejected(t *testing.T) {
 		t.Fatalf("add requirement: %v", err)
 	}
 
-	if _, err := f.pool.Exec(
-		f.ctx,
-		`UPDATE device_profiles SET mode = 'enforce' WHERE id = $1`,
-		profile.ID,
-	); err != nil {
-		t.Fatalf("set enforce mode: %v", err)
+	// PENDING-16: a profile a resource policy uses keeps its last requirement.
+	pol, err := f.mr.PostureStore.CreateResourcePolicy(f.ctx, uuid.MustParse(f.tenantID), "last-req-"+uuid.NewString(), nil)
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	if _, err := f.mr.PostureStore.SetResourcePolicyProfiles(f.ctx, uuid.MustParse(f.tenantID), pol.ID, []uuid.UUID{profile.ID}); err != nil {
+		t.Fatalf("require profile: %v", err)
 	}
 
 	_, err = f.mr.RemoveProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall)
 	if err == nil {
-		t.Fatal("expected error removing last requirement from enforced profile")
+		t.Fatal("expected error removing the last requirement of a profile in use")
 	}
-	if !strings.Contains(err.Error(), "cannot remove the final requirement from an enforced profile") {
-		t.Fatalf("error = %v, want last requirement from enforced profile", err)
+	if got := ErrorPresenter(f.ctx, err).Message; got != posture.ErrLastRequirement.Error() {
+		t.Fatalf("client sees %q, want %q", got, posture.ErrLastRequirement.Error())
 	}
 	if got := f.fires.Load(); got != 0 {
 		t.Fatalf("push hook fired %d times, want 0", got)
@@ -258,7 +259,7 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 		t.Fatalf("create profile: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = store.DeleteProfile(context.Background(), uuid.MustParse(f.tenantID), profile.ID)
+		_, _ = store.DeleteProfile(context.Background(), uuid.MustParse(f.tenantID), profile.ID, true)
 	})
 	id := profile.ID.String()
 

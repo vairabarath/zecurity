@@ -27,6 +27,9 @@ type OutboxEvent struct {
 	UserID        *uuid.UUID
 	CorrelationID uuid.UUID
 	Payload       json.RawMessage
+	// Traceparent is the publishing span's W3C traceparent, nil when tracing
+	// was off or the publisher had no span (PENDING-10).
+	Traceparent   *string
 	Status        string
 	RetryCount    int
 	CreatedAt     time.Time

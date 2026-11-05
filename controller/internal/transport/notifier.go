@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"github.com/yourorg/ztna/controller/internal/metrics"
 )
 
 // Notifier tracks a monotonic transport version per workspace and invalidates
@@ -75,6 +77,7 @@ func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string, a
 
 	v.Add(1)
 	n.cache.Invalidate(workspaceID)
+	metrics.RecordPolicyNotification("transport")
 	for _, listen := range n.listeners {
 		listen(workspaceID)
 	}

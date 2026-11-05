@@ -6,7 +6,13 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/yourorg/ztna/controller/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -26,6 +32,12 @@ type Processor struct {
 	pollInterval   time.Duration
 	lockWindow     time.Duration
 	reaperInterval time.Duration
+	running        atomic.Bool
+}
+
+// IsRunning reports whether the processor background loops are actively executing.
+func (p *Processor) IsRunning() bool {
+	return p.running.Load()
 }
 
 type ProcessorOption func(*processorConfig)
@@ -154,8 +166,23 @@ func (p *Processor) processEvent(
 
 	leaseID := *evt.LeaseID
 
+	// The dispatch span starts a new trace and links to the span that
+	// published the event, when one was recorded (PENDING-10).
+	spanOpts := []trace.SpanStartOption{
+		trace.WithAttributes(
+			attribute.String("event.type", evt.EventType),
+			attribute.String("event.id", evt.ID.String()),
+		),
+	}
+	if link, ok := telemetry.LinkFromTraceparent(evt.Traceparent); ok {
+		spanOpts = append(spanOpts, trace.WithLinks(link))
+	}
+	ctx, span := telemetry.StartSpan(ctx, "outbox.dispatch_"+evt.EventType, spanOpts...)
+	defer span.End()
+
 	err := p.registry.Dispatch(ctx, evt)
 	if err == nil {
+		span.SetStatus(codes.Ok, "")
 		if err := p.outbox.MarkDone(ctx, evt.ID, leaseID); err != nil {
 			return fmt.Errorf("mark event done: %w", err)
 		}
@@ -171,6 +198,8 @@ func (p *Processor) processEvent(
 
 		return nil
 	}
+
+	span.SetStatus(codes.Error, err.Error())
 
 	if errors.Is(err, ErrNoHandler) {
 		if markErr := p.outbox.MarkFailedTerminal(
@@ -256,6 +285,9 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 	if batchSize <= 0 {
 		return fmt.Errorf("outbox processor batch size must be positive")
 	}
+
+	p.running.Store(true)
+	defer p.running.Store(false)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)

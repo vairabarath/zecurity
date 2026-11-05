@@ -100,6 +100,37 @@ describe("EditDeviceProfileModal", () => {
     ).toHaveAttribute("aria-checked", "false");
   });
 
+  it("blocks removing the last requirement when the profile is in use by a policy", async () => {
+    const inUseProfile = {
+      ...PROFILE,
+      policies: [{ id: "pol-1", name: "Strict Policy" }],
+      requirements: [{ checkId: "linux.firewall.active" }],
+    };
+
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetSupportedPostureChecksDocument },
+            result: { data: { supportedPostureChecks: CHECKS } },
+          },
+        ]}
+      >
+        <EditDeviceProfileModal open profile={inUseProfile} onOpenChange={vi.fn()} />
+      </MockedProvider>,
+    );
+
+    expect(
+      await screen.findByText(/This profile is in use by 1 policy/),
+    ).toBeInTheDocument();
+
+    const firewallToggle = await screen.findByRole("switch", {
+      name: "Firewall active",
+    });
+    expect(firewallToggle).toHaveAttribute("aria-checked", "true");
+    expect(firewallToggle).toBeDisabled();
+  });
+
   it("renders nothing when closed", () => {
     const { container } = render(
       <MockedProvider mocks={[]}>

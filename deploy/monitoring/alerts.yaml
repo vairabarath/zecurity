@@ -1,0 +1,122 @@
+groups:
+  - name: zecurity-controller-pki
+    rules:
+      # The controller gRPC cert rotates at 2/3 of its lifetime (TTL is
+      # configurable, 7 days by default), so a healthy cert never drops below
+      # ~1/3 of its lifetime. Thresholds are a share of the lifetime, not a fixed
+      # number of days, so a short-lived healthy cert doesn't alert. root_ca and
+      # intermediate_ca (10 y / 5 y, no automatic rotation) warn at 1/4 left.
+      - alert: CertExpiryImminentWarning
+        expr: cert_runway_seconds / cert_lifetime_seconds < 0.25
+        for: 5m
+        labels:
+          severity: warning
+          component: pki
+        annotations:
+          summary: "Certificate past 3/4 of its lifetime"
+          description: "Certificate '{{ $labels.entity }}' has {{ $value | humanizePercentage }} of its lifetime left. The controller cert should have rotated at 2/3; check the controller-rotator logs and pki_rotations_total{status=\"error\"}."
+
+      - alert: CertExpiryImminentCritical
+        expr: cert_runway_seconds < 172800
+        for: 1m
+        labels:
+          severity: critical
+          component: pki
+        annotations:
+          summary: "Certificate expiry critical (under 48 hours runway)"
+          description: "Certificate '{{ $labels.entity }}' has {{ $value | humanizeDuration }} runway remaining. Immediate rotation required."
+
+      - alert: CertInvalid
+        expr: cert_valid == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: pki
+        annotations:
+          summary: "Certificate validity check failed"
+          description: "Certificate '{{ $labels.entity }}' is expired, not yet valid, or failed validation."
+
+  - name: zecurity-controller-fleet
+    rules:
+      - alert: RelayFleetNearCapacity
+        expr: relay_capacity_utilization_ratio > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: relay
+        annotations:
+          summary: "Relay fleet capacity utilization high (> 85%)"
+          description: "Relay fleet capacity utilization is at {{ $value | humanizePercentage }} for over 5 minutes."
+
+      # Lag is measured in ACL versions (controller version - connector reported
+      # version per heartbeat), not seconds.
+      - alert: ConnectorACLLagHigh
+        expr: histogram_quantile(0.95, sum(rate(connector_acl_lag_versions_bucket[5m])) by (le)) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: connector
+        annotations:
+          summary: "Connector ACL synchronization lag is high"
+          description: "p95 connector ACL lag exceeds 5 versions (current: {{ $value }})."
+
+  - name: zecurity-controller-policy
+    rules:
+      - alert: ACLCompileLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(acl_compile_duration_seconds_bucket[5m])) by (le)) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          component: policy
+        annotations:
+          summary: "ACL compilation latency high (> 250ms)"
+          description: "p95 ACL compiler duration is {{ $value }}s over the last 5 minutes."
+
+  - name: zecurity-controller-outbox
+    rules:
+      - alert: OutboxBacklogAccumulating
+        expr: outbox_events_pending > 500 or outbox_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: outbox
+        annotations:
+          summary: "Outbox event backlog accumulating"
+          description: "Outbox has {{ $value }} pending events or oldest pending event age exceeds 300s."
+
+      - alert: OutboxDeadLetterDetected
+        expr: increase(outbox_dead_letter_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: outbox
+        annotations:
+          summary: "Outbox dead letter events detected"
+          description: "Outbox events have transitioned to dead letter status (rate: {{ $value }} over 5m)."
+
+  - name: zecurity-controller-infrastructure
+    rules:
+      - alert: DatabasePoolExhausted
+        # ignoring(state): the two sides differ only in the state label, so a
+        # plain comparison matches nothing and the alert can never fire.
+        expr: db_pool_connections{state="acquired"} >= ignoring(state) db_pool_connections{state="max"}
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "All {{ $value }} database connections are currently acquired/busy."
+
+      # Needs a Prometheus blackbox-exporter job probing the public /readyz
+      # (job name matching .*controller.*readyz.*); the controller doesn't export
+      # probe_success itself. Without that job this rule never fires.
+      - alert: ControllerReadinessFailing
+        expr: probe_success{job=~".*controller.*readyz.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: controller
+        annotations:
+          summary: "Controller readiness probe failing"
+          description: "Controller instance has failed readiness checks for > 1m."
