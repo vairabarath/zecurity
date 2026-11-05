@@ -224,61 +224,89 @@ SELECT w.id, s.stream, audit_genesis(w.id, s.stream)
 ON CONFLICT DO NOTHING;
 
 -- ── access-event retention (P-4, S-6) ──────────────────────────────────────
--- Deletes, per workspace, at most p_batch of the OLDEST access events, and
--- only a seq prefix whose rows were all recorded before p_cutoff (it stops at
--- the first newer row). Records the checkpoint on the head first, so the chain
--- stays verifiable from (purged_through_seq, purged_through_hash). Returns the
--- number of rows deleted; the caller repeats until it returns 0.
-CREATE FUNCTION audit_purge_access(p_cutoff TIMESTAMPTZ, p_batch INT) RETURNS BIGINT
+-- Retention floor (S-6): access events are kept at least this long. The
+-- runtime role may call the purge, but can never shorten retention: a cutoff
+-- newer than now() - floor is refused. ACCESS_LOG_RETENTION_DAYS can only
+-- lengthen it.
+CREATE FUNCTION audit_access_retention_floor() RETURNS INTERVAL
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT INTERVAL '90 days' $$;
+
+-- Deletes at most p_batch of ONE workspace's oldest access events, and only a
+-- seq prefix whose rows were all recorded before p_cutoff: it stops at the
+-- first newer row, so a back-dated insert can never expose earlier rows.
+-- Records the checkpoint on the head, so the chain stays verifiable from
+-- (purged_through_seq, purged_through_hash), and appends an
+-- 'audit.access_purged' row to the workspace's admin stream, so the SIEM sees
+-- every purge. Returns the number of rows deleted; the caller repeats until 0.
+--
+-- One workspace per call (one short transaction each): the access head lock
+-- blocks that workspace's access inserts only while one batch runs.
+-- Lock order: workspace (KEY SHARE), admin head, access head.
+CREATE FUNCTION audit_purge_access(p_workspace UUID, p_cutoff TIMESTAMPTZ, p_batch INT) RETURNS BIGINT
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
-    ws        UUID;
     head      RECORD;
     stop_seq  BIGINT;
     upto      BIGINT;
     upto_hash BYTEA;
     n         BIGINT;
-    total     BIGINT := 0;
 BEGIN
-    IF p_batch IS NULL OR p_batch <= 0 THEN
-        RAISE EXCEPTION 'audit_purge_access: p_batch must be positive';
+    IF p_batch IS NULL OR p_batch <= 0 OR p_batch > 100000 THEN
+        RAISE EXCEPTION 'audit_purge_access: p_batch must be in 1..100000';
     END IF;
-    FOR ws IN SELECT workspace_id FROM audit_stream_heads WHERE stream = 'access' LOOP
-        SELECT h.last_seq, h.purged_through_seq INTO head
-          FROM audit_stream_heads h
-         WHERE h.workspace_id = ws AND h.stream = 'access'
-           FOR UPDATE;
-        SELECT min(c.seq) INTO stop_seq
-          FROM connector_logs c
-         WHERE c.workspace_id = ws
-           AND c.seq >  head.purged_through_seq
-           AND c.seq <= head.purged_through_seq + p_batch
-           AND c.created_at >= p_cutoff;
-        IF stop_seq IS NOT NULL THEN
-            upto := stop_seq - 1;
-        ELSE
-            upto := least(head.purged_through_seq + p_batch, head.last_seq);
-        END IF;
-        CONTINUE WHEN upto <= head.purged_through_seq;
+    IF p_cutoff IS NULL OR p_cutoff > now() - audit_access_retention_floor() THEN
+        RAISE EXCEPTION 'audit_purge_access: cutoff % is inside the retention floor (%)',
+            p_cutoff, audit_access_retention_floor()
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
 
-        SELECT c.row_hash INTO upto_hash
-          FROM connector_logs c
-         WHERE c.workspace_id = ws AND c.seq = upto;
+    PERFORM audit_chain_lock(p_workspace, 'admin');   -- workspace, then admin head
+    PERFORM audit_chain_lock(p_workspace, 'access');  -- then the access head
+    SELECT h.last_seq, h.purged_through_seq INTO head
+      FROM audit_stream_heads h
+     WHERE h.workspace_id = p_workspace AND h.stream = 'access';
 
-        DELETE FROM connector_logs c
-         WHERE c.workspace_id = ws
-           AND c.seq >  head.purged_through_seq
-           AND c.seq <= upto;
-        GET DIAGNOSTICS n = ROW_COUNT;
+    SELECT min(c.seq) INTO stop_seq
+      FROM connector_logs c
+     WHERE c.workspace_id = p_workspace
+       AND c.seq >  head.purged_through_seq
+       AND c.seq <= head.purged_through_seq + p_batch
+       AND c.created_at >= p_cutoff;
+    IF stop_seq IS NOT NULL THEN
+        upto := stop_seq - 1;
+    ELSE
+        upto := least(head.purged_through_seq + p_batch, head.last_seq);
+    END IF;
+    IF upto <= head.purged_through_seq THEN
+        RETURN 0;
+    END IF;
 
-        UPDATE audit_stream_heads
-           SET purged_through_seq = upto, purged_through_hash = upto_hash
-         WHERE workspace_id = ws AND stream = 'access';
-        total := total + n;
-    END LOOP;
-    RETURN total;
+    SELECT c.row_hash INTO upto_hash
+      FROM connector_logs c
+     WHERE c.workspace_id = p_workspace AND c.seq = upto;
+
+    DELETE FROM connector_logs c
+     WHERE c.workspace_id = p_workspace
+       AND c.seq >  head.purged_through_seq
+       AND c.seq <= upto;
+    GET DIAGNOSTICS n = ROW_COUNT;
+
+    UPDATE audit_stream_heads
+       SET purged_through_seq = upto, purged_through_hash = upto_hash
+     WHERE workspace_id = p_workspace AND stream = 'access';
+
+    INSERT INTO audit_logs (tenant_id, actor_email, action, target_type, target_id, details)
+    VALUES (p_workspace, 'system', 'audit.access_purged', 'audit_stream', 'access',
+            jsonb_build_object(
+                'from_seq', head.purged_through_seq + 1,
+                'through_seq', upto,
+                'rows', n,
+                'through_hash', encode(upto_hash, 'hex'),
+                'cutoff', to_char(p_cutoff AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')));
+    RETURN n;
 END;
 $$;
 
@@ -297,6 +325,10 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO ztna_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ztna_app;
+-- Deleting a workspace cascades through its audit streams, so the app may not
+-- delete workspaces at all (D-12, D-13). Tenant deletion (D-34, not built) will
+-- run through an owner SECURITY DEFINER routine that exports first.
+REVOKE DELETE ON workspaces FROM ztna_app;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO ztna_app;
 -- PKI reset (pki/service.go resetPKI) truncates the CA tables on an empty platform.
 GRANT TRUNCATE ON ca_intermediate, ca_root TO ztna_app;
@@ -317,5 +349,5 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- the runtime role (purge is invoked by the controller's retention worker).
 REVOKE ALL ON FUNCTION audit_chain_lock(UUID, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION audit_chain_advance(UUID, TEXT, BIGINT, BYTEA) FROM PUBLIC;
-REVOKE ALL ON FUNCTION audit_purge_access(TIMESTAMPTZ, INT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION audit_purge_access(TIMESTAMPTZ, INT) TO ztna_app;
+REVOKE ALL ON FUNCTION audit_purge_access(UUID, TIMESTAMPTZ, INT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION audit_purge_access(UUID, TIMESTAMPTZ, INT) TO ztna_app;

@@ -39,6 +39,7 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/changehint"
@@ -105,6 +106,18 @@ func main() {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	// D-12 (PENDING-11): the controller must run as ztna_app, which can only
+	// insert and read the audit tables. Fail closed outside development.
+	if bad, err := audit.CheckAppendOnly(ctx, db.Pool); err != nil {
+		log.Fatalf("audit privilege check: %v", err)
+	} else if len(bad) > 0 {
+		msg := fmt.Sprintf("audit tables are not append-only for this DATABASE_URL role (%s); connect as ztna_app (see controller/.env.example)", strings.Join(bad, ", "))
+		if os.Getenv("ENV") != "development" {
+			log.Fatal(msg)
+		}
+		log.Printf("WARNING: %s", msg)
+	}
 
 	outboxMaxRetries := envOrInt(
 		"OUTBOX_MAX_RETRIES",

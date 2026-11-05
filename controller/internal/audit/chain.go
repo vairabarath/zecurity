@@ -160,3 +160,31 @@ func VerifyStream(ctx context.Context, db Querier, workspaceID string, s Stream)
 	}
 	return res, nil
 }
+
+// CheckAppendOnly reports whether the database role the controller runs as
+// can change or remove audit rows (D-12). It returns the offending privileges,
+// for example "UPDATE audit_logs"; empty means append-only holds. A non-empty
+// result means DATABASE_URL still points at the schema owner instead of
+// ztna_app.
+func CheckAppendOnly(ctx context.Context, db Querier) ([]string, error) {
+	var bad []string
+	for _, table := range []string{"audit_logs", "connector_logs", "provider_audit_logs"} {
+		for _, priv := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			var has bool
+			if err := db.QueryRow(ctx, `SELECT has_table_privilege(current_user, $1, $2)`, table, priv).Scan(&has); err != nil {
+				return nil, fmt.Errorf("audit: check %s on %s: %w", priv, table, err)
+			}
+			if has {
+				bad = append(bad, priv+" "+table)
+			}
+		}
+	}
+	var delWorkspaces bool
+	if err := db.QueryRow(ctx, `SELECT has_table_privilege(current_user, 'workspaces', 'DELETE')`).Scan(&delWorkspaces); err != nil {
+		return nil, fmt.Errorf("audit: check DELETE on workspaces: %w", err)
+	}
+	if delWorkspaces {
+		bad = append(bad, "DELETE workspaces (cascades through audit streams)")
+	}
+	return bad, nil
+}

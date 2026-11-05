@@ -258,6 +258,12 @@ func TestD12_AppRoleIsAppendOnly(t *testing.T) {
 		`INSERT INTO audit_stream_heads (workspace_id, stream, last_hash) VALUES ('` + ws + `', 'admin', '\x00')`,
 		`SELECT audit_chain_advance('` + ws + `', 'admin', 0, '\x00')`,
 		`SELECT * FROM audit_chain_lock('` + ws + `', 'admin')`,
+		// Deleting a workspace would cascade through its audit streams.
+		`DELETE FROM workspaces WHERE id = '` + ws + `'`,
+		// The purge can't shorten retention below the 90-day floor.
+		`SELECT audit_purge_access('` + ws + `', NOW(), 10)`,
+		`SELECT audit_purge_access('` + ws + `', NOW() - INTERVAL '89 days', 10)`,
+		`SELECT audit_purge_access('` + ws + `', NULL, 10)`,
 		`RESET ROLE`, // sanity: proves the pool really is ztna_app (owner could reset)
 	}
 	for _, q := range refused[:len(refused)-1] {
@@ -272,7 +278,7 @@ func TestD12_AppRoleIsAppendOnly(t *testing.T) {
 		t.Fatalf("app pool runs as %q (%v), want ztna_app", role, err)
 	}
 	// Retention is the one sanctioned delete path, and the app may call it.
-	if _, err := app.Exec(ctx, `SELECT audit_purge_access(NOW() - INTERVAL '90 days', 10)`); err != nil {
+	if _, err := app.Exec(ctx, `SELECT audit_purge_access($1, NOW() - INTERVAL '90 days', 10)`, ws); err != nil {
 		t.Fatalf("app purge call: %v", err)
 	}
 }
@@ -339,7 +345,7 @@ func TestPurgeAccess_PrefixAndCheckpoint(t *testing.T) {
 
 	purge := func(batch int) int64 {
 		var n int64
-		if err := app.QueryRow(ctx, `SELECT audit_purge_access(NOW() - INTERVAL '90 days', $1)`, batch).Scan(&n); err != nil {
+		if err := app.QueryRow(ctx, `SELECT audit_purge_access($1, NOW() - INTERVAL '90 days', $2)`, ws, batch).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
@@ -362,6 +368,24 @@ func TestPurgeAccess_PrefixAndCheckpoint(t *testing.T) {
 	if err := owner.QueryRow(ctx, `SELECT purged_through_seq FROM audit_stream_heads WHERE workspace_id = $1 AND stream = 'access'`, ws).Scan(&purgedSeq); err != nil || purgedSeq != 7 {
 		t.Fatalf("purged_through_seq = %d (%v), want 7", purgedSeq, err)
 	}
+	// Every purge is itself recorded in the admin stream, so the SIEM sees it.
+	var purges []string
+	rows, err := owner.Query(ctx, `SELECT details->>'from_seq' || '-' || (details->>'through_seq') || ':' || (details->>'rows')
+	                                 FROM audit_logs WHERE tenant_id = $1 AND action = 'audit.access_purged' ORDER BY seq`, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			t.Fatal(err)
+		}
+		purges = append(purges, r)
+	}
+	if strings.Join(purges, ",") != "1-3:3,4-7:4" {
+		t.Fatalf("purge audit rows = %v, want [1-3:3 4-7:4]", purges)
+	}
+	mustVerify(t, owner, ws, StreamAdmin, 2)
 }
 
 // The hashed bytes don't depend on session settings (TimeZone, DateStyle):
@@ -427,5 +451,19 @@ func TestChain_CanonicalMatchesGoEncoding(t *testing.T) {
 	}
 	if !json.Valid([]byte(details)) {
 		t.Fatalf("details_canonical is not valid JSON: %q", details)
+	}
+}
+
+// The startup guard flags the owner and passes ztna_app.
+func TestCheckAppendOnly(t *testing.T) {
+	owner, app, _ := newChainDB(t)
+	ctx := context.Background()
+	bad, err := CheckAppendOnly(ctx, owner)
+	if err != nil || len(bad) == 0 {
+		t.Fatalf("owner: bad=%v err=%v, want privileges reported", bad, err)
+	}
+	bad, err = CheckAppendOnly(ctx, app)
+	if err != nil || len(bad) != 0 {
+		t.Fatalf("ztna_app: bad=%v err=%v, want none", bad, err)
 	}
 }

@@ -5,8 +5,10 @@
 # only *.sql and use SET ROLE ztna_app instead.
 set -eu
 if [ -z "${APP_DB_PASSWORD:-}" ]; then
-    echo "zz_app_role_login.sh: APP_DB_PASSWORD is not set; ztna_app stays NOLOGIN" >&2
-    exit 1
+    # Don't break a stack that mounts migrations/ without the variable; the
+    # controller's startup privilege check reports an owner DATABASE_URL.
+    echo "zz_app_role_login.sh: WARNING: APP_DB_PASSWORD is not set; ztna_app stays NOLOGIN" >&2
+    exit 0
 fi
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
     -v app_pw="$APP_DB_PASSWORD" <<'EOSQL'

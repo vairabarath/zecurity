@@ -167,7 +167,8 @@ The `SECURITY DEFINER` functions (the chain trigger, purge and retention) pin `S
 - `ALTER DEFAULT PRIVILEGES` covers future migrations.
 - The controller's `DATABASE_URL` switches to `ztna_app`. DB-backed tests that need DDL or TRUNCATE keep an owner URL.
 - Retention (P-4) and the D-13 tenant purge run through `SECURITY DEFINER` functions owned by `ztna`. They are the only delete paths.
-- `ON DELETE CASCADE` from `workspaces` still works, because referential actions run as the table owner.
+- `ztna_app` may **not delete workspaces**: the `ON DELETE CASCADE` from `workspaces` would remove the workspace's audit streams, bypassing D-12 and D-13. Tenant deletion (D-34, not v1) will run through an owner `SECURITY DEFINER` routine that exports first. (Found by the S1a review; the draft had treated the cascade as fine.)
+- **Startup guard:** the controller checks its own privileges (`audit.CheckAppendOnly`). If it can UPDATE, DELETE or TRUNCATE an audit table, or delete workspaces, it refuses to start outside `ENV=development` and logs a warning in development.
 - **What changes:**
   - the controller `DATABASE_URL` in `.env`, `.env.example` and the lab docs moves to `ztna_app`;
   - `docker-compose.yml` gains `APP_DB_PASSWORD`;
@@ -178,7 +179,12 @@ The `SECURITY DEFINER` functions (the chain trigger, purge and retention) pin `S
 ### P-4. Retention
 
 - **`admin` stream:** kept forever in v1. It is small.
-- **`access` stream:** a purge job deletes rows older than `ACCESS_LOG_RETENTION_DAYS` (default 90) in batches, through the definer function.
+- **`access` stream:** a purge job deletes rows older than `ACCESS_LOG_RETENTION_DAYS` (default 90) in batches, through the definer function `audit_purge_access(workspace, cutoff, batch)`.
+  - **One workspace per call**, in a short transaction, so a purge stalls only that workspace's access inserts, and only for one batch.
+  - **90-day floor enforced in the database:** a cutoff newer than `now() - 90 days` is refused. `ACCESS_LOG_RETENTION_DAYS` can only lengthen retention, so an injected call can't wipe the stream.
+  - The purge deletes only a **prefix** of the stream (it stops at the first row newer than the cutoff), so a back-dated insert can't expose earlier rows.
+  - Every purge appends an `audit.access_purged` row (from/through seq, row count, checkpoint hash) to the workspace's `admin` stream.
+  - Lock order: workspace, `admin` head, `access` head.
   - Before it deletes, it records the last purged `(seq, row_hash)` on the head row, so the chain stays verifiable from that checkpoint.
   - Whether the purge waits for export is open (O-2).
 - If the purge removes rows a sink has not delivered, the exporter **never skips silently**. It sends one `export.gap {from_seq, to_seq, checkpoint_hash}` event, so the SIEM can tell a retention gap from tampering, and then continues from the checkpoint.
