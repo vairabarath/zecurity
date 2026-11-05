@@ -136,6 +136,8 @@ async fn main() -> anyhow::Result<()> {
         policy_cache.clone(),
         gate.clone(),
     );
+    // FU-9: Connector-wide budget of Shield-routed tunnels (PENDING-21 §7).
+    shield_registry.tunnel_hub.set_tunnel_limit(cfg.shield_tunnel_limit);
     // Connector-revocation fail-closed (B2): on every loss of authorization
     // cancel all sessions; terminal → close shield streams and clear the ACL;
     // Disabled → close shield streams after the D15 grace.

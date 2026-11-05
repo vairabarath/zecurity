@@ -111,6 +111,9 @@ Triggered when controller sends `re_enroll=true` in heartbeat response.
 | `HEARTBEAT_INTERVAL_SECS` | `30` | Heartbeat frequency |
 | `LOG_LEVEL` | `info` | tracing log level |
 | `AUTO_UPDATE_ENABLED` | `true` | Binary self-update |
+| `SHIELD_TUNNEL_LIMIT` (`shield_tunnel_limit`) | `512` | FU-9: Shield-routed tunnels (active + pending) across all Shields. Each can hold up to 256 KB of unread data per direction (its HTTP/2 stream window), so the default bounds that at 128 MB per direction (256 MB both ways). Each Shield is also limited to 256. Over the limit a new tunnel is refused at once (`SHIELD_TUNNEL_LIMIT`). Raising it raises the worst case by 256 KB per tunnel |
+
+**Shield-facing HTTP/2 (`:9091`, FU-9, fixed in code — PENDING-21 §8.6):** 256 KB stream window, 256 MB connection window (a ceiling, not preallocated), adaptive window off, keepalive ping every 30 s (20 s timeout). Each Shield tunnel is its own `ShieldService.Tunnel` stream; Control carries only coordination.
 
 ---
 
