@@ -1,6 +1,6 @@
 ---
 type: adr
-status: design-draft
+status: approved
 id: PENDING-11
 domain: operations
 priority: P2
@@ -15,7 +15,7 @@ tags: [pending, adr, operations, audit, siem, compliance]
 
 # PENDING-11: Audit logging and SIEM export
 
-**Status:** design draft, 2026-11-05. **Not approved. No code until approval.**
+**Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR.
 **Base:** `main` (89655c83). Next migration: `051_`.
 **Scope:** its own epic. It also builds D-12 (DB-enforced append-only audit), which the Decision Record left to this phase.
 
@@ -91,7 +91,19 @@ Constraints already decided elsewhere still apply:
 - D-02: single controller instance.
 - No secrets are written to any audit or export payload.
 
-## 4. Proposed design
+### Approved 2026-11-05 (the open questions in §5, all as recommended)
+
+| # | Decision |
+|---|---|
+| S-5 (O-1) | D-12 via a **separate role `ztna_app`** (created NOLOGIN in `051_`, given LOGIN by `zz_app_role_login.sh`). |
+| S-6 (O-2) | Access events are purged after **90 days whatever their export state**. The exporter sends `export.gap`; the console warns once a sink is 7 days behind. |
+| S-7 (O-3) | New capability **`AUDIT_ADMIN`** for the Admin and Security roles. |
+| S-8 (O-4) | v1 adapters: **webhook + Splunk HEC**. |
+| S-9 (O-5) | A read-only tenant **Audit Log page** (`CONSOLE_READ`) ships in v1. |
+| S-10 (O-6) | Access-event loss while the control stream is down is **accepted and documented** for v1; follow-up opened. |
+| S-11 (O-7) | **Client sign-in events** are in v1 (`auth.*` in the `admin` stream, with a `client` flag). |
+
+## 4. Design
 
 ### P-1. Two streams per workspace
 
@@ -270,7 +282,7 @@ No passwords, tokens or codes go into `details`.
 - Lossless connector-side buffering of access events.
 - Cross-replica coordination (D-02).
 
-## 5. Open questions (need answers before build)
+## 5. Open questions (answered 2026-11-05, see S-5 … S-11)
 
 | # | Question | Recommendation |
 |---|---|---|
