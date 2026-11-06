@@ -354,7 +354,24 @@ These narrow or pin down the design above; none adds an architectural choice.
 | `audit verify` before tampering | admin 1..20 OK, access 1..23 OK, exit 0 |
 | Owner edits admin seq 17, deletes access seq 10 | `audit verify`: seq 17 "row edited", seq 10 missing, exit 3 |
 
-**Not covered live** (covered by integration tests): the retention `export.gap` (needs 90-day-old rows); refused sign-ins on an enterprise connection; viewer access to sinks (schema test). The console pages were checked by unit and sweep tests, not in a browser.
+**Console live run (2026-11-06, Orca browser):** branch controller and admin console (vite) on the reset DB, signed in as the `p11live` admin through the mock IdP. All checks passed.
+
+| Check | Result |
+|---|---|
+| Audit Log page | rows newest first (the browser sign-in as seq 21); action filter `auth.` → seq 21, 16, 3; details expand as formatted JSON |
+| Paging (62 rows) | 62..13, then Older → 12..1 (Older disabled), Back to newer → 62..13 |
+| Audit export list | both sinks with per-stream status, seq and last delivery |
+| Test button | toast "Test event delivered."; `export.test` reached the receiver; while failing: "Test delivery failed: destination answered HTTP 503" |
+| Rotate secret | secret shown once; gone after "I have copied it"; not in the Apollo cache, localStorage or sessionStorage; the receiver verified signatures with it |
+| Edit the Splunk URL without the token | form error "Changing the URL requires entering the Splunk HEC token again."; the server refuses the same change; saved once the token was re-entered; the audit row has `https://127.0.0.1:9443` only, and no token appears in `audit_logs` |
+| Add sink (webhook, auth header, admin only, "Only new events") | secret dialog; first event delivered was its own `audit_export.sink.create`; Add sink disabled at 3 |
+| Receiver answering 503 | every sink shows "Failing", 1 pending and "destination answered HTTP 503"; it recovered to "up to date" |
+| Pause | "paused" pill; no deliveries while paused |
+| Delete | the confirm dialog explains the consequence; the sink is removed; Add sink is enabled again |
+| Role = Viewer (live role) | Audit Log visible; Audit export hidden; `auditExportSinks` refused "requires capability AUDIT_ADMIN" |
+| Role = Security | Audit export visible with both sinks (S-7); role restored to Admin |
+
+**Not covered live** (covered by integration tests): the retention `export.gap` (needs 90-day-old rows) and refused sign-ins on an enterprise connection.
 
 ---
 
