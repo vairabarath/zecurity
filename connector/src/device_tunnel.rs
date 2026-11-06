@@ -624,7 +624,7 @@ where
                     "session cancelled — authorization revoked mid-session",
                 );
                 // FU-15: abort, so nothing still queued reaches the client.
-                stream.abort();
+                stream.abort(crate::abort_stream::SESSION_REVOKED_CODE);
             }
             result = relay_udp(&mut stream, &req.destination, req.port) => { result?; }
         }
@@ -700,9 +700,9 @@ where
                 "session cancelled — authorization revoked mid-session",
             );
             // FU-15: abort, so nothing still queued reaches the client.
-            stream.abort();
+            stream.abort(crate::abort_stream::SESSION_REVOKED_CODE);
         }
-        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => {
+        result = relay_tcp(&mut stream, &mut resource_conn) => {
             // Logged (live E2E run 2026-10-30, F-7): an error here used to
             // return silently, dropping the stream without a clean shutdown.
             match &result {
@@ -722,6 +722,24 @@ where
         }
     }
     Ok(())
+}
+
+/// Relay a connector-route TCP flow between the device stream and the
+/// resource. A normal end (the resource's FIN) shuts the device stream down
+/// cleanly. FU-17: an error (e.g. the resource reset the connection
+/// mid-download) ends the device stream abruptly instead: a dropped QUIC
+/// stream is finished, so the app would take a truncated response as a
+/// complete one.
+async fn relay_tcp<S, R>(stream: &mut S, resource: &mut R) -> std::io::Result<(u64, u64)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + crate::abort_stream::AbortStream + Unpin,
+    R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let result = tokio::io::copy_bidirectional(stream, resource).await;
+    if result.is_err() {
+        stream.abort(crate::abort_stream::TUNNEL_FAILED_CODE);
+    }
+    result
 }
 
 async fn relay_udp<S>(stream: &mut S, dest: &str, port: u16) -> Result<()>
@@ -950,5 +968,128 @@ mod shield_failure_tests {
         );
         assert_eq!(client, "INTERNAL");
         assert!(log.starts_with("shield_error: "), "{log}");
+    }
+}
+
+/// FU-17 on the connector route: `relay_tcp` against a real TCP resource.
+#[cfg(test)]
+mod fu17_tests {
+    use super::*;
+    use crate::abort_stream::{AbortStream, TUNNEL_FAILED_CODE};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const BODY: usize = 100 * 1024;
+
+    /// The device stream; records the abort code (0 = not aborted).
+    struct Device {
+        inner: tokio::io::DuplexStream,
+        aborted: Arc<AtomicU32>,
+    }
+    impl AbortStream for Device {
+        fn abort(&mut self, code: u32) {
+            self.aborted.store(code, Ordering::SeqCst);
+        }
+    }
+    impl tokio::io::AsyncRead for Device {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+    impl tokio::io::AsyncWrite for Device {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// A resource that sends BODY bytes, then resets (`rst`) or closes
+    /// normally. Returns the relay's result, the abort code and what the
+    /// device's peer (the client side) read.
+    async fn run(rst: bool) -> (std::io::Result<(u64, u64)>, u32, Vec<u8>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            s.write_all(&vec![9u8; BODY]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if rst {
+                s.set_zero_linger().unwrap();
+                drop(s); // RST
+            } else {
+                s.shutdown().await.unwrap(); // FIN
+                let mut rest = Vec::new();
+                let _ = s.read_to_end(&mut rest).await;
+            }
+        });
+        let mut resource = TcpStream::connect(addr).await.unwrap();
+        let (near, mut client) = tokio::io::duplex(4 * BODY);
+        let aborted = Arc::new(AtomicU32::new(0));
+        let mut device = Device {
+            inner: near,
+            aborted: aborted.clone(),
+        };
+        let reader = tokio::spawn(async move {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 8192];
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+                if got.len() >= BODY {
+                    let _ = client.shutdown().await; // the client is done sending
+                }
+            }
+            got
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            relay_tcp(&mut device, &mut resource),
+        )
+        .await
+        .expect("the relay ends");
+        drop(device);
+        let got = reader.await.unwrap();
+        (result, aborted.load(Ordering::SeqCst), got)
+    }
+
+    /// A resource that resets mid-flow ends the device stream abruptly
+    /// (TFLD), so the app sees an error instead of a clean EOF.
+    #[tokio::test]
+    async fn a_resource_reset_aborts_the_device_stream() {
+        let (result, aborted, _) = run(true).await;
+        assert!(result.is_err(), "the reset must surface: {result:?}");
+        assert_eq!(aborted, TUNNEL_FAILED_CODE);
+    }
+
+    /// A normal end of the resource is still a clean end: everything is
+    /// delivered and the device stream is not aborted.
+    #[tokio::test]
+    async fn a_resource_fin_is_still_a_clean_end() {
+        let (result, aborted, got) = run(false).await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(aborted, 0, "a normal end must not be an abort");
+        assert_eq!(got.len(), BODY);
     }
 }
