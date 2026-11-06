@@ -942,7 +942,7 @@ Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). B
 **Follow-up (2026-11-05, branch `test/fu9-gate4-linkage`):** the three gate-4 tests deferred at review were added: the stream ends after its abort, a queued frame is discarded, and the real-server HTTP/2 end with no relay loop. 3 mutants were killed. Details: PENDING-21 §11.
 
 ### Fix: FU-17 an abnormal upstream end reaches the app as an error, never as a clean EOF
-**Status:** implemented and validated, not committed. Branch `fix/fu17-failed-tunnel-not-clean-eof`, base `main` `89655c83`. The FU-17 row is added by the live-run docs PR #184.
+**Status:** implemented and validated; PR pending. Branch `fix/fu17-failed-tunnel-not-clean-eof`, base `main` `89655c83`. The FU-17 row came with the live-run docs PR #184.
 
 **Issue (live run 2026-11-05, LT-1):** after a dead shield link, the connector unregistered the session at +51 s, but the client kept receiving the download for ~95 s more (≈3.7 MB). The download then ended with a clean FIN (curl 18, "partial file"), so a truncated download looked complete.
 
