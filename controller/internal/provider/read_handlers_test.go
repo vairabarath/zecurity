@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -246,6 +247,7 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("GET /provider/tenants/{id}", rp(http.HandlerFunc(h.GetTenant)))
 	mux.Handle("GET /provider/audit", rp(http.HandlerFunc(h.QueryAudit)))
 	mux.Handle("GET /provider/certificates", rp(http.HandlerFunc(h.Certificates)))
+	mux.Handle("GET /provider/pki", rp(http.HandlerFunc(h.PKI)))
 	noop := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	mux.Handle("POST /provider/relays", noop)
 	mux.Handle("POST /provider/relays/{id}/revoke", noop)
@@ -308,6 +310,7 @@ func TestReadRoutes_AuthMatrix(t *testing.T) {
 		{"/provider/tenants/" + e.tenantID, 403},
 		{"/provider/audit", 403},
 		{"/provider/certificates", 403},
+		{"/provider/pki", 403},
 	}
 	for _, rt := range routes {
 		if r := e.get(t, rt.path, e.superTok); r.code != 200 {
@@ -352,6 +355,8 @@ func TestReadRoutes_BadParams400(t *testing.T) {
 		"/provider/audit?action=" + strings.Repeat("x", 300):                    "invalid_filter",
 		"/provider/audit?limit=1.5":                                             "invalid_limit",
 		"/provider/certificates?within=30d":                                     "invalid_within",
+		"/provider/pki?limit=abc":                                               "invalid_limit",
+		"/provider/pki?cursor=garbage":                                          "invalid_cursor",
 		"/provider/certificates?within=-1h":                                     "invalid_within",
 		"/provider/certificates?within=0s":                                      "invalid_within",
 		"/provider/certificates?within=8761h":                                   "invalid_within",
@@ -718,5 +723,40 @@ func TestTenantDetail_NoAuditOn400_403_404(t *testing.T) {
 	// and 401 are refused before any database work.
 	if e.db.begins != 1 {
 		t.Fatalf("transactions started = %d, want 1 (the 404 lookup only)", e.db.begins)
+	}
+}
+
+// ── PKI (quick-win F15/F16) ─────────────────────────────────────────────────
+
+func TestPKIRoute_ShapeAndNoKeyMaterial(t *testing.T) {
+	e := newReadEnv(t)
+	exec(t, e.pool, `INSERT INTO ca_root (encrypted_key, nonce, certificate_pem, not_before, not_after)
+	   VALUES ('ROOTKEYCANARY', 'ROOTNONCECANARY', '-----BEGIN CERTIFICATE-----PEMCANARY', now(), now() + interval '1 year')`)
+	exec(t, e.pool, `INSERT INTO workspace_ca_keys (tenant_id, encrypted_private_key, nonce, certificate_pem, not_before, not_after)
+	   VALUES ($1, 'WSKEYCANARY', 'WSNONCECANARY', 'PEMCANARY', now(), now() + interval '1 year')`, e.tenantID)
+	r := e.get(t, "/provider/pki?limit=1", e.superTok)
+	if r.code != 200 {
+		t.Fatalf("pki = %d %s", r.code, r.body)
+	}
+	lower := strings.ToLower(r.body)
+	for _, bad := range []string{"canary", "begin", "-----", "encrypted", "nonce", "private", "pem"} {
+		if strings.Contains(lower, bad) {
+			t.Errorf("pki response contains %q: %s", bad, r.body)
+		}
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(r.body), &top); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if want := []string{"intermediates", "next_cursor", "roots", "workspace_cas", "workspace_cas_total"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("pki keys = %v, want %v", keys, want)
+	}
+	if e.totalAudit(t) != 0 {
+		t.Error("a PKI read must not be audited")
 	}
 }

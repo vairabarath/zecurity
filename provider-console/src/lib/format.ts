@@ -48,3 +48,16 @@ export function formatScope(scope: string | null | undefined): string {
   if (!scope) return '—'
   return SCOPES[scope] ?? scope
 }
+
+/** "10 minutes", "24 hours": a CRL validity in words (CA hierarchy, F15). */
+export function validityText(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const h = seconds / 3600
+    return `${h} ${h === 1 ? 'hour' : 'hours'}`
+  }
+  if (seconds % 60 === 0) {
+    const m = seconds / 60
+    return `${m} ${m === 1 ? 'minute' : 'minutes'}`
+  }
+  return `${seconds} seconds`
+}

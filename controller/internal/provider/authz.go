@@ -109,7 +109,7 @@ func (a *Authz) CanReadTenants(actor Actor, target Target) error {
 	return decide(actor, ActionTenantRead, target)
 }
 
-// CanReadCertificates gates GET /provider/certificates.
+// CanReadCertificates gates GET /provider/certificates and GET /provider/pki.
 func (a *Authz) CanReadCertificates(actor Actor) error {
 	return decide(actor, ActionCertRead, Target{Type: "certificate"})
 }

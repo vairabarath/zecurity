@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/providerquery"
 )
 
@@ -23,6 +24,7 @@ import (
 //	GET /provider/tenants/{id}    tenant.read, audited, fail-closed (OQ-1)
 //	GET /provider/audit           audit.view  (super-admin)
 //	GET /provider/certificates    cert.read   (super-admin)
+//	GET /provider/pki             cert.read   (super-admin; CA tree + CRL status)
 //
 // Only a successful tenant detail read is audited. Lists, relay, audit and
 // certificate reads, and 400/403/404 responses write nothing.
@@ -273,6 +275,31 @@ func (h *ReadHandlers) Certificates(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := providerquery.CertificateExpiry(r.Context(), h.db, h.ctlCert, providerquery.CertificateFilter{
 		Within: within, Kind: kind, TenantID: tenantID, Limit: limit, Cursor: q.Get("cursor"),
+	})
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, res)
+}
+
+// ── PKI hierarchy (quick-win F15/F16) ────────────────────────────────────────
+
+// PKI: GET /provider/pki?limit=&cursor= (not audited). The CRL validities
+// come from the pki package so the reported status matches what is signed.
+func (h *ReadHandlers) PKI(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadCertificates(actor)) {
+		return
+	}
+	q := r.URL.Query()
+	limit, ok := parseLimit(w, q.Get("limit"))
+	if !ok {
+		return
+	}
+	res, err := providerquery.PKI(r.Context(), h.db, providerquery.PKIFilter{
+		Validity: providerquery.PKIValidity{Relay: pki.RelayCRLValidity, Workspace: pki.WorkspaceCRLValidity},
+		Limit:    limit, Cursor: q.Get("cursor"),
 	})
 	if err != nil {
 		h.queryError(w, err)

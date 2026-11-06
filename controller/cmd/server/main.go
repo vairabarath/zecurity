@@ -617,6 +617,7 @@ func main() {
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
 	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
+	mux.Handle("GET /provider/pki", requireProvider(http.HandlerFunc(providerReads.PKI)))
 
 	// Health & Readiness (PENDING-10 Phase 1).
 	// Bounded check timeouts and 1s result caching prevent probe storms from saturating downstream services.

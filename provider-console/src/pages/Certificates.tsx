@@ -10,6 +10,7 @@ import {
   type CertificateKind,
   type CertificateSummary,
 } from '@/api/types'
+import { CAHierarchy } from '@/components/CAHierarchy'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { PageHeader } from '@/components/PageHeader'
@@ -170,6 +171,8 @@ export function Certificates() {
           </>
         )}
       </DataState>
+
+      <CAHierarchy />
     </div>
   )
 }
