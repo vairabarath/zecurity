@@ -42,9 +42,9 @@ struct RelayAck {
 
 /// Persistent Connector-side connection to a Relay.
 ///
-/// `_endpoint` must remain alive for as long as the QUIC connection is used.
+/// `endpoint` must remain alive for as long as the QUIC connection is used.
 pub struct RelayClient {
-    _endpoint: Endpoint,
+    endpoint: Endpoint,
     connection: Connection,
     peer_serial: Vec<u8>,
 }
@@ -104,7 +104,7 @@ impl RelayClient {
         let peer_serial = peer_certificate_serial(&connection)?;
 
         Ok(Self {
-            _endpoint: endpoint,
+            endpoint,
             connection,
             peer_serial,
         })
@@ -136,6 +136,12 @@ impl RelayClient {
 
         info!(connector_id, spiffe_id, "Connector registered with Relay");
         Ok(())
+    }
+
+    /// The endpoint the connection runs on (FU-18: a shutdown waits on it
+    /// until the close has gone out).
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint.clone()
     }
 
     /// Clone the registered outer QUIC connection for the Relay stream handler.
@@ -231,6 +237,7 @@ pub async fn run_session(
 
         let connection = client.connection();
         let serial = client.peer_serial().to_vec();
+        drain_tracker.attach_endpoint(client.endpoint());
         tokio::select! {
             result = relay_handler.clone().run(connection.clone(), drain_tracker) => result,
             result = monitor_relay_revocation(connection, relay_crl_manager, serial) => result,

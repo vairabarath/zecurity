@@ -999,3 +999,54 @@ Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). B
 - New code is `rustfmt`-clean.
 
 **Not yet validated live:** an LT-1 rerun (dead shield link) should now show the client failing the flow with `reset … 0x5446_4c44` at about +51 s, instead of a clean FIN at +146 s.
+
+### Fix: FU-18 a graceful connector shutdown closes its relay connections
+**Status:** implemented and validated; PR pending. Branch `fix/fu18-relay-close-on-shutdown`, base `main` `d7522bc0`.
+
+**Issue (live run 2026-11-05, LT-3c):** after `systemctl stop zecurity-connector`, relayed clients:
+- kept receiving relay-buffered data (1.7–4.0 MB);
+- then hung silently until the relay's idle timeout forwarded a reset (+61–66 s; relay log: `connection lost: timed out`).
+
+On the direct path the same stop ends flows in < 1 s.
+
+**Root cause:** `graceful_shutdown` (`connector/src/main.rs`, Sprint 20 Fix 16) closed the client QUIC endpoint, the shield streams and said goodbye, but never closed the connector's QUIC connection to the relay. The relay found out only at its 60 s idle timeout.
+
+**Fix applied:**
+- **`relay_handler.rs`:**
+  - `RelayDrainTracker::close(code, reason)` generalises the FU-14 `cut()`, which keeps "DRNT"; the connection is closed once.
+  - The tracker also keeps the session's endpoint.
+  - A new code, `SHUTDOWN_CODE` = `0x5348_444E` ("SHDN").
+  - A new `RelaySessions` registry holds weak references to every live session's tracker; ended sessions are pruned on `register`. `close_all()` closes every live relay connection with SHDN and returns their endpoints. `wait_closed(endpoints, limit)` waits, bounded, until the closes have gone out.
+- **`relay_client.rs`:** `run_session` attaches the session's endpoint to its tracker.
+- **`relay_selector.rs`:**
+  - `spawn_session` registers every session.
+  - `run` takes the shutdown token and stops at once on it (`biased`, checked first), so the selector never redials a relay after the shutdown closed the connections.
+- **`main.rs`:** `graceful_shutdown` calls `close_all()` right after closing the shield streams (before goodbye), then `wait_closed(…, 2 s)` after the client endpoint's wait. The doc comment now lists the relay step.
+
+**Unchanged:**
+- **Direct connections** keep their existing shutdown behaviour (client endpoint closed through the `shutdown` token).
+- **FU-14 drain cuts** still use DRNT.
+- **Certificate renewal and normal operation:** nothing changes outside shutdown. A session dialled after a renewal registers like any other.
+- No relay, client or proto change. The relay already resets bridged streams when the connector's connection ends (FU-15 relay path); it now learns at once.
+
+**Tests:**
+- **New:**
+  - `relay_handler::tests::close_all_closes_every_live_relay_connection_on_shutdown`: real QUIC; two relays see `ApplicationClosed(SHDN)` within 2 s; an open relayed stream fails instead of finishing.
+  - `relay_handler::tests::ended_sessions_drop_out_and_close_is_once`: ended sessions are not live and are pruned on `register`; a second `close_all` and a later drain cut are no-ops.
+  - `relay_handler::tests::wait_closed_returns_once_the_close_went_out`.
+  - `relay_selector::terminal_tests::a_shutdown_stops_the_selector_at_once`.
+  - `relay_selector::terminal_tests::spawned_sessions_are_registered_for_shutdown`.
+- **Existing, unchanged and passing:** the FU-14 tests (`cut_closes_the_attached_connection_and_its_streams`, `drain_timeout_cuts_the_streams_still_open`, `a_completed_drain_does_not_cut`).
+
+**Mutants:**
+
+| Mutant | Change | Result |
+|---|---|---|
+| F1 | `close_all` does not close | Caught |
+| F2 | Session not registered | Caught |
+| F3 | Selector ignores shutdown | Caught |
+| F4 | Wrong close code | Caught |
+| F5 | `register` does not prune | Caught |
+| F6 | `graceful_shutdown` does not call `close_all` | **Survives:** the `main.rs` wiring is not unit-tested; covered by review, to be covered by the live rerun |
+
+**Not yet validated live:** an LT-3c rerun (connector stop behind the relay) should show the relay logging the connector's close (SHDN) at once, and relayed flows failing within about a second instead of at +61–66 s.
