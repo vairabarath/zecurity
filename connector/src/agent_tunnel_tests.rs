@@ -3,7 +3,8 @@
 //! streams over mTLS are exercised in agent_server.rs.
 
 use super::*;
-use std::sync::atomic::AtomicBool;
+use crate::abort_stream::{SESSION_REVOKED_CODE, TUNNEL_FAILED_CODE};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -153,15 +154,16 @@ impl Shield {
     }
 }
 
-/// A device stream that records whether it was aborted (FU-15) or shut down.
+/// A device stream that records the code it was aborted with (FU-15 / FU-17;
+/// 0 = not aborted) and whether it was shut down.
 struct Probe {
     inner: tokio::io::DuplexStream,
-    aborted: Arc<AtomicBool>,
+    aborted: Arc<AtomicU32>,
     shut: Arc<AtomicBool>,
 }
 
-fn probe(inner: tokio::io::DuplexStream) -> (Probe, Arc<AtomicBool>, Arc<AtomicBool>) {
-    let aborted = Arc::new(AtomicBool::new(false));
+fn probe(inner: tokio::io::DuplexStream) -> (Probe, Arc<AtomicU32>, Arc<AtomicBool>) {
+    let aborted = Arc::new(AtomicU32::new(0));
     let shut = Arc::new(AtomicBool::new(false));
     (
         Probe {
@@ -175,8 +177,8 @@ fn probe(inner: tokio::io::DuplexStream) -> (Probe, Arc<AtomicBool>, Arc<AtomicB
 }
 
 impl crate::abort_stream::AbortStream for Probe {
-    fn abort(&mut self) {
-        self.aborted.store(true, Ordering::SeqCst);
+    fn abort(&mut self, code: u32) {
+        self.aborted.store(code, Ordering::SeqCst);
     }
 }
 
@@ -253,7 +255,11 @@ async fn tcp_data_flows_both_ways_and_a_clean_end_shuts_the_device_down() {
         shut.load(Ordering::SeqCst),
         "a clean end must shut the device stream down"
     );
-    assert!(!aborted.load(Ordering::SeqCst));
+    assert_eq!(
+        aborted.load(Ordering::SeqCst),
+        0,
+        "a clean end is not an abort"
+    );
     assert_eq!(s.hub.tunnel_count(), 0, "an ended session frees its place");
 }
 
@@ -294,7 +300,7 @@ async fn an_error_end_is_not_a_clean_end() {
     let mut s = shield();
     let (session, mut tunnel) = s.open("tcp").await;
     let (_device, relay_end) = tokio::io::duplex(64 * 1024);
-    let (p, _, shut) = probe(relay_end);
+    let (p, aborted, shut) = probe(relay_end);
     let relay = tokio::spawn(session.relay_stream(p));
     tunnel.send(end("resource reset")).await;
     tokio::time::timeout(WAIT, relay)
@@ -306,6 +312,9 @@ async fn an_error_end_is_not_a_clean_end() {
         !shut.load(Ordering::SeqCst),
         "an error end must not look like a clean end"
     );
+    // FU-17: not merely "not shut down" — a dropped QUIC stream is finished,
+    // which the app reads as a clean EOF. The device stream must be reset.
+    assert_eq!(aborted.load(Ordering::SeqCst), TUNNEL_FAILED_CODE);
     expect_aborted_stream(&mut tunnel).await;
 }
 
@@ -317,9 +326,10 @@ async fn a_stream_lost_without_tunnel_end_is_not_a_clean_end() {
         let mut s = shield();
         let (session, tunnel) = s.open("tcp").await;
         let (_device, relay_end) = tokio::io::duplex(1024);
-        let (p, _, shut) = probe(relay_end);
+        let (p, aborted, shut) = probe(relay_end);
         let relay = tokio::spawn(session.relay_stream(p));
         let FakeTunnel { to_connector, .. } = tunnel;
+        let case = format!("{lost:?}");
         if let Some(status) = lost {
             to_connector.send(Err(status)).await.unwrap();
         }
@@ -330,6 +340,64 @@ async fn a_stream_lost_without_tunnel_end_is_not_a_clean_end() {
             .unwrap()
             .unwrap();
         assert!(!shut.load(Ordering::SeqCst));
+        assert_eq!(
+            aborted.load(Ordering::SeqCst),
+            TUNNEL_FAILED_CODE,
+            "FU-17: a lost shield stream ({case}) must reset the device stream"
+        );
+    }
+}
+
+/// FU-17: a frame the Shield must never send mid-tunnel is a failure too:
+/// the device stream is reset, not finished.
+#[tokio::test]
+async fn an_unexpected_shield_frame_resets_the_device() {
+    let mut s = shield();
+    let (session, tunnel) = s.open("tcp").await;
+    let (_device, relay_end) = tokio::io::duplex(1024);
+    let (p, aborted, shut) = probe(relay_end);
+    let relay = tokio::spawn(session.relay_stream(p));
+    tunnel
+        .send(Ok(TunnelFrame {
+            frame: Some(Frame::Start(crate::shield_proto::TunnelStart {
+                connection_id: "not-expected".into(),
+            })),
+        }))
+        .await;
+    tokio::time::timeout(WAIT, relay)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!shut.load(Ordering::SeqCst));
+    assert_eq!(aborted.load(Ordering::SeqCst), TUNNEL_FAILED_CODE);
+}
+
+/// FU-17 on a UDP tunnel: a failed Shield stream resets the device stream
+/// as for TCP; a clean UDP end does not.
+#[tokio::test]
+async fn a_failed_udp_tunnel_resets_the_device_and_a_clean_one_does_not() {
+    for failed in [true, false] {
+        let mut s = shield();
+        let (session, tunnel) = s.open("udp").await;
+        let (_device, relay_end) = tokio::io::duplex(1024);
+        let (p, aborted, _) = probe(relay_end);
+        let relay = tokio::spawn(session.relay_stream(p));
+        tunnel.send(data(b"datagram")).await;
+        tunnel
+            .send(if failed {
+                end("resource unreachable")
+            } else {
+                end("")
+            })
+            .await;
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let expected = if failed { TUNNEL_FAILED_CODE } else { 0 };
+        assert_eq!(aborted.load(Ordering::SeqCst), expected, "failed={failed}");
     }
 }
 
@@ -429,7 +497,7 @@ async fn a_slow_reader_still_gets_the_clean_end() {
         completed: Arc<AtomicBool>,
     }
     impl crate::abort_stream::AbortStream for DrainGated {
-        fn abort(&mut self) {}
+        fn abort(&mut self, _code: u32) {}
     }
     impl tokio::io::AsyncRead for DrainGated {
         fn poll_read(
@@ -838,9 +906,10 @@ async fn a_revoked_session_aborts_the_device_and_the_shield() {
             .expect("ends at once")
             .unwrap()
             .unwrap();
-        assert!(
+        assert_eq!(
             aborted.load(Ordering::SeqCst),
-            "not aborted (slow device: {slow_device})"
+            SESSION_REVOKED_CODE,
+            "not aborted as revoked (slow device: {slow_device})"
         );
         assert!(
             !shut.load(Ordering::SeqCst),
@@ -876,7 +945,7 @@ async fn a_revoked_session_aborts_while_the_shield_is_not_reading() {
         .expect("ends at once")
         .unwrap()
         .unwrap();
-    assert!(aborted.load(Ordering::SeqCst));
+    assert_eq!(aborted.load(Ordering::SeqCst), SESSION_REVOKED_CODE);
 }
 
 /// Revoking the Shield ends its tunnels (device aborted, stream aborted),
@@ -904,7 +973,7 @@ async fn revoking_the_shield_ends_its_tunnels_and_pending_opens() {
         .expect("the tunnel ends")
         .unwrap()
         .unwrap();
-    assert!(aborted.load(Ordering::SeqCst));
+    assert_eq!(aborted.load(Ordering::SeqCst), SESSION_REVOKED_CODE);
     expect_aborted_stream(&mut tunnel).await;
     assert_eq!(open_err(pending.await.unwrap()), OpenError::Closed);
     assert_eq!(
@@ -1009,7 +1078,7 @@ async fn a_tunnel_ends_when_its_connection_certificate_expires() {
     assert!(!relay.is_finished());
     tokio::time::sleep(Duration::from_secs(2)).await;
     relay.await.unwrap().unwrap();
-    assert!(aborted.load(Ordering::SeqCst));
+    assert_eq!(aborted.load(Ordering::SeqCst), SESSION_REVOKED_CODE);
     expect_aborted_stream(&mut tunnel).await;
 }
 
@@ -1061,7 +1130,7 @@ async fn an_abort_is_not_lost_when_control_is_full() {
         .expect("ends without waiting for Control capacity")
         .unwrap()
         .unwrap();
-    assert!(aborted.load(Ordering::SeqCst));
+    assert_eq!(aborted.load(Ordering::SeqCst), SESSION_REVOKED_CODE);
     expect_aborted_stream(&mut tunnel).await;
     let (posted, overflowed) = hub.abort_mailbox(SHIELD).take();
     assert!(!overflowed);

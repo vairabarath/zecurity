@@ -940,3 +940,60 @@ Found in journey 7 (2026-10-30, record `Sprint22/Live-E2E-Run-2026-10-29.md`). B
 - **L7/L8:** the client-side tail after a revocation is **FU-16** (also on the connector route, so not FU-9).
 
 **Follow-up (2026-11-05, branch `test/fu9-gate4-linkage`):** the three gate-4 tests deferred at review were added: the stream ends after its abort, a queued frame is discarded, and the real-server HTTP/2 end with no relay loop. 3 mutants were killed. Details: PENDING-21 §11.
+
+### Fix: FU-17 an abnormal upstream end reaches the app as an error, never as a clean EOF
+**Status:** implemented and validated, not committed. Branch `fix/fu17-failed-tunnel-not-clean-eof`, base `main` `89655c83`. The FU-17 row is added by the live-run docs PR #184.
+
+**Issue (live run 2026-11-05, LT-1):** after a dead shield link, the connector unregistered the session at +51 s, but the client kept receiving the download for ~95 s more (≈3.7 MB). The download then ended with a clean FIN (curl 18, "partial file"), so a truncated download looked complete.
+
+**Root cause:** two code paths dropped the device stream, and quinn finishes a dropped `SendStream` (everything queued, then FIN):
+- `connector/src/agent_tunnel.rs` `relay_stream`, `End::Failed`. Its causes: the shield's `TunnelEnd{error}`, an unexpected frame, a stream error, an end without `TunnelEnd`, and a device write error. FU-15 had fixed only `End::Aborted`.
+- The **connector route**, `connector/src/device_tunnel.rs`: an error from `copy_bidirectional` (e.g. the resource resets mid-download) returned with the stream dropped. On the direct TLS-over-TCP path the drop was a FIN for the same reason.
+
+**Fix applied:**
+- **`abort_stream.rs`:** `AbortStream::abort(code)` now takes the QUIC application error code. The new code `TUNNEL_FAILED_CODE` = `0x5446_4c44` ("TFLD") sits next to `SESSION_REVOKED_CODE` ("RVKD").
+- **`agent_tunnel.rs`:** `End::Failed` rejoins the device stream from its device→shield task and resets it with TFLD, through `abort_device`, shared with `End::Aborted`, which keeps RVKD.
+- **`device_tunnel.rs`:** the connector-route TCP copy moved into `relay_tcp`, which resets the device stream with TFLD when the copy fails. The revocation aborts pass RVKD explicitly.
+
+**The three outcomes stay distinct:**
+
+| End | Device stream |
+|---|---|
+| Normal completion (shield `TunnelEnd{}`, resource FIN) | Graceful shutdown (F-7), unchanged |
+| Revocation, cancel, certificate expiry | Reset with RVKD, unchanged |
+| Abnormal upstream end | Reset with TFLD (was: dropped → clean FIN) |
+
+**Scope:**
+- **Same handler on every path:** direct QUIC, direct TLS-over-TCP (RST) and the relay path (inner TLS over the relay QUIC stream; the reset reaches the client through the relay, FU-15 relay fix) all go through `device_tunnel::handle_stream` / `relay_stream`.
+- **Connector-route UDP (`relay_udp`) is unchanged:** UDP has no EOF the app could mistake for completion.
+- No client, relay or proto change. The client already turns any reset into a failed flow and an RST to the app (FU-15).
+
+**Tests:**
+- **New:**
+  - `abort_stream::tests::an_aborted_stream_reaches_the_peer_as_an_error_not_eof`: real quinn; TFLD and RVKD reach the peer as `Reset(code)`.
+  - `abort_stream::tests::a_dropped_stream_reaches_the_peer_as_a_clean_end`: control showing the FU-17 mechanism.
+  - `agent_tunnel::tests::an_unexpected_shield_frame_resets_the_device`.
+  - `agent_tunnel::tests::a_failed_udp_tunnel_resets_the_device_and_a_clean_one_does_not`.
+  - `device_tunnel::fu17_tests::a_resource_reset_aborts_the_device_stream`: real TCP resource sending an RST.
+  - `device_tunnel::fu17_tests::a_resource_fin_is_still_a_clean_end`.
+- **Strengthened:** the probe records the abort code.
+  - `an_error_end_is_not_a_clean_end` and `a_stream_lost_without_tunnel_end_is_not_a_clean_end` now require TFLD; before, they only checked "not shut down", which a drop passes.
+  - The five revocation tests require RVKD.
+  - The clean-end test requires no abort.
+
+**Mutants, all caught:**
+
+| Mutant | Change | Tests that fail |
+|---|---|---|
+| M1 | Failure path back to a plain drop (= `main`) | The 4 failure tests |
+| M2 | Connector-route copy error not aborted | `a_resource_reset_aborts_the_device_stream` |
+| M3 | Failure uses RVKD | The 4 TFLD assertions |
+| M4 | Every end treated as an error | `tcp_data_flows_both_ways_and_a_clean_end_shuts_the_device_down`, `a_slow_reader_still_gets_the_clean_end`, the UDP clean case, `a_resource_fin_is_still_a_clean_end` |
+| M5 | Revocation uses TFLD | The 5 revocation tests |
+
+**Results:**
+- `cd connector && cargo test`: 323 passed, 0 failed, 1 ignored (the FU-9 lab harness).
+- Clippy: nothing new in the changed files; `too_many_arguments` on `listen` / `handle_stream` is already on `main`.
+- New code is `rustfmt`-clean.
+
+**Not yet validated live:** an LT-1 rerun (dead shield link) should now show the client failing the flow with `reset … 0x5446_4c44` at about +51 s, instead of a clean FIN at +146 s.
