@@ -47,12 +47,24 @@ type DeviceCounts struct {
 }
 
 // TenantCounts is the per-tenant count block shared by list and detail.
+// PolicyCounts sizes a tenant's access policy (quick-win F8): what its admins
+// configured, not who may use it. Resources counts every row, as the admin's
+// resource list does (a resource being removed still exists); access rules
+// count enabled and disabled rules.
+type PolicyCounts struct {
+	Resources        int64 `json:"resources"`
+	Groups           int64 `json:"groups"`
+	AccessRules      int64 `json:"access_rules"`
+	ResourcePolicies int64 `json:"resource_policies"`
+}
+
 type TenantCounts struct {
 	Connectors     AgentCounts  `json:"connectors"`
 	Shields        AgentCounts  `json:"shields"`
 	RemoteNetworks int64        `json:"remote_networks"` // status = 'active'
 	Users          UserCounts   `json:"users"`
 	ClientDevices  DeviceCounts `json:"client_devices"`
+	Policies       PolicyCounts `json:"policies"`
 }
 
 // TenantSummary is one row of GET /provider/tenants: the whole allowed
@@ -121,13 +133,19 @@ type TenantFilter struct {
 // LEFT JOIN LATERAL aggregate per counted table, so a whole page of tenants
 // and all their counts come back in a single statement (no N+1). The users
 // lateral reads only users.status. Column order matches scanTenantSummary.
+//
+// Policy counts (F8): groups, access_rules and resource_policies are counted
+// per tenant through their workspace-leading indexes. resources has no
+// tenant_id index, so a per-tenant lateral would scan it once per row; it is
+// counted with one grouped aggregate instead (one scan per statement).
 const tenantSelect = `
 SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not_after,
        cc.pending, cc.active, cc.disconnected, cc.revoked,
        sc.pending, sc.active, sc.disconnected, sc.revoked,
        rn.active,
        uc.active, uc.suspended, uc.locked, uc.deleted,
-       dc.active, dc.re_enroll_required, dc.renew_pending, dc.revoked
+       dc.active, dc.re_enroll_required, dc.renew_pending, dc.revoked,
+       COALESCE(rc.n, 0), gc.n, ar.n, rp.n
   FROM workspaces w
   LEFT JOIN workspace_ca_keys k ON k.tenant_id = w.id
   LEFT JOIN LATERAL (
@@ -156,7 +174,15 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
               count(*) FILTER (WHERE revoked_at IS NULL AND status = 're_enroll_required') AS re_enroll_required,
               count(*) FILTER (WHERE revoked_at IS NULL AND status = 'renew_pending')      AS renew_pending,
               count(*) FILTER (WHERE revoked_at IS NOT NULL)                               AS revoked
-         FROM client_devices WHERE workspace_id = w.id) dc ON true`
+         FROM client_devices WHERE workspace_id = w.id) dc ON true
+  LEFT JOIN (
+       SELECT tenant_id, count(*) AS n FROM resources GROUP BY tenant_id) rc ON rc.tenant_id = w.id
+  LEFT JOIN LATERAL (
+       SELECT count(*) AS n FROM groups WHERE workspace_id = w.id) gc ON true
+  LEFT JOIN LATERAL (
+       SELECT count(*) AS n FROM access_rules WHERE workspace_id = w.id) ar ON true
+  LEFT JOIN LATERAL (
+       SELECT count(*) AS n FROM resource_policies WHERE workspace_id = w.id) rp ON true`
 
 func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 	var s TenantSummary
@@ -168,6 +194,7 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		&c.RemoteNetworks,
 		&c.Users.Active, &c.Users.Suspended, &c.Users.Locked, &c.Users.Deleted,
 		&c.ClientDevices.Active, &c.ClientDevices.ReEnrollRequired, &c.ClientDevices.RenewPending, &c.ClientDevices.Revoked,
+		&c.Policies.Resources, &c.Policies.Groups, &c.Policies.AccessRules, &c.Policies.ResourcePolicies,
 	); err != nil {
 		return TenantSummary{}, err
 	}

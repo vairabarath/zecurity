@@ -183,13 +183,14 @@ func seedCountedTenant(t *testing.T, pool *pgxpool.Pool, slug string, createdAt 
 	n1 := seedNetwork(t, pool, id, "hq", "active", t0)
 	seedNetwork(t, pool, id, "branch", "active", t0.Add(time.Minute))
 	seedNetwork(t, pool, id, "old", "deleted", t0.Add(2*time.Minute))
-	var conn string
+	var conn, shield string
 	for i, st := range []string{"pending", "active", "active", "disconnected", "revoked"} {
 		conn = seedConnector(t, pool, id, n1, fmt.Sprintf("c%d", i), st, t0.Add(time.Duration(i)*time.Second))
 	}
 	for i, st := range []string{"active", "active", "active", "disconnected", "revoked", "revoked", "pending"} {
-		seedShield(t, pool, id, n1, conn, fmt.Sprintf("s%d", i), st, t0.Add(time.Duration(i)*time.Second))
+		shield = seedShield(t, pool, id, n1, conn, fmt.Sprintf("s%d", i), st, t0.Add(time.Duration(i)*time.Second))
 	}
+	seedPolicies(t, pool, id, n1, shield)
 	var u string
 	for i, st := range []string{"active", "active", "active", "suspended", "locked", "deleted", "deleted"} {
 		u = seedUser(t, pool, id, fmt.Sprintf("%s-u%d", slug, i), st)
@@ -205,12 +206,36 @@ func seedCountedTenant(t *testing.T, pool *pgxpool.Pool, slug string, createdAt 
 	return id
 }
 
+// seedPolicies gives a tenant 2 resource policies (its automatic default
+// and one more), 3 resources (one mid-deletion: it still exists, as the admin's
+// resource list shows it), 2 groups and 3 access rules (one disabled).
+func seedPolicies(t *testing.T, pool *pgxpool.Pool, tenant, network, shield string) {
+	t.Helper()
+	// Every workspace gets its default policy when it is created (049).
+	mustExec(t, pool, `INSERT INTO resource_policies (workspace_id, name) VALUES ($1, 'Strict')`, tenant)
+	var res []string
+	for i, st := range []string{"protected", "pending", "deleting"} {
+		res = append(res, mustScalar[string](t, pool,
+			`INSERT INTO resources (tenant_id, remote_network_id, shield_id, name, host, status) VALUES ($1,$2,$3,$4,'10.0.0.9',$5) RETURNING id::text`,
+			tenant, network, shield, fmt.Sprintf("r%d", i), st))
+	}
+	var groups []string
+	for _, n := range []string{"eng", "ops"} {
+		groups = append(groups, mustScalar[string](t, pool, `INSERT INTO groups (workspace_id, name) VALUES ($1,$2) RETURNING id::text`, tenant, n))
+	}
+	for i, en := range []bool{true, true, false} {
+		mustExec(t, pool, `INSERT INTO access_rules (workspace_id, resource_id, group_id, enabled) VALUES ($1,$2,$3,$4)`,
+			tenant, res[i], groups[i%2], en)
+	}
+}
+
 var wantCounts = TenantCounts{
 	Connectors:     AgentCounts{Pending: 1, Active: 2, Disconnected: 1, Revoked: 1},
 	Shields:        AgentCounts{Pending: 1, Active: 3, Disconnected: 1, Revoked: 2},
 	RemoteNetworks: 2,
 	Users:          UserCounts{Active: 3, Suspended: 1, Locked: 1, Deleted: 2},
 	ClientDevices:  DeviceCounts{Active: 2, ReEnrollRequired: 1, RenewPending: 1, Revoked: 2},
+	Policies:       PolicyCounts{Resources: 3, Groups: 2, AccessRules: 3, ResourcePolicies: 2},
 }
 
 func TestListTenants_Counts(t *testing.T) {
@@ -236,8 +261,10 @@ func TestListTenants_Counts(t *testing.T) {
 			t.Errorf("tenant %s ca_not_after = %v", id, got[id].CANotAfter)
 		}
 	}
-	if got[empty].Counts != (TenantCounts{}) || got[empty].CANotAfter != nil {
-		t.Errorf("empty tenant = %+v, want zero counts and no CA", got[empty])
+	// A new workspace already holds its automatic default resource policy (049).
+	wantEmpty := TenantCounts{Policies: PolicyCounts{ResourcePolicies: 1}}
+	if got[empty].Counts != wantEmpty || got[empty].CANotAfter != nil {
+		t.Errorf("empty tenant = %+v, want only the default policy and no CA", got[empty])
 	}
 	s := got[a]
 	if s.Slug != "acme" || s.Name != "Tenant acme" || s.Status != "active" || s.TrustDomain != "acme.zecurity.test" ||
@@ -276,6 +303,43 @@ func TestTenantQueries_FixedStatementCount(t *testing.T) {
 	}
 	if cq.n != 4 {
 		t.Fatalf("GetTenant ran %d statements, want 4 (tenant+counts, networks, connectors, shields)", cq.n)
+	}
+}
+
+// F8 at a realistic size: a full page of 200 tenants (MaxLimit) with policy
+// rows is still one statement, and every tenant gets only its own counts
+// (one tenant holds many resources, which must not leak into the others).
+func TestListTenants_PolicyCountsAtFullPage(t *testing.T) {
+	pool := newTestDB(t)
+	ctx := context.Background()
+	ids := make([]string, 0, MaxLimit)
+	for i := 0; i < MaxLimit; i++ {
+		ids = append(ids, seedWorkspace(t, pool, fmt.Sprintf("p%03d", i), "active", t0.Add(time.Duration(i)*time.Second)))
+	}
+	mustExec(t, pool, `INSERT INTO groups (workspace_id, name) SELECT id, 'g' FROM workspaces`)
+	busy := ids[0]
+	n := seedNetwork(t, pool, busy, "hq", "active", t0)
+	c := seedConnector(t, pool, busy, n, "c", "active", t0)
+	sh := seedShield(t, pool, busy, n, c, "s", "active", t0)
+	mustExec(t, pool, `INSERT INTO resources (tenant_id, remote_network_id, shield_id, name, host)
+	                   SELECT $1, $2, $3, 'r' || g, '10.0.0.9' FROM generate_series(1, 50) g`, busy, n, sh)
+
+	cq := &countingQuerier{Querier: pool}
+	page, err := ListTenants(ctx, cq, TenantFilter{Limit: MaxLimit})
+	if err != nil || len(page.Items) != MaxLimit {
+		t.Fatalf("list: %d items, err %v", len(page.Items), err)
+	}
+	if cq.n != 1 {
+		t.Fatalf("ListTenants ran %d statements for %d tenants, want 1", cq.n, MaxLimit)
+	}
+	for _, s := range page.Items {
+		want := PolicyCounts{Groups: 1, ResourcePolicies: 1}
+		if s.ID == busy {
+			want.Resources = 50
+		}
+		if s.Counts.Policies != want {
+			t.Fatalf("tenant %s policies = %+v, want %+v", s.Slug, s.Counts.Policies, want)
+		}
 	}
 }
 
@@ -478,7 +542,8 @@ func TestTenantDTOSurface(t *testing.T) {
 	}{
 		"TenantSummary":       {TenantSummary{}, summary},
 		"TenantDetail":        {TenantDetail{}, detail},
-		"TenantCounts":        {TenantCounts{}, []string{"client_devices", "connectors", "remote_networks", "shields", "users"}},
+		"TenantCounts":        {TenantCounts{}, []string{"client_devices", "connectors", "policies", "remote_networks", "shields", "users"}},
+		"PolicyCounts":        {PolicyCounts{}, []string{"access_rules", "groups", "resource_policies", "resources"}},
 		"AgentCounts":         {AgentCounts{}, agent},
 		"UserCounts":          {UserCounts{}, []string{"active", "deleted", "locked", "suspended"}},
 		"DeviceCounts":        {DeviceCounts{}, []string{"active", "re_enroll_required", "renew_pending", "revoked"}},

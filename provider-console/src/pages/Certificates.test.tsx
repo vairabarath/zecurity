@@ -286,7 +286,7 @@ describe('Certificates: tenant links (audited detail)', () => {
       'GET /provider/certificates': result(),
       [`GET /provider/tenants/${TENANT}`]: {
         status: 200,
-        body: { id: TENANT, slug: 'acme', name: 'Acme', status: 'active', trust_domain: 'acme.test', created_at: '2026-10-01T00:00:00Z', ca_not_after: null, counts: { connectors: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, shields: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, remote_networks: 0, users: { active: 0, suspended: 0, locked: 0, deleted: 0 }, client_devices: { active: 0, re_enroll_required: 0, renew_pending: 0, revoked: 0 } }, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false },
+        body: { id: TENANT, slug: 'acme', name: 'Acme', status: 'active', trust_domain: 'acme.test', created_at: '2026-10-01T00:00:00Z', ca_not_after: null, counts: { connectors: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, shields: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, remote_networks: 0, users: { active: 0, suspended: 0, locked: 0, deleted: 0 }, client_devices: { active: 0, re_enroll_required: 0, renew_pending: 0, revoked: 0 }, policies: { resources: 0, groups: 0, access_rules: 0, resource_policies: 0 } }, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false },
       },
     })
     renderCerts()

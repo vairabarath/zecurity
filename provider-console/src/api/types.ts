@@ -255,12 +255,23 @@ export interface DeviceCounts {
   revoked: number
 }
 
+/** A tenant's access policy, as counts (quick-win F8). */
+export interface PolicyCounts {
+  /** Every resource row, as the admin's resource list shows (incl. one being removed). */
+  resources: number
+  groups: number
+  /** Enabled and disabled access rules. */
+  access_rules: number
+  resource_policies: number
+}
+
 export interface TenantCounts {
   connectors: AgentCounts
   shields: AgentCounts
   remote_networks: number
   users: UserCounts
   client_devices: DeviceCounts
+  policies: PolicyCounts
 }
 
 /** GET /provider/tenants item. */
