@@ -8,7 +8,12 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { DocumentNode } from 'graphql'
 import type { ComponentType } from 'react'
 import {
+  AuditExportSinkKind,
+  AuditStream,
   ConnectorStatus,
+  GetAuditExportSinksDocument,
+  GetAuditLogsDocument,
+  GetWorkspaceDocument,
   GetAllResourcesDocument,
   GetConnectorDocument,
   GetConnectorsDocument,
@@ -115,6 +120,24 @@ beforeEach(() => {
     scimTokens: [{ __typename: 'ScimToken', id: 't-1', workspaceId: 'w', connectionId: 'idp-1', label: 'okta', createdBy: null, createdAt: NOW, lastUsedAt: null, expiresAt: null, revokedAt: null }],
   })
   data.set(GetScimProviderProfilesDocument, { scimProviderProfiles: [] })
+  // PENDING-11: Audit Log page and the Settings audit export section.
+  data.set(GetWorkspaceDocument, {
+    workspace: { __typename: 'Workspace', id: 'w', slug: 'office', name: 'office', status: 'ACTIVE', createdAt: NOW },
+  })
+  data.set(GetAuditLogsDocument, {
+    auditLogs: {
+      __typename: 'AuditLogPage',
+      nextBefore: null,
+      entries: [{ __typename: 'AuditLogEntry', seq: 1, id: 'al-1', action: 'group.create', actorUserId: 'u', actorEmail: 'a@x', targetType: 'group', targetId: 'g-1', details: '{"name":"ops"}', createdAt: NOW, rowHash: 'ab' }],
+    },
+  })
+  data.set(GetAuditExportSinksDocument, {
+    auditExportSinks: [{
+      __typename: 'AuditExportSink', id: 'sink-1', name: 'siem', kind: AuditExportSinkKind.Webhook,
+      url: 'https://siem.example.com/x', streams: [AuditStream.Admin], enabled: true, authHeaderName: null,
+      splunkIndex: null, splunkSource: null, splunkSourcetype: null, createdAt: NOW, updatedAt: NOW, status: [],
+    }],
+  })
   data.set(GetDiscoveredServicesDocument, {
     getDiscoveredServices: [{ __typename: 'DiscoveredService', shieldId: 's-active', protocol: 'tcp', port: 8080, boundIp: '0.0.0.0', serviceName: 'http-alt', firstSeen: NOW, lastSeen: NOW }],
   })
@@ -153,6 +176,8 @@ const PAGES: [string, string, string, () => Promise<{ default: ComponentType }>]
   ['IdpConnections', '/idp-connections', '/idp-connections', () => import('@/pages/IdpConnections')],
   ['IdpConnectionDetail', '/idp-connections/idp-1', '/idp-connections/:id', () => import('@/pages/IdpConnectionDetail')],
   ['ScimConflicts', '/scim-conflicts', '/scim-conflicts', () => import('@/pages/ScimConflicts')],
+  ['AuditLog', '/audit-log', '/audit-log', () => import('@/pages/AuditLog')],
+  ['Settings', '/settings', '/settings', () => import('@/pages/Settings')],
 ]
 
 function writeControls(): string[] {
@@ -179,7 +204,8 @@ describe('Viewer sees no write control on any page', () => {
 // Sanity check that the sweep can see controls at all: the same pages as an
 // Admin show write controls.
 describe('Admin sees write controls (sweep sanity check)', () => {
-  it.each(PAGES.filter(([n]) => !n.startsWith('ScimConflicts')))('%s', async (_name, path, route, mod) => {
+  // ScimConflicts and AuditLog have no write control for anyone.
+  it.each(PAGES.filter(([n]) => !n.startsWith('ScimConflicts') && n !== 'AuditLog'))('%s', async (_name, path, route, mod) => {
     setTestRole(Role.Admin)
     await load(path, route, mod)
     expect(writeControls().length).toBeGreaterThan(0)

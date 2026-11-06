@@ -24,6 +24,7 @@ import Groups from '@/pages/Groups'
 import GroupDetail from '@/pages/GroupDetail'
 import TeamUsers from '@/pages/TeamUsers'
 import AccessLog from '@/pages/AccessLog'
+import AuditLog from '@/pages/AuditLog'
 import DeviceManagement from '@/pages/DeviceManagement'
 import Policies from '@/pages/Policies'
 import IdpConnections from '@/pages/IdpConnections'
@@ -96,6 +97,7 @@ export default function App() {
         <Route path="/groups"            element={<Groups />} />
         <Route path="/groups/:id"        element={<GroupDetail />} />
         <Route path="/access-log"        element={<AccessLog />} />
+        <Route path="/audit-log"         element={<AuditLog />} />
         <Route path="/devices"           element={<DeviceManagement />} />
         <Route path="/policies"          element={<Policies />} />
         <Route path="/idp-connections"     element={<IdpConnections />} />

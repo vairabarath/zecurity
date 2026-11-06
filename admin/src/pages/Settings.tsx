@@ -2,9 +2,13 @@ import { useQuery } from '@apollo/client/react'
 import { GetWorkspaceDocument, type GetWorkspaceQuery } from '@/generated/graphql'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { AuditExportSection } from '@/components/audit/AuditExportSection'
+import { Capability, useCan } from '@/lib/capabilities'
 
 export default function Settings() {
   const { data, loading } = useQuery<GetWorkspaceQuery>(GetWorkspaceDocument)
+  // PENDING-11 S-7: SIEM export is Admin + Security; the server checks anyway.
+  const canExport = useCan(Capability.AuditAdmin)
 
   return (
     <div className="space-y-6">
@@ -42,6 +46,8 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      {canExport ? <AuditExportSection /> : null}
     </div>
   )
 }

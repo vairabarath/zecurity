@@ -75,6 +75,12 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   // MEMBERS_ADMIN — Admin (R-10)
   createInvitation: Capability.MembersAdmin,
   setMemberRole: Capability.MembersAdmin,
+  // AUDIT_ADMIN — Admin + Security (PENDING-11 S-7): SIEM export sinks
+  createAuditExportSink: Capability.AuditAdmin,
+  updateAuditExportSink: Capability.AuditAdmin,
+  rotateAuditExportSinkSecret: Capability.AuditAdmin,
+  deleteAuditExportSink: Capability.AuditAdmin,
+  testAuditExportSink: Capability.AuditAdmin,
 }
 
 // REST routes (controller/cmd/server/main.go → RequireCapability).
@@ -143,7 +149,8 @@ export const ROLE_INFO: Record<string, { label: string; description: string }> =
   },
   SECURITY: {
     label: 'Security',
-    description: 'Viewer, plus groups, resource access and device posture profiles.',
+    description:
+      'Viewer, plus groups, resource access, device posture profiles and audit export (SIEM).',
   },
   HELPDESK: {
     label: 'Helpdesk',
