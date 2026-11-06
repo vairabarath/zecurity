@@ -166,6 +166,7 @@ pub async fn handle_connection(
             spawn_lookup(
                 send,
                 recv,
+                connection.clone(),
                 connector_id,
                 identity.clone(),
                 state.clone(),
@@ -192,6 +193,7 @@ pub async fn handle_connection(
                 spawn_lookup(
                     send,
                     recv,
+                    connection.clone(),
                     connector_id,
                     identity.clone(),
                     state.clone(),
@@ -206,6 +208,7 @@ pub async fn handle_connection(
 fn spawn_lookup(
     send: SendStream,
     recv: RecvStream,
+    client_connection: Connection,
     connector_id: String,
     identity: ParsedSpiffe,
     state: Arc<RelayState>,
@@ -228,7 +231,15 @@ fn spawn_lookup(
     };
     tokio::spawn(async move {
         let _permit = permit;
-        if let Err(error) = handle_lookup_stream(send, recv, &connector_id, &identity, &state).await
+        if let Err(error) = handle_lookup_stream(
+            send,
+            recv,
+            &client_connection,
+            &connector_id,
+            &identity,
+            &state,
+        )
+        .await
         {
             warn!(connector_id = %connector_id, error = format!("{error:#}"), "Relay Lookup failed");
         }
@@ -238,6 +249,7 @@ fn spawn_lookup(
 async fn handle_lookup_stream(
     mut client_send: SendStream,
     client_recv: RecvStream,
+    client_connection: &Connection,
     connector_id: &str,
     identity: &ParsedSpiffe,
     state: &RelayState,
@@ -275,7 +287,15 @@ async fn handle_lookup_stream(
         "bridging Client to Connector through Relay"
     );
     ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
-    let result = pipe_streams(client_send, client_recv, connector_send, connector_recv).await;
+    let result = pipe_streams(
+        client_send,
+        client_recv,
+        connector_send,
+        connector_recv,
+        client_connection,
+        &connector.connection,
+    )
+    .await;
     ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
     result
 }
@@ -340,6 +360,9 @@ enum PipeError {
     Reset(quinn::VarInt),
     /// The peer stopped reading the stream we write to, with this code.
     Stopped(quinn::VarInt),
+    /// FU-19: one side's connection closed while the bridge ran; its
+    /// application close code, if it closed with one.
+    ConnectionGone(Option<quinn::VarInt>),
     Other(anyhow::Error),
 }
 
@@ -348,7 +371,10 @@ impl PipeError {
     fn code(&self) -> quinn::VarInt {
         match self {
             PipeError::Reset(code) | PipeError::Stopped(code) => *code,
-            PipeError::Other(_) => quinn::VarInt::from_u32(RELAY_ABORT_CODE),
+            PipeError::ConnectionGone(Some(code)) => *code,
+            PipeError::ConnectionGone(None) | PipeError::Other(_) => {
+                quinn::VarInt::from_u32(RELAY_ABORT_CODE)
+            }
         }
     }
 
@@ -362,8 +388,39 @@ impl PipeError {
                 "{direction}: stream stopped by peer (code {:#x})",
                 code.into_inner()
             ),
+            PipeError::ConnectionGone(code) => anyhow::anyhow!(
+                "{direction} (close code {})",
+                code.map_or("none".to_owned(), |c| format!("{:#x}", c.into_inner()))
+            ),
             PipeError::Other(e) => e.context(direction.to_owned()),
         }
+    }
+}
+
+/// FU-19: a stream failed because its connection closed; keep the close code.
+fn gone(lost: quinn::ConnectionError) -> PipeError {
+    match lost {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            PipeError::ConnectionGone(Some(close.error_code))
+        }
+        _ => PipeError::ConnectionGone(None),
+    }
+}
+
+/// FU-19: resolves when either side's connection is gone, naming the side and
+/// its application close code (a connector stop closes with SHDN, a drain cut
+/// with DRNT).
+async fn connection_gone(
+    client: &Connection,
+    connector: &Connection,
+) -> (&'static str, Option<quinn::VarInt>) {
+    let code = |error: quinn::ConnectionError| match gone(error) {
+        PipeError::ConnectionGone(code) => code,
+        _ => None,
+    };
+    tokio::select! {
+        error = client.closed() => ("client connection closed", code(error)),
+        error = connector.closed() => ("connector connection closed", code(error)),
     }
 }
 
@@ -372,6 +429,8 @@ async fn pipe_streams(
     mut client_recv: RecvStream,
     mut connector_send: SendStream,
     mut connector_recv: RecvStream,
+    client_connection: &Connection,
+    connector_connection: &Connection,
 ) -> Result<()> {
     // Per-direction byte counts and which direction finished first, logged
     // when the bridge ends (live E2E run 2026-10-30, F-7: relayed flows ended
@@ -410,7 +469,23 @@ async fn pipe_streams(
         })
     };
 
-    let result = tokio::try_join!(client_to_connector, connector_to_client);
+    // FU-19: a stream keeps handing out what quinn buffered for it after its
+    // connection closed (up to its receive window), and reports the loss only
+    // once drained. Watching the connections ends the bridge as soon as either
+    // side is gone, instead of forwarding a stopped connector's backlog at the
+    // client's pace (live rerun 2026-11-06: +53 s at 25 KB/s). A bridge that
+    // already finished keeps its normal result (checked first).
+    let result = {
+        let bridge = async { tokio::try_join!(client_to_connector, connector_to_client) };
+        tokio::pin!(bridge);
+        tokio::select! {
+            biased;
+            result = &mut bridge => result,
+            (side, code) = connection_gone(client_connection, connector_connection) => {
+                Err((side, PipeError::ConnectionGone(code)))
+            }
+        }
+    };
     let up = up.load(std::sync::atomic::Ordering::Relaxed);
     let down = down.load(std::sync::atomic::Ordering::Relaxed);
     let first = first_done.lock().unwrap().unwrap_or("neither");
@@ -461,11 +536,14 @@ async fn counted_copy(
             Ok(Some(n)) => n,
             Ok(None) => return Ok(()),
             Err(quinn::ReadError::Reset(code)) => return Err(PipeError::Reset(code)),
+            // FU-19: the connection closed: forward its close code.
+            Err(quinn::ReadError::ConnectionLost(lost)) => return Err(gone(lost)),
             Err(e) => return Err(PipeError::Other(anyhow::Error::new(e).context("read"))),
         };
         match writer.write_all(&buf[..n]).await {
             Ok(()) => {}
             Err(quinn::WriteError::Stopped(code)) => return Err(PipeError::Stopped(code)),
+            Err(quinn::WriteError::ConnectionLost(lost)) => return Err(gone(lost)),
             Err(e) => return Err(PipeError::Other(anyhow::Error::new(e).context("write"))),
         }
         count.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
@@ -777,12 +855,19 @@ mod tests {
         relay_connector_send.write_all(b"hi").await.unwrap();
         let (connector_send, mut connector_recv) = connector.accept_bi().await.unwrap();
         connector_recv.read_exact(&mut hi).await.unwrap();
-        let pipe = tokio::spawn(pipe_streams(
-            relay_client_send,
-            relay_client_recv,
-            relay_connector_send,
-            relay_connector_recv,
-        ));
+        let (watch_client, watch_connector) =
+            (relay_client_side.clone(), relay_connector_side.clone());
+        let pipe = tokio::spawn(async move {
+            pipe_streams(
+                relay_client_send,
+                relay_client_recv,
+                relay_connector_send,
+                relay_connector_recv,
+                &watch_client,
+                &watch_connector,
+            )
+            .await
+        });
         Bridge {
             client_send,
             client_recv,
@@ -848,6 +933,97 @@ mod tests {
         assert!(
             b.pipe.await.unwrap().is_err(),
             "the bridge ends with an error"
+        );
+    }
+
+    /// Fill the bridge toward a client that isn't reading; returns bytes the
+    /// connector got out before flow control stopped it.
+    async fn fill_toward_client(b: &mut Bridge) -> usize {
+        let chunk = vec![7u8; 64 * 1024];
+        let mut written = 0;
+        while written < 4 * 1024 * 1024 {
+            match timeout(
+                Duration::from_millis(200),
+                b.connector_send.write_all(&chunk),
+            )
+            .await
+            {
+                Ok(Ok(())) => written += chunk.len(),
+                _ => break,
+            }
+        }
+        assert!(written >= 1024 * 1024, "only {written} bytes in flight");
+        written
+    }
+
+    /// FU-19 (live rerun 2026-11-06, R3): the connector's connection closes
+    /// (a stop sends SHDN) while megabytes are queued toward a slow client.
+    /// The client must get a reset carrying the connector's close code at
+    /// once, not the relay's buffered backlog first and RLAB at the end.
+    #[tokio::test]
+    async fn a_closed_connector_connection_ends_the_bridge_at_once() {
+        const SHDN: u32 = 0x5348_444E;
+        let mut b = bridge().await;
+        let written = fill_toward_client(&mut b).await;
+        b._conns[3].close(quinn::VarInt::from_u32(SHDN), b"connector shutting down");
+        let pipe = timeout(Duration::from_secs(2), &mut b.pipe)
+            .await
+            .expect("the bridge must end at once, not after draining its buffers")
+            .unwrap();
+        assert!(pipe.is_err(), "a lost connector is not a clean end");
+        let (got, end) = timeout(Duration::from_secs(5), drain(&mut b.client_recv))
+            .await
+            .expect("the client must learn of the end");
+        assert!(
+            matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == u64::from(SHDN)),
+            "client saw {end:?} after {got} bytes, want a reset with SHDN"
+        );
+        assert!(
+            got < written,
+            "the client received the whole backlog ({got} of {written} bytes)"
+        );
+    }
+
+    /// FU-19, the other direction: the client's connection closes; the
+    /// connector's side of the bridge is reset at once with the client's code.
+    #[tokio::test]
+    async fn a_closed_client_connection_ends_the_bridge_at_once() {
+        let mut b = bridge().await;
+        b._conns[0].close(quinn::VarInt::from_u32(0x4343), b"client gone");
+        timeout(Duration::from_secs(2), &mut b.pipe)
+            .await
+            .expect("the bridge must end at once")
+            .unwrap()
+            .expect_err("a lost client is not a clean end");
+        let (_, end) = timeout(Duration::from_secs(5), drain(&mut b.connector_recv))
+            .await
+            .expect("the connector must learn of the end");
+        assert!(
+            matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == 0x4343),
+            "connector saw {end:?}"
+        );
+    }
+
+    /// A connection lost without a close code (idle timeout, crash) ends the
+    /// bridge with the relay's own RLAB.
+    #[tokio::test]
+    async fn a_connection_lost_without_a_code_forwards_rlab() {
+        let mut b = bridge().await;
+        let _ = fill_toward_client(&mut b).await;
+        // A connection-level close with no application code: a transport
+        // close on the connector side endpoint stands in for a lost peer.
+        b._conns[2].close(quinn::VarInt::from_u32(0), b"");
+        timeout(Duration::from_secs(2), &mut b.pipe)
+            .await
+            .expect("the bridge must end at once")
+            .unwrap()
+            .expect_err("a lost connector is not a clean end");
+        let (_, end) = timeout(Duration::from_secs(5), drain(&mut b.client_recv))
+            .await
+            .expect("the client must learn of the end");
+        assert!(
+            matches!(end, Err(quinn::ReadError::Reset(_))),
+            "client saw {end:?}"
         );
     }
 
