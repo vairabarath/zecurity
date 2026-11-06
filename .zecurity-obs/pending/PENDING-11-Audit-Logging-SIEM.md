@@ -398,6 +398,81 @@ These narrow or pin down the design above; none adds an architectural choice.
 
 **Not covered in this run:** live access-deny events (the replayed access history has only `allow`), and the Splunk HEC kind into Wazuh (Wazuh has no HEC endpoint).
 
+## 9. Addendum: Twingate-style SIEM delivery (approved 2026-11-06)
+
+**Ask (Sathiya, 2026-11-06):** "I want the Twingate-style SIEM, nothing else", after the Wazuh live run showed that push needs a bridge in front of Wazuh.
+
+**How Twingate does it.** Two channels; nothing is pushed into the customer's SIEM.
+
+1. **Control-plane events: files in the customer's S3 bucket.**
+   - Audit logs, network events and DNS logs are synced as NDJSON about every 5 minutes.
+   - Each line carries an `event_type`.
+   - The SIEM pulls from the bucket.
+   - Auth is OIDC role federation or an IAM user.
+   - There is no webhook, no SIEM push and no documented tamper evidence.
+2. **Data-plane events: the connector's own output.**
+   - With `TWINGATE_LOG_ANALYTICS=v3`, the connector prints `ANALYTICS {json}` lines to stdout/journald.
+   - The customer's log agent on the connector host collects them. For Wazuh, that is the Wazuh agent.
+
+Wazuh supports both channels natively:
+- its agent reads journald and files (`log_format journald` in 4.14);
+- its `aws-s3` module pulls "Custom Logs Buckets" (S3 + SQS notifications). That reader (`wodles/aws/subscribers/s3_log_handler.py`, v4.14.0) parses NDJSON, has a dedicated `.jsonl.gz` path, and nests each event's fields under `aws.*`.
+
+**Decisions W-1 … W-8 (approved 2026-11-06, Sathiya, as proposed; live test: full path via LocalStack):**
+
+- **W-1 Scope.** Build these two channels only.
+  - No verify tool, Wazuh rules pack or bridge.
+  - The webhook and Splunk HEC sinks from S1b stay as shipped.
+- **W-2 Connector real-time access log.**
+  - Turned on with `ZECURITY_LOG_ANALYTICS=v1` (`config.rs`); off by default.
+  - `emit_access_log` in `device_tunnel.rs` is the single place a `ConnectorLog` is built, so every access decision goes through it, relay-routed ones included. There it also writes one line, `ANALYTICS {json}`, to stdout:
+    - written whole, under the stdout lock;
+    - not through `tracing`, which would prepend a timestamp and level.
+  - Fields:
+    - `schema` = `zecurity.connector.analytics.v1`;
+    - `event_type` = `access_decision`;
+    - `timestamp` (RFC 3339);
+    - `decision` (`allow` / `deny` / `error`) and `error`;
+    - `resource{id, destination, port, protocol}`, `route_type`;
+    - `client{spiffe_id}` plus the id parsed from it (`client/{id}` or `client_device/{id}`);
+    - `connector{id}`.
+  - **Not in v1:**
+    - user email, which the connector doesn't know (adding it is a proto change);
+    - Twingate's established/closed pairs with rx/tx/duration, since the connector doesn't track connection end today.
+  - The line is written even when the control stream is down, so the O-6 loss (S-10) no longer applies to the local copy.
+  - These lines are unchained. The chained copy is still the controller's `access` stream.
+  - **No proto, controller or shield change.**
+- **W-3 `s3` sink kind.**
+  - Non-secret config: `bucket`, `region`, `prefix`, an optional `endpoint` for S3-compatible stores (path-style), and `access_key_id`.
+  - The secret access key goes in the existing sealed auth-header slot, like the HEC token.
+  - **Static IAM user keys only.** OIDC role federation would need the controller to act as a public OIDC issuer, so it is deferred.
+  - Any change to bucket, region, endpoint or access key id requires the secret again (the same rule as a HEC URL change, §7).
+  - The docs recommend an IAM policy of `s3:PutObject` on the prefix only.
+- **W-4 Object format and key.**
+  - gzip NDJSON with one `zecurity.audit.v1` event per line, unchanged; the `stream` field plays Twingate's `event_type` role.
+  - Key: `<prefix>/zecurity/v1/<workspace_id>/<stream>/YYYY/MM/DD/HH/<first_seq>-<last_seq>.jsonl.gz`, where the hour is the first event's `recorded_at` in UTC.
+  - Delivery stays at-least-once. A retry that picks up more events writes a different key, so consumers deduplicate on `(workspace_id, stream, seq)`.
+- **W-5 Five-minute batching, stateless.**
+  - The exporter takes an `s3` batch only when the event at cursor+1 has a `recorded_at` at least 5 minutes old, or when 500 events are pending.
+  - There is no in-memory timer, and nothing changes for the other kinds.
+  - `testAuditExportSink` writes one `export.test` object at once.
+- **W-6 SigV4, hand-written.**
+  - One operation: `PutObject` with `x-amz-content-sha256`, about 150 lines, tested against AWS's published SigV4 test vectors.
+  - It goes through the shared SSRF-safe client (P-6). The default endpoint is `https://<bucket>.s3.<region>.amazonaws.com`.
+  - This avoids adding aws-sdk-go-v2 and keeps the dial-time SSRF guard in charge.
+- **W-7 Schema and console.**
+  - `053_audit_export_s3.sql` drops the kind CHECK from 052 and adds it back with `'s3'` (052 itself is never edited; `[schema: reset DB]`).
+  - The GraphQL enum gains `S3`.
+  - The console's Audit export form gains an "Amazon S3" kind.
+- **W-8 Docs.** One setup section per channel, like Twingate's:
+  - connector env var + Wazuh `localfile` (journald) + the decoder snippet. A prematch on `ANALYTICS ` with `plugin_decoder` `JSON_Decoder` at `offset="after_prematch"`, proved with `wazuh-logtest`.
+  - bucket + IAM policy + the Wazuh `aws-s3` custom-bucket block.
+
+**Live test.**
+- **Channel 1:** a real connector with the Wazuh agent reading journald (or the Docker log) into a Wazuh manager.
+- **Channel 2, the full path needs room:** LocalStack (S3 + SQS + STS on one endpoint) plus the manager's `aws-s3` wodle with `service_endpoint`. That needs about 1.5 GB more on `/` than the 3.8 GB free, on top of the Wazuh image saved in `~/dev/docker-images`.
+- **Channel 2 fallback:** MinIO for the PutObject path, then the produced `.jsonl.gz` fed to the manager.
+
 ---
 
 ## History
