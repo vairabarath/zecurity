@@ -373,6 +373,31 @@ These narrow or pin down the design above; none adds an architectural choice.
 
 **Not covered live** (covered by integration tests): the retention `export.gap` (needs 90-day-old rows) and refused sign-ins on an enterprise connection.
 
+### Wazuh live run (2026-11-06): PASS
+
+**Setup:**
+- **Controller:** branch build 9a7bc9fc (sha checked against the running process), on the same DB as the S3 run (`p11live`; admin head 75, access head 23).
+- **Wazuh:** single-node `wazuh/wazuh-manager:4.14.10` in Docker. Manager only: the indexer and dashboard didn't fit on the lab disk, so results were read from `alerts.json` and `archives.json` (`logall_json` on). Vulnerability detection, SCA and the indexer connector were off.
+- **Path:** controller webhook sink → a local HTTPS bridge → Wazuh server API `POST /events`.
+  - The bridge verifies `X-Zecurity-Signature`, checks the chain per stream and forwards one JSON string per event, in chunks of ≤ 100, with a JWT.
+  - It answers 2xx only after Wazuh accepted every chunk, otherwise 502, so a Wazuh outage reaches the exporter.
+  - Wazuh has no HTTPS webhook or HEC receiver of its own, so a bridge is needed on this path.
+- **Rules:** custom `local_rules.xml` (100200 …). The Wazuh JSON decoder decodes events with no custom decoder. The top-level `action` is Wazuh's static `action` field, so rules match it with `<action>`. Nested keys flatten (`actor.email`, `details.destination`, `subject.user_id`).
+- The two S3 sinks (dead receiver) were paused. A third webhook sink `wazuh` was created: all history, both streams.
+
+| Check | Result |
+|---|---|
+| Full-history replay on sink create | access 1..23 (22 rows) and admin 1..75 delivered on the first poll; one alert per event: 100210 access allow, 100221 sign-in, 100223 export change (level 10), 100226 access-control change (level 8), 100220 other admin |
+| Chain verified from Wazuh's own copy (`archives.json` `full_log`, recomputed `sha256(prev_hash ‖ canonical)`) | every link holds except the S3 tamper rows: admin seq 17 "row_hash mismatch" (edited) and access seq 10 missing (deleted); 0 duplicates. The SIEM copy alone shows the tampering |
+| Live admin change (`updateAuditExportSink`) | seq 78, 79 alerted ~1.2 s after `recorded_at` (2 s poll) |
+| `testAuditExportSink` | `export.test` delivered synchronously, alerted in ~0.2 s (rule 100201: it has no seq or row_hash) |
+| Wazuh manager stopped; 3 sign-ins and 3 sink changes made meanwhile | `lastError` "destination answered HTTP 502" (no URL), `failingSince` set, cursor held at 79 (lag 6); retries at +1, +4, +6, +10, +18 s; `testAuditExportSink` answered "destination answered HTTP 502" |
+| Manager started | caught up on the next retry: admin 80..85 in one batch; lag 0, error cleared; chain 1..85 with no new gaps and 0 duplicates |
+| Forged signature to the bridge | 401, nothing forwarded |
+| Correlation rule 100213 (5 denials in 120 s for one `subject.user_id`, level 12) | fires on the 5th deny; checked with `wazuh-logtest` only (no connector or client in this run, so no live deny events) |
+
+**Not covered in this run:** live access-deny events (the replayed access history has only `allow`), and the Splunk HEC kind into Wazuh (Wazuh has no HEC endpoint).
+
 ---
 
 ## History
