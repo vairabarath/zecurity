@@ -40,6 +40,8 @@ import {
   STREAM_LABEL,
   initialForm,
   kindLabel,
+  s3Changed,
+  s3Location,
   validateForm,
   type FormState,
   type Sink,
@@ -115,6 +117,7 @@ function SinkDialog({
   const [error, setError] = useState<string | null>(null)
   const editing = !!sink
   const splunk = f.kind === AuditExportSinkKind.SplunkHec
+  const s3 = f.kind === AuditExportSinkKind.S3
 
   const [create, { loading: creating }] = useMutation(CreateAuditExportSinkDocument, {
     fetchPolicy: 'no-cache',
@@ -133,6 +136,15 @@ function SinkDialog({
     sourcetype: f.sourcetype || undefined,
   })
 
+  const s3Input = () => ({
+    bucket: f.bucket.trim(),
+    region: f.region.trim(),
+    prefix: f.prefix.trim() || undefined,
+    endpoint: f.endpoint.trim() || undefined,
+    accessKeyId: f.accessKeyId.trim(),
+    secretAccessKey: f.secretAccessKey || undefined,
+  })
+
   async function submit() {
     const msg = validateForm(f, sink)
     if (msg) {
@@ -145,12 +157,13 @@ function SinkDialog({
         const input: CreateAuditExportSinkInput = {
           name: f.name.trim(),
           kind: f.kind,
-          url: f.url,
           streams,
           enabled: f.enabled,
           startFrom: f.startFrom,
         }
-        if (splunk) input.splunk = splunkInput()
+        if (!s3) input.url = f.url
+        if (s3) input.s3 = s3Input()
+        else if (splunk) input.splunk = splunkInput()
         else if (f.headerName) input.authHeader = { name: f.headerName, value: f.headerValue }
         const res = await create({ variables: { input } })
         const secret = res.data?.createAuditExportSink.signingSecret
@@ -160,10 +173,14 @@ function SinkDialog({
       }
       const input: UpdateAuditExportSinkInput = {}
       if (f.name.trim() !== sink.name) input.name = f.name.trim()
-      if (f.url !== sink.url) input.url = f.url
+      if (!s3 && f.url !== sink.url) input.url = f.url
       const before = [...sink.streams].sort().join()
       if ([...streams].sort().join() !== before) input.streams = streams
-      if (splunk) {
+      if (s3) {
+        const changed =
+          s3Changed(f, sink) || !!f.secretAccessKey || f.prefix.trim() !== (sink.s3Prefix ?? '')
+        if (changed) input.s3 = s3Input()
+      } else if (splunk) {
         const changed =
           !!f.token ||
           f.index !== (sink.splunkIndex ?? '') ||
@@ -205,7 +222,7 @@ function SinkDialog({
             <div className="space-y-1.5">
               <Label>Destination type</Label>
               <div className="flex gap-2">
-                {[AuditExportSinkKind.Webhook, AuditExportSinkKind.SplunkHec].map((k) => (
+                {[AuditExportSinkKind.Webhook, AuditExportSinkKind.SplunkHec, AuditExportSinkKind.S3].map((k) => (
                   <Button
                     key={k}
                     type="button"
@@ -219,6 +236,50 @@ function SinkDialog({
               </div>
             </div>
           ) : null}
+          {s3 ? (
+            <div className="space-y-3" data-testid="s3-settings">
+              <p className="text-xs text-muted-foreground">
+                Events are written to your bucket as gzip NDJSON files every 5 minutes (sooner when 500 are
+                waiting), for your SIEM to pull, for example Wazuh's aws-s3 module. Give the access key only{' '}
+                <code>s3:PutObject</code> on the prefix.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sink-bucket">Bucket</Label>
+                  <Input id="sink-bucket" value={f.bucket} placeholder="my-audit-bucket" onChange={(e) => set('bucket', e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sink-region">Region</Label>
+                  <Input id="sink-region" value={f.region} placeholder="eu-west-1" onChange={(e) => set('region', e.target.value)} />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sink-prefix">Key prefix (optional)</Label>
+                <Input id="sink-prefix" value={f.prefix} placeholder="siem" onChange={(e) => set('prefix', e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sink-endpoint">Endpoint (optional, S3-compatible stores)</Label>
+                <Input id="sink-endpoint" value={f.endpoint} placeholder="https://minio.example.com:9000" onChange={(e) => set('endpoint', e.target.value)} />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sink-access-key">Access key ID</Label>
+                  <Input id="sink-access-key" value={f.accessKeyId} autoComplete="off" onChange={(e) => set('accessKeyId', e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sink-secret-key">Secret access key</Label>
+                  <Input
+                    id="sink-secret-key"
+                    type="password"
+                    autoComplete="off"
+                    value={f.secretAccessKey}
+                    placeholder={editing ? 'Leave blank to keep' : ''}
+                    onChange={(e) => set('secretAccessKey', e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="space-y-1.5">
             <Label htmlFor="sink-url">URL</Label>
             <Input
@@ -232,6 +293,7 @@ function SinkDialog({
               {splunk ? 'token' : 'auth header'}, not the URL.
             </p>
           </div>
+          )}
           <fieldset className="space-y-1.5">
             <legend className="text-sm font-medium">Streams</legend>
             {(
@@ -274,7 +336,7 @@ function SinkDialog({
             </fieldset>
           ) : null}
 
-          {splunk ? (
+          {s3 ? null : splunk ? (
             <div className="space-y-3">
               <div className="space-y-1.5">
                 <Label htmlFor="sink-token">HEC token</Label>
@@ -419,7 +481,15 @@ function SinkRow({
             <StatusPill label={kindLabel(sink.kind)} tone="info" />
             {!sink.enabled ? <StatusPill label="paused" tone="muted" /> : null}
           </div>
-          <div className="truncate font-mono text-xs text-muted-foreground">{sink.url}</div>
+          <div className="truncate font-mono text-xs text-muted-foreground">
+            {sink.kind === AuditExportSinkKind.S3 ? s3Location(sink) : sink.url}
+          </div>
+          {sink.kind === AuditExportSinkKind.S3 ? (
+            <div className="text-xs text-muted-foreground">
+              {sink.s3Region}
+              {sink.s3Endpoint ? ` · ${sink.s3Endpoint}` : ''} · access key {sink.s3AccessKeyId} · written every 5 minutes
+            </div>
+          ) : null}
           {sink.authHeaderName ? (
             <div className="text-xs text-muted-foreground">
               {sink.kind === AuditExportSinkKind.SplunkHec ? 'HEC token set' : `Auth header: ${sink.authHeaderName}`}
@@ -547,7 +617,7 @@ export function AuditExportSection() {
           <EmptyState
             icon={<Webhook className="h-6 w-6" />}
             title="No export sinks"
-            description="Add a webhook or Splunk HEC destination (up to 3)."
+            description="Add a webhook, Splunk HEC or Amazon S3 destination (up to 3)."
           />
         ) : (
           sinks.map((s) => (

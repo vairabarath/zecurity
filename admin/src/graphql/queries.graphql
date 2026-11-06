@@ -565,6 +565,11 @@ query GetAuditExportSinks {
     splunkIndex
     splunkSource
     splunkSourcetype
+    s3Bucket
+    s3Region
+    s3Prefix
+    s3Endpoint
+    s3AccessKeyId
     createdAt
     updatedAt
     status {

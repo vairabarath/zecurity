@@ -30,6 +30,11 @@ export type AuditExportSink = {
   id: Scalars['ID']['output'];
   kind: AuditExportSinkKind;
   name: Scalars['String']['output'];
+  s3AccessKeyId?: Maybe<Scalars['String']['output']>;
+  s3Bucket?: Maybe<Scalars['String']['output']>;
+  s3Endpoint?: Maybe<Scalars['String']['output']>;
+  s3Prefix?: Maybe<Scalars['String']['output']>;
+  s3Region?: Maybe<Scalars['String']['output']>;
   splunkIndex?: Maybe<Scalars['String']['output']>;
   splunkSource?: Maybe<Scalars['String']['output']>;
   splunkSourcetype?: Maybe<Scalars['String']['output']>;
@@ -40,6 +45,7 @@ export type AuditExportSink = {
 };
 
 export enum AuditExportSinkKind {
+  S3 = 'S3',
   SplunkHec = 'SPLUNK_HEC',
   Webhook = 'WEBHOOK'
 }
@@ -188,10 +194,11 @@ export type CreateAuditExportSinkInput = {
   enabled?: InputMaybe<Scalars['Boolean']['input']>;
   kind: AuditExportSinkKind;
   name: Scalars['String']['input'];
+  s3?: InputMaybe<S3Input>;
   splunk?: InputMaybe<SplunkHecInput>;
   startFrom?: InputMaybe<AuditExportStartFrom>;
   streams: Array<AuditStream>;
-  url: Scalars['String']['input'];
+  url?: InputMaybe<Scalars['String']['input']>;
 };
 
 export type CreateIdpConnectionInput = {
@@ -976,6 +983,15 @@ export enum Role {
   Viewer = 'VIEWER'
 }
 
+export type S3Input = {
+  accessKeyId: Scalars['String']['input'];
+  bucket: Scalars['String']['input'];
+  endpoint?: InputMaybe<Scalars['String']['input']>;
+  prefix?: InputMaybe<Scalars['String']['input']>;
+  region: Scalars['String']['input'];
+  secretAccessKey?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type ScanResult = {
   __typename?: 'ScanResult';
   firstSeen: Scalars['String']['output'];
@@ -1076,6 +1092,7 @@ export type UpdateAuditExportSinkInput = {
   clearAuthHeader?: InputMaybe<Scalars['Boolean']['input']>;
   enabled?: InputMaybe<Scalars['Boolean']['input']>;
   name?: InputMaybe<Scalars['String']['input']>;
+  s3?: InputMaybe<S3Input>;
   splunk?: InputMaybe<SplunkHecInput>;
   streams?: InputMaybe<Array<AuditStream>>;
   url?: InputMaybe<Scalars['String']['input']>;
@@ -1840,7 +1857,7 @@ export type GetAuditLogsQuery = { __typename?: 'Query', auditLogs: { __typename?
 export type GetAuditExportSinksQueryVariables = Exact<{ [key: string]: never; }>;
 
 
-export type GetAuditExportSinksQuery = { __typename?: 'Query', auditExportSinks: Array<{ __typename?: 'AuditExportSink', id: string, name: string, kind: AuditExportSinkKind, url: string, streams: Array<AuditStream>, enabled: boolean, authHeaderName?: string | null, splunkIndex?: string | null, splunkSource?: string | null, splunkSourcetype?: string | null, createdAt: string, updatedAt: string, status: Array<{ __typename?: 'AuditExportStreamStatus', stream: AuditStream, cursorSeq: number, headSeq: number, lag: number, lastSuccessAt?: string | null, lastError?: string | null, failingSince?: string | null, oldestPendingAt?: string | null, lagging: boolean }> }> };
+export type GetAuditExportSinksQuery = { __typename?: 'Query', auditExportSinks: Array<{ __typename?: 'AuditExportSink', id: string, name: string, kind: AuditExportSinkKind, url: string, streams: Array<AuditStream>, enabled: boolean, authHeaderName?: string | null, splunkIndex?: string | null, splunkSource?: string | null, splunkSourcetype?: string | null, s3Bucket?: string | null, s3Region?: string | null, s3Prefix?: string | null, s3Endpoint?: string | null, s3AccessKeyId?: string | null, createdAt: string, updatedAt: string, status: Array<{ __typename?: 'AuditExportStreamStatus', stream: AuditStream, cursorSeq: number, headSeq: number, lag: number, lastSuccessAt?: string | null, lastError?: string | null, failingSince?: string | null, oldestPendingAt?: string | null, lagging: boolean }> }> };
 
 
 export const InitiateAuthDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"InitiateAuth"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"provider"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"workspaceName"}},"type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"connectionId"}},"type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"initiateAuth"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"provider"},"value":{"kind":"Variable","name":{"kind":"Name","value":"provider"}}},{"kind":"Argument","name":{"kind":"Name","value":"workspaceName"},"value":{"kind":"Variable","name":{"kind":"Name","value":"workspaceName"}}},{"kind":"Argument","name":{"kind":"Name","value":"connectionId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"connectionId"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"redirectUrl"}},{"kind":"Field","name":{"kind":"Name","value":"state"}}]}}]}}]} as unknown as DocumentNode<InitiateAuthMutation, InitiateAuthMutationVariables>;
@@ -1933,4 +1950,4 @@ export const GetResourcePoliciesDocument = {"kind":"Document","definitions":[{"k
 export const GetResourcePolicyDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetResourcePolicy"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"resourcePolicy"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"description"}},{"kind":"Field","name":{"kind":"Name","value":"isDefault"}},{"kind":"Field","name":{"kind":"Name","value":"resourceCount"}},{"kind":"Field","name":{"kind":"Name","value":"profiles"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}}]}},{"kind":"Field","name":{"kind":"Name","value":"resources"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}}]}}]}}]}}]} as unknown as DocumentNode<GetResourcePolicyQuery, GetResourcePolicyQueryVariables>;
 export const PreviewResourcePolicyDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"PreviewResourcePolicy"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"resourceIds"}},"type":{"kind":"NonNullType","type":{"kind":"ListType","type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"profileIds"}},"type":{"kind":"NonNullType","type":{"kind":"ListType","type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"previewResourcePolicy"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"resourceIds"},"value":{"kind":"Variable","name":{"kind":"Name","value":"resourceIds"}}},{"kind":"Argument","name":{"kind":"Name","value":"profileIds"},"value":{"kind":"Variable","name":{"kind":"Name","value":"profileIds"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"devices"}},{"kind":"Field","name":{"kind":"Name","value":"passing"}}]}}]}}]} as unknown as DocumentNode<PreviewResourcePolicyQuery, PreviewResourcePolicyQueryVariables>;
 export const GetAuditLogsDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetAuditLogs"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"before"}},"type":{"kind":"NamedType","name":{"kind":"Name","value":"Int"}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"limit"}},"type":{"kind":"NamedType","name":{"kind":"Name","value":"Int"}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"actionPrefix"}},"type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"auditLogs"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"before"},"value":{"kind":"Variable","name":{"kind":"Name","value":"before"}}},{"kind":"Argument","name":{"kind":"Name","value":"limit"},"value":{"kind":"Variable","name":{"kind":"Name","value":"limit"}}},{"kind":"Argument","name":{"kind":"Name","value":"actionPrefix"},"value":{"kind":"Variable","name":{"kind":"Name","value":"actionPrefix"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"entries"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"seq"}},{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"action"}},{"kind":"Field","name":{"kind":"Name","value":"actorUserId"}},{"kind":"Field","name":{"kind":"Name","value":"actorEmail"}},{"kind":"Field","name":{"kind":"Name","value":"targetType"}},{"kind":"Field","name":{"kind":"Name","value":"targetId"}},{"kind":"Field","name":{"kind":"Name","value":"details"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"rowHash"}}]}},{"kind":"Field","name":{"kind":"Name","value":"nextBefore"}}]}}]}}]} as unknown as DocumentNode<GetAuditLogsQuery, GetAuditLogsQueryVariables>;
-export const GetAuditExportSinksDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetAuditExportSinks"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"auditExportSinks"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"kind"}},{"kind":"Field","name":{"kind":"Name","value":"url"}},{"kind":"Field","name":{"kind":"Name","value":"streams"}},{"kind":"Field","name":{"kind":"Name","value":"enabled"}},{"kind":"Field","name":{"kind":"Name","value":"authHeaderName"}},{"kind":"Field","name":{"kind":"Name","value":"splunkIndex"}},{"kind":"Field","name":{"kind":"Name","value":"splunkSource"}},{"kind":"Field","name":{"kind":"Name","value":"splunkSourcetype"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"updatedAt"}},{"kind":"Field","name":{"kind":"Name","value":"status"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"stream"}},{"kind":"Field","name":{"kind":"Name","value":"cursorSeq"}},{"kind":"Field","name":{"kind":"Name","value":"headSeq"}},{"kind":"Field","name":{"kind":"Name","value":"lag"}},{"kind":"Field","name":{"kind":"Name","value":"lastSuccessAt"}},{"kind":"Field","name":{"kind":"Name","value":"lastError"}},{"kind":"Field","name":{"kind":"Name","value":"failingSince"}},{"kind":"Field","name":{"kind":"Name","value":"oldestPendingAt"}},{"kind":"Field","name":{"kind":"Name","value":"lagging"}}]}}]}}]}}]} as unknown as DocumentNode<GetAuditExportSinksQuery, GetAuditExportSinksQueryVariables>;
+export const GetAuditExportSinksDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetAuditExportSinks"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"auditExportSinks"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"kind"}},{"kind":"Field","name":{"kind":"Name","value":"url"}},{"kind":"Field","name":{"kind":"Name","value":"streams"}},{"kind":"Field","name":{"kind":"Name","value":"enabled"}},{"kind":"Field","name":{"kind":"Name","value":"authHeaderName"}},{"kind":"Field","name":{"kind":"Name","value":"splunkIndex"}},{"kind":"Field","name":{"kind":"Name","value":"splunkSource"}},{"kind":"Field","name":{"kind":"Name","value":"splunkSourcetype"}},{"kind":"Field","name":{"kind":"Name","value":"s3Bucket"}},{"kind":"Field","name":{"kind":"Name","value":"s3Region"}},{"kind":"Field","name":{"kind":"Name","value":"s3Prefix"}},{"kind":"Field","name":{"kind":"Name","value":"s3Endpoint"}},{"kind":"Field","name":{"kind":"Name","value":"s3AccessKeyId"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"updatedAt"}},{"kind":"Field","name":{"kind":"Name","value":"status"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"stream"}},{"kind":"Field","name":{"kind":"Name","value":"cursorSeq"}},{"kind":"Field","name":{"kind":"Name","value":"headSeq"}},{"kind":"Field","name":{"kind":"Name","value":"lag"}},{"kind":"Field","name":{"kind":"Name","value":"lastSuccessAt"}},{"kind":"Field","name":{"kind":"Name","value":"lastError"}},{"kind":"Field","name":{"kind":"Name","value":"failingSince"}},{"kind":"Field","name":{"kind":"Name","value":"oldestPendingAt"}},{"kind":"Field","name":{"kind":"Name","value":"lagging"}}]}}]}}]}}]} as unknown as DocumentNode<GetAuditExportSinksQuery, GetAuditExportSinksQueryVariables>;
