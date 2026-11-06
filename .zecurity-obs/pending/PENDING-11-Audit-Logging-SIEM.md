@@ -473,6 +473,61 @@ Wazuh supports both channels natively:
 - **Channel 2, the full path needs room:** LocalStack (S3 + SQS + STS on one endpoint) plus the manager's `aws-s3` wodle with `service_endpoint`. That needs about 1.5 GB more on `/` than the 3.8 GB free, on top of the Wazuh image saved in `~/dev/docker-images`.
 - **Channel 2 fallback:** MinIO for the PutObject path, then the produced `.jsonl.gz` fed to the manager.
 
+### Build (2026-11-06, local branch `feat/pending11-twingate-siem`, stacked on #187)
+
+- **d71d2b10, connector (W-2):** `analytics.rs`; the line is emitted at the single `emit_access_log`. 338 connector tests pass.
+- **863ecf4f, controller (W-3 … W-7) `[schema: reset DB]`:**
+  - `s3.go` (adapter, key, gzip NDJSON, `URLDeriver`) and `sigv4.go` (hand-written PutObject signing);
+  - exporter `Windowed` batching;
+  - store rules: URL derived from config; secret required; secret again on a bucket, region, endpoint or access key ID change; no URL, ClearAuth or auth header on S3;
+  - `053_audit_export_s3.sql`; GraphQL `S3` kind, `S3Input` and `s3*` fields.
+  - Gate: 1753 pass / 0 fail / 2 skip (the known two).
+  - SigV4 is checked against AWS's published get-vanilla and S3 PUT examples, and against botocore.
+  - The wire path is the signed path. Prefixes are limited to `A-Z a-z 0-9 / _ . -`, since botocore sends `+` literally while an encoder would sign `%2B`.
+- **6f371273, console (W-7):** Amazon S3 in Settings → Audit export. 294 admin tests pass; lint unchanged (17 pre-existing).
+- **Docs (W-8):** `docs/siem-export.md`.
+
+**Build decisions (within W-1 … W-8):**
+- The object carries `x-amz-meta-zecurity-signature`, the sink's HMAC of the gzip body, so the signing secret still means something on S3.
+- In the API, `authHeaderName` is null for S3 sinks: the secret's storage slot is not a header.
+- When the window isn't due, only `next_attempt_at` moves, to the moment the oldest event turns 5 minutes old (only when `attempts = 0` and the cursor is unchanged).
+- Wazuh needs two decoders: one for plain lines, and one bound to `program_name` `zecurity-connector`. Once a syslog header names a program, Wazuh no longer tries decoders without a `program_name`.
+
+### Live run (2026-11-06): PASS
+
+**Setup:** an isolated stack, so the shared DB was not reset.
+- **Database:** a throwaway Postgres on 55432 built from every schema file (`053_` ran clean), with the controller as `ztna_app`. Branch controller build (sha checked), workspace `p11s3` (sign-up through the local test identity provider), Valkey DB 14.
+- **S3:** moto 5.1.4 (S3 + SQS + STS) behind a lab-CA TLS front. IAM was enforced after the 10 setup calls:
+  - writer key: `s3:PutObject` on `zecurity-audit/siem/*` only;
+  - reader key for Wazuh: GetObject/ListBucket, SQS and GetCallerIdentity.
+- **Wazuh:** `wazuh/wazuh-manager:4.14.10`, manager only (no disk for the indexer).
+  - `aws-s3` `<subscriber type="buckets">`. SQS and STS were pointed at moto through `endpoint_url` in `/root/.aws/config` (boto3 1.34), because the module passes `service_endpoint` to S3 only.
+  - `localfile` on the connector's log file.
+- **Connector:** branch build, in a container on the moto network (`postgres:15` image for glibc). A connector on the same host as the client loops: the client captures the connector's own dial to the resource.
+- **Client:** sandbox root daemon, rebuilt to embed the isolated stack's platform root.
+- **Resource:** moto 172.20.0.2:5000.
+
+| Check | Result |
+|---|---|
+| moto enforcement | wrong key `InvalidAccessKeyId`, wrong secret `SignatureDoesNotMatch`, write outside the prefix `AccessDenied` |
+| S3 sink create (GraphQL) | URL derived (`https://127.0.0.1:9445/zecurity-audit`), `authHeaderName` null |
+| 5-minute window | no PUT for young events; cursor `next_attempt_at` ≈ 4 min 42 s; then admin 1..8 in one object `1-8.jsonl.gz` |
+| `testAuditExportSink` | `export.test-<id>.jsonl.gz` written at once, HTTP 200 under IAM enforcement (the hand-written SigV4 accepted) |
+| Wazuh pull | bucket notification → SQS → `aws-s3` module; location `Wazuh-AWS`, Zecurity fields under `data.aws.*` |
+| S3 down (TLS front stopped), 4 admin changes | after the window: `lastError` "could not connect to the destination" (no URL), cursor held at 8, backoff |
+| S3 back | `9-12.jsonl.gz` on the next retry; lag 0, error cleared |
+| Chain from Wazuh's copy (`archives.json`, `data.aws.*`) | admin 1..22 over 3 objects and access 1..124 in `1-124.jsonl.gz`: no gaps, every `row_hash` and link OK, 0 duplicates |
+| Connector `ANALYTICS` lines, real tunnels | 3 allowed requests (HTTP 200) → 3 `allow` lines; access removed while a request loop ran → `deny no_acl_match` from the connector; Wazuh decoded all (`zecurity-connector-analytics`) with every field |
+| Controller stopped for 12 s, 3 requests | 3 lines written and decoded by Wazuh during the outage. The controller copy also arrived after reconnect (`connector_logs` 121..124), because the connector queued them |
+| S3 access stream vs connector lines | the same decisions in both: 123 `allow`, 1 `deny` |
+| Decoders, `wazuh-logtest` | plain line and the journald (syslog-header) form both decode |
+
+**Not covered live:**
+- the journald `localfile` block on an agent (only the decoder was checked, with logtest);
+- the Docker journald log driver;
+- the 500-event "full batch" path (integration test only);
+- real AWS (moto stood in, with IAM enforcement on).
+
 ---
 
 ## History
