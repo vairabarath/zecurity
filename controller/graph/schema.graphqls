@@ -120,6 +120,7 @@ enum Capability {
   DEVICE_ADMIN
   IDENTITY_ADMIN
   MEMBERS_ADMIN
+  AUDIT_ADMIN
 }
 
 enum WorkspaceStatus {

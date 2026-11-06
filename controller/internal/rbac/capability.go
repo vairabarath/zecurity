@@ -44,12 +44,14 @@ const (
 	DeviceAdmin   Capability = "DEVICE_ADMIN"
 	IdentityAdmin Capability = "IDENTITY_ADMIN"
 	MembersAdmin  Capability = "MEMBERS_ADMIN"
+	// AuditAdmin manages SIEM export sinks (PENDING-11 S-7): Admin + Security.
+	AuditAdmin Capability = "AUDIT_ADMIN"
 )
 
 // AllCapabilities lists every capability in a stable order.
 var AllCapabilities = []Capability{
 	ConsoleRead, NetworkWrite, AccessWrite, PostureWrite,
-	DeviceWrite, DeviceAdmin, IdentityAdmin, MembersAdmin,
+	DeviceWrite, DeviceAdmin, IdentityAdmin, MembersAdmin, AuditAdmin,
 }
 
 // table is the role → capability map (PENDING-19 §4). Member has none.
@@ -57,7 +59,7 @@ var table = map[string][]Capability{
 	RoleAdmin:    AllCapabilities,
 	RoleViewer:   {ConsoleRead},
 	RoleDevOps:   {ConsoleRead, NetworkWrite},
-	RoleSecurity: {ConsoleRead, AccessWrite, PostureWrite},
+	RoleSecurity: {ConsoleRead, AccessWrite, PostureWrite, AuditAdmin},
 	RoleHelpdesk: {ConsoleRead, DeviceWrite},
 	RoleMember:   {},
 }

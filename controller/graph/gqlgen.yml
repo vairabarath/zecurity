@@ -10,6 +10,7 @@ schema:
   - graph/posture.graphqls
   - graph/resource_policy.graphqls
   - graph/idp.graphqls
+  - graph/audit.graphqls
 
 exec:
   filename: graph/generated.go

@@ -12,6 +12,67 @@ import (
 	"github.com/yourorg/ztna/controller/internal/models"
 )
 
+type AuditExportAuthHeaderInput struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type AuditExportSink struct {
+	ID               string                     `json:"id"`
+	Name             string                     `json:"name"`
+	Kind             AuditExportSinkKind        `json:"kind"`
+	URL              string                     `json:"url"`
+	Streams          []AuditStream              `json:"streams"`
+	Enabled          bool                       `json:"enabled"`
+	AuthHeaderName   *string                    `json:"authHeaderName,omitempty"`
+	SplunkIndex      *string                    `json:"splunkIndex,omitempty"`
+	SplunkSource     *string                    `json:"splunkSource,omitempty"`
+	SplunkSourcetype *string                    `json:"splunkSourcetype,omitempty"`
+	CreatedAt        string                     `json:"createdAt"`
+	UpdatedAt        string                     `json:"updatedAt"`
+	Status           []*AuditExportStreamStatus `json:"status"`
+}
+
+type AuditExportSinkWithSecret struct {
+	Sink          *AuditExportSink `json:"sink"`
+	SigningSecret string           `json:"signingSecret"`
+}
+
+type AuditExportStreamStatus struct {
+	Stream          AuditStream `json:"stream"`
+	CursorSeq       int         `json:"cursorSeq"`
+	HeadSeq         int         `json:"headSeq"`
+	Lag             int         `json:"lag"`
+	LastSuccessAt   *string     `json:"lastSuccessAt,omitempty"`
+	LastError       *string     `json:"lastError,omitempty"`
+	FailingSince    *string     `json:"failingSince,omitempty"`
+	OldestPendingAt *string     `json:"oldestPendingAt,omitempty"`
+	Lagging         bool        `json:"lagging"`
+}
+
+type AuditExportTestResult struct {
+	Ok    bool    `json:"ok"`
+	Error *string `json:"error,omitempty"`
+}
+
+type AuditLogEntry struct {
+	Seq         int     `json:"seq"`
+	ID          string  `json:"id"`
+	Action      string  `json:"action"`
+	ActorUserID *string `json:"actorUserId,omitempty"`
+	ActorEmail  string  `json:"actorEmail"`
+	TargetType  string  `json:"targetType"`
+	TargetID    string  `json:"targetId"`
+	Details     *string `json:"details,omitempty"`
+	CreatedAt   string  `json:"createdAt"`
+	RowHash     string  `json:"rowHash"`
+}
+
+type AuditLogPage struct {
+	Entries    []*AuditLogEntry `json:"entries"`
+	NextBefore *int             `json:"nextBefore,omitempty"`
+}
+
 type ClientDevice struct {
 	ID              string  `json:"id"`
 	UserID          string  `json:"userId"`
@@ -64,6 +125,17 @@ type CountryRule struct {
 type CountryRuleInput struct {
 	Allow []string `json:"allow"`
 	Deny  []string `json:"deny"`
+}
+
+type CreateAuditExportSinkInput struct {
+	Name       string                      `json:"name"`
+	Kind       AuditExportSinkKind         `json:"kind"`
+	URL        string                      `json:"url"`
+	Streams    []AuditStream               `json:"streams"`
+	Enabled    *bool                       `json:"enabled,omitempty"`
+	StartFrom  *AuditExportStartFrom       `json:"startFrom,omitempty"`
+	AuthHeader *AuditExportAuthHeaderInput `json:"authHeader,omitempty"`
+	Splunk     *SplunkHecInput             `json:"splunk,omitempty"`
 }
 
 type CreateIdpConnectionInput struct {
@@ -311,6 +383,23 @@ type ShieldToken struct {
 	ShieldID string `json:"shieldId"`
 }
 
+type SplunkHecInput struct {
+	Token      *string `json:"token,omitempty"`
+	Index      *string `json:"index,omitempty"`
+	Source     *string `json:"source,omitempty"`
+	Sourcetype *string `json:"sourcetype,omitempty"`
+}
+
+type UpdateAuditExportSinkInput struct {
+	Name            *string                     `json:"name,omitempty"`
+	URL             *string                     `json:"url,omitempty"`
+	Streams         []AuditStream               `json:"streams,omitempty"`
+	Enabled         *bool                       `json:"enabled,omitempty"`
+	AuthHeader      *AuditExportAuthHeaderInput `json:"authHeader,omitempty"`
+	ClearAuthHeader *bool                       `json:"clearAuthHeader,omitempty"`
+	Splunk          *SplunkHecInput             `json:"splunk,omitempty"`
+}
+
 type UpdateIdpConnectionInput struct {
 	DisplayName  *string `json:"displayName,omitempty"`
 	ClientID     *string `json:"clientId,omitempty"`
@@ -377,6 +466,171 @@ type WorkspacePublic struct {
 	Slug string `json:"slug"`
 }
 
+type AuditExportSinkKind string
+
+const (
+	AuditExportSinkKindWebhook   AuditExportSinkKind = "WEBHOOK"
+	AuditExportSinkKindSplunkHec AuditExportSinkKind = "SPLUNK_HEC"
+)
+
+var AllAuditExportSinkKind = []AuditExportSinkKind{
+	AuditExportSinkKindWebhook,
+	AuditExportSinkKindSplunkHec,
+}
+
+func (e AuditExportSinkKind) IsValid() bool {
+	switch e {
+	case AuditExportSinkKindWebhook, AuditExportSinkKindSplunkHec:
+		return true
+	}
+	return false
+}
+
+func (e AuditExportSinkKind) String() string {
+	return string(e)
+}
+
+func (e *AuditExportSinkKind) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = AuditExportSinkKind(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid AuditExportSinkKind", str)
+	}
+	return nil
+}
+
+func (e AuditExportSinkKind) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *AuditExportSinkKind) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e AuditExportSinkKind) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type AuditExportStartFrom string
+
+const (
+	AuditExportStartFromAllHistory AuditExportStartFrom = "ALL_HISTORY"
+	AuditExportStartFromNow        AuditExportStartFrom = "NOW"
+)
+
+var AllAuditExportStartFrom = []AuditExportStartFrom{
+	AuditExportStartFromAllHistory,
+	AuditExportStartFromNow,
+}
+
+func (e AuditExportStartFrom) IsValid() bool {
+	switch e {
+	case AuditExportStartFromAllHistory, AuditExportStartFromNow:
+		return true
+	}
+	return false
+}
+
+func (e AuditExportStartFrom) String() string {
+	return string(e)
+}
+
+func (e *AuditExportStartFrom) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = AuditExportStartFrom(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid AuditExportStartFrom", str)
+	}
+	return nil
+}
+
+func (e AuditExportStartFrom) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *AuditExportStartFrom) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e AuditExportStartFrom) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type AuditStream string
+
+const (
+	AuditStreamAdmin  AuditStream = "ADMIN"
+	AuditStreamAccess AuditStream = "ACCESS"
+)
+
+var AllAuditStream = []AuditStream{
+	AuditStreamAdmin,
+	AuditStreamAccess,
+}
+
+func (e AuditStream) IsValid() bool {
+	switch e {
+	case AuditStreamAdmin, AuditStreamAccess:
+		return true
+	}
+	return false
+}
+
+func (e AuditStream) String() string {
+	return string(e)
+}
+
+func (e *AuditStream) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = AuditStream(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid AuditStream", str)
+	}
+	return nil
+}
+
+func (e AuditStream) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *AuditStream) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e AuditStream) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
 type Capability string
 
 const (
@@ -388,6 +642,7 @@ const (
 	CapabilityDeviceAdmin   Capability = "DEVICE_ADMIN"
 	CapabilityIdentityAdmin Capability = "IDENTITY_ADMIN"
 	CapabilityMembersAdmin  Capability = "MEMBERS_ADMIN"
+	CapabilityAuditAdmin    Capability = "AUDIT_ADMIN"
 )
 
 var AllCapability = []Capability{
@@ -399,11 +654,12 @@ var AllCapability = []Capability{
 	CapabilityDeviceAdmin,
 	CapabilityIdentityAdmin,
 	CapabilityMembersAdmin,
+	CapabilityAuditAdmin,
 }
 
 func (e Capability) IsValid() bool {
 	switch e {
-	case CapabilityConsoleRead, CapabilityNetworkWrite, CapabilityAccessWrite, CapabilityPostureWrite, CapabilityDeviceWrite, CapabilityDeviceAdmin, CapabilityIdentityAdmin, CapabilityMembersAdmin:
+	case CapabilityConsoleRead, CapabilityNetworkWrite, CapabilityAccessWrite, CapabilityPostureWrite, CapabilityDeviceWrite, CapabilityDeviceAdmin, CapabilityIdentityAdmin, CapabilityMembersAdmin, CapabilityAuditAdmin:
 		return true
 	}
 	return false

@@ -16,7 +16,8 @@ tags: [pending, adr, operations, audit, siem, compliance]
 # PENDING-11: Audit logging and SIEM export
 
 **Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR. **S1a built 2026-11-05** (fc3561c1 on local `feat/pending11-siem`: migration 051, `ztna_app`, `audit.VerifyStream`; gate 1719/0/2). Lock order: workspace FOR KEY SHARE, then head (found while testing: the FK check after a BEFORE trigger would otherwise deadlock against a workspace FOR UPDATE + audit transaction).
-**Base:** `main` (89655c83). Next migration: `051_`.
+**S1b built 2026-11-06** (local `feat/pending11-siem`): migration `052_audit_export.sql`, P-9 audit gaps, `internal/auditexport` (exporter, webhook + Splunk HEC, SSRF-safe client, sealed secrets), GraphQL sink API + `auditLogs` behind `AUDIT_ADMIN` / `CONSOLE_READ`, access-event retention worker, `zecurity-controller audit verify`. Decisions taken while building are in §7.
+**Base:** `main` (89655c83). Migrations: `051_`, `052_`.
 **Scope:** its own epic. It also builds D-12 (DB-enforced append-only audit), which the Decision Record left to this phase.
 
 ---
@@ -308,6 +309,21 @@ One PR, `[schema: reset DB]`, migration `051_`:
 2. **S1b, backend:** the P-9 audit gaps, the exporter worker and cursors, the adapter registry, the webhook adapter (plus HEC if O-4), the SSRF client, sealed secrets, the GraphQL sink API, and a chain verifier (`zecurity-controller audit verify --workspace …`).
 3. **S2, console:** the Audit export settings and, if O-5, the Audit Log page.
 4. **S3, live run:** a real connector and client produce access events. The receiver's certificate is trusted through a dev-only CA-bundle setting (`AUDIT_EXPORT_DEV_CA_FILE`, `ENV=development`), next to the private-IP override. A local HTTPS receiver checks signatures, seq continuity and hash recomputation. Then: kill the receiver and confirm retry and catch-up with no gaps or duplicates beyond the at-least-once overlap; attempt UPDATE as `ztna_app` (refused); edit a row as the owner (the verifier reports the break).
+
+## 7. Build decisions (S1b, 2026-11-06)
+
+These narrow or pin down the design above; none adds an architectural choice.
+
+- **`auth.sign_in_failed` scope (narrows P-9).** `audit_logs.tenant_id` is NOT NULL, and the admin stream is kept forever, so letting unauthenticated callers append to it would be a storage-DoS path. A refused sign-in is recorded only after the IdP has proven the identity **and** the connection is the workspace's own (enterprise) connection, for "not invited" and "account not active" alike, with one reason (`not_permitted`) so the row never tells the two apart. Failures before that (bad state, expired state, IdP error, platform connection) are not audited. Same rule on the client path (`TokenExchange`), where a platform connection would otherwise let any IdP account name any workspace.
+- **`auth.sign_out`** is recorded only for a session the call actually ended, so replaying a token can't flood the stream. Console and client share `EndSession`; the client path marks its context (`auth.WithClientChannel`) for `details.client`.
+- **Backoff:** `outbox.RetryPolicy{Base: 2s, Max: 15m}.Backoff(n)`, without `Validate` (which caps at the outbox's 5 min). The outbox constant is unchanged.
+- **Adapter signature:** `Deliver(ctx, *http.Client, Destination, Batch)`: the sink's decrypted URL, signing key, auth header and config travel in `Destination`, and the shared SSRF-safe client is passed in, so adapters never build their own.
+- **Splunk HEC:** the token is stored as the sealed auth header `Authorization: Splunk <token>`; index, source and sourcetype are the non-secret config. HEC requests are also signed (harmless).
+- **A stored credential doesn't follow a sink to a new host.** Changing the URL's host (or port) on a sink that has an auth header or HEC token requires entering it again; otherwise an `AUDIT_ADMIN` user could point the sink at their own server and capture a token they never saw (found by the background security review).
+- **"Now" start:** the cursor is set to the head before the sink's own `audit_export.sink.create` row is written, so that row is the first admin event a "now" sink receives.
+- **Canonical bytes are built in Go** (`audit/canonical.go`) from the raw columns, for the verifier and the exporter; a test pins them to the database's `audit_*_canonical`. Neither trusts the database's hashing function.
+- **Error text** stored in `last_error` and returned by `testAuditExportSink` never carries the URL (a query string may hold a token), headers or the response body. Audit rows for sink changes carry the URL without its query.
+- **gqlgen** fails with Go 1.27 (`package "time" without types`); regenerate with `GOTOOLCHAIN=go1.26.2 go tool gqlgen generate --config graph/gqlgen.yml`, then revert the `go.mod`/`go.sum` tidy it does.
 
 ---
 
