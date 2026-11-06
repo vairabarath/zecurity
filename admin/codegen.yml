@@ -10,6 +10,7 @@ schema:
   - "../controller/graph/posture.graphqls"
   - "../controller/graph/resource_policy.graphqls"
   - "../controller/graph/idp.graphqls"
+  - "../controller/graph/audit.graphqls"
 documents: "src/graphql/**/*.graphql"
 generates:
   src/generated/:

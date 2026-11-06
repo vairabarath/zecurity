@@ -39,6 +39,8 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/auditexport"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/changehint"
@@ -78,6 +80,10 @@ func main() {
 	if isRecoverAdminCommand(os.Args) {
 		os.Exit(runRecoverAdmin(os.Args[3:]))
 	}
+	// PENDING-11: offline hash-chain check of a workspace's audit streams.
+	if isAuditVerifyCommand(os.Args) {
+		os.Exit(runAuditVerify(os.Args[3:]))
+	}
 	loadOptionalEnv()
 
 	ctx, stop := signal.NotifyContext(
@@ -105,6 +111,18 @@ func main() {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	// D-12 (PENDING-11): the controller must run as ztna_app, which can only
+	// insert and read the audit tables. Fail closed outside development.
+	if bad, err := audit.CheckAppendOnly(ctx, db.Pool); err != nil {
+		log.Fatalf("audit privilege check: %v", err)
+	} else if len(bad) > 0 {
+		msg := fmt.Sprintf("audit tables are not append-only for this DATABASE_URL role (%s); connect as ztna_app (see controller/.env.example)", strings.Join(bad, ", "))
+		if os.Getenv("ENV") != "development" {
+			log.Fatal(msg)
+		}
+		log.Printf("WARNING: %s", msg)
+	}
 
 	outboxMaxRetries := envOrInt(
 		"OUTBOX_MAX_RETRIES",
@@ -187,7 +205,9 @@ func main() {
 	oidcRedirectURI := mustEnv("GOOGLE_REDIRECT_URI")
 
 	authSvc, err := auth.NewService(auth.Config{
-		Pool:               db.Pool,
+		Pool: db.Pool,
+		// PENDING-11 P-9 / S-11: auth.* rows in the workspace admin stream.
+		Audit:              func(ctx context.Context, e audit.Entry) { _ = audit.Record(ctx, db.Pool, e) },
 		IdentityService:    identitySvc,
 		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
@@ -354,6 +374,15 @@ func main() {
 		log.Printf("discovery rate limit: trusting X-Forwarded-For from %d proxy range(s)", len(discoveryProxies))
 	}
 
+	// PENDING-11 P-5..P-8: SIEM export. One exporter inside the controller
+	// (D-02); dev overrides only with ENV=development.
+	auditExportOpts, err := auditexport.OptionsFromEnv(log.Printf)
+	if err != nil {
+		log.Fatalf("audit export: %v", err)
+	}
+	auditExportStore := auditexport.NewStore(db.Pool, pkiService, auditexport.DefaultRegistry(), auditExportOpts.AllowPrivate)
+	auditExporter := auditexport.NewExporter(db.Pool, auditExportStore, auditexport.NewClient(auditExportOpts))
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -381,6 +410,8 @@ func main() {
 				BreakGlassEmails:  breakGlassEmails,
 				OIDCRedirectURI:   oidcRedirectURI,
 				Roles:             roleChecker,
+				AuditExport:       auditExportStore,
+				AuditExporter:     auditExporter,
 			},
 			Directives: graph.DirectiveRoot{
 				Requires: resolvers.NewRequires(roleChecker),
@@ -793,6 +824,22 @@ func main() {
 	)
 	workers.Go("posture-retention", func() {
 		retentionWorker.Run(ctx)
+	})
+
+	// PENDING-11: SIEM export worker, and access-event retention (P-4, S-6;
+	// the database refuses anything under 90 days).
+	workers.Go("audit-export", func() {
+		auditExporter.Run(ctx)
+	})
+	accessRetentionDays := envOrInt("ACCESS_LOG_RETENTION_DAYS", audit.MinAccessRetentionDays)
+	if accessRetentionDays < audit.MinAccessRetentionDays {
+		log.Printf("WARNING: ACCESS_LOG_RETENTION_DAYS=%d is under the %d-day floor; using %d",
+			accessRetentionDays, audit.MinAccessRetentionDays, audit.MinAccessRetentionDays)
+		accessRetentionDays = audit.MinAccessRetentionDays
+	}
+	accessRetention := &audit.AccessRetention{Pool: db.Pool, Days: accessRetentionDays}
+	workers.Go("audit-access-retention", func() {
+		accessRetention.Run(ctx)
 	})
 
 	// PENDING-20 G1: pick up a new GeoIP database file (operators replace it

@@ -3,6 +3,7 @@ package resolvers
 import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/auditexport"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
@@ -71,4 +72,10 @@ type Resolver struct {
 	// that evaluate one before client authentication, which would otherwise read
 	// as "not invalid_client" and wrongly pass.
 	OIDCRedirectURI string
+
+	// AuditExport and AuditExporter back the SIEM export API (PENDING-11
+	// P-8): sink CRUD (audited in-transaction by the store) and the test
+	// delivery.
+	AuditExport   *auditexport.Store
+	AuditExporter *auditexport.Exporter
 }

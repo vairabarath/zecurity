@@ -143,6 +143,25 @@ func (r *valkeyClient) DeleteRefreshSession(ctx context.Context, userID, sid str
 	return err
 }
 
+// EndRefreshSession is DeleteRefreshSession that also reports whether the
+// session existed (logout audits only a session it actually ended).
+func (r *valkeyClient) EndRefreshSession(ctx context.Context, userID, sid string) (bool, error) {
+	if sid == "" {
+		n, err := r.rdb.Del(ctx, refreshKey(userID, "")).Result()
+		return n > 0, err
+	}
+	var del *valkeycompat.IntCmd
+	_, err := r.rdb.TxPipelined(ctx, func(p valkeycompat.Pipeliner) error {
+		del = p.Del(ctx, refreshKey(userID, sid))
+		p.SRem(ctx, refreshIndexKey(userID), sid)
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return del.Val() > 0, nil
+}
+
 // DeleteAllRefreshSessions ends every session of the user, including a legacy
 // single-session key. Used when the user itself is revoked (status or
 // identity_generation), where no session may survive.

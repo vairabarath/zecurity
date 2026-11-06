@@ -9,7 +9,12 @@ export const ROLE_CAPABILITIES: Record<Role, Capability[]> = {
   [Role.Admin]: Object.values(Capability),
   [Role.Viewer]: [Capability.ConsoleRead],
   [Role.Devops]: [Capability.ConsoleRead, Capability.NetworkWrite],
-  [Role.Security]: [Capability.ConsoleRead, Capability.AccessWrite, Capability.PostureWrite],
+  [Role.Security]: [
+    Capability.ConsoleRead,
+    Capability.AccessWrite,
+    Capability.PostureWrite,
+    Capability.AuditAdmin,
+  ],
   [Role.Helpdesk]: [Capability.ConsoleRead, Capability.DeviceWrite],
   [Role.Member]: [],
 }

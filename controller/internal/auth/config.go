@@ -25,6 +25,10 @@ type connectionStore interface {
 // Called by: main.go — Member 4 instantiates this using env vars and passes it to NewService().
 // Member 2 defines what fields are needed here.
 type Config struct {
+	// Audit records auth.* events in the workspace's admin audit stream
+	// (PENDING-11 P-9, S-11). Optional; nil disables auth auditing.
+	Audit AuditRecorder
+
 	// Pool is the pgx connection pool, passed to the bootstrap service.
 	// Provided by: db.Pool (internal/db/pool.go, Member 4)
 	Pool *pgxpool.Pool

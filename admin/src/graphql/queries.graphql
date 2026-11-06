@@ -532,3 +532,51 @@ query PreviewResourcePolicy($resourceIds: [ID!]!, $profileIds: [ID!]!) {
   }
 }
 
+
+# PENDING-11: workspace audit log (S-9) and SIEM export sinks (P-8).
+query GetAuditLogs($before: Int, $limit: Int, $actionPrefix: String) {
+  auditLogs(before: $before, limit: $limit, actionPrefix: $actionPrefix) {
+    entries {
+      seq
+      id
+      action
+      actorUserId
+      actorEmail
+      targetType
+      targetId
+      details
+      createdAt
+      rowHash
+    }
+    nextBefore
+  }
+}
+
+
+query GetAuditExportSinks {
+  auditExportSinks {
+    id
+    name
+    kind
+    url
+    streams
+    enabled
+    authHeaderName
+    splunkIndex
+    splunkSource
+    splunkSourcetype
+    createdAt
+    updatedAt
+    status {
+      stream
+      cursorSeq
+      headSeq
+      lag
+      lastSuccessAt
+      lastError
+      failingSince
+      oldestPendingAt
+      lagging
+    }
+  }
+}

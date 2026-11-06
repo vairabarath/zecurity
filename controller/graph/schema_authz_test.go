@@ -51,7 +51,7 @@ var expectedCapability = func() map[string]rbac.Capability {
 	put(rbac.ConsoleRead, `clientDevices remoteNetworks remoteNetwork connectors connector
 		shields shield resources allResources getDiscoveredServices getScanResults groups group
 		supportedPostureChecks deviceProfiles devicePostureVisibility idpConnections
-		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users
+		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users auditLogs
 		resourcePolicies resourcePolicy previewResourcePolicy`)
 	put(rbac.NetworkWrite, `createRemoteNetwork deleteRemoteNetwork generateConnectorToken
 		revokeConnector deleteConnector generateShieldToken revokeShield deleteShield
@@ -71,6 +71,8 @@ var expectedCapability = func() map[string]rbac.Capability {
 		mintScimToken rotateScimToken revokeScimToken acceptScimConflict rejectScimConflict
 		reopenScimConflict grantPermission enableScimBreakGlass`)
 	put(rbac.MembersAdmin, `createInvitation setMemberRole`)
+	put(rbac.AuditAdmin, `auditExportSinks createAuditExportSink updateAuditExportSink
+		rotateAuditExportSinkSecret deleteAuditExportSink testAuditExportSink`)
 	return m
 }()
 
@@ -181,7 +183,7 @@ func TestAllFieldsAuthorized(t *testing.T) {
 	// 73 console operations + setMemberRole (PENDING-19 §4.1)
 	// + updateProfileRequirementCountries (PENDING-20 G-10). A drop below
 	// means schema collection broke and a pass would be meaningless.
-	const wantGated = 80 // PENDING-16: -3 (mode, bind, unbind), +8 (resource policies)
+	const wantGated = 87 // PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
 	if gated != wantGated {
 		t.Fatalf("authz check found %d gated operations, want %d — schema collection broken or "+
 			"an operation was added/removed without updating expectedCapability", gated, wantGated)
@@ -228,6 +230,9 @@ func TestRoleOperationMatrix(t *testing.T) {
 	}
 	// What each role may do, stated from §3 rather than from rbac's table.
 	allowed := func(role, op string, c rbac.Capability) bool {
+		if c == rbac.AuditAdmin { // PENDING-11 S-7: SIEM wiring, reads included
+			return role == rbac.RoleAdmin || role == rbac.RoleSecurity
+		}
 		switch role {
 		case rbac.RoleAdmin:
 			return true
@@ -261,6 +266,8 @@ func TestRoleOperationMatrix(t *testing.T) {
 		{rbac.RoleHelpdesk, rbac.DeviceAdmin, false},  // R-8: revokeDevice is Admin-only
 		{rbac.RoleDevOps, rbac.NetworkWrite, true},    // R-4: install tokens
 		{rbac.RoleSecurity, rbac.MembersAdmin, false}, // R-10: invites Admin-only
+		{rbac.RoleSecurity, rbac.AuditAdmin, true},    // PENDING-11 S-7
+		{rbac.RoleViewer, rbac.AuditAdmin, false},
 		{rbac.RoleViewer, rbac.ConsoleRead, true},
 		{rbac.RoleMember, rbac.ConsoleRead, false},
 		{"", rbac.ConsoleRead, false},
