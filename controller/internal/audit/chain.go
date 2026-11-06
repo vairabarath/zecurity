@@ -72,7 +72,9 @@ const maxBreaks = 100
 // the row's current content, and a head that disagrees with the last row.
 // The canonical bytes are built in Go from the raw columns (canonical.go),
 // not by the database's audit_*_canonical functions, so a pass doesn't
-// depend on trusting the database's own hashing code.
+// depend on trusting the database's own hashing code. Pass a REPEATABLE READ
+// transaction as db so a concurrent retention purge can't read as missing
+// rows.
 func VerifyStream(ctx context.Context, db Querier, workspaceID string, s Stream) (VerifyResult, error) {
 	res := VerifyResult{Stream: s}
 	if !s.Valid() {

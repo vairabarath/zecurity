@@ -175,14 +175,15 @@ func ValidateURL(raw string, allowPrivate bool) error {
 	return nil
 }
 
-// RedactURL is the URL without query and credentials, for audit details and
-// logs (a query string may carry a token).
+// RedactURL is the URL's scheme and host only, for audit details and logs:
+// a path (e.g. /services/T…/B…/<secret>) or query string may carry a token,
+// and audit rows are readable by every console role and exported.
 func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
 	}
-	return u.Scheme + "://" + u.Host + u.EscapedPath()
+	return u.Scheme + "://" + u.Host
 }
 
 func describeTransportError(err error) string {

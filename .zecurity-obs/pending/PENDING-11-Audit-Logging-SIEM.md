@@ -319,10 +319,10 @@ These narrow or pin down the design above; none adds an architectural choice.
 - **Backoff:** `outbox.RetryPolicy{Base: 2s, Max: 15m}.Backoff(n)`, without `Validate` (which caps at the outbox's 5 min). The outbox constant is unchanged.
 - **Adapter signature:** `Deliver(ctx, *http.Client, Destination, Batch)`: the sink's decrypted URL, signing key, auth header and config travel in `Destination`, and the shared SSRF-safe client is passed in, so adapters never build their own.
 - **Splunk HEC:** the token is stored as the sealed auth header `Authorization: Splunk <token>`; index, source and sourcetype are the non-secret config. HEC requests are also signed (harmless).
-- **A stored credential doesn't follow a sink to a new host.** Changing the URL's host (or port) on a sink that has an auth header or HEC token requires entering it again; otherwise an `AUDIT_ADMIN` user could point the sink at their own server and capture a token they never saw (found by the background security review).
+- **A stored credential doesn't follow a sink to a new URL.** Any URL change on a sink that has an auth header or HEC token requires entering it again; otherwise an `AUDIT_ADMIN` user could point the sink at their own server (or another path on a shared relay host) and capture a token they never saw (found by the background security review).
 - **"Now" start:** the cursor is set to the head before the sink's own `audit_export.sink.create` row is written, so that row is the first admin event a "now" sink receives.
 - **Canonical bytes are built in Go** (`audit/canonical.go`) from the raw columns, for the verifier and the exporter; a test pins them to the database's `audit_*_canonical`. Neither trusts the database's hashing function.
-- **Error text** stored in `last_error` and returned by `testAuditExportSink` never carries the URL (a query string may hold a token), headers or the response body. Audit rows for sink changes carry the URL without its query.
+- **Error text** stored in `last_error` and returned by `testAuditExportSink` never carries the URL (a query string may hold a token), headers or the response body. Audit rows for sink changes carry only the URL's scheme and host: a path or query may hold a token, and audit rows are readable by every console role and exported.
 - **gqlgen** fails with Go 1.27 (`package "time" without types`); regenerate with `GOTOOLCHAIN=go1.26.2 go tool gqlgen generate --config graph/gqlgen.yml`, then revert the `go.mod`/`go.sum` tidy it does.
 
 ---

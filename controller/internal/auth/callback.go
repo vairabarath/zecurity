@@ -118,7 +118,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			// enterprise connection), so unauthenticated callers can't append
 			// to the admin stream. "not invited" and "not active" share one
 			// reason.
-			if conn.TenantID != nil && (errors.Is(err, identity.ErrNotInvited) || errors.Is(err, identity.ErrUserNotActive)) {
+			if conn.TenantID != nil && AuditSignInFailure(conn.TenantID, *conn.TenantID, err) {
 				s.record(ctx, audit.Entry{
 					TenantID:   *conn.TenantID,
 					ActorEmail: authCtx.Email,

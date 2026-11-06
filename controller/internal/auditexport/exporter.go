@@ -25,7 +25,9 @@ const (
 	// outbox's own 5-minute cap is not used here).
 	MaxBackoff = 15 * time.Minute
 	workers    = 4
-	maxDue     = 64
+	// catchUpBudget bounds how long one worker stays on one cursor.
+	catchUpBudget = 30 * time.Second
+	maxDue        = 64
 )
 
 var retry = outbox.RetryPolicy{Base: 2 * time.Second, Max: MaxBackoff}
@@ -79,15 +81,32 @@ func (e *Exporter) Run(ctx context.Context) {
 				defer wg.Done()
 				defer func() { <-sem }()
 				defer e.release(k)
-				if _, err := e.DeliverOnce(ctx, k.sinkID, k.stream); err != nil && ctx.Err() == nil {
-					log.Printf("audit export: sink %s stream %s: %v", k.sinkID, k.stream, err)
-				}
+				e.catchUp(ctx, k)
 			}(k)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// catchUp keeps delivering one claimed cursor while it has a backlog, for up
+// to catchUpBudget, so catch-up after an outage or from "all history" isn't
+// limited to one batch per poll.
+func (e *Exporter) catchUp(ctx context.Context, k cursorKey) {
+	deadline := time.Now().Add(catchUpBudget)
+	for time.Now().Before(deadline) {
+		n, err := e.DeliverOnce(ctx, k.sinkID, k.stream)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("audit export: sink %s stream %s: %v", k.sinkID, k.stream, err)
+			}
+			return
+		}
+		if n == 0 {
+			return
 		}
 	}
 }

@@ -69,7 +69,7 @@ func TestValidateURL(t *testing.T) {
 	if err := ValidateURL("https://127.0.0.1:9443/hook", true); err != nil {
 		t.Errorf("dev override: %v", err)
 	}
-	if got := RedactURL("https://siem.example.com/hook?token=abc"); got != "https://siem.example.com/hook" {
+	if got := RedactURL("https://siem.example.com/services/T1/B2/secret?token=abc"); got != "https://siem.example.com" {
 		t.Errorf("RedactURL = %q", got)
 	}
 }

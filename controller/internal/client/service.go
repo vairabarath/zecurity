@@ -404,8 +404,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		// connection any IdP account could name any workspace and append to
 		// its kept-forever admin stream. "not invited" and "not active" share
 		// a reason.
-		ownConn := conn.TenantID != nil && *conn.TenantID == sess.WorkspaceID
-		if ownConn && (errors.Is(err, errUserNotInvited) || errors.Is(err, identity.ErrUserNotActive)) {
+		if auth.AuditSignInFailure(conn.TenantID, sess.WorkspaceID, err, errUserNotInvited) {
 			s.recordAudit(ctx, audit.Entry{
 				TenantID:   sess.WorkspaceID,
 				ActorEmail: sess.Email,

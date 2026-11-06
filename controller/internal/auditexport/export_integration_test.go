@@ -437,8 +437,11 @@ func TestStore_LimitSecretsAndAudit(t *testing.T) {
 	if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: id, URL: strPtr("https://attacker.example.net/x"), Actor: actor}); !errors.As(err, &ie) {
 		t.Fatalf("host change without re-entering the header: err = %v", err)
 	}
-	if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: id, URL: strPtr(rc.srv.URL + "/other-path"), Actor: actor}); err != nil {
-		t.Fatalf("same-host path change: %v", err)
+	if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: id, URL: strPtr(rc.srv.URL + "/other-path"), Actor: actor}); !errors.As(err, &ie) {
+		t.Fatalf("same-host path change without re-entering the header: err = %v", err)
+	}
+	if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: id, Enabled: boolPtr(false), Actor: actor}); err != nil {
+		t.Fatalf("non-URL change: %v", err)
 	}
 	if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: id, URL: strPtr("https://new.example.net/x"),
 		AuthHeader: &AuthHeader{Name: "X-Api-Key", Value: "hdr-secret-0"}, Actor: actor}); err != nil {
@@ -527,3 +530,36 @@ func TestSplunkHEC_Delivers(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func boolPtr(b bool) *bool { return &b }
+
+// Run drains a backlog beyond one batch without waiting a poll per batch.
+func TestExporterRun_CatchesUpWithinOnePoll(t *testing.T) {
+	_, app, ws, store, rc, exp := setup(t)
+	ctx := context.Background()
+	if _, err := app.Exec(ctx,
+		`INSERT INTO audit_logs (tenant_id, actor_email, action, target_type, target_id)
+		 SELECT $1, 'a@example.com', 'bulk.x', 't', g::text FROM generate_series(1, 1200) g`, ws); err != nil {
+		t.Fatal(err)
+	}
+	sink, secret, err := store.Create(ctx, CreateInput{WorkspaceID: ws, Name: "siem", Kind: "webhook", URL: rc.srv.URL,
+		Streams: []string{"admin"}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.secret = []byte(secret)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { exp.Run(runCtx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(PollInterval) // well under the 3 polls one-batch-per-poll would need
+	for time.Now().Before(deadline) {
+		if seq, _, _ := cursor(t, app, sink.ID, audit.StreamAdmin); seq == 1201 {
+			checkChain(t, ws, audit.StreamAdmin, rc.events("admin"))
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	seq, _, _ := cursor(t, app, sink.ID, audit.StreamAdmin)
+	t.Fatalf("cursor = %d after one poll interval, want 1201", seq)
+}

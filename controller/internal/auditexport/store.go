@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -402,10 +401,12 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 			if err := ValidateURL(*in.URL, s.allowPrivate); err != nil {
 				return inputErr("%v", err)
 			}
-			// A stored credential must not follow the sink to a new host: an
-			// editor could otherwise capture a token they never saw.
-			if cur.HeaderName != nil && in.AuthHeader == nil && !in.ClearAuth && !sameOrigin(cur.URL, *in.URL) {
-				return inputErr("changing the destination host requires entering the auth header or Splunk token again")
+			// A stored credential must not follow the sink to a new
+			// destination: an editor could otherwise capture a token they
+			// never saw. Any URL change counts (a path on a shared host can
+			// route elsewhere).
+			if cur.HeaderName != nil && in.AuthHeader == nil && !in.ClearAuth {
+				return inputErr("changing the URL requires entering the auth header or Splunk token again")
 			}
 			next.URL, changed["url"] = *in.URL, RedactURL(*in.URL)
 		}
@@ -690,11 +691,4 @@ func (s *Store) loadTarget(ctx context.Context, sinkID string) (target, error) {
 		t.AuthHeaderName, t.AuthHeaderValue = *hName, string(v)
 	}
 	return t, nil
-}
-
-// sameOrigin reports whether two https URLs share host and port.
-func sameOrigin(a, b string) bool {
-	ua, errA := url.Parse(a)
-	ub, errB := url.Parse(b)
-	return errA == nil && errB == nil && strings.EqualFold(ua.Host, ub.Host)
 }

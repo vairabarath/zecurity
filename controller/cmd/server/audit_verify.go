@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/db"
 )
@@ -79,7 +80,19 @@ func runAuditVerify(args []string) int {
 		return 1
 	}
 	defer db.Close()
-	return verifyStreams(ctx, db.Pool, a, os.Stdout, os.Stderr)
+	// One REPEATABLE READ snapshot: a retention purge landing between the
+	// head read and the row pages would otherwise read as missing rows.
+	code := 1
+	err = pgx.BeginTxFunc(ctx, db.Pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			code = verifyStreams(ctx, tx, a, os.Stdout, os.Stderr)
+			return nil
+		})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit verify: %v\n", err)
+		return 1
+	}
+	return code
 }
 
 func verifyStreams(ctx context.Context, q audit.Querier, a auditVerifyArgs, stdout, stderr io.Writer) int {
