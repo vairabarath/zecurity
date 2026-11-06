@@ -56,8 +56,21 @@ func NewRegistry(as ...Adapter) *Registry {
 	return r
 }
 
-// DefaultRegistry holds the v1 adapters (S-8): webhook and Splunk HEC.
-func DefaultRegistry() *Registry { return NewRegistry(Webhook{}, SplunkHEC{}) }
+// URLDeriver is implemented by adapters whose destination URL is built from
+// their config (S3): the store derives the url column instead of taking one.
+type URLDeriver interface {
+	DeriveURL(cfg json.RawMessage) (string, error)
+}
+
+// Windowed is implemented by adapters that write a batch only once its oldest
+// event is BatchWindow old (S3, W-5), or a full batch is pending.
+type Windowed interface {
+	BatchWindow() time.Duration
+}
+
+// DefaultRegistry holds the adapters: webhook and Splunk HEC (S-8), and
+// Amazon S3 (§9 W-3).
+func DefaultRegistry() *Registry { return NewRegistry(Webhook{}, SplunkHEC{}, S3{}) }
 
 // Get returns the adapter for kind.
 func (r *Registry) Get(kind string) (Adapter, bool) {

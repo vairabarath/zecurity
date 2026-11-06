@@ -211,11 +211,50 @@ func (s *Store) validateConfig(kind string, cfg json.RawMessage) (json.RawMessag
 	return cfg, nil
 }
 
+// deriveURL builds the url column for kinds whose address comes from their
+// config (S3). ok is false for kinds that take a URL.
+func (s *Store) deriveURL(kind string, cfg json.RawMessage) (string, bool, error) {
+	a, found := s.registry.Get(kind)
+	if !found {
+		return "", false, inputErr("unknown sink kind %q", kind)
+	}
+	d, ok := a.(URLDeriver)
+	if !ok {
+		return "", false, nil
+	}
+	u, err := d.DeriveURL(cfg)
+	if err != nil {
+		return "", true, inputErr("%v", err)
+	}
+	return u, true, nil
+}
+
+// s3AccessKeyIDOf reads access_key_id from an S3 sink's config.
+func s3AccessKeyIDOf(cfg json.RawMessage) string {
+	var c struct {
+		AccessKeyID string `json:"access_key_id"`
+	}
+	_ = json.Unmarshal(cfg, &c)
+	return c.AccessKeyID
+}
+
 // Create validates and stores a new sink, its cursors and its audit row in
 // one transaction. It returns the signing secret, shown once.
 func (s *Store) Create(ctx context.Context, in CreateInput) (Sink, string, error) {
 	if err := validateName(in.Name); err != nil {
 		return Sink{}, "", err
+	}
+	cfg, err := s.validateConfig(in.Kind, in.Config)
+	if err != nil {
+		return Sink{}, "", err
+	}
+	if derived, ok, err := s.deriveURL(in.Kind, cfg); err != nil {
+		return Sink{}, "", err
+	} else if ok {
+		if in.URL != "" {
+			return Sink{}, "", inputErr("an S3 sink's address comes from its bucket, region and endpoint, not a URL")
+		}
+		in.URL = derived
 	}
 	if err := ValidateURL(in.URL, s.allowPrivate); err != nil {
 		return Sink{}, "", inputErr("%v", err)
@@ -224,12 +263,11 @@ func (s *Store) Create(ctx context.Context, in CreateInput) (Sink, string, error
 	if err != nil {
 		return Sink{}, "", err
 	}
-	cfg, err := s.validateConfig(in.Kind, in.Config)
-	if err != nil {
-		return Sink{}, "", err
-	}
 	if in.Kind == "splunk_hec" && in.AuthHeader == nil {
 		return Sink{}, "", inputErr("a Splunk HEC sink needs its HEC token")
+	}
+	if in.Kind == "s3" && (in.AuthHeader == nil || in.AuthHeader.Name != S3SecretSlot) {
+		return Sink{}, "", inputErr("an S3 sink needs its secret access key")
 	}
 	if in.AuthHeader != nil {
 		if err := validateHeader(in.AuthHeader.Name, in.AuthHeader.Value); err != nil {
@@ -397,6 +435,37 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 			}
 			next.Name, changed["name"] = *in.Name, *in.Name
 		}
+		var s3Config json.RawMessage // validated new config of an S3 sink
+		if cur.Kind == "s3" {
+			if in.URL != nil {
+				return inputErr("an S3 sink's address comes from its bucket, region and endpoint, not a URL")
+			}
+			if in.ClearAuth {
+				return inputErr("an S3 sink needs its secret access key")
+			}
+			if in.AuthHeader != nil && in.AuthHeader.Name != S3SecretSlot {
+				return inputErr("an S3 sink takes a secret access key, not an auth header")
+			}
+			if in.Config != nil {
+				cfg, err := s.validateConfig(cur.Kind, in.Config)
+				if err != nil {
+					return err
+				}
+				derived, _, err := s.deriveURL(cur.Kind, cfg)
+				if err != nil {
+					return err
+				}
+				if derived != cur.URL {
+					in.URL = &derived // checked below like any URL change
+				}
+				// A secret must not be paired with an access key ID it wasn't
+				// entered for (§9 W-3).
+				if s3AccessKeyIDOf(cfg) != s3AccessKeyIDOf(cur.Config) && in.AuthHeader == nil {
+					return inputErr("changing the S3 bucket, region, endpoint or access key ID requires entering the secret access key again")
+				}
+				s3Config = cfg
+			}
+		}
 		if in.URL != nil && *in.URL != cur.URL {
 			if err := ValidateURL(*in.URL, s.allowPrivate); err != nil {
 				return inputErr("%v", err)
@@ -406,6 +475,9 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 			// never saw. Any URL change counts (a path on a shared host can
 			// route elsewhere).
 			if cur.HeaderName != nil && in.AuthHeader == nil && !in.ClearAuth {
+				if cur.Kind == "s3" {
+					return inputErr("changing the S3 bucket, region, endpoint or access key ID requires entering the secret access key again")
+				}
 				return inputErr("changing the URL requires entering the auth header or Splunk token again")
 			}
 			next.URL, changed["url"] = *in.URL, RedactURL(*in.URL)
@@ -422,7 +494,9 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 		if in.Enabled != nil && *in.Enabled != cur.Enabled {
 			next.Enabled, changed["enabled"] = *in.Enabled, *in.Enabled
 		}
-		if in.Config != nil {
+		if s3Config != nil {
+			next.Config, changed["config"] = s3Config, json.RawMessage(s3Config)
+		} else if in.Config != nil {
 			cfg, err := s.validateConfig(cur.Kind, in.Config)
 			if err != nil {
 				return err
@@ -445,6 +519,11 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 			hName, hCT, hNonce, authChange = &in.AuthHeader.Name, &ct, &n, true
 			changed["auth_header"] = "replaced"
 			changed["auth_header_name"] = in.AuthHeader.Name
+			if cur.Kind == "s3" {
+				delete(changed, "auth_header")
+				delete(changed, "auth_header_name")
+				changed["secret_access_key"] = "replaced"
+			}
 		case in.ClearAuth:
 			if cur.Kind == "splunk_hec" {
 				return inputErr("a Splunk HEC sink needs its HEC token")

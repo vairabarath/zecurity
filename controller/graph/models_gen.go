@@ -28,6 +28,11 @@ type AuditExportSink struct {
 	SplunkIndex      *string                    `json:"splunkIndex,omitempty"`
 	SplunkSource     *string                    `json:"splunkSource,omitempty"`
 	SplunkSourcetype *string                    `json:"splunkSourcetype,omitempty"`
+	S3Bucket         *string                    `json:"s3Bucket,omitempty"`
+	S3Region         *string                    `json:"s3Region,omitempty"`
+	S3Prefix         *string                    `json:"s3Prefix,omitempty"`
+	S3Endpoint       *string                    `json:"s3Endpoint,omitempty"`
+	S3AccessKeyID    *string                    `json:"s3AccessKeyId,omitempty"`
 	CreatedAt        string                     `json:"createdAt"`
 	UpdatedAt        string                     `json:"updatedAt"`
 	Status           []*AuditExportStreamStatus `json:"status"`
@@ -130,12 +135,13 @@ type CountryRuleInput struct {
 type CreateAuditExportSinkInput struct {
 	Name       string                      `json:"name"`
 	Kind       AuditExportSinkKind         `json:"kind"`
-	URL        string                      `json:"url"`
+	URL        *string                     `json:"url,omitempty"`
 	Streams    []AuditStream               `json:"streams"`
 	Enabled    *bool                       `json:"enabled,omitempty"`
 	StartFrom  *AuditExportStartFrom       `json:"startFrom,omitempty"`
 	AuthHeader *AuditExportAuthHeaderInput `json:"authHeader,omitempty"`
 	Splunk     *SplunkHecInput             `json:"splunk,omitempty"`
+	S3         *S3Input                    `json:"s3,omitempty"`
 }
 
 type CreateIdpConnectionInput struct {
@@ -309,6 +315,15 @@ type ResourcePolicyRef struct {
 	Name string `json:"name"`
 }
 
+type S3Input struct {
+	Bucket          string  `json:"bucket"`
+	Region          string  `json:"region"`
+	Prefix          *string `json:"prefix,omitempty"`
+	Endpoint        *string `json:"endpoint,omitempty"`
+	AccessKeyID     string  `json:"accessKeyId"`
+	SecretAccessKey *string `json:"secretAccessKey,omitempty"`
+}
+
 type ScanResult struct {
 	RequestID     string `json:"requestId"`
 	IP            string `json:"ip"`
@@ -398,6 +413,7 @@ type UpdateAuditExportSinkInput struct {
 	AuthHeader      *AuditExportAuthHeaderInput `json:"authHeader,omitempty"`
 	ClearAuthHeader *bool                       `json:"clearAuthHeader,omitempty"`
 	Splunk          *SplunkHecInput             `json:"splunk,omitempty"`
+	S3              *S3Input                    `json:"s3,omitempty"`
 }
 
 type UpdateIdpConnectionInput struct {
@@ -471,16 +487,18 @@ type AuditExportSinkKind string
 const (
 	AuditExportSinkKindWebhook   AuditExportSinkKind = "WEBHOOK"
 	AuditExportSinkKindSplunkHec AuditExportSinkKind = "SPLUNK_HEC"
+	AuditExportSinkKindS3        AuditExportSinkKind = "S3"
 )
 
 var AllAuditExportSinkKind = []AuditExportSinkKind{
 	AuditExportSinkKindWebhook,
 	AuditExportSinkKindSplunkHec,
+	AuditExportSinkKindS3,
 }
 
 func (e AuditExportSinkKind) IsValid() bool {
 	switch e {
-	case AuditExportSinkKindWebhook, AuditExportSinkKindSplunkHec:
+	case AuditExportSinkKindWebhook, AuditExportSinkKindSplunkHec, AuditExportSinkKindS3:
 		return true
 	}
 	return false

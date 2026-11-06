@@ -158,6 +158,8 @@ type pending struct {
 	fromSeq     int64 // cursor at read time
 	toSeq       int64 // cursor after the batch is acknowledged
 	events      []Event
+	more        bool // the stream has events past this batch (it is full)
+	gap         bool // a synthesized export.gap batch
 }
 
 // DeliverOnce sends the next batch for one sink stream and moves its cursor.
@@ -180,6 +182,17 @@ func (e *Exporter) DeliverOnce(ctx context.Context, sinkID string, s audit.Strea
 	p, err := e.read(ctx, sinkID, t.WorkspaceID, s)
 	if err != nil || p == nil {
 		return 0, err
+	}
+	if w, ok := adapter.(Windowed); ok && !p.gap && !p.more {
+		if due, wait := windowDue(p.events[0], w.BatchWindow(), e.now()); !due {
+			// Not a full batch and the oldest event is still young: come back
+			// when it is old enough (W-5). Only the schedule moves.
+			_, err := e.pool.Exec(ctx,
+				`UPDATE audit_export_cursors SET next_attempt_at = now() + make_interval(secs => $3)
+				  WHERE sink_id = $1 AND stream = $2 AND last_seq = $4 AND attempts = 0`,
+				sinkID, string(s), wait.Seconds(), p.fromSeq)
+			return 0, err
+		}
 	}
 	b := Batch{DeliveryID: uuid.NewString(), WorkspaceID: p.workspaceID, Stream: string(s), Events: p.events}
 	dctx, cancel := context.WithTimeout(ctx, DeliveryTimeout)
@@ -225,7 +238,7 @@ func (e *Exporter) read(ctx context.Context, sinkID, workspaceID string, s audit
 			return err
 		}
 		if cursor < head.PurgedThroughSeq {
-			p = &pending{workspaceID: workspaceID, fromSeq: cursor, toSeq: head.PurgedThroughSeq,
+			p = &pending{workspaceID: workspaceID, fromSeq: cursor, toSeq: head.PurgedThroughSeq, gap: true,
 				events: []Event{GapEvent(workspaceID, s, cursor+1, head.PurgedThroughSeq, head.PurgedThroughHash, e.now())}}
 			return nil
 		}
@@ -255,10 +268,26 @@ func (e *Exporter) read(ctx context.Context, sinkID, workspaceID string, s audit
 		if len(events) == 0 {
 			return nil
 		}
-		p = &pending{workspaceID: workspaceID, fromSeq: cursor, toSeq: events[len(events)-1].Seq, events: events}
+		last := events[len(events)-1].Seq
+		p = &pending{workspaceID: workspaceID, fromSeq: cursor, toSeq: last, events: events, more: head.LastSeq > last}
 		return nil
 	})
 	return p, err
+}
+
+// windowDue reports whether a batch starting with first may be written now
+// under a batch window, and otherwise how long to wait. An event whose
+// recorded_at can't be read is treated as due.
+func windowDue(first Event, window time.Duration, now time.Time) (bool, time.Duration) {
+	at, err := time.Parse(time.RFC3339Nano, first.RecordedAt)
+	if err != nil {
+		return true, 0
+	}
+	wait := at.Add(window).Sub(now)
+	if wait <= 0 {
+		return true, 0
+	}
+	return false, wait
 }
 
 // capBytes keeps a prefix of events whose JSON fits in limit (always at

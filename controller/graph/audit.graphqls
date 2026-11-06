@@ -30,6 +30,9 @@ type AuditLogPage {
 enum AuditExportSinkKind {
   WEBHOOK
   SPLUNK_HEC
+  # Gzip NDJSON objects in the customer's S3 bucket every 5 minutes, for the
+  # SIEM to pull (Twingate-style; PENDING-11 §9).
+  S3
 }
 
 enum AuditExportStartFrom {
@@ -67,6 +70,12 @@ type AuditExportSink {
   splunkIndex: String
   splunkSource: String
   splunkSourcetype: String
+  # S3 sinks only. The secret access key is write-only and never returned.
+  s3Bucket: String
+  s3Region: String
+  s3Prefix: String
+  s3Endpoint: String
+  s3AccessKeyId: String
   createdAt: String!
   updatedAt: String!
   status: [AuditExportStreamStatus!]!
@@ -97,15 +106,30 @@ input SplunkHecInput {
   sourcetype: String
 }
 
+# Amazon S3 (or S3-compatible) settings. secretAccessKey is required on
+# create and write-only; on update it is replaced only when given, and it is
+# required again when the bucket, region, endpoint or access key ID changes.
+input S3Input {
+  bucket: String!
+  region: String!
+  prefix: String
+  # https://host[:port] of an S3-compatible store (path-style). Empty = AWS.
+  endpoint: String
+  accessKeyId: String!
+  secretAccessKey: String
+}
+
 input CreateAuditExportSinkInput {
   name: String!
   kind: AuditExportSinkKind!
-  url: String!
+  # Webhook and Splunk HEC only; an S3 sink's address comes from s3.
+  url: String
   streams: [AuditStream!]!
   enabled: Boolean
   startFrom: AuditExportStartFrom
   authHeader: AuditExportAuthHeaderInput
   splunk: SplunkHecInput
+  s3: S3Input
 }
 
 # Omitted fields are unchanged. `splunk` replaces the Splunk settings; its
@@ -118,6 +142,8 @@ input UpdateAuditExportSinkInput {
   authHeader: AuditExportAuthHeaderInput
   clearAuthHeader: Boolean
   splunk: SplunkHecInput
+  # Replaces the S3 settings (S3 sinks only).
+  s3: S3Input
 }
 
 extend type Query {

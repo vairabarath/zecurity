@@ -52,6 +52,11 @@ type ComplexityRoot struct {
 		ID               func(childComplexity int) int
 		Kind             func(childComplexity int) int
 		Name             func(childComplexity int) int
+		S3AccessKeyID    func(childComplexity int) int
+		S3Bucket         func(childComplexity int) int
+		S3Endpoint       func(childComplexity int) int
+		S3Prefix         func(childComplexity int) int
+		S3Region         func(childComplexity int) int
 		SplunkIndex      func(childComplexity int) int
 		SplunkSource     func(childComplexity int) int
 		SplunkSourcetype func(childComplexity int) int
@@ -707,6 +712,36 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.AuditExportSink.Name(childComplexity), true
+	case "AuditExportSink.s3AccessKeyId":
+		if e.ComplexityRoot.AuditExportSink.S3AccessKeyID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.AuditExportSink.S3AccessKeyID(childComplexity), true
+	case "AuditExportSink.s3Bucket":
+		if e.ComplexityRoot.AuditExportSink.S3Bucket == nil {
+			break
+		}
+
+		return e.ComplexityRoot.AuditExportSink.S3Bucket(childComplexity), true
+	case "AuditExportSink.s3Endpoint":
+		if e.ComplexityRoot.AuditExportSink.S3Endpoint == nil {
+			break
+		}
+
+		return e.ComplexityRoot.AuditExportSink.S3Endpoint(childComplexity), true
+	case "AuditExportSink.s3Prefix":
+		if e.ComplexityRoot.AuditExportSink.S3Prefix == nil {
+			break
+		}
+
+		return e.ComplexityRoot.AuditExportSink.S3Prefix(childComplexity), true
+	case "AuditExportSink.s3Region":
+		if e.ComplexityRoot.AuditExportSink.S3Region == nil {
+			break
+		}
+
+		return e.ComplexityRoot.AuditExportSink.S3Region(childComplexity), true
 	case "AuditExportSink.splunkIndex":
 		if e.ComplexityRoot.AuditExportSink.SplunkIndex == nil {
 			break
@@ -3271,6 +3306,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputCreateAuditExportSinkInput,
 		ec.unmarshalInputCreateIdpConnectionInput,
 		ec.unmarshalInputCreateResourceInput,
+		ec.unmarshalInputS3Input,
 		ec.unmarshalInputSplunkHecInput,
 		ec.unmarshalInputUpdateAuditExportSinkInput,
 		ec.unmarshalInputUpdateIdpConnectionInput,
@@ -3403,6 +3439,16 @@ func (ec *executionContext) childFields_AuditExportSink(ctx context.Context, fie
 		return ec.fieldContext_AuditExportSink_splunkSource(ctx, field)
 	case "splunkSourcetype":
 		return ec.fieldContext_AuditExportSink_splunkSourcetype(ctx, field)
+	case "s3Bucket":
+		return ec.fieldContext_AuditExportSink_s3Bucket(ctx, field)
+	case "s3Region":
+		return ec.fieldContext_AuditExportSink_s3Region(ctx, field)
+	case "s3Prefix":
+		return ec.fieldContext_AuditExportSink_s3Prefix(ctx, field)
+	case "s3Endpoint":
+		return ec.fieldContext_AuditExportSink_s3Endpoint(ctx, field)
+	case "s3AccessKeyId":
+		return ec.fieldContext_AuditExportSink_s3AccessKeyId(ctx, field)
 	case "createdAt":
 		return ec.fieldContext_AuditExportSink_createdAt(ctx, field)
 	case "updatedAt":
@@ -6152,6 +6198,121 @@ func (ec *executionContext) _AuditExportSink_splunkSourcetype(ctx context.Contex
 	)
 }
 func (ec *executionContext) fieldContext_AuditExportSink_splunkSourcetype(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _AuditExportSink_s3Bucket(ctx context.Context, field graphql.CollectedField, obj *AuditExportSink) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_AuditExportSink_s3Bucket(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.S3Bucket, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_AuditExportSink_s3Bucket(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _AuditExportSink_s3Region(ctx context.Context, field graphql.CollectedField, obj *AuditExportSink) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_AuditExportSink_s3Region(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.S3Region, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_AuditExportSink_s3Region(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _AuditExportSink_s3Prefix(ctx context.Context, field graphql.CollectedField, obj *AuditExportSink) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_AuditExportSink_s3Prefix(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.S3Prefix, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_AuditExportSink_s3Prefix(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _AuditExportSink_s3Endpoint(ctx context.Context, field graphql.CollectedField, obj *AuditExportSink) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_AuditExportSink_s3Endpoint(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.S3Endpoint, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_AuditExportSink_s3Endpoint(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _AuditExportSink_s3AccessKeyId(ctx context.Context, field graphql.CollectedField, obj *AuditExportSink) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_AuditExportSink_s3AccessKeyId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.S3AccessKeyID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_AuditExportSink_s3AccessKeyId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("AuditExportSink", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
@@ -18926,7 +19087,7 @@ func (ec *executionContext) unmarshalInputCreateAuditExportSinkInput(ctx context
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"name", "kind", "url", "streams", "enabled", "startFrom", "authHeader", "splunk"}
+	fieldsInOrder := [...]string{"name", "kind", "url", "streams", "enabled", "startFrom", "authHeader", "splunk", "s3"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -18949,7 +19110,7 @@ func (ec *executionContext) unmarshalInputCreateAuditExportSinkInput(ctx context
 			it.Kind = data
 		case "url":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("url"))
-			data, err := ec.unmarshalNString2string(ctx, v)
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
 			if err != nil {
 				return it, err
 			}
@@ -18989,6 +19150,13 @@ func (ec *executionContext) unmarshalInputCreateAuditExportSinkInput(ctx context
 				return it, err
 			}
 			it.Splunk = data
+		case "s3":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("s3"))
+			data, err := ec.unmarshalOS3Input2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐS3Input(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.S3 = data
 		}
 	}
 	return it, nil
@@ -19145,6 +19313,71 @@ func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Contex
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputS3Input(ctx context.Context, obj any) (S3Input, error) {
+	var it S3Input
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"bucket", "region", "prefix", "endpoint", "accessKeyId", "secretAccessKey"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "bucket":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("bucket"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Bucket = data
+		case "region":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("region"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Region = data
+		case "prefix":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("prefix"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Prefix = data
+		case "endpoint":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("endpoint"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Endpoint = data
+		case "accessKeyId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("accessKeyId"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.AccessKeyID = data
+		case "secretAccessKey":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("secretAccessKey"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.SecretAccessKey = data
+		}
+	}
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputSplunkHecInput(ctx context.Context, obj any) (SplunkHecInput, error) {
 	var it SplunkHecInput
 	if obj == nil {
@@ -19207,7 +19440,7 @@ func (ec *executionContext) unmarshalInputUpdateAuditExportSinkInput(ctx context
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"name", "url", "streams", "enabled", "authHeader", "clearAuthHeader", "splunk"}
+	fieldsInOrder := [...]string{"name", "url", "streams", "enabled", "authHeader", "clearAuthHeader", "splunk", "s3"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -19263,6 +19496,13 @@ func (ec *executionContext) unmarshalInputUpdateAuditExportSinkInput(ctx context
 				return it, err
 			}
 			it.Splunk = data
+		case "s3":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("s3"))
+			data, err := ec.unmarshalOS3Input2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐS3Input(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.S3 = data
 		}
 	}
 	return it, nil
@@ -19506,6 +19746,16 @@ func (ec *executionContext) _AuditExportSink(ctx context.Context, sel ast.Select
 			out.Values[i] = ec._AuditExportSink_splunkSource(ctx, field, obj)
 		case "splunkSourcetype":
 			out.Values[i] = ec._AuditExportSink_splunkSourcetype(ctx, field, obj)
+		case "s3Bucket":
+			out.Values[i] = ec._AuditExportSink_s3Bucket(ctx, field, obj)
+		case "s3Region":
+			out.Values[i] = ec._AuditExportSink_s3Region(ctx, field, obj)
+		case "s3Prefix":
+			out.Values[i] = ec._AuditExportSink_s3Prefix(ctx, field, obj)
+		case "s3Endpoint":
+			out.Values[i] = ec._AuditExportSink_s3Endpoint(ctx, field, obj)
+		case "s3AccessKeyId":
+			out.Values[i] = ec._AuditExportSink_s3AccessKeyId(ctx, field, obj)
 		case "createdAt":
 			out.Values[i] = ec._AuditExportSink_createdAt(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
@@ -25536,6 +25786,14 @@ func (ec *executionContext) marshalOResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋz
 		return graphql.Null
 	}
 	return ec._ResourcePolicy(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalOS3Input2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐS3Input(ctx context.Context, v any) (*S3Input, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := ec.unmarshalInputS3Input(ctx, v)
+	return &res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) marshalOShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx context.Context, sel ast.SelectionSet, v *Shield) graphql.Marshaler {

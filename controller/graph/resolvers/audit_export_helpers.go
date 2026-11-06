@@ -117,6 +117,8 @@ func sinkKind(k graph.AuditExportSinkKind) (string, error) {
 		return "webhook", nil
 	case graph.AuditExportSinkKindSplunkHec:
 		return "splunk_hec", nil
+	case graph.AuditExportSinkKindS3:
+		return "s3", nil
 	}
 	return "", apperr.UserErrorf("unknown sink kind %q", k)
 }
@@ -156,6 +158,35 @@ func splunkSettings(in *graph.SplunkHecInput) (json.RawMessage, *auditexport.Aut
 	return raw, &auditexport.AuthHeader{Name: "Authorization", Value: "Splunk " + tok}, nil
 }
 
+// s3Settings turns the S3 input into the adapter config and the sealed
+// secret access key (optional on update).
+func s3Settings(in *graph.S3Input) (json.RawMessage, *auditexport.AuthHeader, error) {
+	opt := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return strings.TrimSpace(*p)
+	}
+	raw, err := json.Marshal(auditexport.S3Config{
+		Bucket:      strings.TrimSpace(in.Bucket),
+		Region:      strings.TrimSpace(in.Region),
+		Prefix:      opt(in.Prefix),
+		Endpoint:    opt(in.Endpoint),
+		AccessKeyID: strings.TrimSpace(in.AccessKeyID),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if in.SecretAccessKey == nil {
+		return raw, nil, nil
+	}
+	sec := *in.SecretAccessKey
+	if sec == "" || len(sec) > 256 || strings.ContainsAny(sec, " \t\r\n") {
+		return nil, nil, apperr.UserErrorf("S3 secret access key must be 1-256 characters without spaces")
+	}
+	return raw, &auditexport.AuthHeader{Name: auditexport.S3SecretSlot, Value: sec}, nil
+}
+
 func authHeaderIn(in *graph.AuditExportAuthHeaderInput) *auditexport.AuthHeader {
 	if in == nil {
 		return nil
@@ -181,7 +212,7 @@ func (r *Resolver) createAuditExportSink(ctx context.Context, in graph.CreateAud
 		WorkspaceID: tenant.MustGet(ctx).TenantID,
 		Name:        in.Name,
 		Kind:        kind,
-		URL:         in.URL,
+		URL:         derefString(in.URL),
 		Streams:     streamNames(in.Streams),
 		Enabled:     in.Enabled == nil || *in.Enabled,
 		StartFrom:   auditexport.StartAllHistory,
@@ -204,9 +235,24 @@ func (r *Resolver) createAuditExportSink(ctx context.Context, in graph.CreateAud
 			return nil, err
 		}
 		ci.Config, ci.AuthHeader = cfg, hdr
+	case "s3":
+		if in.AuthHeader != nil || in.Splunk != nil || in.URL != nil {
+			return nil, apperr.UserErrorf("createAuditExportSink: an S3 sink takes only s3 settings (no url, authHeader or splunk)")
+		}
+		if in.S3 == nil || in.S3.SecretAccessKey == nil {
+			return nil, apperr.UserErrorf("createAuditExportSink: an S3 sink needs s3 settings with secretAccessKey")
+		}
+		cfg, hdr, err := s3Settings(in.S3)
+		if err != nil {
+			return nil, err
+		}
+		ci.Config, ci.AuthHeader = cfg, hdr
 	default:
-		if in.Splunk != nil {
-			return nil, apperr.UserErrorf("createAuditExportSink: splunk settings apply to Splunk HEC sinks only")
+		if in.Splunk != nil || in.S3 != nil {
+			return nil, apperr.UserErrorf("createAuditExportSink: splunk and s3 settings apply to their own sink kinds only")
+		}
+		if in.URL == nil {
+			return nil, apperr.UserErrorf("createAuditExportSink: a webhook sink needs url")
 		}
 	}
 	sink, secret, err := store.Create(ctx, ci)
@@ -238,6 +284,21 @@ func (r *Resolver) updateAuditExportSink(ctx context.Context, id string, in grap
 	}
 	if in.Streams != nil {
 		ui.Streams = streamNames(in.Streams)
+	}
+	if in.S3 != nil && cur.Kind != "s3" {
+		return nil, apperr.UserErrorf("updateAuditExportSink: s3 settings apply to S3 sinks only")
+	}
+	if cur.Kind == "s3" {
+		if in.AuthHeader != nil || in.Splunk != nil || in.URL != nil || ui.ClearAuth {
+			return nil, apperr.UserErrorf("updateAuditExportSink: an S3 sink takes only s3 settings (no url, authHeader or splunk)")
+		}
+		if in.S3 != nil {
+			cfg, hdr, err := s3Settings(in.S3)
+			if err != nil {
+				return nil, err
+			}
+			ui.Config, ui.AuthHeader = cfg, hdr
+		}
 	}
 	if cur.Kind == "splunk_hec" {
 		if in.AuthHeader != nil {
@@ -322,6 +383,20 @@ func toGraphSink(s auditexport.Sink) *graph.AuditExportSink {
 			}
 			g.SplunkIndex, g.SplunkSource, g.SplunkSourcetype = opt(cfg.Index), opt(cfg.Source), opt(cfg.Sourcetype)
 		}
+	case "s3":
+		g.Kind = graph.AuditExportSinkKindS3
+		g.AuthHeaderName = nil // the secret's storage slot is not a header
+		var cfg auditexport.S3Config
+		if json.Unmarshal(s.Config, &cfg) == nil {
+			opt := func(v string) *string {
+				if v == "" {
+					return nil
+				}
+				return &v
+			}
+			g.S3Bucket, g.S3Region, g.S3Prefix = opt(cfg.Bucket), opt(cfg.Region), opt(cfg.Prefix)
+			g.S3Endpoint, g.S3AccessKeyID = opt(cfg.Endpoint), opt(cfg.AccessKeyID)
+		}
 	default:
 		g.Kind = graph.AuditExportSinkKindWebhook
 	}
@@ -358,4 +433,11 @@ func (r *Resolver) auditExportSinks(ctx context.Context) ([]*graph.AuditExportSi
 		out = append(out, toGraphSink(s))
 	}
 	return out, nil
+}
+
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
