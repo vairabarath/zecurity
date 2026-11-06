@@ -206,8 +206,12 @@ func (a S3) Deliver(ctx context.Context, c *http.Client, d Destination, b Batch)
 		return &DeliveryError{Msg: "S3 refused the request (HTTP 403): check the access key, its PutObject permission and the region"}
 	case resp.StatusCode == http.StatusNotFound:
 		return &DeliveryError{Msg: "S3 answered HTTP 404: check the bucket name and region"}
-	case resp.StatusCode == http.StatusMovedPermanently || resp.StatusCode == http.StatusBadRequest:
-		return &DeliveryError{Msg: fmt.Sprintf("S3 answered HTTP %d: check the region", resp.StatusCode)}
+	case resp.StatusCode == http.StatusMovedPermanently:
+		return &DeliveryError{Msg: "S3 answered HTTP 301: check the region"}
+	case resp.StatusCode == http.StatusBadRequest:
+		// Many causes (wrong region, a bucket policy or Object Lock default
+		// retention that needs Content-MD5, …); the body isn't shown.
+		return &DeliveryError{Msg: "S3 refused the request (HTTP 400): check the region and the bucket's policy and Object Lock settings"}
 	default:
 		return &DeliveryError{Msg: fmt.Sprintf("destination answered HTTP %d", resp.StatusCode)}
 	}

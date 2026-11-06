@@ -137,9 +137,13 @@ func (e *Exporter) dueCursors(ctx context.Context) ([]cursorKey, error) {
 		   JOIN audit_stream_heads h ON h.workspace_id = s.workspace_id AND h.stream = c.stream
 		  WHERE s.enabled AND c.stream = ANY(s.streams)
 		    AND h.last_seq > c.last_seq
-		    AND c.next_attempt_at <= now()
+		    AND (c.next_attempt_at <= now()
+		         -- A batch-windowed cursor (S3, W-5) waiting for its window
+		         -- is due at once when a full batch is pending; one in
+		         -- backoff (attempts > 0) keeps waiting.
+		         OR (c.attempts = 0 AND h.last_seq - c.last_seq >= $2))
 		  ORDER BY c.next_attempt_at
-		  LIMIT $1`, maxDue)
+		  LIMIT $1`, maxDue, MaxBatchEvents)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +187,8 @@ func (e *Exporter) DeliverOnce(ctx context.Context, sinkID string, s audit.Strea
 	if err != nil || p == nil {
 		return 0, err
 	}
-	if w, ok := adapter.(Windowed); ok && !p.gap && !p.more {
+	full := p.more || len(p.events) >= MaxBatchEvents
+	if w, ok := adapter.(Windowed); ok && !p.gap && !full {
 		if due, wait := windowDue(p.events[0], w.BatchWindow(), e.now()); !due {
 			// Not a full batch and the oldest event is still young: come back
 			// when it is old enough (W-5). Only the schedule moves.

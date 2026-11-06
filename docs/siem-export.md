@@ -118,6 +118,7 @@ Each batch is one object:
 - **Format:** gzip, one `zecurity.audit.v1` event per line. These are the same events the webhook sink sends.
 - **Hour in the key:** the first event's `recorded_at`, in UTC.
 - **When an object is written:** once the oldest waiting event is 5 minutes old, or as soon as 500 events are waiting.
+- **Console status:** an S3 sink normally shows "catching up" for up to 5 minutes after each event. That is the batching window, not a fault.
 - **Test button:** writes `export.test-<delivery id>.jsonl.gz` at once.
 - **Duplicates:** delivery is at-least-once. A retry can repeat events under a different key, so deduplicate on `(workspace_id, stream, seq)`.
 - **Object metadata:** `x-amz-meta-zecurity-signature` holds the sink's HMAC of the gzip body (`t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>`), using the signing secret shown once when the sink is created.
@@ -163,6 +164,13 @@ Each batch is one object:
 - `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueUrl` on the queue;
 - `s3:GetObject` on `<bucket>/<prefix>/*`;
 - `sts:GetCallerIdentity`.
+
+Set the profile's region in `/root/.aws/config`; the module refuses a profile without one:
+
+```ini
+[default]
+region = <bucket region>
+```
 
 **4. Add the module** to `ossec.conf`:
 

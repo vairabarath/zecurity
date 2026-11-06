@@ -522,6 +522,15 @@ Wazuh supports both channels natively:
 | S3 access stream vs connector lines | the same decisions in both: 123 `allow`, 1 `deny` |
 | Decoders, `wazuh-logtest` | plain line and the journald (syslog-header) form both decode |
 
+**Post-run fix (review, 2026-11-06): the full-batch half of W-5 now works in the polling loop.**
+- **Bug:** a cursor rescheduled for its window was skipped by `dueCursors` (`next_attempt_at <= now()`) however many events piled up, and exactly 500 pending counted as "not full". The integration test had called `DeliverOnce` directly and missed it.
+- **Fix:**
+  - `dueCursors` also lists a cursor with `attempts = 0` and ≥ `MaxBatchEvents` pending;
+  - a batch of `MaxBatchEvents` counts as full.
+- **Test:** `TestS3Sink_FullBatchWakesARescheduledCursor` goes through `dueCursors`. It fails on the old code.
+- **Other changes:** HTTP 400 is no longer worded as a region problem, and the docs add the `/root/.aws/config` region the Wazuh module requires.
+- **Gate:** 1754 pass / 0 fail / 2 skip.
+
 **Not covered live:**
 - the journald `localfile` block on an agent (only the decoder was checked, with logtest);
 - the Docker journald log driver;

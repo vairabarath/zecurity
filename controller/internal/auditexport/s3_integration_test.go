@@ -267,3 +267,63 @@ func TestS3Sink_FailureIsRecordedAndTestWritesAtOnce(t *testing.T) {
 		t.Fatalf("failure state: %d %v", attempts, lastErr)
 	}
 }
+
+// W-5 through the real poll: a cursor rescheduled for its window wakes up as
+// soon as a full batch is pending, but not while it is in backoff.
+func TestS3Sink_FullBatchWakesARescheduledCursor(t *testing.T) {
+	app, ws, store, _, exp, cfg := s3Setup(t)
+	ctx := context.Background()
+	sink, _, err := store.Create(ctx, CreateInput{WorkspaceID: ws, Name: "s3", Kind: "s3", Config: cfg,
+		Streams: []string{"admin"}, Enabled: true, StartFrom: StartNow, AuthHeader: s3Secret("sek")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := func() bool {
+		t.Helper()
+		ks, err := exp.dueCursors(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range ks {
+			if k.sinkID == sink.ID && k.stream == audit.StreamAdmin {
+				return true
+			}
+		}
+		return false
+	}
+	// Young events: rescheduled, so not due.
+	if n, err := exp.DeliverOnce(ctx, sink.ID, audit.StreamAdmin); err != nil || n != 0 {
+		t.Fatalf("young batch: n=%d err=%v", n, err)
+	}
+	if due() {
+		t.Fatal("rescheduled cursor listed as due")
+	}
+	// Exactly a full batch pending (the create row + 499): due at once, and
+	// delivered although young.
+	for i := 0; i < MaxBatchEvents-1; i++ {
+		if err := audit.Record(ctx, app, audit.Entry{TenantID: ws, ActorEmail: "a@example.com", Action: "group.create",
+			TargetType: "group", TargetID: "g"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !due() {
+		t.Fatal("full batch pending but cursor not due")
+	}
+	if n, err := exp.DeliverOnce(ctx, sink.ID, audit.StreamAdmin); err != nil || n != MaxBatchEvents {
+		t.Fatalf("full batch: n=%d err=%v", n, err)
+	}
+	// In backoff, a full batch doesn't override the retry delay.
+	if _, err := app.Exec(ctx, `UPDATE audit_export_cursors SET attempts = 3, next_attempt_at = now() + interval '10 minutes'
+		WHERE sink_id = $1`, sink.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxBatchEvents; i++ {
+		if err := audit.Record(ctx, app, audit.Entry{TenantID: ws, ActorEmail: "a@example.com", Action: "group.create",
+			TargetType: "group", TargetID: "g"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if due() {
+		t.Fatal("cursor in backoff listed as due")
+	}
+}
