@@ -858,9 +858,23 @@ struct AccessLogFields<'a> {
 
 async fn emit_access_log<'a>(
     control_tx: &mpsc::Sender<ControlMessage>,
-    _connector_id: &str,
+    connector_id: &str,
     fields: AccessLogFields<'a>,
 ) {
+    // PENDING-11 §9 W-2: the local real-time line, written before (and
+    // whatever the fate of) the controller copy.
+    crate::analytics::emit(&crate::analytics::AccessDecision {
+        connector_id,
+        client_spiffe_id: fields.client_spiffe_id,
+        resource_id: fields.resource_id,
+        route_type: fields.route_type,
+        destination: fields.destination,
+        port: fields.port,
+        protocol: fields.protocol,
+        decision: fields.action,
+        error: fields.error,
+    });
+
     let occurred_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

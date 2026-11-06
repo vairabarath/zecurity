@@ -25,7 +25,7 @@ use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use zecurity_connector::{
-    agent_server, appmeta, authorization, config::ConnectorConfig, control_stream, controller_client, crl,
+    agent_server, analytics, appmeta, authorization, config::ConnectorConfig, control_stream, controller_client, crl,
     device_tunnel, enrollment, fail_closed, net_util, policy, quic_listener, relay_attachment, relay_handler,
     relay_selector,session_registry, tls, updater, watchdog, ControlMessage,
 };
@@ -92,6 +92,18 @@ async fn main() -> anyhow::Result<()> {
         );
         state
     };
+
+    match analytics::parse_setting(cfg.zecurity_log_analytics.as_deref()) {
+        Ok(true) => {
+            analytics::enable(&enrollment_state.workspace_id);
+            info!(
+                schema = analytics::SCHEMA,
+                "access analytics lines on (ZECURITY_LOG_ANALYTICS=v1)"
+            );
+        }
+        Ok(false) => {}
+        Err(msg) => warn!("{msg}"),
+    }
 
     // Single owner of the connector certificate (Sprint 20 G-2a). Every TLS
     // consumer reads the CURRENT certificate from it and switches when a
