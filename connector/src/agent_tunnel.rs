@@ -931,18 +931,27 @@ impl RelaySession {
                 guard.hub.abort_on_shield(&connection_id, reason);
                 abort.cancel();
                 guard.settled = true;
-                match tokio::time::timeout(crate::abort_stream::ABORT_REJOIN_GRACE, d2s).await {
-                    Ok(Ok(reader)) => reader.unsplit(writer).abort(),
-                    _ => warn!(
-                        connection_id = %connection_id,
-                        "aborted session: device stream not aborted (device→shield task did not stop)"
-                    ),
-                }
+                abort_device(
+                    d2s,
+                    writer,
+                    &connection_id,
+                    crate::abort_stream::SESSION_REVOKED_CODE,
+                )
+                .await;
             }
             End::Failed => {
-                d2s.abort();
-                // The guard aborts the Shield's side; the device stream is
-                // dropped (abrupt, unlike a clean shutdown).
+                // FU-17: the upstream ended abnormally, so the device must see an
+                // error, never a clean EOF. Dropping the stream is not enough: quinn
+                // finishes a dropped stream (everything queued, then FIN), so a
+                // truncated download looked complete (live run 2026-11-05, LT-1).
+                // The guard aborts the Shield's side.
+                abort_device(
+                    d2s,
+                    writer,
+                    &connection_id,
+                    crate::abort_stream::TUNNEL_FAILED_CODE,
+                )
+                .await;
             }
             End::Clean => {
                 d2s.abort();
@@ -956,6 +965,27 @@ impl RelaySession {
             }
         }
         Ok(())
+    }
+}
+
+/// Rejoin the device stream from its device→shield task (already told to
+/// stop) and end it abruptly with `code`: a QUIC reset, or an RST on the
+/// direct TLS path. The peer gets an error instead of the data still queued.
+async fn abort_device<S>(
+    d2s: tokio::task::JoinHandle<tokio::io::ReadHalf<S>>,
+    writer: tokio::io::WriteHalf<S>,
+    connection_id: &str,
+    code: u32,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + crate::abort_stream::AbortStream + Unpin,
+{
+    match tokio::time::timeout(crate::abort_stream::ABORT_REJOIN_GRACE, d2s).await {
+        Ok(Ok(reader)) => reader.unsplit(writer).abort(code),
+        _ => warn!(
+            connection_id = %connection_id,
+            code,
+            "device stream not aborted (device→shield task did not stop)"
+        ),
     }
 }
 
