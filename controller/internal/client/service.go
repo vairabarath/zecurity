@@ -399,9 +399,13 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 
 	user, gen, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, conn.ID, conn.Issuer, inviteRow != nil)
 	if err != nil {
-		// PENDING-11 P-9 / S-11: the IdP has proven the identity and the
-		// workspace is known; "not invited" and "not active" share a reason.
-		if errors.Is(err, errUserNotInvited) || errors.Is(err, identity.ErrUserNotActive) {
+		// PENDING-11 P-9 / S-11: audited only on the workspace's own
+		// (enterprise) connection, as in auth/callback.go. On a platform
+		// connection any IdP account could name any workspace and append to
+		// its kept-forever admin stream. "not invited" and "not active" share
+		// a reason.
+		ownConn := conn.TenantID != nil && *conn.TenantID == sess.WorkspaceID
+		if ownConn && (errors.Is(err, errUserNotInvited) || errors.Is(err, identity.ErrUserNotActive)) {
 			s.recordAudit(ctx, audit.Entry{
 				TenantID:   sess.WorkspaceID,
 				ActorEmail: sess.Email,
