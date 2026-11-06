@@ -42,9 +42,10 @@ func TestDecide_ReadMatrix(t *testing.T) {
 		{ActionTenantRead, func(x Actor) error { return a.CanReadTenants(x, Target{Type: "tenant", ID: "t1"}) }},
 		{ActionAuditView, func(x Actor) error { return a.CanViewProviderAudit(x) }},
 		{ActionCertRead, func(x Actor) error { return a.CanReadCertificates(x) }},
+		{ActionHealthRead, func(x Actor) error { return a.CanReadHealth(x) }},
 	}
 	allowed := map[string]map[string]bool{
-		RoleSuperAdmin: {ActionRelayRead: true, ActionTenantRead: true, ActionAuditView: true, ActionCertRead: true},
+		RoleSuperAdmin: {ActionRelayRead: true, ActionTenantRead: true, ActionAuditView: true, ActionCertRead: true, ActionHealthRead: true},
 		RoleRelayOps:   {ActionRelayRead: true},
 		// Unknown, empty, tenant-style and near-miss roles get nothing.
 		"":             {},
@@ -75,6 +76,7 @@ func TestReadActionNames(t *testing.T) {
 		ActionTenantRead: "tenant.read",
 		ActionCertRead:   "cert.read",
 		ActionAuditView:  "audit.view",
+		ActionHealthRead: "health.read",
 	} {
 		if got != want {
 			t.Errorf("action = %q, want %q", got, want)

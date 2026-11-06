@@ -10,7 +10,8 @@ import * as relaysApi from './relays'
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
 // (C-b, plus reset-totp) and the relay mutations (Sprint 22 D-30: Phase E
 // adds create, Phase X revoke and delete, Phase D drain and resume). Phase P adds GETs
-// only. Every exported API function is called here; a new write must be
+// only, and so do the provider quick wins (GET /provider/pki, GET /provider/health;
+// the audit export reuses GET /provider/audit). Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -36,7 +37,9 @@ const ALLOWED_WRITES = [
 const ALLOWED_READS = [
   'GET /provider/audit',
   'GET /provider/certificates',
+  'GET /provider/health',
   'GET /provider/me',
+  'GET /provider/pki',
   'GET /provider/relays',
   'GET /provider/relays/{id}',
   'GET /provider/tenants',
@@ -90,6 +93,8 @@ describe('API surface', () => {
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
       'GET /provider/certificates': { status: 200, body: { summary: {}, items: [], next_cursor: null } },
+      'GET /provider/pki': { status: 200, body: {} },
+      'GET /provider/health': { status: 200, body: {} },
     })
 
     let exported = 0
@@ -119,10 +124,12 @@ describe('API surface', () => {
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
       'GET /provider/certificates': { status: 200, body: { summary: {}, items: [], next_cursor: null } },
+      'GET /provider/pki': { status: 200, body: {} },
+      'GET /provider/health': { status: 200, body: {} },
     })
     const wrappers = Object.entries(readsApi).filter(([name, fn]) => typeof fn === 'function' && name !== 'buildQuery')
     expect(wrappers.map(([n]) => n).sort()).toEqual(
-      ['getCertificates', 'getRelay', 'getTenant', 'listRelays', 'listTenants', 'queryAudit'],
+      ['getCertificates', 'getHealth', 'getPki', 'getRelay', 'getTenant', 'listRelays', 'listTenants', 'queryAudit'],
     )
     for (const [, fn] of wrappers) await (fn as (id: string) => Promise<unknown>)(ID)
     expect(calls.every((c) => c.method === 'GET' && c.body === undefined)).toBe(true)

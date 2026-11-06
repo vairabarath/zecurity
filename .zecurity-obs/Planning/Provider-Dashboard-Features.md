@@ -1,10 +1,10 @@
 ---
 type: tracker
 title: Provider Dashboard — Feature Tracker
-updated: 2026-10-29
+updated: 2026-11-06
 owners: [Barath (M2), Sathiya (M1)]
 source: Feature list from Barath, 2026-10-26 (Phase 1 / 2 / 3)
-baseline: fixed-pendings 4cc7ffcc (Sprint 22 T, A, E, X merged; D next)
+baseline: main 520851d4 (Sprint 22 T, A, E, X, D merged; FU-1 … FU-19 done except FU-11, mitigated)
 tags:
   - provider-dashboard
   - tracker
@@ -19,7 +19,66 @@ tags:
 
 ## Tracking
 
-**Progress:** Must have 5 / 18 done · Can have 2 / 22 done · **Total 7 / 40**
+**Progress:** Must have 6 / 18 done · Can have 2 / 22 done · **Total 8 / 40**
+
+## Status snapshot (2026-11-06)
+
+Checked against `main` `520851d4`. "Quick" = controller read API + console view only (🟢 in the effort key).
+
+### Must have (Phase 1): 6 of 18 done
+
+| ID | Feature | Status | What's left |
+|---|---|---|---|
+| F1 | Relay enrolment with a one-time token | ✅ Done | — |
+| F2 | Relay certificates from the provider CA | ✅ Done | — |
+| F3 | Relay revoke and decommission | ✅ Done | — |
+| F4 | Relay list: status, version, region, heartbeat | ◐ Partly | Region needs the pool/region decision (D-03) |
+| F5 | Capacity view: sessions, bandwidth, headroom | ◐ Partly | Bandwidth needs relay heartbeat fields; connection metrics are now exported to Prometheus (PENDING-10) |
+| F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
+| F7 | Tenant create / suspend / delete | ⬜ Not started | Needs a decision (D-34 epic) |
+| F8 | Tenant detail page | ◐ Partly | Policy counts **implemented** (quick-win PR, branch `feat/provider-quick-wins`); plan needs billing (F34) |
+| F9 | Tenant → relay pool assignment | ⬜ Not started | Needs D-03 |
+| F10 | Region / residency constraint | ⬜ Not started | Needs D-03 |
+| F11 | Failover pool per tenant | ⬜ Not started | Needs D-03 (after F9) |
+| F12 | Per-tenant quotas | ⬜ Not started | Needs a decision |
+| F13 | Certificate inventory by expiry | ✅ Done | — |
+| F14 | Expiry alerting | ◐ Partly | Banner / filter **already in place** (Overview "Needs attention" + certificate tile, Certificates listing window 24 h – 365 d); sending alerts needs F26 |
+| F15 | Revocation + CRL/OCSP status | ◐ Partly | CRL status view **implemented** (`GET /provider/pki`, quick-win PR); OCSP (large) |
+| F16 | CA hierarchy view | ◐ Partly | Root → Intermediate → workspace tree **implemented** (`GET /provider/pki`, quick-win PR); tick after merge + live check |
+| F17 | Append-only provider action log | ◐ Partly | Database-enforced append-only (one migration); before/after fields |
+| F18 | Audit search and filter | ✅ Done | — |
+
+### Can have (Phase 2 and 3): 2 of 22 done
+
+| ID | Feature | Status | What's left |
+|---|---|---|---|
+| F19 | Provider admin roles | ◐ Partly | Two roles today; more need a decision |
+| F20 | Break-glass account | ◐ Partly | `recover-admin` CLI exists; decide whether it counts |
+| F21 | MFA on the provider console | ✅ Done | — |
+| F22 | Tunnel success rate per relay/tenant | ⬜ Not started | Needs relay/connector counters (large) |
+| F23 | Active-session timeseries | ⬜ Not started | Prometheus exports some of the data (PENDING-10); nothing stores or shows it over time |
+| F24 | Connector online/offline roster | ✅ Done | — |
+| F25 | Control-plane health | ◐ Partly | Console card **implemented** over the PENDING-10 checks (`GET /provider/health`, super-admin, sanitized; quick-win PR); tick after merge + live check |
+| F26 | Alert rules + webhook/email | ⬜ Not started | Medium: rules, evaluator, dispatch |
+| F27 | Incident timeline | ⬜ Not started | Medium, after F26 |
+| F28 | Relay config push, staged rollout | ⬜ Not started | Large |
+| F29 | Relay version pinning and rollback | ⬜ Not started | Large |
+| F30 | Tenant migration between pools | ⬜ Not started | Needs D-03 |
+| F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
+| F32 | Usage collection | ⬜ Not started | Large: nothing is metered |
+| F33 | Per-tenant usage report | ⬜ Not started | After F32 |
+| F34 | Billing plans and invoicing | ⬜ Not started | Needs a decision |
+| F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
+| F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
+| F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
+| F38 | Compliance export | ◐ Partly | Audit export as CSV/JSON **implemented** (client-side, ≤ 10,000 rows, quick-win PR); full SOC 2 bundle is larger |
+| F39 | Custom dashboards and saved views | ⬜ Not started | Large |
+| F40 | SLA tracking per tenant | ⬜ Not started | Large, after F22, F23 and F25 |
+
+**Quick wins** (controller read API + console view, no decision needed): F8, F14, F15, F16 (Must have); F25, F38 (Can have).
+All implemented on branch `feat/provider-quick-wins` (one PR, not merged); F14's quick part was already in place. Boxes are ticked only after merge and a live check.
+
+## Checklist
 
 ### Must have (Phase 1)
 
@@ -28,8 +87,8 @@ tags:
 - [x] **F2** Cert issuance to relay from provider CA ✅
 - [x] **F3** Relay decommission / revoke ✅
 - [ ] **F4** Relay list with status, version, region, last heartbeat ◐ (region missing)
-- [ ] **F5** Capacity view — active sessions, bandwidth, headroom ◐ (bandwidth missing)
-- [ ] **F6** Drain mode (no new placements, bleed off existing) 🚧 Sprint 22 Phase D
+- [ ] **F5** Capacity view — active sessions, bandwidth, headroom ◐ (bandwidth missing; connection metrics exported to Prometheus, PENDING-10)
+- [x] **F6** Drain mode (no new placements, bleed off existing) ✅ (Phase D, PR #156; AT-D live PASS)
 
 *Tenants*
 - [ ] **F7** Tenant create / suspend / delete ⬜
@@ -58,9 +117,9 @@ tags:
 
 *Monitoring*
 - [ ] **F22** Tunnel establishment success rate per relay and per tenant ⬜
-- [ ] **F23** Active session count timeseries ⬜
+- [ ] **F23** Active session count timeseries ⬜ (some data exported to Prometheus, PENDING-10; not stored or shown)
 - [x] **F24** Connector online/offline roster per tenant ✅
-- [ ] **F25** Control-plane health (API, PKI engine, policy store, DB) ⬜
+- [ ] **F25** Control-plane health (API, PKI engine, policy store, DB) ◐ (backend checks exist, PENDING-10; no console card)
 - [ ] **F26** Alert rules + webhook/email dispatch ⬜
 - [ ] **F27** Incident timeline view ⬜
 
@@ -95,7 +154,7 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | 1 | **F8** Tenant detail | Add policy counts (groups, access rules, resources) to the tenant detail API and page | |
 | 2 | **F16** CA hierarchy view | Read API returning Root → Intermediate → workspace CAs (subject, serial, validity, issuer link); tree view in Certificates | |
 | 3 | **F15** CRL status | Read API for the relay CRL and each workspace CRL: last generated, next update, number of entries; shown in Certificates | |
-| 4 | **F25** Control-plane health | Read API checking DB, Valkey, PKI (Intermediate loaded, controller cert expiry) and policy compiler; status card on Overview | |
+| 4 | **F25** Control-plane health | Provider read over the existing PENDING-10 health checks (DB, Valkey, PKI, policy compiler); status card on Overview | |
 | 5 | **F38** Compliance export (lite) | Export the provider audit log (filtered, JSON/CSV) as a read; full SOC 2 bundle stays ⬜ | |
 | 6 | **F14** Expiry alerting (lite) | Overview banner and Certificates filter for "expiring within N days"; sending alerts waits for F26 | |
 
@@ -111,8 +170,8 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | F2 | Cert issuance to relay from provider CA | ✅ | — | Relay certificates signed by the platform Intermediate, SANs limited to the stored allowlist; renewal with key continuity (Sprint 20/21). | |
 | F3 | Relay decommission / revoke | ✅ | — | API hardened in Phase A (PR #142: reason, typed name, super-admin only); console revoke/delete in Phase X (PR #154); CRL + connector migration live-checked. | |
 | F4 | Relay list with status, version, region, last heartbeat | ◐ | ⚖️ 🔴 | Status, version, last heartbeat, address scope, capacity tier: done (Sprint 21 Relays page). **Region** needs the region/pool model (D-03, not in Sprint 22). | |
-| F5 | Capacity view — active sessions, bandwidth, headroom | ◐ | 🔴 | Connections / max and capacity tier shown. **Bandwidth** isn't measured anywhere: needs relay heartbeat fields (additive proto + relay change). | |
-| F6 | Drain mode | 🚧 | 🟡 | Sprint 22 **Phase D** (D-32): drained relay leaves the published list, last-eligible-relay guard, `043_relay_drain.sql`, no connector/relay/proto change. | |
+| F5 | Capacity view — active sessions, bandwidth, headroom | ◐ | 🔴 | Connections / max and capacity tier shown; `relay_connections_total` and `relay_capacity_utilization_ratio` exported to Prometheus (PENDING-10). **Bandwidth** isn't measured anywhere: needs relay heartbeat fields (additive proto + relay change). | |
+| F6 | Drain mode | ✅ | — | Sprint 22 **Phase D** (D-32), PR #156: drained relay leaves the published list, last-eligible-relay guard, `043_relay_drain.sql`; AT-D live PASS (incl. AT-D6 client data plane); follow-ups FU-6, FU-7, FU-14. | |
 | F7 | Tenant create / suspend / delete | ⬜ | ⚖️ 🔴 | Tenants are created by first sign-in only. Suspension is a separate epic (D-34); deletion semantics are open (decisions doc Q4). | |
 | F8 | Tenant detail page — connectors, users, policies count, plan | ◐ | 🟢 (policies) / ⚖️ (plan) | Done: connectors, shields, remote networks, users, devices with counts (Sprint 21, audited `tenant.read`). Missing: **policy counts** (quick), **plan** (needs F34). | |
 | F9 | Tenant → relay pool assignment | ⬜ | ⚖️ 🔴 | Needs pool entities and a per-tenant relay list (D-03). | |
@@ -134,9 +193,9 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | F20 | Break-glass account with forced audit entry | ◐ | ⚖️ 🟢 | `zecurity-controller provider recover-admin` (Phase T) on the controller host, audited as `provider_user.recover_admin`. Decide whether this counts, or a standing break-glass account is wanted. | |
 | F21 | MFA enforcement on provider console | ✅ | — | Super-admin TOTP, Phase T (PR #138); live AT-T PASS (PR #147). | |
 | F22 | Tunnel establishment success rate per relay and per tenant | ⬜ | 🔴 | Needs success/failure counters reported by relays/connectors. | |
-| F23 | Active session count timeseries | ⬜ | 🟡 / 🔴 | Relay connection count is in each heartbeat (not stored over time); per-tenant sessions need agent data. | |
+| F23 | Active session count timeseries | ⬜ | 🟡 / 🔴 | Relay connection count is in each heartbeat; `connector_active_streams` and relay connection gauges are exported to Prometheus (PENDING-10), but not stored or shown in the console; per-tenant sessions need agent data. | |
 | F24 | Connector online/offline roster per tenant | ✅ | — | Tenant detail lists connectors with status and last heartbeat (Sprint 21). | |
-| F25 | Control-plane health | ⬜ | 🟢 | Only a basic `/health` endpoint today. | |
+| F25 | Control-plane health | ◐ | 🟢 | Health subsystem with `/livez`, `/readyz`, `/healthz`, `/health` and internal diagnostics (PENDING-10). Missing: the **status card on Overview** (a provider read over the same checks). | |
 | F26 | Alert rules + webhook/email dispatch | ⬜ | 🟡 | Needs rule storage, an evaluator and dispatch (SMTP config exists for invites). | |
 | F27 | Incident timeline view | ⬜ | 🟡 | Could combine provider audit, relay/connector events and alerts (after F26). | |
 | F28 | Relay config push with staged rollout | ⬜ | 🔴 | No relay config/command channel or release workflow. | |
@@ -154,7 +213,7 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | F35 | Provider API + API keys | ◐ | ⚖️ 🟡 | Provider REST API exists (session tokens). API keys need an auth decision (must not mint sessions outside `IssueSession`). | |
 | F36 | Tenant self-signup / provisioning workflow | ◐ | 🟡 | First sign-in creates a workspace with its admin and CA. No provider-side provisioning workflow. | |
 | F37 | Multi-provider / reseller hierarchy | ⬜ | ⚖️ 🔴 | Single provider today (decisions doc Q1). | |
-| F38 | Compliance export (SOC 2 evidence, audit bundles) | ⬜ | 🟢 (audit export) / 🟡 | Audit data exists; no export. | |
+| F38 | Compliance export (SOC 2 evidence, audit bundles) | ◐ | 🟡 | **Audit export implemented** (quick-win PR): CSV/JSON from `GET /provider/audit` in the browser, applied filters and order kept, keyset pages without repeats, ≤ 10,000 rows with an explicit limit message, CSV formula cells neutralised. Missing: SOC 2 evidence bundle. | |
 | F39 | Custom dashboards and saved views | ⬜ | 🔴 | — | |
 | F40 | SLA tracking per tenant | ⬜ | 🔴 | Depends on monitoring (F22, F23, F25). | |
 
@@ -172,3 +231,5 @@ From `CLAUDE.md` and the Decision Record (binding):
 ## Changelog
 
 - 2026-10-29: created from the 2026-10-26 feature list; statuses checked against `fixed-pendings` `4cc7ffcc`.
+- 2026-11-06: status snapshot tables added (Must have / Can have); statuses checked against `main` `520851d4`. F6 done (Phase D, PR #156, AT-D live PASS). F25 partly done and F5/F23 notes updated (PENDING-10 health checks and Prometheus metrics). Progress 8 / 40.
+- 2026-11-06: quick-win batch implemented (branch `feat/provider-quick-wins`, one PR): F8 policy counts, F15/F16 `GET /provider/pki` (CA tree by key identifiers + CRL status per signer), F25 `GET /provider/health` (super-admin, sanitized), F38 audit export (CSV/JSON, client-side). F14's quick part was already in place (corrected). Follow-up: `resources` has no `tenant_id` index; the F8 count uses one grouped aggregate per statement instead (an index needs a migration).

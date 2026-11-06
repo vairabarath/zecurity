@@ -53,6 +53,9 @@ function renderCerts(path = '/certificates', strict = false) {
 }
 
 const certCalls = (calls: RecordedCall[]) => calls.filter((c) => c.path === '/provider/certificates')
+const pkiCalls = (calls: RecordedCall[]) => calls.filter((c) => c.path === '/provider/pki')
+// The CA hierarchy section (F15/F16) reads GET /provider/pki once on open.
+const PKI_EMPTY: FakeResponse = { status: 200, body: { roots: [], intermediates: [], workspace_cas: [], workspace_cas_total: 0, next_cursor: null } }
 const tenantDetailCalls = (calls: RecordedCall[]) => calls.filter((c) => c.path.startsWith('/provider/tenants/'))
 const qs = (c: RecordedCall) => Object.fromEntries(new URLSearchParams(c.search))
 const quiet = () => new Promise((r) => setTimeout(r, 50))
@@ -284,9 +287,10 @@ describe('Certificates: tenant links (audited detail)', () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({
       'GET /provider/certificates': result(),
+      'GET /provider/pki': PKI_EMPTY,
       [`GET /provider/tenants/${TENANT}`]: {
         status: 200,
-        body: { id: TENANT, slug: 'acme', name: 'Acme', status: 'active', trust_domain: 'acme.test', created_at: '2026-10-01T00:00:00Z', ca_not_after: null, counts: { connectors: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, shields: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, remote_networks: 0, users: { active: 0, suspended: 0, locked: 0, deleted: 0 }, client_devices: { active: 0, re_enroll_required: 0, renew_pending: 0, revoked: 0 } }, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false },
+        body: { id: TENANT, slug: 'acme', name: 'Acme', status: 'active', trust_domain: 'acme.test', created_at: '2026-10-01T00:00:00Z', ca_not_after: null, counts: { connectors: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, shields: { pending: 0, active: 0, disconnected: 0, revoked: 0 }, remote_networks: 0, users: { active: 0, suspended: 0, locked: 0, deleted: 0 }, client_devices: { active: 0, re_enroll_required: 0, renew_pending: 0, revoked: 0 }, policies: { resources: 0, groups: 0, access_rules: 0, resource_policies: 0 } }, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false },
       },
     })
     renderCerts()
@@ -365,22 +369,29 @@ describe('Certificates: paging', () => {
 describe('Certificates: request behavior', () => {
   it('StrictMode: one request; focus/visibility/reconnect add none', async () => {
     signedInAs(superAdminMe)
-    const { calls } = mockFetch({ 'GET /provider/certificates': result() })
+    const { calls } = mockFetch({ 'GET /provider/certificates': result(), 'GET /provider/pki': PKI_EMPTY })
     renderCerts('/certificates', true)
     await screen.findByRole('table', { name: 'Certificates' })
+    await screen.findByText('Showing 0 of 0 workspace CAs')
     act(() => {
       window.dispatchEvent(new Event('focus'))
       document.dispatchEvent(new Event('visibilitychange'))
       window.dispatchEvent(new Event('online'))
     })
     await quiet()
-    expect(calls).toHaveLength(1)
+    // One certificates read and one CA hierarchy read, nothing more.
+    expect(certCalls(calls)).toHaveLength(1)
+    expect(pkiCalls(calls)).toHaveLength(1)
+    expect(calls).toHaveLength(2)
   })
 
   it('Refresh sends exactly one request; Retry after an error exactly one; no automatic retry', async () => {
     signedInAs(superAdminMe)
     let fail = false
-    const { calls } = mockFetch({ 'GET /provider/certificates': () => (fail ? { status: 500, body: { error: 'server_error' } } : result()) })
+    const { calls } = mockFetch({
+      'GET /provider/certificates': () => (fail ? { status: 500, body: { error: 'server_error' } } : result()),
+      'GET /provider/pki': PKI_EMPTY,
+    })
     renderCerts()
     await screen.findByRole('table', { name: 'Certificates' })
     fail = true
@@ -407,9 +418,10 @@ describe('Certificates: request behavior', () => {
 describe('Certificates: read-only', () => {
   it('no revoke/delete/rotate/renew/edit controls; GETs only', async () => {
     signedInAs(superAdminMe)
-    const { calls } = mockFetch({ 'GET /provider/certificates': result(ITEMS, 'c') })
+    const { calls } = mockFetch({ 'GET /provider/certificates': result(ITEMS, 'c'), 'GET /provider/pki': PKI_EMPTY })
     renderCerts()
     await screen.findByRole('table', { name: 'Certificates' })
+    await screen.findByText('Showing 0 of 0 workspace CAs')
     const main = within(screen.getByRole('main'))
     const buttons = main.getAllByRole('button').map((b) => b.textContent?.trim())
     expect(new Set(buttons)).toEqual(new Set(['Refresh', 'Apply', 'Previous', 'Next']))

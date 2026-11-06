@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/health"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
@@ -189,6 +191,7 @@ type readEnv struct {
 	relayID     string
 	tenantID    string
 	auditRowIDs []string
+	health      *fakeHealth
 }
 
 func newReadEnv(t *testing.T) *readEnv {
@@ -246,6 +249,10 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("GET /provider/tenants/{id}", rp(http.HandlerFunc(h.GetTenant)))
 	mux.Handle("GET /provider/audit", rp(http.HandlerFunc(h.QueryAudit)))
 	mux.Handle("GET /provider/certificates", rp(http.HandlerFunc(h.Certificates)))
+	mux.Handle("GET /provider/pki", rp(http.HandlerFunc(h.PKI)))
+	mux.Handle("GET /provider/health", rp(http.HandlerFunc(h.Health)))
+	env.health = &fakeHealth{report: leakyReport(now), critical: map[string]bool{"database": true, "valkey": true, "pki": true, "outbox": false}}
+	h.SetHealth(env.health)
 	noop := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	mux.Handle("POST /provider/relays", noop)
 	mux.Handle("POST /provider/relays/{id}/revoke", noop)
@@ -308,6 +315,8 @@ func TestReadRoutes_AuthMatrix(t *testing.T) {
 		{"/provider/tenants/" + e.tenantID, 403},
 		{"/provider/audit", 403},
 		{"/provider/certificates", 403},
+		{"/provider/pki", 403},
+		{"/provider/health", 403},
 	}
 	for _, rt := range routes {
 		if r := e.get(t, rt.path, e.superTok); r.code != 200 {
@@ -352,6 +361,8 @@ func TestReadRoutes_BadParams400(t *testing.T) {
 		"/provider/audit?action=" + strings.Repeat("x", 300):                    "invalid_filter",
 		"/provider/audit?limit=1.5":                                             "invalid_limit",
 		"/provider/certificates?within=30d":                                     "invalid_within",
+		"/provider/pki?limit=abc":                                               "invalid_limit",
+		"/provider/pki?cursor=garbage":                                          "invalid_cursor",
 		"/provider/certificates?within=-1h":                                     "invalid_within",
 		"/provider/certificates?within=0s":                                      "invalid_within",
 		"/provider/certificates?within=8761h":                                   "invalid_within",
@@ -718,5 +729,166 @@ func TestTenantDetail_NoAuditOn400_403_404(t *testing.T) {
 	// and 401 are refused before any database work.
 	if e.db.begins != 1 {
 		t.Fatalf("transactions started = %d, want 1 (the 404 lookup only)", e.db.begins)
+	}
+}
+
+// ── PKI and health (quick-win F15/F16, F25) ─────────────────────────────────
+
+// fakeHealth is a HealthSource returning a fixed report.
+type fakeHealth struct {
+	report   *health.DiagnosticReport
+	critical map[string]bool
+}
+
+func (f *fakeHealth) Evaluate(context.Context) *health.DiagnosticReport { return f.report }
+func (f *fakeHealth) Critical() map[string]bool                         { return f.critical }
+
+// leakyReport is what the registry really produces when the database is
+// unreachable: the driver's error names the host, user and address, and
+// details carry pool statistics. None of it may reach the provider.
+func leakyReport(at time.Time) *health.DiagnosticReport {
+	return &health.DiagnosticReport{
+		Status: "not_ready", Timestamp: at, DurationMS: 12,
+		Components: map[string]health.ComponentStatus{
+			"database": {Status: "down", LatencyMS: 5000,
+				Error:   "failed to connect to `host=db.internal.example user=ztna database=ztna_platform`: dial tcp 10.20.30.40:5432: connect: connection refused",
+				Details: map[string]any{"total_conns": 17, "idle_conns": 3, "dsn": "postgres://ztna:hunter2@db.internal.example/ztna_platform"}},
+			"valkey": {Status: "up", LatencyMS: 1.5, Details: map[string]any{"addr": "valkey.internal.example:6379"}},
+			"pki":    {Status: "down", Error: "certificate expired"},
+			"outbox": {Status: "down", Error: "outbox processor stopped", Details: map[string]any{"running": false}},
+		},
+	}
+}
+
+func TestHealth_SanitizedShapeAndStatuses(t *testing.T) {
+	e := newReadEnv(t)
+	r := e.get(t, "/provider/health", e.superTok)
+	if r.code != 200 {
+		t.Fatalf("health = %d %s: a failing check must not fail the endpoint", r.code, r.body)
+	}
+	lower := strings.ToLower(r.body)
+	for _, bad := range []string{"db.internal", "10.20.30.40", "5432", "hunter2", "postgres://", "ztna", "connection refused",
+		"dial tcp", "valkey.internal", "6379", "total_conns", "idle_conns", "dsn", "details", "\"error\"", "running"} {
+		if strings.Contains(lower, bad) {
+			t.Errorf("health response leaks %q: %s", bad, r.body)
+		}
+	}
+	var got provider.HealthResult
+	if err := json.Unmarshal([]byte(r.body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != provider.HealthUnhealthy {
+		t.Errorf("overall = %q, want unhealthy (a critical component is down)", got.Status)
+	}
+	msg := func(s string) *string { return &s }
+	want := []provider.HealthComponent{
+		{Name: "database", Status: provider.HealthUnhealthy, Critical: true, LatencyMS: 5000, Message: msg("check failed")},
+		{Name: "outbox", Status: provider.HealthDegraded, Critical: false, Message: msg("outbox processor stopped")},
+		{Name: "pki", Status: provider.HealthUnhealthy, Critical: true, Message: msg("certificate expired")},
+		{Name: "valkey", Status: provider.HealthHealthy, Critical: true, LatencyMS: 1.5},
+	}
+	if !reflect.DeepEqual(got.Components, want) {
+		t.Errorf("components = %+v\nwant %+v", got.Components, want)
+	}
+	if e.totalAudit(t) != 0 {
+		t.Error("a health read must not be audited")
+	}
+}
+
+func TestHealth_OverallStatus(t *testing.T) {
+	report := func(comps map[string]health.ComponentStatus) *health.DiagnosticReport {
+		return &health.DiagnosticReport{Timestamp: time.Now(), Components: comps}
+	}
+	crit := map[string]bool{"a": true, "b": false}
+	for name, c := range map[string]struct {
+		comps map[string]health.ComponentStatus
+		want  string
+	}{
+		"all up":            {map[string]health.ComponentStatus{"a": {Status: "up"}, "b": {Status: "up"}}, provider.HealthHealthy},
+		"non-critical down": {map[string]health.ComponentStatus{"a": {Status: "up"}, "b": {Status: "down"}}, provider.HealthDegraded},
+		"critical down":     {map[string]health.ComponentStatus{"a": {Status: "down"}, "b": {Status: "up"}}, provider.HealthUnhealthy},
+		"both down":         {map[string]health.ComponentStatus{"a": {Status: "down"}, "b": {Status: "down"}}, provider.HealthUnhealthy},
+		// A component the registry does not label is treated as critical.
+		"unknown down": {map[string]health.ComponentStatus{"zzz": {Status: "down"}}, provider.HealthUnhealthy},
+	} {
+		if got := provider.SanitizeHealth(report(c.comps), crit); got.Status != c.want {
+			t.Errorf("%s: status = %q, want %q", name, got.Status, c.want)
+		}
+	}
+	if got := provider.SanitizeHealth(nil, crit); got.Status != provider.HealthUnhealthy || got.Components == nil {
+		t.Errorf("nil report = %+v, want unhealthy with an empty list", got)
+	}
+}
+
+func TestHealth_WithoutRegistryIs503(t *testing.T) {
+	pool := newReadTestDB(t)
+	ids, _ := provider.NewIdentityService(readTestSecret)
+	store := provider.NewStore(pool)
+	id := scalar[string](t, pool, `INSERT INTO provider_users (email, role) VALUES ('a@p.test', 'super-admin') RETURNING id::text`)
+	tok, _, err := ids.IssueSession(&provider.ProviderUser{ID: id, Email: "a@p.test", Role: provider.RoleSuperAdmin, SessionGeneration: 1},
+		[]string{provider.AMRPassword, provider.AMROTP}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := provider.NewReadHandlers(pool, provider.NewAuthz(), store, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/provider/health", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	middleware.RequireProvider(ids, store)(http.HandlerFunc(h.Health)).ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "health_unavailable") {
+		t.Fatalf("no registry = %d %s, want 503 health_unavailable", w.Code, w.Body.String())
+	}
+}
+
+func TestPKIRoute_ShapeAndNoKeyMaterial(t *testing.T) {
+	e := newReadEnv(t)
+	exec(t, e.pool, `INSERT INTO ca_root (encrypted_key, nonce, certificate_pem, not_before, not_after)
+	   VALUES ('ROOTKEYCANARY', 'ROOTNONCECANARY', '-----BEGIN CERTIFICATE-----PEMCANARY', now(), now() + interval '1 year')`)
+	exec(t, e.pool, `INSERT INTO workspace_ca_keys (tenant_id, encrypted_private_key, nonce, certificate_pem, not_before, not_after)
+	   VALUES ($1, 'WSKEYCANARY', 'WSNONCECANARY', 'PEMCANARY', now(), now() + interval '1 year')`, e.tenantID)
+	r := e.get(t, "/provider/pki?limit=1", e.superTok)
+	if r.code != 200 {
+		t.Fatalf("pki = %d %s", r.code, r.body)
+	}
+	lower := strings.ToLower(r.body)
+	for _, bad := range []string{"canary", "begin", "-----", "encrypted", "nonce", "private", "pem"} {
+		if strings.Contains(lower, bad) {
+			t.Errorf("pki response contains %q: %s", bad, r.body)
+		}
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(r.body), &top); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if want := []string{"intermediates", "next_cursor", "roots", "workspace_cas", "workspace_cas_total"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("pki keys = %v, want %v", keys, want)
+	}
+	if e.totalAudit(t) != 0 {
+		t.Error("a PKI read must not be audited")
+	}
+}
+
+func TestHealthDTOSurface(t *testing.T) {
+	keys := func(v any) []string {
+		b, _ := json.Marshal(v)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		out := make([]string, 0, len(m))
+		for k := range m {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got, want := keys(provider.HealthResult{}), []string{"checked_at", "components", "status"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("HealthResult keys = %v, want %v", got, want)
+	}
+	if got, want := keys(provider.HealthComponent{}), []string{"critical", "latency_ms", "message", "name", "status"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("HealthComponent keys = %v, want %v", got, want)
 	}
 }

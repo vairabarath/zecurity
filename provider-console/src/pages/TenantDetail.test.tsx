@@ -32,6 +32,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
       remote_networks: 1,
       users: { active: 40, suspended: 1, locked: 0, deleted: 2 },
       client_devices: { active: 30, re_enroll_required: 1, renew_pending: 0, revoked: 4 },
+      policies: { resources: 12, groups: 4, access_rules: 9, resource_policies: 2 },
     },
     remote_networks: [
       { id: NET, name: 'hq', status: 'active' },
@@ -183,6 +184,7 @@ describe('Tenant detail: content', () => {
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     expect(screen.getByText('acme.zecurity.test')).toBeInTheDocument()
     expect(screen.getByLabelText('User counts')).toHaveTextContent('40 active · 1 suspended · 0 locked · 2 deleted')
+    expect(screen.getByLabelText('Policy counts')).toHaveTextContent('12 resources · 4 groups · 9 access rules · 2 resource policies')
 
     const nets = within(screen.getByRole('table', { name: 'Remote networks' }))
     expect(nets.getByRole('row', { name: 'old' })).toHaveTextContent('deleted') // lifecycle kept, per R3 review

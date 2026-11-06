@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { StrictMode } from 'react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AppRoutes } from '@/App'
 import type { AuditEntry, JsonValue } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
@@ -386,7 +386,8 @@ describe('Audit: read-only and security', () => {
     await screen.findByRole('table', { name: 'Audit entries' })
     const main = within(screen.getByRole('main'))
     const buttons = main.getAllByRole('button').map((b) => b.textContent?.trim())
-    expect(new Set(buttons)).toEqual(new Set(['Refresh', 'Apply', 'Clear', 'Show details', 'Previous', 'Next']))
+    // Export (F38) reads and downloads; it changes nothing.
+    expect(new Set(buttons)).toEqual(new Set(['Export CSV', 'Export JSON', 'Refresh', 'Apply', 'Clear', 'Show details', 'Previous', 'Next']))
     expect(main.queryByRole('button', { name: /\b(revoke|delete|edit|create|suspend|disable|enable)\b/i })).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
@@ -399,5 +400,91 @@ describe('Audit: read-only and security', () => {
     await screen.findByRole('table', { name: 'Audit entries' })
     expect(document.body.textContent).not.toMatch(/canary|acme\.example/)
     for (const c of calls) expect(c.search + location()).not.toMatch(/tok|password|secret|details/i)
+  })
+})
+
+describe('Audit export (F38)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  /** Captures what download() offers: the file name and its text. */
+  function captureDownloads() {
+    const files: { name: string; text: Promise<string> }[] = []
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      files.push({ name: '', text: (b as Blob).text() })
+      return 'blob:test'
+    })
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      files[files.length - 1].name = this.download
+    })
+    return files
+  }
+
+  it('exports the applied filters, newest first, through GETs on the audit API only', async () => {
+    signedInAs(superAdminMe)
+    const files = captureDownloads()
+    const { calls } = mockFetch({
+      'GET /provider/audit': (c) => (qs(c).cursor === 'p2' ? page(ENTRIES.slice(4)) : page(ENTRIES.slice(0, 4), 'p2')),
+    })
+    renderAudit('/audit?action=provider_user.disable&since=2026-10-01T00:00:00Z')
+    await screen.findByRole('table', { name: 'Audit entries' })
+    const before = calls.length
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export CSV' }))
+    expect(await screen.findByText(`Exported ${ENTRIES.length} entries.`)).toBeInTheDocument()
+    const exportCalls = calls.slice(before)
+    expect(exportCalls.every((c) => c.method === 'GET' && c.path === '/provider/audit')).toBe(true)
+    for (const c of exportCalls) {
+      expect(qs(c)).toMatchObject({ action: 'provider_user.disable', since: '2026-10-01T00:00:00Z' })
+    }
+    expect(files).toHaveLength(1)
+    expect(files[0].name).toMatch(/^provider-audit-.*\.csv$/)
+    const lines = (await files[0].text).trim().split('\r\n')
+    expect(lines).toHaveLength(1 + ENTRIES.length)
+    // Newest first, one line per entry (details JSON may hold quoted commas).
+    ENTRIES.forEach((e, i) => expect(lines[i + 1]).toContain(e.id))
+  })
+
+  it('JSON export carries exactly the API fields', async () => {
+    signedInAs(superAdminMe)
+    const files = captureDownloads()
+    mockFetch({ 'GET /provider/audit': page(ENTRIES) })
+    renderAudit()
+    await screen.findByRole('table', { name: 'Audit entries' })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export JSON' }))
+    await screen.findByText(`Exported ${ENTRIES.length} entries.`)
+    expect(files[0].name).toMatch(/\.json$/)
+    expect(JSON.parse(await files[0].text)).toEqual(ENTRIES)
+  })
+
+  it('says so when more than 10,000 entries match', async () => {
+    signedInAs(superAdminMe)
+    captureDownloads()
+    let n = 0
+    const many = (count: number) => Array.from({ length: count }, () => entry({ id: `e-${String(++n).padStart(6, '0')}` }))
+    mockFetch({ 'GET /provider/audit': (c) => page(many(Number(qs(c).limit ?? 50)), `c${n}`) })
+    renderAudit()
+    await screen.findByRole('table', { name: 'Audit entries' })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export CSV' }))
+    expect(await screen.findByText(/Exported the newest 10,000 entries: more match/, undefined, { timeout: 5000 })).toBeInTheDocument()
+  })
+
+  it('a failed export saves nothing and says so', async () => {
+    signedInAs(superAdminMe)
+    const files = captureDownloads()
+    let first = true
+    mockFetch({
+      'GET /provider/audit': () => {
+        if (first) {
+          first = false
+          return page(ENTRIES)
+        }
+        return { status: 500, body: { error: 'server_error' } }
+      },
+    })
+    renderAudit()
+    await screen.findByRole('table', { name: 'Audit entries' })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Export CSV' }))
+    expect(await screen.findByText('Export failed. Nothing was saved.')).toBeInTheDocument()
+    expect(files).toHaveLength(0)
   })
 })

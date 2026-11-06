@@ -86,6 +86,19 @@ func (r *Registry) Register(c Checker) {
 	r.lastReport = nil
 }
 
+// Critical reports, per registered check name, whether the check is
+// critical for readiness. Read-only; the provider health read uses it to
+// label components (a report carries only each component's status).
+func (r *Registry) Critical() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]bool, len(r.checkers))
+	for _, c := range r.checkers {
+		out[c.Name()] = c.IsCritical()
+	}
+	return out
+}
+
 // Evaluate runs all checkers or returns a fresh cached report.
 func (r *Registry) Evaluate(ctx context.Context) *DiagnosticReport {
 	r.mu.RLock()

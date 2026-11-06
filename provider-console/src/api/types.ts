@@ -255,12 +255,23 @@ export interface DeviceCounts {
   revoked: number
 }
 
+/** A tenant's access policy, as counts (quick-win F8). */
+export interface PolicyCounts {
+  /** Every resource row, as the admin's resource list shows (incl. one being removed). */
+  resources: number
+  groups: number
+  /** Enabled and disabled access rules. */
+  access_rules: number
+  resource_policies: number
+}
+
 export interface TenantCounts {
   connectors: AgentCounts
   shields: AgentCounts
   remote_networks: number
   users: UserCounts
   client_devices: DeviceCounts
+  policies: PolicyCounts
 }
 
 /** GET /provider/tenants item. */
@@ -370,3 +381,61 @@ export interface CertificateExpiryResult {
   items: CertificateEntry[]
   next_cursor: string | null
 }
+
+// ── PKI hierarchy (quick-win F15/F16) ───────────────────────────────────────
+
+/** The CRL a CA signs. Signed on request: `entries` is what a CRL fetched now lists. */
+export interface CRLStatus {
+  url: string
+  covers: string[]
+  entries: number
+  valid_for_seconds: number
+}
+
+export type CANodeKind = 'root' | 'intermediate' | 'workspace_ca'
+
+/** One CA. subject/issuer/serial/not_before are null when its certificate does not parse. */
+export interface CANode {
+  id: string
+  kind: CANodeKind
+  name: string
+  tenant_id: string | null
+  subject: string | null
+  issuer: string | null
+  serial: string | null
+  not_before: string | null
+  not_after: string
+  /** The CA that signed it (key identifiers); null for a root or when unresolved. */
+  parent_id: string | null
+  crl: CRLStatus | null
+}
+
+/** GET /provider/pki. workspace_cas is one page; the total and cursor make that explicit. */
+export interface PKIHierarchy {
+  roots: CANode[]
+  intermediates: CANode[]
+  workspace_cas: CANode[]
+  workspace_cas_total: number
+  next_cursor: string | null
+}
+
+// ── Control-plane health (quick-win F25) ────────────────────────────────────
+
+export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy'
+
+export interface HealthComponent {
+  name: string
+  status: HealthStatus
+  critical: boolean
+  latency_ms: number
+  /** A fixed check message or "check failed"; null when healthy. Never raw errors. */
+  message: string | null
+}
+
+/** GET /provider/health. */
+export interface HealthResult {
+  status: HealthStatus
+  checked_at: string
+  components: HealthComponent[]
+}
+

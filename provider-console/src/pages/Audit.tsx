@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
+import { collectAudit, download, EXPORT_MAX, toCSV, toJSON, type AuditFilters } from '@/lib/auditExport'
 import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 
 // Provider audit (Phase P, audit.view: super-admin only). Read-only;
@@ -69,10 +70,13 @@ export function Audit() {
         title="Audit log"
         description="What provider operators did: sessions, operator changes, relay actions and tenant views. Newest first. Tenant audit logs are separate."
         actions={
-          <Button variant="outline" onClick={q.retry} aria-label="Refresh audit">
-            <RefreshCw aria-hidden />
-            Refresh
-          </Button>
+          <>
+            <AuditExport filters={q.filters} />
+            <Button variant="outline" onClick={q.retry} aria-label="Refresh audit">
+              <RefreshCw aria-hidden />
+              Refresh
+            </Button>
+          </>
         }
       />
 
@@ -94,6 +98,52 @@ export function Audit() {
           </Card>
         )}
       </DataState>
+    </div>
+  )
+}
+
+type ExportState =
+  | { kind: 'idle' }
+  | { kind: 'running'; rows: number }
+  | { kind: 'done'; rows: number; truncated: boolean }
+  | { kind: 'error' }
+
+/**
+ * Export the entries matching the applied filters (quick-win F38), newest
+ * first, as CSV or JSON, up to EXPORT_MAX. Built in the browser from the same
+ * audit API the table reads; nothing is stored.
+ */
+function AuditExport({ filters }: { filters: Filters }) {
+  const [state, setState] = useState<ExportState>({ kind: 'idle' })
+  async function run(format: 'csv' | 'json') {
+    setState({ kind: 'running', rows: 0 })
+    try {
+      const r = await collectAudit(filters as AuditFilters, { onProgress: (n) => setState({ kind: 'running', rows: n }) })
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      if (format === 'csv') download(`provider-audit-${stamp}.csv`, 'text/csv;charset=utf-8', toCSV(r.rows))
+      else download(`provider-audit-${stamp}.json`, 'application/json', toJSON(r.rows))
+      setState({ kind: 'done', rows: r.rows.length, truncated: r.truncated })
+    } catch {
+      setState({ kind: 'error' })
+    }
+  }
+  const busy = state.kind === 'running'
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button variant="outline" onClick={() => run('csv')} disabled={busy}>
+        Export CSV
+      </Button>
+      <Button variant="outline" onClick={() => run('json')} disabled={busy}>
+        Export JSON
+      </Button>
+      <span role="status" className="text-xs text-muted-foreground">
+        {state.kind === 'running' && `Exporting… ${state.rows.toLocaleString()} entries`}
+        {state.kind === 'done' &&
+          (state.truncated
+            ? `Exported the newest ${state.rows.toLocaleString()} entries: more match (the limit is ${EXPORT_MAX.toLocaleString()}). Narrow the filters to export the rest.`
+            : `Exported ${state.rows.toLocaleString()} ${state.rows === 1 ? 'entry' : 'entries'}.`)}
+        {state.kind === 'error' && 'Export failed. Nothing was saved.'}
+      </span>
     </div>
   )
 }
