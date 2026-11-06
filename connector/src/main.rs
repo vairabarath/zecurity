@@ -306,6 +306,8 @@ async fn main() -> anyhow::Result<()> {
     );
     let connector_spiffe_id =
         appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
+    // FU-18: every live relay session, closed by a graceful shutdown.
+    let relay_sessions = relay_handler::RelaySessions::default();
     let selector_cfg = relay_selector::RelaySelectorConfig {
         state_dir: std::path::PathBuf::from(&cfg.state_dir),
         connector_id: connector_id.clone(),
@@ -321,10 +323,12 @@ async fn main() -> anyhow::Result<()> {
         reconnect_max: std::time::Duration::from_secs(cfg.relay_reconnect_max_secs),
         reconnect_backoff_factor: cfg.relay_reconnect_backoff_factor,
         drain_timeout: std::time::Duration::from_secs(cfg.relay_drain_timeout_secs),
+        relay_sessions: relay_sessions.clone(),
     };
     let selector_attachment_slot = relay_attachment_slot.clone();
     let selector_ctrl_tx = ctrl_tx.clone();
     let selector_gate = gate.clone();
+    let selector_shutdown = shutdown.clone();
     tokio::spawn(async move {
         relay_selector::run(
             selector_cfg,
@@ -333,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
             relay_list_rx,
             selector_ctrl_tx,
             selector_gate,
+            selector_shutdown,
         )
         .await
     });
@@ -361,7 +366,16 @@ async fn main() -> anyhow::Result<()> {
             authz,
         ) => result,
         signal = shutdown_signal() => {
-            graceful_shutdown(signal, &cfg, &shutdown_certs, &shutdown_shields, &shutdown, quic_task).await;
+            graceful_shutdown(
+                signal,
+                &cfg,
+                &shutdown_certs,
+                &shutdown_shields,
+                &relay_sessions,
+                &shutdown,
+                quic_task,
+            )
+            .await;
             Ok(())
         }
     }
@@ -388,21 +402,36 @@ async fn shutdown_signal() -> &'static str {
 /// the controller for its disconnect threshold):
 /// 1. close every client QUIC connection (CONNECTION_CLOSE);
 /// 2. close every shield Control stream as not serving, so shields fail over;
-/// 3. say Goodbye to the controller, which marks this connector disconnected
+/// 3. close every relay connection (FU-18), so the relay ends relayed flows at
+///    once instead of at its idle timeout;
+/// 4. say Goodbye to the controller, which marks this connector disconnected
 ///    and pushes the change to clients;
+///
 /// all bounded, then return so the process exits.
 async fn graceful_shutdown(
     signal: &str,
     cfg: &ConnectorConfig,
     certs: &tls::cert_holder::CertHolder,
     shields: &agent_server::ShieldRegistry,
+    relay_sessions: &relay_handler::RelaySessions,
     shutdown: &tokio_util::sync::CancellationToken,
     quic_task: tokio::task::JoinHandle<()>,
 ) {
     const GOODBYE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    info!(signal, "shutting down: closing client connections and shield streams, saying goodbye");
+    info!(
+        signal,
+        "shutting down: closing client, shield and relay connections, saying goodbye"
+    );
     shutdown.cancel();
     shields.close_all_streams("connector shutting down");
+    // FU-18: close the relay connections too, so the relay ends the relayed
+    // flows at once instead of at its idle timeout. The selector already
+    // stopped on `shutdown`, so nothing dials a relay again.
+    let relay_endpoints = relay_sessions.close_all();
+    info!(
+        relay_connections = relay_endpoints.len(),
+        "closed relay connections"
+    );
 
     let store = certs.current().store.clone();
     let goodbye = async {
@@ -419,5 +448,6 @@ async fn graceful_shutdown(
     }
     // The QUIC listener returns once its close frames went out (bounded).
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), quic_task).await;
+    relay_handler::wait_closed(&relay_endpoints, std::time::Duration::from_secs(2)).await;
     info!("shutdown complete");
 }

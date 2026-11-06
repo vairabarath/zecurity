@@ -412,6 +412,7 @@ pub fn selector_config(
         reconnect_max: StdDuration::from_secs(10),
         reconnect_backoff_factor: 2.0,
         drain_timeout: StdDuration::from_secs(10),
+        relay_sessions: Default::default(),
     }
 }
 
@@ -495,6 +496,34 @@ impl AttackerPki {
 
 /// A plain QUIC connection pair over loopback (self-signed, no SPIFFE), for
 /// tests that only need a live quinn connection. Returns (server, client).
+/// Like `plain_quic_pair`, also returning the client endpoint (not leaked),
+/// for tests that wait on it.
+pub async fn plain_quic_pair_with_client_endpoint(
+) -> (quinn::Connection, quinn::Connection, quinn::Endpoint) {
+    install_crypto_provider();
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+    );
+    let server_cfg =
+        quinn::ServerConfig::with_single_cert(vec![cert_der.clone()], key_der).unwrap();
+    let server = quinn::Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert_der).unwrap();
+    let client_cfg =
+        quinn::ClientConfig::with_root_certificates(std::sync::Arc::new(roots)).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(client_cfg);
+    let connecting = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let server_side = server.accept().await.unwrap().await.unwrap();
+    let client_side = connecting.await.unwrap();
+    std::mem::forget(server);
+    (server_side, client_side, client)
+}
+
 pub async fn plain_quic_pair() -> (quinn::Connection, quinn::Connection) {
     install_crypto_provider();
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();

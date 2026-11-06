@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use quinn::{Connection, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -31,6 +31,10 @@ const CLIENT_ROLE: &str = "client";
 /// at the drain timeout (FU-14). "DRNT".
 pub const DRAIN_TIMEOUT_CODE: u32 = 0x4452_4E54;
 
+/// QUIC application close code for every relay connection when the
+/// connector shuts down gracefully (FU-18). "SHDN".
+pub const SHUTDOWN_CODE: u32 = 0x5348_444E;
+
 #[derive(Clone, Debug, Default)]
 pub struct RelayDrainTracker {
     inner: Arc<RelayDrainTrackerInner>,
@@ -42,6 +46,9 @@ struct RelayDrainTrackerInner {
     idle_notify: Notify,
     /// The relay connection these streams run on, for cut().
     connection: std::sync::Mutex<Option<Connection>>,
+    /// The endpoint the connection runs on, so a shutdown can wait until the
+    /// close has gone out (FU-18).
+    endpoint: std::sync::Mutex<Option<Endpoint>>,
 }
 
 impl RelayDrainTracker {
@@ -65,16 +72,25 @@ impl RelayDrainTracker {
         *self.inner.connection.lock().unwrap() = Some(connection);
     }
 
+    /// Remembers the endpoint the relay connection runs on (FU-18).
+    pub fn attach_endpoint(&self, endpoint: Endpoint) {
+        *self.inner.endpoint.lock().unwrap() = Some(endpoint);
+    }
+
     /// Ends every stream still on the relay connection by closing it (FU-14).
     /// Stream tasks are detached and keep the connection alive on their own, so
     /// aborting the session task alone never cut them. No-op without one.
     pub fn cut(&self) {
-        if let Some(connection) = self.inner.connection.lock().unwrap().take() {
-            connection.close(
-                quinn::VarInt::from_u32(DRAIN_TIMEOUT_CODE),
-                b"relay drain timeout",
-            );
-        }
+        let _ = self.close(DRAIN_TIMEOUT_CODE, b"relay drain timeout");
+    }
+
+    /// Close the relay connection with `code` (once; later calls are no-ops).
+    /// Returns its endpoint, if one is attached, so the caller can wait for
+    /// the close to go out; `None` when there was nothing to close.
+    pub fn close(&self, code: u32, reason: &[u8]) -> Option<Endpoint> {
+        let connection = self.inner.connection.lock().unwrap().take()?;
+        connection.close(quinn::VarInt::from_u32(code), reason);
+        self.inner.endpoint.lock().unwrap().clone()
     }
 
     pub async fn wait_for_idle(&self) {
@@ -86,6 +102,65 @@ impl RelayDrainTracker {
             notified.await;
         }
     }
+}
+
+/// FU-18: every live relay session of this connector, so a graceful shutdown
+/// can close their connections at once. Without it the relay learned of the
+/// stop only at its idle timeout (60 s), and relayed clients kept receiving
+/// buffered data, then hung (live run 2026-11-05, LT-3c). Holds weak
+/// references: a session that ended drops out by itself.
+#[derive(Clone, Debug, Default)]
+pub struct RelaySessions {
+    inner: Arc<std::sync::Mutex<Vec<std::sync::Weak<RelayDrainTrackerInner>>>>,
+}
+
+impl RelaySessions {
+    /// Track a new session (its drain tracker lives as long as the session).
+    pub fn register(&self, tracker: &RelayDrainTracker) {
+        let mut sessions = self.inner.lock().unwrap();
+        sessions.retain(|s| s.strong_count() > 0);
+        sessions.push(Arc::downgrade(&tracker.inner));
+    }
+
+    /// Close every live relay connection with SHUTDOWN_CODE. Returns the
+    /// endpoints to wait on (`wait_closed`).
+    pub fn close_all(&self) -> Vec<Endpoint> {
+        let live: Vec<RelayDrainTracker> = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.upgrade().map(|inner| RelayDrainTracker { inner }))
+            .collect();
+        live.iter()
+            .filter_map(|t| t.close(SHUTDOWN_CODE, b"connector shutting down"))
+            .collect()
+    }
+
+    /// Sessions still alive (does not prune).
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        let sessions = self.inner.lock().unwrap();
+        sessions.iter().filter(|s| s.strong_count() > 0).count()
+    }
+
+    /// Entries held, dead ones included: `register` must prune.
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+}
+
+/// Wait (at most `limit`) until the closes on `endpoints` have gone out and
+/// the endpoints are idle, so the process does not exit before the relay
+/// heard of the close.
+pub async fn wait_closed(endpoints: &[Endpoint], limit: Duration) {
+    let all = async {
+        for endpoint in endpoints {
+            endpoint.wait_idle().await;
+        }
+    };
+    let _ = timeout(limit, all).await;
 }
 
 pub struct RelayStreamGuard {
@@ -483,6 +558,96 @@ mod tests {
     #[test]
     fn cut_without_a_connection_is_a_no_op() {
         RelayDrainTracker::new().cut();
+    }
+
+    /// The relay side sees `conn` closed by the connector with `code`.
+    async fn expect_closed_with(relay_side: &quinn::Connection, code: u32) {
+        let reason = tokio::time::timeout(Duration::from_secs(2), relay_side.closed())
+            .await
+            .expect("the relay must see the close at once, not at its idle timeout");
+        assert!(
+            matches!(&reason, quinn::ConnectionError::ApplicationClosed(c)
+                if c.error_code == quinn::VarInt::from_u32(code)),
+            "relay saw {reason:?}"
+        );
+    }
+
+    /// FU-18: a graceful shutdown closes every live relay connection with
+    /// SHDN, and a stream still open on one fails instead of finishing.
+    #[tokio::test]
+    async fn close_all_closes_every_live_relay_connection_on_shutdown() {
+        let sessions = RelaySessions::default();
+        let (connector_a, relay_a) = crate::test_support::plain_quic_pair().await;
+        let (connector_b, relay_b) = crate::test_support::plain_quic_pair().await;
+        let a = RelayDrainTracker::new();
+        a.attach_connection(connector_a.clone());
+        let b = RelayDrainTracker::new();
+        b.attach_connection(connector_b);
+        sessions.register(&a);
+        sessions.register(&b);
+        // A relayed download mid-transfer on relay A.
+        let (mut send, mut recv) = relay_a.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        let (_csend, mut crecv) = connector_a.accept_bi().await.unwrap();
+        let mut one = [0u8; 1];
+        crecv.read_exact(&mut one).await.unwrap();
+
+        sessions.close_all();
+
+        expect_closed_with(&relay_a, SHUTDOWN_CODE).await;
+        expect_closed_with(&relay_b, SHUTDOWN_CODE).await;
+        let mut buf = [0u8; 16];
+        assert!(
+            recv.read(&mut buf).await.is_err(),
+            "the relayed stream must fail, not finish"
+        );
+    }
+
+    /// Sessions that ended drop out of the registry, and a connection is
+    /// closed once: a second close_all has nothing left to close.
+    #[tokio::test]
+    async fn ended_sessions_drop_out_and_close_is_once() {
+        let sessions = RelaySessions::default();
+        let ended = RelayDrainTracker::new();
+        sessions.register(&ended);
+        drop(ended);
+        assert_eq!(sessions.live(), 0, "an ended session is not live");
+        assert!(sessions.close_all().is_empty());
+
+        let (connector_side, relay_side) = crate::test_support::plain_quic_pair().await;
+        let live = RelayDrainTracker::new();
+        live.attach_connection(connector_side);
+        sessions.register(&live);
+        assert_eq!(sessions.live(), 1);
+        assert_eq!(sessions.tracked(), 1, "register prunes ended sessions");
+        sessions.close_all();
+        expect_closed_with(&relay_side, SHUTDOWN_CODE).await;
+        assert!(sessions.close_all().is_empty(), "closed once");
+        live.cut(); // a later drain-timeout cut is a no-op
+        expect_closed_with(&relay_side, SHUTDOWN_CODE).await;
+    }
+
+    /// The shutdown can wait until the close went out: with the endpoint
+    /// attached, `wait_closed` returns well inside its limit.
+    #[tokio::test]
+    async fn wait_closed_returns_once_the_close_went_out() {
+        let (relay_side, connector_side, endpoint) =
+            crate::test_support::plain_quic_pair_with_client_endpoint().await;
+        let tracker = RelayDrainTracker::new();
+        tracker.attach_connection(connector_side);
+        tracker.attach_endpoint(endpoint);
+        let sessions = RelaySessions::default();
+        sessions.register(&tracker);
+        let endpoints = sessions.close_all();
+        assert_eq!(endpoints.len(), 1);
+        let start = std::time::Instant::now();
+        wait_closed(&endpoints, Duration::from_secs(5)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        expect_closed_with(&relay_side, SHUTDOWN_CODE).await;
     }
 }
 

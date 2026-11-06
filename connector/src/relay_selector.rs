@@ -69,6 +69,8 @@ pub struct RelaySelectorConfig {
     pub reconnect_max: Duration,
     pub reconnect_backoff_factor: f64,
     pub drain_timeout: Duration,
+    /// Every live relay session, closed by a graceful shutdown (FU-18).
+    pub relay_sessions: crate::relay_handler::RelaySessions,
 }
 
 /// Connector mTLS identity used for Relay dials and probes.
@@ -132,18 +134,30 @@ pub async fn run(
     relay_list_rx: watch::Receiver<Option<LabelledRelayList>>,
     ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
     gate: AuthzGate,
-) -> ! {
-    run_until_terminal(
-        cfg,
-        relay_handler,
-        attachment_slot,
-        relay_list_rx,
-        ctrl_tx,
-        gate,
-    )
-    .await;
-    // Terminal is never left within the process: nothing to resume.
-    std::future::pending().await
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    // FU-18: a graceful shutdown stops the selector first (checked first on
+    // every wake), so it never dials a relay again after the shutdown closed
+    // the relay connections (`RelaySessions::close_all`).
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {
+            info!("relay selector stopped: connector shutting down");
+        }
+        _ = async {
+            run_until_terminal(
+                cfg,
+                relay_handler,
+                attachment_slot,
+                relay_list_rx,
+                ctrl_tx,
+                gate,
+            )
+            .await;
+            // Terminal is never left within the process: nothing to resume.
+            std::future::pending::<()>().await
+        } => {}
+    }
 }
 
 /// The selector loop. Returns only once the connector is terminal (revoked
@@ -834,6 +848,7 @@ fn spawn_session(
     let max_streams = cfg_owned.max_incoming_bidi_streams;
     let idle_timeout = cfg_owned.idle_timeout;
     let drain_tracker = RelayDrainTracker::new();
+    cfg_owned.relay_sessions.register(&drain_tracker);
     let session_drain_tracker = drain_tracker.clone();
     let handle = tokio::spawn(async move {
         relay_client::run_session(
@@ -1711,6 +1726,58 @@ mod terminal_tests {
             .unwrap();
         assert!(at.elapsed() < Duration::from_secs(1));
         assert!(f.slot.active().await.is_none());
+    }
+
+    /// FU-18: a graceful shutdown stops the selector at once, so it cannot
+    /// dial a relay again after the shutdown closed the relay connections.
+    #[tokio::test(start_paused = true)]
+    async fn a_shutdown_stops_the_selector_at_once() {
+        let f = fx();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(run(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            empty_list(),
+            f.ctrl_tx.clone(),
+            AuthzGate::open_for_tests(),
+            shutdown.clone(),
+        ));
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!task.is_finished(), "runs until the shutdown");
+        let at = TokioInstant::now();
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("stops at once on shutdown")
+            .unwrap();
+        assert!(at.elapsed() < Duration::from_millis(100));
+    }
+
+    /// FU-18: every relay session the selector starts is registered, so a
+    /// graceful shutdown can close its connection.
+    #[tokio::test]
+    async fn spawned_sessions_are_registered_for_shutdown() {
+        let f = fx();
+        assert_eq!(f.cfg.relay_sessions.live(), 0);
+        let (handle, tracker) = spawn_session(
+            &f.cfg,
+            crate::proto::LabelledRelayInfo {
+                relay_id: "33333333-3333-4333-8333-333333333333".into(),
+                relay_addr: "127.0.0.1:9".into(),
+                spiffe_id: "spiffe://zecurity.in/relay/33333333-3333-4333-8333-333333333333".into(),
+                label: crate::proto::RelayCapacityLabel::RelayCapacityMedium as i32,
+            },
+            f.handler.clone(),
+            f.slot.clone(),
+            f.ctrl_tx.clone(),
+            None,
+        );
+        assert_eq!(f.cfg.relay_sessions.live(), 1);
+        handle.abort();
+        let _ = handle.await;
+        drop(tracker);
+        assert_eq!(f.cfg.relay_sessions.live(), 0, "an ended session drops out");
     }
 
     /// A selector still waiting for its first relay list stops too.
