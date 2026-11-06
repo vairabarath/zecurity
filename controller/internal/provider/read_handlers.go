@@ -25,6 +25,7 @@ import (
 //	GET /provider/audit           audit.view  (super-admin)
 //	GET /provider/certificates    cert.read   (super-admin)
 //	GET /provider/pki             cert.read   (super-admin; CA tree + CRL status)
+//	GET /provider/health          health.read (super-admin; health_read.go)
 //
 // Only a successful tenant detail read is audited. Lists, relay, audit and
 // certificate reads, and 400/403/404 responses write nothing.
@@ -43,6 +44,7 @@ type ReadHandlers struct {
 	store      *Store
 	heartbeats providerquery.HeartbeatSource      // may be nil: DB heartbeat only
 	ctlCert    providerquery.ControllerCertSource // may be nil: no controller_grpc row
+	health     HealthSource                       // set by SetHealth; nil: 503
 }
 
 // NewReadHandlers wires the read handlers. heartbeats is the relay service

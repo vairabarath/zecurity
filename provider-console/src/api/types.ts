@@ -418,3 +418,24 @@ export interface PKIHierarchy {
   workspace_cas_total: number
   next_cursor: string | null
 }
+
+// ── Control-plane health (quick-win F25) ────────────────────────────────────
+
+export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy'
+
+export interface HealthComponent {
+  name: string
+  status: HealthStatus
+  critical: boolean
+  latency_ms: number
+  /** A fixed check message or "check failed"; null when healthy. Never raw errors. */
+  message: string | null
+}
+
+/** GET /provider/health. */
+export interface HealthResult {
+  status: HealthStatus
+  checked_at: string
+  components: HealthComponent[]
+}
+

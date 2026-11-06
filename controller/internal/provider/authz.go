@@ -33,6 +33,9 @@ const (
 	ActionRelayRead  = "relay.read"
 	ActionTenantRead = "tenant.read"
 	ActionCertRead   = "cert.read"
+	// Control-plane health (quick-win F25): not under relay.*, so
+	// super-admin only.
+	ActionHealthRead = "health.read"
 )
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform
@@ -107,6 +110,11 @@ func (a *Authz) CanReadRelays(actor Actor, target Target) error {
 // CanReadTenants gates GET /provider/tenants and /provider/tenants/{id}.
 func (a *Authz) CanReadTenants(actor Actor, target Target) error {
 	return decide(actor, ActionTenantRead, target)
+}
+
+// CanReadHealth gates GET /provider/health (super-admin only).
+func (a *Authz) CanReadHealth(actor Actor) error {
+	return decide(actor, ActionHealthRead, Target{Type: "health"})
 }
 
 // CanReadCertificates gates GET /provider/certificates and GET /provider/pki.

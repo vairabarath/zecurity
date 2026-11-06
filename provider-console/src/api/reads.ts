@@ -3,6 +3,7 @@ import type {
   AuditEntry,
   CertificateExpiryResult,
   CertificateKind,
+  HealthResult,
   Page,
   PKIHierarchy,
   RelayDetail,
@@ -116,4 +117,9 @@ export function getCertificates(params?: CertificateParams): Promise<Certificate
 /** CA hierarchy and CRL status (cert.read: super-admin). Not audited. */
 export function getPki(params?: PKIParams): Promise<PKIHierarchy> {
   return request<PKIHierarchy>('GET', '/provider/pki' + buildQuery(params, PKI_KEYS))
+}
+
+/** Control-plane health (health.read: super-admin). Not audited. */
+export function getHealth(): Promise<HealthResult> {
+  return request<HealthResult>('GET', '/provider/health')
 }
