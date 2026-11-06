@@ -200,7 +200,9 @@ func main() {
 	oidcRedirectURI := mustEnv("GOOGLE_REDIRECT_URI")
 
 	authSvc, err := auth.NewService(auth.Config{
-		Pool:               db.Pool,
+		Pool: db.Pool,
+		// PENDING-11 P-9 / S-11: auth.* rows in the workspace admin stream.
+		Audit:              func(ctx context.Context, e audit.Entry) { _ = audit.Record(ctx, db.Pool, e) },
 		IdentityService:    identitySvc,
 		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),

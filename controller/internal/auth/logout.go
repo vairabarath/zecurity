@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/yourorg/ztna/controller/internal/audit"
 )
 
 // LogoutHandler handles POST /auth/logout.
@@ -76,8 +77,23 @@ func (s *serviceImpl) EndSession(ctx context.Context, accessToken string) {
 		// Malformed / wrong signature — do not touch Redis.
 		return
 	}
-	if err := s.redisClient.DeleteRefreshSession(ctx, claims.Subject, claims.SessionID); err != nil {
+	ended, err := s.redisClient.EndRefreshSession(ctx, claims.Subject, claims.SessionID)
+	if err != nil {
 		// Logged server-side only — reporting it would leak liveness.
 		log.Printf("auth logout: delete refresh session user=%s: %v", claims.Subject, err)
+		return
+	}
+	// Audit only a session this call actually ended, so replaying a token
+	// can't flood the (kept-forever) admin stream (PENDING-11 P-9).
+	if ended {
+		s.record(ctx, audit.Entry{
+			TenantID:    claims.TenantID,
+			ActorUserID: claims.Subject,
+			ActorEmail:  claims.Email,
+			Action:      ActionSignOut,
+			TargetType:  "user",
+			TargetID:    claims.Subject,
+			Details:     map[string]any{"client": IsClientChannel(ctx)},
+		})
 	}
 }

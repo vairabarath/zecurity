@@ -467,3 +467,56 @@ func TestCheckAppendOnly(t *testing.T) {
 		t.Fatalf("ztna_app: bad=%v err=%v, want none", bad, err)
 	}
 }
+
+// The Go encoder (canonical.go) reproduces the database's canonical bytes for
+// both streams, with NULL and non-NULL optional columns, so VerifyStream and
+// the exporter never depend on the database's own hashing function.
+func TestCanonical_GoMatchesDatabase(t *testing.T) {
+	owner, app, ws := newChainDB(t)
+	ctx := context.Background()
+	if err := Record(ctx, app, Entry{TenantID: ws, ActorEmail: "system", Action: "a.none", TargetType: "t", TargetID: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Record(ctx, app, Entry{TenantID: ws, ActorUserID: "6f1c0a52-2d4f-4b1e-9a51-0c1f5d0e7b11", ActorEmail: "ü@example.com", Action: "a.full", TargetType: "t", TargetID: "x", Details: map[string]any{"z": 1, "a": "é"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx, `INSERT INTO connector_logs (workspace_id, connector_id, message) VALUES ($1, 'c1', 'bare')`, ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx,
+		`INSERT INTO connector_logs (workspace_id, connector_id, message, resource_id, client_spiffe_id,
+		   client_device_id, user_id, route_type, destination, port, protocol, action, error, occurred_at)
+		 VALUES ($1, 'c1', 'full', gen_random_uuid(), 'spiffe://x/y', gen_random_uuid(), gen_random_uuid(),
+		   'shield', '10.0.0.5', 443, 'tcp', 'deny', 'nope', now() - interval '3 seconds')`, ws); err != nil {
+		t.Fatal(err)
+	}
+
+	admin, err := ReadAdminRows(ctx, owner, ws, 0, 1<<62, 10)
+	if err != nil || len(admin) != 2 {
+		t.Fatalf("admin rows: %d %v", len(admin), err)
+	}
+	for _, r := range admin {
+		var db []byte
+		if err := owner.QueryRow(ctx, `SELECT audit_admin_canonical(a) FROM audit_logs a WHERE tenant_id = $1 AND seq = $2`, ws, r.Seq).Scan(&db); err != nil {
+			t.Fatal(err)
+		}
+		if string(db) != string(r.Canonical()) {
+			t.Fatalf("admin seq %d:\n go %q\n db %q", r.Seq, r.Canonical(), db)
+		}
+	}
+	access, err := ReadAccessRows(ctx, owner, ws, 0, 1<<62, 10)
+	if err != nil || len(access) != 2 {
+		t.Fatalf("access rows: %d %v", len(access), err)
+	}
+	for _, r := range access {
+		var db []byte
+		if err := owner.QueryRow(ctx, `SELECT audit_access_canonical(c) FROM connector_logs c WHERE workspace_id = $1 AND seq = $2`, ws, r.Seq).Scan(&db); err != nil {
+			t.Fatal(err)
+		}
+		if string(db) != string(r.Canonical()) {
+			t.Fatalf("access seq %d:\n go %q\n db %q", r.Seq, r.Canonical(), db)
+		}
+	}
+	mustVerify(t, owner, ws, StreamAdmin, 2)
+	mustVerify(t, owner, ws, StreamAccess, 2)
+}

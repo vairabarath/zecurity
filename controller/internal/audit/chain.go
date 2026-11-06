@@ -70,72 +70,36 @@ const maxBreaks = 100
 // retention checkpoint (or genesis) up to the head. It reports missing or
 // extra seqs, prev_hash links that don't match, row hashes that don't match
 // the row's current content, and a head that disagrees with the last row.
-// It reads the canonical bytes from the database's audit_*_canonical function,
-// the same bytes the exporter ships, and hashes them here, so a pass shows
-// the chain is checkable without Postgres.
+// The canonical bytes are built in Go from the raw columns (canonical.go),
+// not by the database's audit_*_canonical functions, so a pass doesn't
+// depend on trusting the database's own hashing code.
 func VerifyStream(ctx context.Context, db Querier, workspaceID string, s Stream) (VerifyResult, error) {
 	res := VerifyResult{Stream: s}
 	if !s.Valid() {
 		return res, fmt.Errorf("audit: unknown stream %q", s)
 	}
-
-	var (
-		lastHash, purgedHash []byte
-		purgedSeq            int64
-	)
-	err := db.QueryRow(ctx,
-		`SELECT last_seq, last_hash, purged_through_seq, purged_through_hash
-		   FROM audit_stream_heads
-		  WHERE workspace_id = $1 AND stream = $2`,
-		workspaceID, string(s),
-	).Scan(&res.HeadSeq, &lastHash, &purgedSeq, &purgedHash)
+	// Rows appended after the head is read are outside this check (seq bound).
+	head, err := ReadHead(ctx, db, workspaceID, s)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return res, fmt.Errorf("audit: no %s stream head for workspace %s", s, workspaceID)
 	}
 	if err != nil {
 		return res, fmt.Errorf("audit: read stream head: %w", err)
 	}
+	res.HeadSeq = head.LastSeq
 
-	prev := purgedHash
+	prev := head.PurgedThroughHash
 	if prev == nil {
 		prev = Genesis(workspaceID, s)
 	}
-	res.FromSeq = purgedSeq + 1
-
-	var q string
-	switch s {
-	case StreamAdmin:
-		q = `SELECT a.seq, a.prev_hash, a.row_hash, audit_admin_canonical(a)
-		       FROM audit_logs a
-		      WHERE a.tenant_id = $1 AND a.seq > $2
-		      ORDER BY a.seq`
-	case StreamAccess:
-		q = `SELECT c.seq, c.prev_hash, c.row_hash, audit_access_canonical(c)
-		       FROM connector_logs c
-		      WHERE c.workspace_id = $1 AND c.seq > $2
-		      ORDER BY c.seq`
-	}
-	rows, err := db.Query(ctx, q, workspaceID, purgedSeq)
-	if err != nil {
-		return res, fmt.Errorf("audit: read %s stream: %w", s, err)
-	}
-	defer rows.Close()
+	res.FromSeq = head.PurgedThroughSeq + 1
 
 	addBreak := func(seq int64, format string, args ...any) {
 		if len(res.Breaks) < maxBreaks {
 			res.Breaks = append(res.Breaks, Break{Seq: seq, Reason: fmt.Sprintf(format, args...)})
 		}
 	}
-
-	expected := res.FromSeq
-	for rows.Next() {
-		var (
-			seq                          int64
-			prevHash, rowHash, canonical []byte
-		)
-		if err := rows.Scan(&seq, &prevHash, &rowHash, &canonical); err != nil {
-			return res, fmt.Errorf("audit: scan %s row: %w", s, err)
-		}
+	check := func(seq int64, prevHash, rowHash, canonical []byte, expected int64) {
 		res.RowsChecked++
 		if seq != expected {
 			addBreak(seq, "expected seq %d, found %d (rows missing)", expected, seq)
@@ -147,15 +111,43 @@ func VerifyStream(ctx context.Context, db Querier, workspaceID string, s Stream)
 			addBreak(seq, "row_hash does not match the row's content (row edited)")
 		}
 		prev = rowHash
-		expected = seq + 1
 	}
-	if err := rows.Err(); err != nil {
-		return res, fmt.Errorf("audit: read %s stream: %w", s, err)
+
+	const page = 1000
+	expected := res.FromSeq
+	after := head.PurgedThroughSeq
+	for {
+		n := 0
+		switch s {
+		case StreamAdmin:
+			rows, err := ReadAdminRows(ctx, db, workspaceID, after, head.LastSeq, page)
+			if err != nil {
+				return res, err
+			}
+			for _, r := range rows {
+				check(r.Seq, r.PrevHash, r.RowHash, r.Canonical(), expected)
+				expected, after = r.Seq+1, r.Seq
+			}
+			n = len(rows)
+		case StreamAccess:
+			rows, err := ReadAccessRows(ctx, db, workspaceID, after, head.LastSeq, page)
+			if err != nil {
+				return res, err
+			}
+			for _, r := range rows {
+				check(r.Seq, r.PrevHash, r.RowHash, r.Canonical(), expected)
+				expected, after = r.Seq+1, r.Seq
+			}
+			n = len(rows)
+		}
+		if n < page {
+			break
+		}
 	}
 
 	if expected-1 != res.HeadSeq {
 		addBreak(expected-1, "stream ends at seq %d but the head is at %d", expected-1, res.HeadSeq)
-	} else if !bytes.Equal(prev, lastHash) {
+	} else if !bytes.Equal(prev, head.LastHash) {
 		addBreak(res.HeadSeq, "head hash does not match the last row's hash")
 	}
 	return res, nil

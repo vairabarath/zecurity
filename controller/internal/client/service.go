@@ -399,6 +399,18 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 
 	user, gen, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, conn.ID, conn.Issuer, inviteRow != nil)
 	if err != nil {
+		// PENDING-11 P-9 / S-11: the IdP has proven the identity and the
+		// workspace is known; "not invited" and "not active" share a reason.
+		if errors.Is(err, errUserNotInvited) || errors.Is(err, identity.ErrUserNotActive) {
+			s.recordAudit(ctx, audit.Entry{
+				TenantID:   sess.WorkspaceID,
+				ActorEmail: sess.Email,
+				Action:     auth.ActionSignInFailed,
+				TargetType: "identity_connection",
+				TargetID:   conn.ID,
+				Details:    map[string]any{"client": true, "reason": auth.SignInFailedReasonNotPermitted},
+			})
+		}
 		if errors.Is(err, errUserNotInvited) {
 			return nil, status.Error(codes.PermissionDenied, "no membership in workspace; ask an admin for an invitation")
 		}
@@ -412,6 +424,15 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		if err := markInvitationAccepted(ctx, s.pool, inviteRow.ID); err != nil {
 			return nil, status.Errorf(codes.Internal, "accept invitation: %v", err)
 		}
+		s.recordAudit(ctx, audit.Entry{
+			TenantID:    sess.WorkspaceID,
+			ActorUserID: user.ID,
+			ActorEmail:  sess.Email,
+			Action:      "invitation.accept",
+			TargetType:  "invitation",
+			TargetID:    inviteRow.ID,
+			Details:     map[string]any{"client": true},
+		})
 	}
 	_ = created
 
@@ -419,6 +440,15 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue session: %v", err)
 	}
+	s.recordAudit(ctx, audit.Entry{
+		TenantID:    sess.WorkspaceID,
+		ActorUserID: user.ID,
+		ActorEmail:  sess.Email,
+		Action:      auth.ActionSignIn,
+		TargetType:  "user",
+		TargetID:    user.ID,
+		Details:     map[string]any{"client": true, "connection_id": conn.ID},
+	})
 
 	return &clientv1.TokenExchangeResponse{
 		AccessToken:  accessToken,
@@ -498,6 +528,20 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		}
 		return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
 	}
+	s.recordAudit(ctx, audit.Entry{
+		TenantID:    tokenClaims.TenantID,
+		ActorUserID: tokenClaims.UserID,
+		ActorEmail:  tokenClaims.Email,
+		Action:      "device.enroll",
+		TargetType:  "client_device",
+		TargetID:    deviceID,
+		Details: map[string]any{
+			"device_name": req.GetDeviceName(),
+			"os":          req.GetOs(),
+			"spiffe_id":   spiffeID,
+			"cert_serial": certResult.Serial,
+		},
+	})
 	if err := s.policyNotifier.NotifyPolicyChange(ctx, tokenClaims.TenantID); err != nil {
 		return nil, status.Errorf(codes.Internal, "refresh policy after device enrollment: %v", err)
 	}
@@ -917,8 +961,17 @@ func (s *Service) RefreshSession(ctx context.Context, req *clientv1.RefreshSessi
 // (replacing the client's plain-HTTP /auth/logout). Idempotent: always
 // succeeds, revealing nothing about whether a session existed.
 func (s *Service) Logout(ctx context.Context, req *clientv1.LogoutRequest) (*clientv1.LogoutResponse, error) {
-	s.authSvc.EndSession(ctx, req.GetAccessToken())
+	s.authSvc.EndSession(auth.WithClientChannel(ctx), req.GetAccessToken())
 	return &clientv1.LogoutResponse{}, nil
+}
+
+// recordAudit writes an admin-stream audit row (PENDING-11 P-9). Best effort:
+// the action has already happened, so a failure is logged by audit.Record.
+func (s *Service) recordAudit(ctx context.Context, e audit.Entry) {
+	if s.pool == nil {
+		return
+	}
+	_ = audit.Record(context.WithoutCancel(ctx), s.pool, e)
 }
 
 // Compile-time interface check.
