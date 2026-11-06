@@ -76,7 +76,16 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("100::/64"),        // discard
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 	netip.MustParsePrefix("2002::/16"),       // 6to4 (could embed a private IPv4)
+	netip.MustParsePrefix("2001::/32"),       // Teredo (embeds an IPv4)
+	netip.MustParsePrefix("2001:10::/28"),    // ORCHID
+	netip.MustParsePrefix("2001:20::/28"),    // ORCHIDv2
+	netip.MustParsePrefix("::/96"),           // IPv4-compatible (deprecated, embeds an IPv4)
+	netip.MustParsePrefix("::ffff:0:0/96"),   // IPv4-mapped (checked unmapped, kept as a backstop)
 }
+
+// globalUnicast6 is the only IPv6 space the exporter dials (RFC 4291 global
+// unicast); everything outside it is special-purpose.
+var globalUnicast6 = netip.MustParsePrefix("2000::/3")
 
 // AddressAllowed reports whether the exporter may connect to ip: only public
 // unicast addresses. IPv4-mapped IPv6 is checked as IPv4.
@@ -84,6 +93,9 @@ func AddressAllowed(ip netip.Addr) bool {
 	ip = ip.Unmap()
 	if !ip.IsValid() || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	if ip.Is6() && !globalUnicast6.Contains(ip) {
 		return false
 	}
 	for _, p := range blockedPrefixes {
