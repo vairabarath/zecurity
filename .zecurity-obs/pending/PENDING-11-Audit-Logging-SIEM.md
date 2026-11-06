@@ -16,7 +16,7 @@ tags: [pending, adr, operations, audit, siem, compliance]
 # PENDING-11: Audit logging and SIEM export
 
 **Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR. **S1a built 2026-11-05** (fc3561c1 on local `feat/pending11-siem`: migration 051, `ztna_app`, `audit.VerifyStream`; gate 1719/0/2). Lock order: workspace FOR KEY SHARE, then head (found while testing: the FK check after a BEFORE trigger would otherwise deadlock against a workspace FOR UPDATE + audit transaction).
-**S1b built 2026-11-06** (local `feat/pending11-siem`): migration `052_audit_export.sql`, P-9 audit gaps, `internal/auditexport` (exporter, webhook + Splunk HEC, SSRF-safe client, sealed secrets), GraphQL sink API + `auditLogs` behind `AUDIT_ADMIN` / `CONSOLE_READ`, access-event retention worker, `zecurity-controller audit verify`. Decisions taken while building are in §7. **S2 built 2026-11-06** (b4565fde): `/audit-log` page and Settings → Audit export. Next: S3 live run.
+**S1b built 2026-11-06** (local `feat/pending11-siem`): migration `052_audit_export.sql`, P-9 audit gaps, `internal/auditexport` (exporter, webhook + Splunk HEC, SSRF-safe client, sealed secrets), GraphQL sink API + `auditLogs` behind `AUDIT_ADMIN` / `CONSOLE_READ`, access-event retention worker, `zecurity-controller audit verify`. Decisions taken while building are in §7. **S2 built 2026-11-06** (b4565fde): `/audit-log` page and Settings → Audit export. **S3 live run PASS 2026-11-06** (§8).
 **Base:** `main` (89655c83). Migrations: `051_`, `052_`.
 **Scope:** its own epic. It also builds D-12 (DB-enforced append-only audit), which the Decision Record left to this phase.
 
@@ -324,6 +324,37 @@ These narrow or pin down the design above; none adds an architectural choice.
 - **Canonical bytes are built in Go** (`audit/canonical.go`) from the raw columns, for the verifier and the exporter; a test pins them to the database's `audit_*_canonical`. Neither trusts the database's hashing function.
 - **Error text** stored in `last_error` and returned by `testAuditExportSink` never carries the URL (a query string may hold a token), headers or the response body. Audit rows for sink changes carry only the URL's scheme and host: a path or query may hold a token, and audit rows are readable by every console role and exported.
 - **gqlgen** fails with Go 1.27 (`package "time" without types`); regenerate with `GOTOOLCHAIN=go1.26.2 go tool gqlgen generate --config graph/gqlgen.yml`, then revert the `go.mod`/`go.sum` tidy it does.
+
+## 8. S3 live run (2026-11-06): PASS
+
+**Setup:** branch build (2261aed8 code).
+- **Database:** the shared local DB was reset (Sathiya's OK), so 051 and 052 ran on a fresh volume, and the controller ran as `ztna_app`. No append-only warning; no permission errors in Postgres or the controller log.
+- **Workspace:** `p11live`, created by sign-up through a platform OIDC connection to the local mock IdP.
+- **Connector:** branch build, in Docker; resource 172.31.11.20:9001 inside its namespace.
+- **Client:** branch build (`dev-build.sh`), running as a root sandbox daemon.
+- **Receiver:** a local HTTPS receiver (lab CA through `AUDIT_EXPORT_DEV_CA_FILE`, plus `AUDIT_EXPORT_DEV_ALLOW_PRIVATE`). It checked, for each event:
+  - the HMAC signature;
+  - seq continuity per sink and stream;
+  - prev_hash links from genesis;
+  - `row_hash = sha256(prev_hash || canonical)`;
+  - that `details_canonical` is the hashed text.
+
+| Check | Result |
+|---|---|
+| Sign-up audit | `workspace.create`, `identity.user.provisioned`, `auth.sign_in {client:false}` |
+| Webhook sink, all history, both streams | admin 1..5 delivered and verified |
+| `testAuditExportSink` | `export.test` delivered and verified |
+| Splunk HEC sink (admin) | `Authorization: Splunk <token>`; index set; replayed from seq 1 on its own cursor |
+| Client login and enroll | `auth.sign_in {client:true}` and `device.enroll` exported |
+| Real access through the connector | `resource.access` / `allow` with subject user, device and SPIFFE; destination and port |
+| Receiver down (20 accesses, 3 admin changes) | per-stream `lastError` "could not connect to the destination" (no URL), `failingSince`, backoff 5 attempts → 26 s |
+| Receiver back | caught up on the next retry: access 4..23 and admin 18..20 on both sinks; **0 gaps, 0 duplicates, 0 errors** (63 events total) |
+| UPDATE `audit_logs` / DELETE `connector_logs` / DELETE workspace as `ztna_app` | permission denied |
+| `audit_purge_access(ws, now(), …)` as `ztna_app` | refused (inside the 90-day floor) |
+| `audit verify` before tampering | admin 1..20 OK, access 1..23 OK, exit 0 |
+| Owner edits admin seq 17, deletes access seq 10 | `audit verify`: seq 17 "row edited", seq 10 missing, exit 3 |
+
+**Not covered live** (covered by integration tests): the retention `export.gap` (needs 90-day-old rows); refused sign-ins on an enterprise connection; viewer access to sinks (schema test). The console pages were checked by unit and sweep tests, not in a browser.
 
 ---
 
