@@ -887,11 +887,51 @@ func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdD
 	}, nil
 }
 
+// BandwidthSample is a relay's cumulative byte counters from one heartbeat
+// (F5): bytes forwarded on bridged client streams since the relay process
+// started, and how long it has been running.
+type BandwidthSample struct {
+	ToConnector   int64
+	ToClient      int64
+	UptimeSeconds int64
+}
+
+// F5 SQL fragments for RecordHeartbeat ($12 measuredAt, $13/$14 the byte
+// totals, $15 the relay's uptime in seconds; all may be NULL except $12).
+//
+// bytesNewer: this heartbeat is newer than the stored sample (or there is
+// none). An older heartbeat, delivered late, changes nothing.
+// bytesRateValid: a rate can be derived: both samples exist, neither counter
+// went down, and the relay has been up at least as long as the gap (with 5 s
+// of slack for heartbeat delivery jitter).
+const (
+	bytesNewer     = `(bytes_sampled_at IS NULL OR bytes_sampled_at < $12)`
+	bytesRateValid = `($13::bigint IS NOT NULL AND $14::bigint IS NOT NULL AND bytes_sampled_at IS NOT NULL
+		AND bytes_to_connector_total IS NOT NULL AND bytes_to_client_total IS NOT NULL
+		AND $13::bigint >= bytes_to_connector_total AND $14::bigint >= bytes_to_client_total
+		AND $15::bigint + 5 >= EXTRACT(EPOCH FROM ($12 - bytes_sampled_at)))`
+)
+
+// bytesRate is the per-second growth of a counter column to its new value,
+// or NULL when bytesRateValid doesn't hold.
+func bytesRate(column, param string) string {
+	return `CASE WHEN ` + bytesRateValid + ` THEN (` + param + `::bigint - ` + column + `) / EXTRACT(EPOCH FROM ($12 - bytes_sampled_at)) END`
+}
+
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
 // runtime and certificate metadata. measuredAt is when the heartbeat carrying
 // connectionCount arrived; it is stored as connection_count_at, so a reader can
 // tell how old the count is (Sprint 22 Phase D).
-func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
+//
+// F5: bandwidth (nil = not reported) replaces the stored byte sample when it
+// is newer, and the rate is the counter growth since the previous sample over
+// the time between them. A first sample, a counter that went down or an uptime
+// shorter than the gap (the relay restarted) stores the sample with no rate.
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time, bandwidth *BandwidthSample) error {
+	var toConnector, toClient, uptime *int64
+	if bandwidth != nil {
+		toConnector, toClient, uptime = &bandwidth.ToConnector, &bandwidth.ToClient, &bandwidth.UptimeSeconds
+	}
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
 		    SET status            = 'active',
@@ -907,11 +947,22 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		                                 THEN $10 ELSE connection_count END,
 		        max_connections   = $11,
 		        connection_count_at = GREATEST(connection_count_at, $12),
+		        -- F5: every right-hand side reads the row as it was.
+		        bytes_to_connector_per_sec = CASE WHEN `+bytesNewer+` THEN `+bytesRate("bytes_to_connector_total", "$13")+` ELSE bytes_to_connector_per_sec END,
+		        bytes_to_client_per_sec    = CASE WHEN `+bytesNewer+` THEN `+bytesRate("bytes_to_client_total", "$14")+` ELSE bytes_to_client_per_sec END,
+		        bytes_rate_window_seconds  = CASE WHEN `+bytesNewer+` THEN CASE WHEN `+bytesRateValid+`
+		                                         THEN EXTRACT(EPOCH FROM ($12 - bytes_sampled_at)) END
+		                                         ELSE bytes_rate_window_seconds END,
+		        bytes_to_connector_total   = CASE WHEN `+bytesNewer+` THEN $13 ELSE bytes_to_connector_total END,
+		        bytes_to_client_total      = CASE WHEN `+bytesNewer+` THEN $14 ELSE bytes_to_client_total END,
+		        bytes_sampled_at           = CASE WHEN `+bytesNewer+` THEN CASE WHEN $13::bigint IS NOT NULL THEN $12 END
+		                                         ELSE bytes_sampled_at END,
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND status NOT IN ('deleted', 'revoked')`,
 		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt,
+		toConnector, toClient, uptime,
 	)
 	if err != nil {
 		return fmt.Errorf("record relay heartbeat: %w", err)

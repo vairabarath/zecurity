@@ -33,6 +33,7 @@ type fakeHeartbeatStore struct {
 	publicAddr            string
 	connectionCount       uint32
 	maxConnections        uint32
+	bandwidth             *BandwidthSample // F5
 	err                   error
 	connectorsByWorkspace map[string][]string // returned (as ws→connIDs) by ListConnectorsForRelay
 	// Phase D: answer and calls of RevokedConnectorSPIFFEIDs.
@@ -76,7 +77,7 @@ func (s *fakeHeartbeatStore) EvaluateCapacityLabel(_ context.Context, relayID st
 	}, s.err
 }
 
-func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
+func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time, bandwidth *BandwidthSample) error {
 	s.id = id
 	s.certSerial = certSerial
 	s.certNotAfter = certNotAfter
@@ -88,6 +89,7 @@ func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial s
 	s.publicAddr = publicAddr
 	s.connectionCount = connectionCount
 	s.maxConnections = maxConnections
+	s.bandwidth = bandwidth
 	return s.err
 }
 
@@ -343,9 +345,9 @@ type countingHeartbeatStore struct {
 	recordCalls int
 }
 
-func (s *countingHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
+func (s *countingHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time, bandwidth *BandwidthSample) error {
 	s.recordCalls++
-	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt)
+	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt, bandwidth)
 }
 
 // TestHeartbeat_FirstHeartbeatAfterEvictionPersists — a relay evicted while its

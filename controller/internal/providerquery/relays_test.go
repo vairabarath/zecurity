@@ -338,8 +338,48 @@ func TestRelayResponses_ExcludeSensitiveFields(t *testing.T) {
 
 // The DTOs are the allowed response surface: adding a field must be a
 // deliberate change to this list.
+// F5: bandwidth is null when not reported and for revoked/deleted relays;
+// "measuring" (a sample, no rate yet) keeps the time and nulls the rates.
+func TestRelayBandwidth(t *testing.T) {
+	pool := newTestDB(t)
+	ctx := context.Background()
+	reported := seedRelay(t, pool, "reported", "active", t0)
+	measuring := seedRelay(t, pool, "measuring", "active", t0.Add(time.Minute))
+	silent := seedRelay(t, pool, "silent", "active", t0.Add(2*time.Minute))
+	revoked := seedRelay(t, pool, "revoked", "revoked", t0.Add(3*time.Minute))
+	at := t0.Add(-time.Minute)
+	for _, id := range []string{reported, revoked} {
+		mustExec(t, pool, `UPDATE relays SET bytes_to_connector_total = 9000, bytes_to_client_total = 36000, bytes_sampled_at = $2,
+		                     bytes_to_connector_per_sec = 30, bytes_to_client_per_sec = 120, bytes_rate_window_seconds = 300 WHERE id = $1`, id, at)
+	}
+	mustExec(t, pool, `UPDATE relays SET bytes_to_connector_total = 5, bytes_to_client_total = 5, bytes_sampled_at = $2 WHERE id = $1`, measuring, at)
+
+	page, err := ListRelays(ctx, pool, nil, RelayFilter{Status: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]*RelayBandwidth{}
+	for _, s := range page.Items {
+		got[s.ID] = s.Bandwidth
+	}
+	if b := got[reported]; b == nil || !b.MeasuredAt.Equal(at) || b.MeasuredAt.Location() != time.UTC ||
+		*b.WindowSeconds != 300 || *b.ToConnectorBytesPerSec != 30 || *b.ToClientBytesPerSec != 120 {
+		t.Fatalf("reported: %+v", b)
+	}
+	if b := got[measuring]; b == nil || !b.MeasuredAt.Equal(at) || b.WindowSeconds != nil || b.ToConnectorBytesPerSec != nil || b.ToClientBytesPerSec != nil {
+		t.Fatalf("measuring: %+v", b)
+	}
+	if got[silent] != nil || got[revoked] != nil {
+		t.Fatalf("not reported / revoked must be null: %+v / %+v", got[silent], got[revoked])
+	}
+	d, err := GetRelay(ctx, pool, nil, reported)
+	if err != nil || d.Bandwidth == nil || *d.Bandwidth.ToClientBytesPerSec != 120 {
+		t.Fatalf("detail bandwidth: %+v %v", d, err)
+	}
+}
+
 func TestRelayDTOSurface(t *testing.T) {
-	summary := []string{"address_scope", "attached_connectors", "capacity_label", "cert_not_after", "cert_serial",
+	summary := []string{"address_scope", "attached_connectors", "bandwidth", "capacity_label", "cert_not_after", "cert_serial",
 		"connection_count", "created_at", "drain_state", "draining_since", "hostname", "id", "last_heartbeat_at",
 		"max_connections", "name", "public_addr", "status", "version"}
 	detail := append(append([]string{}, summary...), "attachments", "attachments_truncated", "certificates",

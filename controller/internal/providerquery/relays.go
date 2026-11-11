@@ -44,10 +44,25 @@ type RelaySummary struct {
 	// relay is draining; revoked and deleted relays never show them.
 	DrainingSince *time.Time `json:"draining_since"`
 	DrainState    *string    `json:"drain_state"`
+	// Bandwidth (F5) is null when the relay doesn't report byte counters (an
+	// older relay, or none received yet) and for revoked or deleted relays.
+	Bandwidth *RelayBandwidth `json:"bandwidth"`
 
 	// connectionCountAt is when ConnectionCount was measured; it decides
 	// DrainState and is not part of the response.
 	connectionCountAt *time.Time
+}
+
+// RelayBandwidth is a relay's forwarded-bytes rate on bridged client streams,
+// averaged over WindowSeconds up to MeasuredAt (the time between the two
+// stored heartbeats it was derived from: RELAY_HEARTBEAT_DB_WRITE_INTERVAL,
+// or one heartbeat while draining). The rates and window are null while
+// measuring: after the first sample, or after the relay restarted.
+type RelayBandwidth struct {
+	MeasuredAt             time.Time `json:"measured_at"`
+	WindowSeconds          *float64  `json:"window_seconds"`
+	ToConnectorBytesPerSec *float64  `json:"to_connector_bytes_per_sec"`
+	ToClientBytesPerSec    *float64  `json:"to_client_bytes_per_sec"`
 }
 
 // Drain progress (Sprint 22 Phase D, P4), decided here and never by the
@@ -147,14 +162,18 @@ const relaySummaryColumns = `
        r.capacity_label, r.connection_count, r.max_connections, r.cert_serial, r.cert_not_after,
        r.last_heartbeat_at,
        (SELECT count(*) FROM connector_relay_placement p WHERE p.relay_id = r.id),
-       r.created_at, r.drain_started_at, r.connection_count_at`
+       r.created_at, r.drain_started_at, r.connection_count_at,
+       r.bytes_sampled_at, r.bytes_rate_window_seconds, r.bytes_to_connector_per_sec, r.bytes_to_client_per_sec`
 
 func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	var s RelaySummary
+	var bwAt *time.Time
+	var bwWindow, bwToConnector, bwToClient *float64
 	dest := append([]any{
 		&s.ID, &s.Name, &s.Status, &s.Version, &s.Hostname, &s.PublicAddr, &s.AddressScope,
 		&s.CapacityLabel, &s.ConnectionCount, &s.MaxConnections, &s.CertSerial, &s.CertNotAfter,
 		&s.LastHeartbeatAt, &s.AttachedConnectors, &s.CreatedAt, &s.DrainingSince, &s.connectionCountAt,
+		&bwAt, &bwWindow, &bwToConnector, &bwToClient,
 	}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return RelaySummary{}, err
@@ -163,6 +182,12 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	s.LastHeartbeatAt = utcPtr(s.LastHeartbeatAt)
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.DrainingSince = utcPtr(s.DrainingSince)
+	if bwAt != nil && s.Status != "revoked" && s.Status != "deleted" {
+		s.Bandwidth = &RelayBandwidth{
+			MeasuredAt: bwAt.UTC(), WindowSeconds: bwWindow,
+			ToConnectorBytesPerSec: bwToConnector, ToClientBytesPerSec: bwToClient,
+		}
+	}
 	return s, nil
 }
 

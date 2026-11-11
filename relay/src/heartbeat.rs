@@ -11,7 +11,7 @@ use crate::cert_manager::{CertManager, CertMaterial};
 use crate::config::RelayConfig;
 use crate::relay::v1::relay_service_client::RelayServiceClient;
 use crate::relay::v1::{HeartbeatRequest, HeartbeatResponse};
-use crate::session::ACTIVE_STREAMS;
+use crate::session::{ACTIVE_STREAMS, BYTES_CLIENT_TO_CONNECTOR, BYTES_CONNECTOR_TO_CLIENT};
 use crate::state::RelayState;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -190,6 +190,12 @@ async fn run_connected<T: HeartbeatTransport>(
             connection_count: ACTIVE_STREAMS.load(std::sync::atomic::Ordering::Relaxed),
             max_connections: settings.max_connections,
             registered_connector_spiffe_ids: state.registered_connector_spiffe_ids(),
+            bytes_client_to_connector: Some(
+                BYTES_CLIENT_TO_CONNECTOR.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            bytes_connector_to_client: Some(
+                BYTES_CONNECTOR_TO_CLIENT.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         };
         let response = transport.send(&mut conn, request).await?;
         // Connector-revocation Phase D: drop revoked connectors (sticky set).
@@ -300,12 +306,16 @@ mod tests {
         }
     }
 
+    /// F5: (bytes_client_to_connector, bytes_connector_to_client) as sent.
+    type SentBytes = (Option<u64>, Option<u64>);
+
     /// Answers every heartbeat with a fixed revoked list and records the
     /// registered ids each request carried.
     #[derive(Clone)]
     struct RevokingTransport {
         revoked: Vec<String>,
         sent_ids: Arc<Mutex<Vec<Vec<String>>>>,
+        sent_bytes: Arc<Mutex<Vec<SentBytes>>>,
     }
 
     impl HeartbeatTransport for RevokingTransport {
@@ -320,6 +330,10 @@ mod tests {
             _conn: &mut (),
             request: HeartbeatRequest,
         ) -> Result<HeartbeatResponse> {
+            self.sent_bytes.lock().unwrap().push((
+                request.bytes_client_to_connector,
+                request.bytes_connector_to_client,
+            ));
             self.sent_ids
                 .lock()
                 .unwrap()
@@ -449,7 +463,14 @@ mod tests {
         let transport = RevokingTransport {
             revoked: vec![revoked.clone()],
             sent_ids: Arc::default(),
+            sent_bytes: Arc::default(),
         };
+        // F5: the counters are process-wide and only grow (other tests bridge
+        // bytes concurrently), so the request carries at least these values.
+        let floor = (
+            crate::session::BYTES_CLIENT_TO_CONNECTOR.load(std::sync::atomic::Ordering::Relaxed),
+            crate::session::BYTES_CONNECTOR_TO_CLIENT.load(std::sync::atomic::Ordering::Relaxed),
+        );
         let settings = HeartbeatSettings {
             listen_port: 9093,
             max_connections: 16,
@@ -471,6 +492,11 @@ mod tests {
         let mut want = vec![revoked.clone(), kept];
         want.sort();
         assert_eq!(sent, want, "request carries the registered ids");
+        let (up, down) = transport.sent_bytes.lock().unwrap()[0];
+        assert!(
+            up.is_some_and(|v| v >= floor.0) && down.is_some_and(|v| v >= floor.1),
+            "F5: request carries both byte counters, got {up:?} / {down:?}"
+        );
         assert!(state.is_revoked(&revoked));
         assert!(c2.close_reason().is_none(), "unlisted connector untouched");
     }
