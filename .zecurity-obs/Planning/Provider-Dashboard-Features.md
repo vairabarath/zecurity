@@ -45,7 +45,7 @@ Checked against `main` `520851d4`. "Quick" = controller read API + console view 
 | F14 | Expiry alerting | ◐ Partly | Banner / filter **already in place** (Overview "Needs attention" + certificate tile, Certificates listing window 24 h – 365 d); sending alerts needs F26 |
 | F15 | Revocation + CRL/OCSP status | ◐ Partly | CRL status view **implemented** (`GET /provider/pki`, quick-win PR); OCSP (large) |
 | F16 | CA hierarchy view | ◐ Partly | Root → Intermediate → workspace tree **implemented** (`GET /provider/pki`, quick-win PR); tick after merge + live check |
-| F17 | Append-only provider action log | ◐ Partly | Database-enforced append-only (one migration); before/after fields |
+| F17 | Append-only provider action log | ◐ Partly | Implemented on `feat/f17-append-only-audit` (migration `051_`, before/after); PR pending; tick after merge + live check |
 | F18 | Audit search and filter | ✅ Done | — |
 
 ### Can have (Phase 2 and 3): 2 of 22 done
@@ -105,7 +105,7 @@ All implemented on branch `feat/provider-quick-wins` (one PR, not merged); F14's
 - [ ] **F16** CA hierarchy view ◐ (CAs listed, no hierarchy view)
 
 *Audit*
-- [ ] **F17** Append-only provider action log (actor, action, target, before/after, timestamp) ◐ (not DB-enforced, no before/after)
+- [ ] **F17** Append-only provider action log (actor, action, target, before/after, timestamp) ◐ (implemented: DB triggers + before/after; PR pending)
 - [x] **F18** Audit search and filter ✅
 
 ### Can have (Phase 2)
@@ -182,7 +182,7 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | F14 | Expiry alerting (threshold-based) | ◐ | 🟢 (lite) / 🟡 | Expiry buckets (<24h, <7d, <30d) visible in the console. No alert is sent; dispatch depends on F26. | |
 | F15 | Revocation action + CRL/OCSP status | ◐ | 🟢 (CRL status) / 🔴 (OCSP) | Revoke actions exist (relays: console; connectors/shields: admin UI); workspace and relay CRLs are published. Missing: **CRL status view**, **OCSP**. | |
 | F16 | CA hierarchy view | ◐ | 🟢 | CAs appear in the certificate inventory; no Root → Intermediate → workspace hierarchy view. | |
-| F17 | Append-only provider action log | ◐ | 🟡 | `provider_audit_logs` has actor, action, target, details, IP, timestamp; mutations audited (transactionally for revoke/delete/create). Missing: **DB-enforced append-only** (trigger or privileges) and **before/after** fields. | |
+| F17 | Append-only provider action log | ◐ | 🟡 | `provider_audit_logs` has actor, action, target, details, IP, timestamp; mutations audited (transactionally for revoke/delete/create). Implemented (branch `feat/f17-append-only-audit`, PR pending): migration `051_provider_audit_append_only.sql` refuses UPDATE, DELETE and TRUNCATE (incl. TRUNCATE ... CASCADE) with SQLSTATE 42501; `provider.WithChange` adds `details.before` / `details.after` (state fields only, never credentials) to operator create/bootstrap, role change, disable/enable, password reset/change, TOTP enrol/reset, recover-admin, relay create/revoke/delete/drain/resume. Events (login, logout, MFA verify, rate limits, tenant.read) carry no before/after. Limit: the table owner or a superuser can still disable the triggers (needs a non-owner app role, out of scope). | |
 | F18 | Audit search and filter | ✅ | — | Audit page with filters and pagination (Sprint 21). | |
 
 ### Can have (Phase 2)

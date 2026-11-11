@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -286,6 +287,27 @@ func TestTOTP_BootstrapSuperAdminMustEnrol(t *testing.T) {
 	}
 	if n := e.auditCount(t, provider.AuditTOTPEnroll); n != 1 {
 		t.Fatalf("totp_enroll audit rows: %d", n)
+	}
+	// F17: bootstrap and the first password change record before/after.
+	for _, c := range []struct{ action, want string }{
+		{provider.AuditBootstrapCreate, `{"after":{"must_change_password":true,"role":"super-admin","status":"active"}}`},
+		{provider.AuditPasswordChange, `{"after":{"must_change_password":false},"before":{"must_change_password":true}}`},
+	} {
+		var got string
+		if err := e.pool.QueryRow(context.Background(),
+			`SELECT jsonb_build_object('before', details->'before', 'after', details->'after')::text
+			   FROM provider_audit_logs WHERE action = $1`, c.action).Scan(&got); err != nil {
+			t.Fatalf("%s audit row: %v", c.action, err)
+		}
+		var g, w any
+		_ = json.Unmarshal([]byte(got), &g)
+		_ = json.Unmarshal([]byte(c.want), &w)
+		if gm, ok := g.(map[string]any); ok && gm["before"] == nil {
+			delete(gm, "before")
+		}
+		if !reflect.DeepEqual(g, w) {
+			t.Fatalf("%s before/after %s, want %s", c.action, got, c.want)
+		}
 	}
 	if len(e.sealer.contexts) == 0 {
 		t.Fatal("the TOTP secret was never sealed")

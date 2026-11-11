@@ -123,6 +123,11 @@ func lockActiveSuperAdmins(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// createdOperatorState is the after-state of a newly created operator (F17).
+func createdOperatorState(u *ProviderUser) map[string]any {
+	return map[string]any{"role": u.Role, "status": "active", "must_change_password": u.MustChangePassword}
+}
+
 // lockTarget loads and locks the target row (including disabled rows).
 func lockTarget(ctx context.Context, tx pgx.Tx, id string) (*ProviderUser, error) {
 	u, err := scanProviderUser(tx.QueryRow(ctx,
@@ -180,7 +185,7 @@ func (s *Store) CreateOperator(ctx context.Context, actor AuditActor, email, rol
 			return fmt.Errorf("insert provider user: %w", err)
 		}
 		if err := s.auditOperator(ctx, tx, actor, AuditOperatorCreate, u,
-			map[string]any{"email": u.Email, "role": u.Role}); err != nil {
+			WithChange(map[string]any{"email": u.Email, "role": u.Role}, nil, createdOperatorState(u))); err != nil {
 			return err
 		}
 		created = u
@@ -232,7 +237,8 @@ func (s *Store) ChangeRole(ctx context.Context, actor AuditActor, id, role strin
 			return fmt.Errorf("change provider role: %w", err)
 		}
 		if err := s.auditOperator(ctx, tx, actor, AuditOperatorRoleChange, u,
-			map[string]any{"email": u.Email, "from": target.Role, "to": u.Role}); err != nil {
+			WithChange(map[string]any{"email": u.Email, "from": target.Role, "to": u.Role},
+				map[string]any{"role": target.Role}, map[string]any{"role": u.Role})); err != nil {
 			return err
 		}
 		result, changed = u, true
@@ -289,6 +295,7 @@ func (s *Store) SetDisabled(ctx context.Context, actor AuditActor, id string, di
 				return fmt.Errorf("disable provider user: %w", err)
 			}
 			action = AuditOperatorDisable
+			WithChange(details, map[string]any{"status": "active"}, map[string]any{"status": "disabled"})
 		} else {
 			if _, err := tx.Exec(ctx,
 				`UPDATE provider_users
@@ -299,6 +306,7 @@ func (s *Store) SetDisabled(ctx context.Context, actor AuditActor, id string, di
 			}
 			action = AuditOperatorEnable
 			details["credential_cleared"] = true
+			WithChange(details, map[string]any{"status": "disabled"}, map[string]any{"status": "active"})
 		}
 		if err := s.auditOperator(ctx, tx, actor, action, target, details); err != nil {
 			return err
@@ -336,6 +344,8 @@ func (s *Store) ResetOperatorPassword(ctx context.Context, actor AuditActor, id,
 			return fmt.Errorf("reset provider password: %w", err)
 		}
 		return s.auditOperator(ctx, tx, actor, AuditOperatorPasswordReset, target,
-			map[string]any{"email": target.Email})
+			WithChange(map[string]any{"email": target.Email},
+				map[string]any{"must_change_password": target.MustChangePassword},
+				map[string]any{"must_change_password": true}))
 	})
 }

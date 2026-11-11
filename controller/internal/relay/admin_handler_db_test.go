@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -295,6 +296,9 @@ func TestAdminDB_SuperAdminRevokeAndDelete(t *testing.T) {
 	if rev[0]["details"].(map[string]any)["reason"] != "key compromised" || del[0]["details"].(map[string]any)["reason"] != "host retired" {
 		t.Fatalf("audit reasons: %+v / %+v", rev[0], del[0])
 	}
+	// F17: the status before and after, read under the row lock.
+	wantStatusChange(t, rev[0], "pending", "revoked")
+	wantStatusChange(t, del[0], "pending", "deleted")
 	if e.fanoutCount() != 2 {
 		t.Fatalf("fan-out calls: %d, want 2", e.fanoutCount())
 	}
@@ -369,6 +373,19 @@ func TestAdminDB_RepeatedOperations(t *testing.T) {
 	}
 	if len(e.auditRows(t, provider.ActionRelayRevoke)) != 1 || len(e.auditRows(t, provider.ActionRelayDelete)) != 1 || e.fanoutCount() != 2 {
 		t.Fatal("refused repeats must write no audit row and call no fan-out")
+	}
+	// F17: delete after revoke records revoked -> deleted.
+	wantStatusChange(t, e.auditRows(t, provider.ActionRelayDelete)[0], "revoked", "deleted")
+}
+
+// wantStatusChange checks an audit row's details.before/after status (F17).
+func wantStatusChange(t *testing.T, row map[string]any, before, after string) {
+	t.Helper()
+	d := row["details"].(map[string]any)
+	b, _ := d["before"].(map[string]any)
+	a, _ := d["after"].(map[string]any)
+	if len(b) != 1 || len(a) != 1 || b["status"] != before || a["status"] != after {
+		t.Fatalf("before/after %v -> %v, want status %s -> %s", d["before"], d["after"], before, after)
 	}
 }
 
@@ -533,6 +550,9 @@ func TestAdminDB_CreateByRelayOps(t *testing.T) {
 	rows := e.auditRows(t, provider.ActionRelayCreate)
 	if len(rows) != 1 || rows[0]["ip"] != "192.0.2.10" || strings.Contains(rows[0]["details"].(map[string]any)["name"].(string), out.ProvisioningToken) {
 		t.Fatalf("create audit: %+v", rows)
+	}
+	if d := rows[0]["details"].(map[string]any); d["before"] != nil || !reflect.DeepEqual(d["after"], map[string]any{"name": "relay-new", "status": "pending"}) {
+		t.Fatalf("create before/after: %v -> %v", d["before"], d["after"])
 	}
 	for _, row := range rows {
 		raw, _ := json.Marshal(row)

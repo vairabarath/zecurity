@@ -220,12 +220,12 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 				Action:         provider.ActionRelayCreate,
 				TargetType:     "relay",
 				TargetID:       relayID,
-				Details: map[string]any{
+				Details: provider.WithChange(map[string]any{
 					"name": name,
 					"ttl":  ProvisioningTokenTTL.String(),
 					"dns":  dnsAllowlist,
 					"ip":   ipAllowlist,
-				},
+				}, nil, map[string]any{"name": name, "status": "pending"}),
 				IPAddress: provider.ClientIP(r),
 			})
 		})
@@ -334,7 +334,9 @@ func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, actio
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
+	var before string // the relay's status under the row lock, for the audit (F17)
 	guard := func(name, status string) error {
+		before = status
 		switch {
 		case status == "deleted":
 			return errAlreadyDeleted
@@ -346,7 +348,9 @@ func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, actio
 		return nil
 	}
 	_, err := h.Store.RevokeRelayGuarded(ctx, relayID, reason, guard, func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		afterStatus := "revoked"
 		if action == provider.ActionRelayDelete {
+			afterStatus = "deleted"
 			if _, err := tx.Exec(ctx,
 				`UPDATE relays SET status = 'deleted', updated_at = NOW() WHERE id = $1`, relayID); err != nil {
 				return fmt.Errorf("mark relay deleted: %w", err)
@@ -358,8 +362,9 @@ func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, actio
 			Action:         action,
 			TargetType:     "relay",
 			TargetID:       relayID,
-			Details:        map[string]any{"serials_revoked": revoked, "reason": reason},
-			IPAddress:      provider.ClientIP(r),
+			Details: provider.WithChange(map[string]any{"serials_revoked": revoked, "reason": reason},
+				map[string]any{"status": before}, map[string]any{"status": afterStatus}),
+			IPAddress: provider.ClientIP(r),
 		})
 	})
 	switch {
@@ -421,8 +426,10 @@ func (h *AdminHandler) Drain(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	changed, err := h.Store.DrainRelay(ctx, relayID, func(ctx context.Context, tx pgx.Tx, _ time.Time) error {
-		details := map[string]any{}
+	changed, err := h.Store.DrainRelay(ctx, relayID, func(ctx context.Context, tx pgx.Tx, started time.Time) error {
+		details := provider.WithChange(nil,
+			map[string]any{"draining": false},
+			map[string]any{"draining": true, "drain_started_at": started.UTC()})
 		if reason != "" {
 			details["reason"] = reason
 		}
@@ -466,8 +473,10 @@ func (h *AdminHandler) Resume(w http.ResponseWriter, r *http.Request) {
 			Action:         provider.ActionRelayResume,
 			TargetType:     "relay",
 			TargetID:       relayID,
-			Details:        map[string]any{"drained_since": drainedSince.UTC()},
-			IPAddress:      provider.ClientIP(r),
+			Details: provider.WithChange(map[string]any{"drained_since": drainedSince.UTC()},
+				map[string]any{"draining": true, "drain_started_at": drainedSince.UTC()},
+				map[string]any{"draining": false}),
+			IPAddress: provider.ClientIP(r),
 		})
 	})
 	h.finishDrainChange(w, r, provider.ActionRelayResume, relayID, false, changed, err)

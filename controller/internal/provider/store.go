@@ -61,6 +61,23 @@ type AuditEntry struct {
 	IPAddress      string
 }
 
+// WithChange records a state transition in audit details (F17): the changed
+// fields as they were (details["before"]) and as they are now
+// (details["after"]). Only state fields go here, never credentials or secrets.
+// A create has no before (nil omits it). details may be nil.
+func WithChange(details, before, after map[string]any) map[string]any {
+	if details == nil {
+		details = map[string]any{}
+	}
+	if before != nil {
+		details["before"] = before
+	}
+	if after != nil {
+		details["after"] = after
+	}
+	return details
+}
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -301,7 +318,7 @@ func (s *Store) CreateBootstrapSuperAdminIfNone(ctx context.Context, email, pass
 		Action:        AuditBootstrapCreate,
 		TargetType:    "provider_user",
 		TargetID:      u.ID,
-		Details:       map[string]any{"email": u.Email, "role": u.Role},
+		Details:       WithChange(map[string]any{"email": u.Email, "role": u.Role}, nil, createdOperatorState(u)),
 	}); err != nil {
 		return 0, nil, err
 	}
