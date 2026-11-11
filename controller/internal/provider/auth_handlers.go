@@ -230,8 +230,10 @@ func (h *AuthHandlers) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		Action:         AuditPasswordChange,
 		TargetType:     "provider_user",
 		TargetID:       u.ID,
-		Details:        map[string]any{"was_required": u.MustChangePassword},
-		IPAddress:      ip,
+		Details: WithChange(map[string]any{"was_required": u.MustChangePassword},
+			map[string]any{"must_change_password": u.MustChangePassword},
+			map[string]any{"must_change_password": updated.MustChangePassword}),
+		IPAddress: ip,
 	}); err != nil {
 		log.Printf("provider password change: audit: %v", err)
 	}
