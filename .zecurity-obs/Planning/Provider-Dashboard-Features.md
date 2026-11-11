@@ -44,8 +44,8 @@ Checked against `main` `37a66bb9`. "Quick" = controller read API + console view 
 | F11 | Failover pool per tenant | ⬜ Not started | Needs D-03 (after F9) |
 | F12 | Per-tenant quotas | ⬜ Not started | Needs a decision |
 | F13 | Certificate inventory by expiry | ✅ Done | — |
-| F14 | Expiry alerting | ◐ Partly | Banner / filter in place (Overview "Needs attention" + certificate tile, Certificates window 24 h – 365 d); **sending** alerts needs a channel/recipients decision (or F26) |
-| F15 | Revocation + CRL/OCSP status | ◐ Partly | CRL status merged (`GET /provider/pki`, PR #190, live check pending); **OCSP**: decide whether it is needed (agents use CRLs) |
+| F14 | Expiry alerting | 🚧 In progress | Banner / filter in place; **daily super-admin email** (D-36) implemented on `feat/f14-expiry-email`, PR pending |
+| F15 | Revocation + CRL/OCSP status | 🧪 Merged | Closed as **CRL-based by design** (D-35: no OCSP); CRL status merged (`GET /provider/pki`, PR #190); live check pending |
 | F16 | CA hierarchy view | 🧪 Merged | Root → Intermediate → workspace tree merged (`GET /provider/pki`, PR #190); live check pending |
 | F17 | Append-only provider action log | 🧪 Merged | DB-enforced append-only + before/after merged (PR #192, migration `051_`); live check pending |
 | F18 | Audit search and filter | ✅ Done | — |
@@ -88,8 +88,8 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 | **D-34** tenant suspension epic + deletion semantics (Q4) | F7 | Separate epic |
 | Quota model | F12 | Which limits (connectors, users, sessions), where enforced |
 | Billing model (F34) | F8 (plan) | Wait for F34 |
-| Alert channel and recipients | F14 (sending) | Daily email to super-admins via existing SMTP, or fold into F26 |
-| OCSP needed? | F15 (OCSP) | Close as CRL-based by design |
+| ~~Alert channel and recipients~~ | F14 (sending) | **Decided D-36** (2026-11-11): daily email to super-admins |
+| ~~OCSP needed?~~ | F15 (OCSP) | **Decided D-35** (2026-11-11): no OCSP, CRL-based by design |
 
 ## Checklist
 
@@ -113,8 +113,8 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 
 *PKI*
 - [x] **F13** Certificate inventory with expiry, sorted by days remaining ✅
-- [ ] **F14** Expiry alerting (threshold-based) ◐ (banner/filter in place; no alerts sent)
-- [ ] **F15** Revocation action + CRL/OCSP status ◐ (CRL status merged, PR #190; no OCSP)
+- [ ] **F14** Expiry alerting (threshold-based) 🚧 (banner/filter in place; daily super-admin email, D-36, PR pending)
+- [ ] **F15** Revocation action + CRL/OCSP status 🧪 (CRL status merged, PR #190; OCSP closed by D-35; live check pending)
 - [ ] **F16** CA hierarchy view 🧪 (merged, PR #190; live check pending)
 
 *Audit*
@@ -194,8 +194,8 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 | F11 | Failover pool per tenant | ⬜ | ⚖️ 🔴 | Connector-side failover between relays exists; no designated secondary pool (depends on F9). | |
 | F12 | Per-tenant quotas | ⬜ | ⚖️ 🟡 | Needs quota entities and enforcement points (connector/user/session creation). | |
 | F13 | Certificate inventory with expiry, sorted by days remaining | ✅ | — | Certificates page: root, intermediate, workspace CAs and agent certificates, ordered by `not_after`, expiry buckets (Sprint 21). | |
-| F14 | Expiry alerting (threshold-based) | ◐ | ⚖️ 🟡 | Expiry buckets (<24h, <7d, <30d), Overview "Needs attention" and the Certificates window filter are in place. No alert is sent: needs a channel/recipient decision (a minimal daily super-admin email over the existing SMTP config) or F26. | |
-| F15 | Revocation action + CRL/OCSP status | ◐ | ⚖️ (OCSP) | Revoke actions exist (relays: console; connectors/shields: admin UI); workspace and relay CRLs are published; **CRL status per signer** merged (`GET /provider/pki`, PR #190, live check pending). Missing: **OCSP**. Clients, connectors and relays check CRLs; nothing would query an OCSP responder without agent changes. Recommendation: close as CRL-based by design. | |
+| F14 | Expiry alerting (threshold-based) | 🚧 | 🟡 | Expiry buckets (<24h, <7d, <30d), Overview "Needs attention" and the Certificates window filter are in place. **Daily email** (D-36) on `feat/f14-expiry-email`, PR pending: `internal/certalert` job (checked a minute after start, then hourly; one email per UTC day via a Valkey marker; retried if every send fails); recipients = active super-admins; platform CAs from 30 days, relays and the controller gRPC certificate within 24 h or expired; tenant agent certificates excluded (short-lived, self-renewing); audited `cert_expiry.alert_sent`; `CERT_EXPIRY_ALERTS=false` disables. Rules and other channels: F26. | |
+| F15 | Revocation action + CRL/OCSP status | 🧪 | — (live check) | Revoke actions exist (relays: console; connectors/shields: admin UI); workspace and relay CRLs are published; **CRL status per signer** merged (`GET /provider/pki`, PR #190). **OCSP closed by D-35** (2026-11-11): CRL-based by design; clients, connectors and relays check CRLs. | |
 | F16 | CA hierarchy view | 🧪 | — (live check) | Root → Intermediate → workspace CA tree merged (`GET /provider/pki`, PR #190): parents linked by SKI/AKI, paginated workspace CAs, unlinked CAs listed separately. | |
 | F17 | Append-only provider action log | 🧪 | — (live check) | `provider_audit_logs` has actor, action, target, details, IP, timestamp; mutations audited (transactionally for revoke/delete/create). Merged (PR #192): migration `051_provider_audit_append_only.sql` refuses UPDATE, DELETE and TRUNCATE (incl. TRUNCATE ... CASCADE) with SQLSTATE 42501; `provider.WithChange` adds `details.before` / `details.after` (state fields only, never credentials) to operator create/bootstrap, role change, disable/enable, password reset/change, TOTP enrol/reset, recover-admin, relay create/revoke/delete/drain/resume. Events (login, logout, MFA verify, rate limits, tenant.read) carry no before/after. Limit: the table owner or a superuser can still disable the triggers (needs a non-owner app role, out of scope). | |
 | F18 | Audit search and filter | ✅ | — | Audit page with filters and pagination (Sprint 21). | |
@@ -249,3 +249,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-06: status snapshot tables added (Must have / Can have); statuses checked against `main` `520851d4`. F6 done (Phase D, PR #156, AT-D live PASS). F25 partly done and F5/F23 notes updated (PENDING-10 health checks and Prometheus metrics). Progress 8 / 40.
 - 2026-11-06: quick-win batch implemented (branch `feat/provider-quick-wins`, one PR): F8 policy counts, F15/F16 `GET /provider/pki` (CA tree by key identifiers + CRL status per signer), F25 `GET /provider/health` (super-admin, sanitized), F38 audit export (CSV/JSON, client-side). F14's quick part was already in place (corrected). Follow-up: `resources` has no `tenant_id` index; the F8 count uses one grouped aggregate per statement instead (an index needs a migration).
 - 2026-11-11: refreshed against `main` `37a66bb9`. Merged: quick wins (PR #190: F8 policy counts, F15 CRL status, F16 CA tree, F25 health card, F38 audit export), F17 append-only audit + before/after (PR #192, migration `051_`), F5 relay bandwidth (PR #193, migration `052_`, heartbeat fields 9/10). New status 🧪 = merged, live check pending ([[Pending-Live-Tests]]). Every remaining Must-have item now needs a decision (table under the snapshot). Progress unchanged at 8 / 40 until the live session.
+- 2026-11-11: decisions D-35 (F15: no OCSP, CRL-based by design) and D-36 (F14: daily super-admin expiry email) recorded in `docs/provider-dashboard-architecture-decisions.md`. F15 → 🧪 (live check of the CRL status view). F14 email implemented on `feat/f14-expiry-email`, PR pending.

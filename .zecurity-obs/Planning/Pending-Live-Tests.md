@@ -13,11 +13,12 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | ID | Feature | PR | Status |
 |---|---|---|---|
 | F8 | Tenant detail: policy counts | #190 | ☐ |
-| F15 / F16 | CA hierarchy and CRL status | #190 | ☐ |
+| F15 / F16 | CA hierarchy and CRL status (F15 OCSP closed, D-35) | #190 | ☐ |
 | F25 | Control-plane health on Overview | #190 | ☐ |
 | F38 | Audit export (CSV, JSON) | #190 | ☐ |
 | F17 | Append-only audit log, before/after | #192 | ☐ |
-| F5 | Relay bandwidth | PR pending | ☐ |
+| F5 | Relay bandwidth | #193 | ☐ |
+| F14 | Daily certificate expiry email | PR pending | ☐ |
 
 Add each Must-have item here as it merges.
 
@@ -76,6 +77,18 @@ Needs the new relay build on a lab relay (heartbeat fields 9/10) and migration `
 4. Restart the relay service: the next stored sample shows **Measuring…** (no spike, no negative rate), then rates return.
 5. An older relay build (without the fields) shows **Not reported**, and a revoked relay shows Not reported.
 6. Relay journal: no errors; heartbeat unchanged otherwise (connection count, revocation answers still work).
+
+## F14: Daily certificate expiry email
+Needs SMTP configured on the controller (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` and the SMTP password) and a super-admin with a mailbox you can read.
+1. Put something in scope: a relay whose certificate is expired or expires within 24 hours (for example a powered-off lab relay whose certificate lapsed), or a workspace CA within 30 days of expiry.
+2. Restart the controller. About one minute later the email arrives (subject "Zecurity: N certificate(s) need attention").
+3. **Pass:**
+   - every active super-admin receives exactly one email; disabled super-admins and relay-ops receive none;
+   - the email lists the expected certificates in the right section (Expired / within 24 hours / 7 days / 30 days) with name, serial and expiry time, and no tenant agent certificates;
+   - restarting the controller again the same day sends nothing more;
+   - the Audit page shows one `cert_expiry.alert_sent` row by `system:cert-expiry-alert` with the counts (no email addresses);
+   - with nothing in scope, no email is sent.
+4. With `CERT_EXPIRY_ALERTS=false`, the controller log says the alert is disabled and nothing is sent.
 
 ## Results log
 | Date | ID | Result | Notes |
