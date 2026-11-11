@@ -31,6 +31,7 @@ function detail(over: Partial<RelayDetail> = {}): RelayDetail {
     created_at: '2026-10-01T00:00:00Z',
     draining_since: null,
     drain_state: null,
+    bandwidth: null,
     in_relay_list: true,
     eligible_relay_count: 2,
     dns_allowlist: ['relay.example.com'],

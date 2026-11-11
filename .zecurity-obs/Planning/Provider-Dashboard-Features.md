@@ -33,7 +33,7 @@ Checked against `main` `520851d4`. "Quick" = controller read API + console view 
 | F2 | Relay certificates from the provider CA | ✅ Done | — |
 | F3 | Relay revoke and decommission | ✅ Done | — |
 | F4 | Relay list: status, version, region, heartbeat | ◐ Partly | Region needs the pool/region decision (D-03) |
-| F5 | Capacity view: sessions, bandwidth, headroom | ◐ Partly | Bandwidth needs relay heartbeat fields; connection metrics are now exported to Prometheus (PENDING-10) |
+| F5 | Capacity view: sessions, bandwidth, headroom | ◐ Partly | Bandwidth implemented on `feat/f5-relay-bandwidth` (heartbeat fields 9/10, migration `052_`); PR pending; tick after merge + live check |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
 | F7 | Tenant create / suspend / delete | ⬜ Not started | Needs a decision (D-34 epic) |
 | F8 | Tenant detail page | ◐ Partly | Policy counts **implemented** (quick-win PR, branch `feat/provider-quick-wins`); plan needs billing (F34) |
@@ -87,7 +87,7 @@ All implemented on branch `feat/provider-quick-wins` (one PR, not merged); F14's
 - [x] **F2** Cert issuance to relay from provider CA ✅
 - [x] **F3** Relay decommission / revoke ✅
 - [ ] **F4** Relay list with status, version, region, last heartbeat ◐ (region missing)
-- [ ] **F5** Capacity view — active sessions, bandwidth, headroom ◐ (bandwidth missing; connection metrics exported to Prometheus, PENDING-10)
+- [ ] **F5** Capacity view — active sessions, bandwidth, headroom ◐ (bandwidth implemented, PR pending; connection metrics exported to Prometheus, PENDING-10)
 - [x] **F6** Drain mode (no new placements, bleed off existing) ✅ (Phase D, PR #156; AT-D live PASS)
 
 *Tenants*
@@ -170,7 +170,7 @@ Features — or the quick part of a feature — that fit "controller API + conso
 | F2 | Cert issuance to relay from provider CA | ✅ | — | Relay certificates signed by the platform Intermediate, SANs limited to the stored allowlist; renewal with key continuity (Sprint 20/21). | |
 | F3 | Relay decommission / revoke | ✅ | — | API hardened in Phase A (PR #142: reason, typed name, super-admin only); console revoke/delete in Phase X (PR #154); CRL + connector migration live-checked. | |
 | F4 | Relay list with status, version, region, last heartbeat | ◐ | ⚖️ 🔴 | Status, version, last heartbeat, address scope, capacity tier: done (Sprint 21 Relays page). **Region** needs the region/pool model (D-03, not in Sprint 22). | |
-| F5 | Capacity view — active sessions, bandwidth, headroom | ◐ | 🔴 | Connections / max and capacity tier shown; `relay_connections_total` and `relay_capacity_utilization_ratio` exported to Prometheus (PENDING-10). **Bandwidth** isn't measured anywhere: needs relay heartbeat fields (additive proto + relay change). | |
+| F5 | Capacity view — active sessions, bandwidth, headroom | ◐ | 🔴 | Connections / max and capacity tier shown; `relay_connections_total` and `relay_capacity_utilization_ratio` exported to Prometheus (PENDING-10). **Bandwidth** implemented (branch `feat/f5-relay-bandwidth`, PR pending): relay counts bytes per direction as they flow and reports cumulative counters in heartbeat fields 9/10 (`optional`, additive); migration `052_relay_bandwidth.sql`; `RecordHeartbeat` derives the rate from the previous stored sample (late heartbeats ignored; counter decrease or uptime < gap = restart, no rate); `GET /provider/relays[/{id}]` returns `bandwidth` (null = not reported / revoked; null rates = measuring); console Bandwidth column and detail card. Rate is an average over the heartbeat DB-write window (5 min default). Not in scope: a bandwidth ceiling ("bandwidth headroom" needs a configured link capacity), Prometheus throughput metric. | |
 | F6 | Drain mode | ✅ | — | Sprint 22 **Phase D** (D-32), PR #156: drained relay leaves the published list, last-eligible-relay guard, `043_relay_drain.sql`; AT-D live PASS (incl. AT-D6 client data plane); follow-ups FU-6, FU-7, FU-14. | |
 | F7 | Tenant create / suspend / delete | ⬜ | ⚖️ 🔴 | Tenants are created by first sign-in only. Suspension is a separate epic (D-34); deletion semantics are open (decisions doc Q4). | |
 | F8 | Tenant detail page — connectors, users, policies count, plan | ◐ | 🟢 (policies) / ⚖️ (plan) | Done: connectors, shields, remote networks, users, devices with counts (Sprint 21, audited `tenant.read`). Missing: **policy counts** (quick), **plan** (needs F34). | |

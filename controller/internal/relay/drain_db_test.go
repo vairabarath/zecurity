@@ -456,7 +456,7 @@ func TestDrainDB_RecordHeartbeatStoresMeasuredAt(t *testing.T) {
 	id := e.eligibleRelay(t, "relay-a")
 	measured := time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)
 	if err := e.store.RecordHeartbeat(context.Background(), id, "s", time.Now().Add(time.Hour), "1.0", "h",
-		"", 0, "", "relay-a.relay.test:9093", 7, 100, measured); err != nil {
+		"", 0, "", "relay-a.relay.test:9093", 7, 100, measured, nil); err != nil {
 		t.Fatal(err)
 	}
 	var count int

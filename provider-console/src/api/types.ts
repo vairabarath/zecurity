@@ -190,6 +190,21 @@ export interface RelaySummary {
   draining_since: string | null
   /** Drain progress, decided by the controller from fresh telemetry only. */
   drain_state: DrainState | null
+  /** F5: null when the relay doesn't report byte counters, and for revoked/deleted relays. */
+  bandwidth: RelayBandwidth | null
+}
+
+/**
+ * F5: bytes per second forwarded on bridged client streams, averaged over
+ * window_seconds up to measured_at (the gap between two stored heartbeats).
+ * The rates and window are null while measuring (first sample, or after a
+ * relay restart).
+ */
+export interface RelayBandwidth {
+  measured_at: string
+  window_seconds: number | null
+  to_connector_bytes_per_sec: number | null
+  to_client_bytes_per_sec: number | null
 }
 
 /**

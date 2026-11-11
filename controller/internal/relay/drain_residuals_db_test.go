@@ -24,7 +24,7 @@ func TestDrainDB_OlderHeartbeatKeepsNewerCount(t *testing.T) {
 	beat := func(count uint32, at time.Time) {
 		t.Helper()
 		if err := e.store.RecordHeartbeat(context.Background(), id, "s", time.Now().Add(time.Hour), "1.0", "h",
-			"", 0, "", "relay-a.relay.test:9093", count, 100, at); err != nil {
+			"", 0, "", "relay-a.relay.test:9093", count, 100, at, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

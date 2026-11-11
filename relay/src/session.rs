@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,12 @@ use crate::spiffe::{same_workspace, ParsedSpiffe};
 use crate::state::RelayState;
 
 pub static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
+
+/// F5: bytes forwarded on bridged client streams since the process started,
+/// per direction, counted as they flow (not when a bridge ends), so a
+/// long-lived stream shows up in every heartbeat. Reported in the heartbeat.
+pub static BYTES_CLIENT_TO_CONNECTOR: AtomicU64 = AtomicU64::new(0);
+pub static BYTES_CONNECTOR_TO_CLIENT: AtomicU64 = AtomicU64::new(0);
 
 struct ProbeRateWindow {
     count: u32,
@@ -439,9 +445,14 @@ async fn pipe_streams(
     let down = std::sync::atomic::AtomicU64::new(0);
     let first_done = std::sync::Mutex::new(None::<&'static str>);
     let client_to_connector = async {
-        counted_copy(&mut client_recv, &mut connector_send, &up)
-            .await
-            .map_err(|e| ("pipe Client to Connector", e))?;
+        counted_copy(
+            &mut client_recv,
+            &mut connector_send,
+            &up,
+            &BYTES_CLIENT_TO_CONNECTOR,
+        )
+        .await
+        .map_err(|e| ("pipe Client to Connector", e))?;
         first_done
             .lock()
             .unwrap()
@@ -454,9 +465,14 @@ async fn pipe_streams(
         })
     };
     let connector_to_client = async {
-        counted_copy(&mut connector_recv, &mut client_send, &down)
-            .await
-            .map_err(|e| ("pipe Connector to Client", e))?;
+        counted_copy(
+            &mut connector_recv,
+            &mut client_send,
+            &down,
+            &BYTES_CONNECTOR_TO_CLIENT,
+        )
+        .await
+        .map_err(|e| ("pipe Connector to Client", e))?;
         first_done
             .lock()
             .unwrap()
@@ -529,6 +545,7 @@ async fn counted_copy(
     reader: &mut RecvStream,
     writer: &mut SendStream,
     count: &std::sync::atomic::AtomicU64,
+    total: &AtomicU64,
 ) -> std::result::Result<(), PipeError> {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -547,6 +564,7 @@ async fn counted_copy(
             Err(e) => return Err(PipeError::Other(anyhow::Error::new(e).context("write"))),
         }
         count.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        total.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 
@@ -1065,6 +1083,36 @@ mod tests {
             matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == 0x4243),
             "connector saw {end:?}"
         );
+    }
+
+    /// F5: the process-wide byte counters grow while a stream is still open,
+    /// per direction (a long-lived stream must show up in every heartbeat).
+    #[tokio::test]
+    async fn bytes_are_counted_while_the_stream_is_open() {
+        let mut b = bridge().await;
+        let up0 = BYTES_CLIENT_TO_CONNECTOR.load(Ordering::Relaxed);
+        let down0 = BYTES_CONNECTOR_TO_CLIENT.load(Ordering::Relaxed);
+        let body = vec![7u8; 256 * 1024];
+        b.connector_send.write_all(&body).await.unwrap();
+        let mut got = vec![0u8; body.len()];
+        timeout(Duration::from_secs(5), b.client_recv.read_exact(&mut got))
+            .await
+            .unwrap()
+            .unwrap();
+        b.client_send.write_all(b"12345").await.unwrap();
+        let mut five = [0u8; 5];
+        timeout(
+            Duration::from_secs(5),
+            b.connector_recv.read_exact(&mut five),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // Other tests bridge concurrently: the counters grew by at least this.
+        // The "hi" announcing the stream was read before the bridge started.
+        assert!(BYTES_CONNECTOR_TO_CLIENT.load(Ordering::Relaxed) - down0 >= body.len() as u64);
+        assert!(BYTES_CLIENT_TO_CONNECTOR.load(Ordering::Relaxed) - up0 >= 5);
+        assert!(!b.pipe.is_finished(), "counted before the bridge ended");
     }
 
     /// A normal end is unchanged: every byte arrives, then a clean finish, in

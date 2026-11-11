@@ -25,9 +25,9 @@ type measuringHeartbeatStore struct {
 	measured []time.Time
 }
 
-func (s *measuringHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error {
+func (s *measuringHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time, bandwidth *BandwidthSample) error {
 	s.measured = append(s.measured, measuredAt)
-	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt)
+	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections, measuredAt, bandwidth)
 }
 
 func newDrainFlagService(t *testing.T, rdb valkeycompat.Cmdable) (*Service, *measuringHeartbeatStore, func()) {

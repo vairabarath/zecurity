@@ -28,6 +28,7 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     created_at: '2026-10-01T00:00:00Z',
     draining_since: null,
     drain_state: null,
+    bandwidth: null,
     ...over,
   }
 }

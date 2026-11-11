@@ -3,6 +3,7 @@ import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { getRelay } from '@/api/reads'
 import type { RelayDetail as RelayDetailDTO } from '@/api/types'
+import { BandwidthDetail } from '@/components/Bandwidth'
 import { CapacityTier } from '@/components/Capacity'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
@@ -273,6 +274,12 @@ function RelayView({
             </dl>
           </div>
           <p className="text-[13px] text-subtle-foreground">Connectors choose relays by the published capacity tier, so a low-tier relay receives fewer new placements.</p>
+        </Card>
+        <Card role="region" className="flex flex-[1_1_300px] flex-col gap-3.5 px-5 py-5" aria-labelledby="relay-bandwidth">
+          <h2 id="relay-bandwidth" className="font-semibold">
+            Bandwidth
+          </h2>
+          <BandwidthDetail bandwidth={r.bandwidth} />
         </Card>
       </div>
 
