@@ -41,6 +41,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/certalert"
 	"github.com/yourorg/ztna/controller/internal/changehint"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
@@ -812,6 +813,24 @@ func main() {
 			}
 		}
 	})
+
+	// F14 (D-36): daily certificate expiry email to super-admins, over the
+	// invitation SMTP settings (stdout when SMTP_HOST is unset). Checked a
+	// minute after start, then hourly; at most one email per UTC day.
+	if envOr("CERT_EXPIRY_ALERTS", "true") != "false" {
+		certAlerts := &certalert.Job{
+			DB:         db.Pool,
+			Controller: controllerRotator,
+			Sender:     inviteEmailer,
+			Audit:      providerStore,
+			Marker:     valkeycompat.NewAdapter(connectorValkey),
+		}
+		workers.Go("cert-expiry-alert", func() {
+			certAlerts.Run(ctx, time.Minute, time.Hour)
+		})
+	} else {
+		log.Printf("cert expiry alert: disabled (CERT_EXPIRY_ALERTS=false)")
+	}
 
 	workers.Go("hourly-ticker", func() {
 
