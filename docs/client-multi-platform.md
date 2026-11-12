@@ -2,6 +2,9 @@
 
 > Status: planning note, 2026-11-12. Not a decision record. The items under
 > "Decisions needed" must go into a decision record before any phase starts.
+> Update 2026-11-12: a first Windows client (W1 core, **provisional**) is built
+> on branch `feat/client-windows`; see section 11. It assumes D-W1 and D-W2 as
+> recommended, pending the decision record.
 
 Goal: take `zecurity-client` (Rust, Linux only today) to **Windows first, then
 Android, then iOS**, without forking the protocol or the controller contract.
@@ -372,3 +375,120 @@ and should be done once, in W2.
   the mechanism that protects the state key changes per platform.
 - The security invariants in `CLAUDE.md`: fail closed, never log or return
   secrets, device identity never downgrades from hardware to software.
+
+## 11. Windows client: what is built (W1, provisional)
+
+Branch `feat/client-windows`. The existing CLI and daemon run on Windows
+behind `cfg` gates; the crate split of phase C0 was **not** done (in-crate
+platform modules instead, lower risk for `daemon.rs`). Linux behaviour and
+command sequences are unchanged.
+
+### What it does
+
+| Piece | Windows implementation | File |
+|---|---|---|
+| TUN | Wintun adapter `zecurity0` through the `tun` crate's Windows backend, `100.64.0.1/32` | `client/src/tun_windows.rs` |
+| Capture | one active-store `/32` route per allowed resource IP (`netsh`); stale `/32` routes on a reopened adapter removed at start | `tun_windows.rs` |
+| Daemon hosting | Windows Service `zecurity-client`, LocalSystem; Stop and deliberate exits report Stopped first; console mode when not started by the SCM | `client/src/win_service.rs` |
+| IPC | named pipe `\\.\pipe\zecurity-client`, same newline-delimited JSON; DACL SYSTEM + Administrators + enrolled user; owned by SYSTEM | `client/src/ipc.rs`, `win_security.rs` |
+| Config, state, logs | `%ProgramData%\Zecurity\{client.conf,state,logs}`; logs in `logs\daemon.log` | `config.rs`, `state_store.rs` |
+| DNS-name resources | reported as "not supported on Windows yet" (IP resources unaffected) | `dns_link.rs` |
+| Posture | OS name and version only; no `linux.*` checks | `posture.rs` |
+| Installer | `client/scripts/client-install.ps1` | |
+
+### Security model (the Linux guarantees, made explicit)
+
+On Linux the daemon runs as the enrolled user, so the user's 0700 home and a
+0700 runtime directory give same-user isolation for free. On Windows the
+daemon is SYSTEM, `C:\ProgramData` lets any user create folders, and pipe
+names are first-come. So:
+
+- **Who may talk to the daemon:** the pipe admits SYSTEM, Administrators and
+  the enrolled user's SID. The SID comes from the service command line
+  (`daemon --ipc-user-sid`), which only administrators can change; it is
+  validated (`S-1-` and digits only), and without it the pipe is admin-only.
+- **No impostor daemon:** the service creates the pipe owned by SYSTEM, and
+  the CLI refuses a pipe owned by anyone but SYSTEM/Administrators before it
+  sends tokens or keys. A second process can't claim the pipe name
+  (`FILE_FLAG_FIRST_PIPE_INSTANCE`).
+- **No hijacked data directory:** before reading anything the daemon refuses
+  a data directory, or any entry in it, that is a junction/link or not owned
+  by SYSTEM/Administrators, then sets protected DACLs with `SetFileSecurityW`
+  (no propagation to existing children).
+- **The enrolled user can't restructure it:** the user may list and read
+  (and delete files in `state`, which logout and post-revocation login do),
+  but never add, rename or replace anything, so they can't swap a folder for
+  a junction and steer the SYSTEM daemon. Consequence: `zecurity-client
+  setup` needs an elevated prompt on Windows; the installer takes
+  `-Workspace` so most users never run it.
+- The state at rest is protected by these ACLs, as the Linux state is by
+  file modes. DPAPI wrapping of the state key is not done yet.
+
+### Build
+
+Cross-compile from Linux with MinGW (`gcc-mingw-w64-x86-64`, `protobuf-compiler`,
+`rustup target add x86_64-pc-windows-gnu`), embedding the controller's root:
+
+```bash
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  client/scripts/dev-build.sh --release --target x86_64-pc-windows-gnu
+# → client/target/x86_64-pc-windows-gnu/release/zecurity-client.exe
+```
+
+On Windows itself, `cargo build --release` with the MSVC toolchain and
+`protoc` on `PATH` (plus `ZECURITY_PLATFORM_ROOT_PEM_FILE`) should work the
+same way; it has not been tried.
+
+`wintun.dll` is not built: take `wintun\bin\amd64\wintun.dll` from the
+official release at https://www.wintun.net and install it next to the exe.
+
+### Install and use
+
+From an elevated PowerShell:
+
+```powershell
+.\client-install.ps1 -Binary .\zecurity-client.exe -Wintun .\wintun.dll `
+  -Workspace acme -ControllerAddr 192.168.1.10:9090 -ControllerHttpAddr 192.168.1.10:8080
+```
+
+Then, as the enrolled user in a normal terminal: `zecurity-client login`,
+`zecurity-client up`, `zecurity-client status`. Uninstall with
+`.\client-install.ps1 -Uninstall` (device state in `%ProgramData%\Zecurity`
+is kept).
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux build + full test suite | 364/364 pass (354 before + 10 new) |
+| Windows cross build (`x86_64-pc-windows-gnu`), debug and release | links, no new warnings |
+| Windows test suite under Wine 8 (Debian bookworm) | 297 pass, 23 fail; the failures are Wine, see below |
+| Windows-only tests under Wine | every security descriptor parses; secured pipe round trip passes; impostor pipe refused |
+| On a real Windows host | **not run**: no adapter, route, service, installer or end-to-end test yet |
+
+The 23 Wine failures: 21 QUIC tests fail to bind a UDP socket (Wine lacks
+socket options `quinn-udp` sets, error 10045); one certificate test compares
+PEM text whose test fixtures get CRLF line endings on Windows; and Wine 8
+does not enforce `FILE_FLAG_FIRST_PIPE_INSTANCE`. All need a real Windows
+run to settle. The installer script has not been executed.
+
+### Not built yet (rest of W1 to W3)
+
+- First real Windows run: install, login, up, reach a resource, down, reboot
+  restore, renewal, revocation (the W1 gate in section 3).
+- DNS-name resources (NRPT rules), `windows.*` posture checks and per-OS
+  posture profiles (W2, needs controller and admin UI work).
+- CNG hardware key, DPAPI-wrapped state key, MSI, code signing, release
+  workflow assets (W3).
+- A daemon that reloads `client.conf` without a service restart.
+
+### Decisions assumed (to confirm in the decision record)
+
+- **D-W1:** IP-level capture. A non-ACL port on a resource IP is reset by
+  smoltcp instead of reaching the LAN.
+- **D-W2:** per-machine daemon (LocalSystem) with one enrolled user admitted
+  to it.
+- Posture: a profile that requires a `linux.*` check marks a Windows device
+  unsupported (controller unchanged; fails closed unless
+  `allow_unsupported`).
+
