@@ -3741,3 +3741,21 @@ serves on `127.0.0.1:9102`.
   - **Gates:** 350/350 client tests; 3 mutants killed; clippy clean in the changed files.
   - Record: `Sprint22/FU16-Revocation-Tail-2026-11-05.md`.
 - Not committed. Lab still up (`fu16-*` units, `fu16_live` DB, Valkey db 4, ufw rule, inkyank connector and servers): cleanup awaits OK.
+
+## 2026-11-12 — M1: Windows client (W1 core, provisional; not run on real Windows)
+- Plan: `docs/client-multi-platform.md` (Windows → Android → iOS); its docs branch `docs/client-multi-platform` is pushed.
+- Branch `feat/client-windows` (local commits, not pushed), base `main` `1809a849`:
+  - the CLI and daemon build for Windows behind `cfg` gates: Wintun adapter `zecurity0`, one `/32` route per allowed IP, a LocalSystem Windows Service, a named-pipe IPC, and `%ProgramData%\Zecurity`;
+  - `client/scripts/client-install.ps1` is the installer;
+  - DNS-name resources and posture checks report as unsupported on Windows.
+- Security (three automated reviews, all addressed):
+  - pipe DACL plus SYSTEM ownership, verified by the CLI;
+  - the enrolled user's SID comes from the service command line;
+  - the data directory refuses junctions and untrusted owners, and the user may read but not change it (`setup` needs an elevated prompt).
+- Gates:
+  - Linux: 364/364 tests.
+  - Windows: debug and release cross builds (MinGW).
+  - Windows tests under Wine 8: 297 pass, 23 fail on Wine limits (QUIC UDP bind error 10045, CRLF test fixture, first-pipe-instance flag).
+  - Clippy adds no new warnings.
+- Provisional: D-W1 (IP-level capture) and D-W2 (per-machine daemon) await the decision record.
+- Next: a first run on a real Windows host (the W1 gate in the note, §3).
