@@ -5,6 +5,7 @@
 // which uses `zecurity_connector::*` to access these modules.
 
 pub mod agent_server;
+pub mod analytics;
 pub mod abort_stream;
 pub mod agent_tunnel;
 pub mod appmeta;

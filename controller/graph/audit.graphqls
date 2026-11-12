@@ -1,0 +1,162 @@
+# PENDING-11: the workspace audit log (S-9) and SIEM export (P-8).
+
+enum AuditStream {
+  ADMIN
+  ACCESS
+}
+
+# One admin-stream row (audit_logs). Hash-chained: rowHash = sha256(prevHash ||
+# canonical row); see the zecurity.audit.v1 export format.
+type AuditLogEntry {
+  seq: Int!
+  id: ID!
+  action: String!
+  actorUserId: ID
+  actorEmail: String!
+  targetType: String!
+  targetId: String!
+  # JSON text, or null.
+  details: String
+  createdAt: String!
+  rowHash: String!
+}
+
+type AuditLogPage {
+  entries: [AuditLogEntry!]!
+  # Pass as `before` to read older entries; null when there are none.
+  nextBefore: Int
+}
+
+enum AuditExportSinkKind {
+  WEBHOOK
+  SPLUNK_HEC
+  # Gzip NDJSON objects in the customer's S3 bucket every 5 minutes, for the
+  # SIEM to pull (Twingate-style; PENDING-11 §9).
+  S3
+}
+
+enum AuditExportStartFrom {
+  # Everything still retained (the default).
+  ALL_HISTORY
+  # Only events recorded from now on.
+  NOW
+}
+
+type AuditExportStreamStatus {
+  stream: AuditStream!
+  cursorSeq: Int!
+  headSeq: Int!
+  # Events recorded but not yet acknowledged by the destination.
+  lag: Int!
+  lastSuccessAt: String
+  lastError: String
+  failingSince: String
+  oldestPendingAt: String
+  # The oldest undelivered event is 7 days old or more: access events past the
+  # 90-day retention may be purged before the sink catches up.
+  lagging: Boolean!
+}
+
+# A SIEM destination. Secrets (signing secret, auth header value, HEC token)
+# are write-only and never returned here.
+type AuditExportSink {
+  id: ID!
+  name: String!
+  kind: AuditExportSinkKind!
+  url: String!
+  streams: [AuditStream!]!
+  enabled: Boolean!
+  authHeaderName: String
+  splunkIndex: String
+  splunkSource: String
+  splunkSourcetype: String
+  # S3 sinks only. The secret access key is write-only and never returned.
+  s3Bucket: String
+  s3Region: String
+  s3Prefix: String
+  s3Endpoint: String
+  s3AccessKeyId: String
+  createdAt: String!
+  updatedAt: String!
+  status: [AuditExportStreamStatus!]!
+}
+
+# Returned by create and rotate only: the HMAC signing secret is shown once.
+type AuditExportSinkWithSecret {
+  sink: AuditExportSink!
+  signingSecret: String!
+}
+
+type AuditExportTestResult {
+  ok: Boolean!
+  error: String
+}
+
+# An extra static header sent with every delivery (webhook sinks).
+input AuditExportAuthHeaderInput {
+  name: String!
+  value: String!
+}
+
+# Splunk HEC settings. token is required on create and write-only.
+input SplunkHecInput {
+  token: String
+  index: String
+  source: String
+  sourcetype: String
+}
+
+# Amazon S3 (or S3-compatible) settings. secretAccessKey is required on
+# create and write-only; on update it is replaced only when given, and it is
+# required again when the bucket, region, endpoint or access key ID changes.
+input S3Input {
+  bucket: String!
+  region: String!
+  prefix: String
+  # https://host[:port] of an S3-compatible store (path-style). Empty = AWS.
+  endpoint: String
+  accessKeyId: String!
+  secretAccessKey: String
+}
+
+input CreateAuditExportSinkInput {
+  name: String!
+  kind: AuditExportSinkKind!
+  # Webhook and Splunk HEC only; an S3 sink's address comes from s3.
+  url: String
+  streams: [AuditStream!]!
+  enabled: Boolean
+  startFrom: AuditExportStartFrom
+  authHeader: AuditExportAuthHeaderInput
+  splunk: SplunkHecInput
+  s3: S3Input
+}
+
+# Omitted fields are unchanged. `splunk` replaces the Splunk settings; its
+# token is replaced only when given.
+input UpdateAuditExportSinkInput {
+  name: String
+  url: String
+  streams: [AuditStream!]
+  enabled: Boolean
+  authHeader: AuditExportAuthHeaderInput
+  clearAuthHeader: Boolean
+  splunk: SplunkHecInput
+  # Replaces the S3 settings (S3 sinks only).
+  s3: S3Input
+}
+
+extend type Query {
+  # The workspace's admin audit stream, newest first (default 50, max 200).
+  auditLogs(before: Int, limit: Int, actionPrefix: String): AuditLogPage! @requires(capability: CONSOLE_READ)
+  auditExportSinks: [AuditExportSink!]! @requires(capability: AUDIT_ADMIN)
+}
+
+extend type Mutation {
+  createAuditExportSink(input: CreateAuditExportSinkInput!): AuditExportSinkWithSecret! @requires(capability: AUDIT_ADMIN)
+  updateAuditExportSink(id: ID!, input: UpdateAuditExportSinkInput!): AuditExportSink! @requires(capability: AUDIT_ADMIN)
+  rotateAuditExportSinkSecret(id: ID!): AuditExportSinkWithSecret! @requires(capability: AUDIT_ADMIN)
+  deleteAuditExportSink(id: ID!): Boolean! @requires(capability: AUDIT_ADMIN)
+  # Sends one signed export.test event; cursors are untouched.
+  testAuditExportSink(id: ID!): AuditExportTestResult! @requires(capability: AUDIT_ADMIN)
+}

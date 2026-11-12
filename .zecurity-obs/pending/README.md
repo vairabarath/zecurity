@@ -47,7 +47,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | ✅ [PENDING-08](finished/PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15 | zero-trust | P2 | — |
 | [PENDING-09](not%20finished/PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — *Option B (bounded) implemented in Sprint 15; full decision (A/C) still open* | zero-trust | P2 | ADR-001 |
 | ✅ [PENDING-10](finished/PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — **all 4 phases complete** (Health/Readiness, Fleet Prometheus metrics, OTel distributed tracing, Alerts & Dashboards) | operations | P1 | — |
-| [PENDING-11](not%20finished/PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — *partial: audit tables exist and are written; **no export sink*** | operations | P2 | — |
+| ✅ [PENDING-11](finished/PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — **implemented (PR #187)**: hash-chained audit streams, append-only `ztna_app`, webhook / Splunk HEC / Amazon S3 export, connector access lines | operations | P2 | PENDING-10, PENDING-19 |
 | [PENDING-12](not%20finished/PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt* | operations | P2 | ADR-013 |
 | ✅ [PENDING-13](finished/PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **all 3 tracks done (Sprint 19)** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
 | ✅ [PENDING-14](finished/PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access — **F0–F4 built and merged (PR #174, #176)** | data-plane | P2 | ADR-009 |

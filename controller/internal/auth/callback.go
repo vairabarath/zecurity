@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 )
@@ -112,6 +113,21 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// workspace (see identity.ProvisionInput.ConnectionTenantID).
 		principal, err := s.identitySvc.Authenticate(ctx, authCtx, conn.ID, pkce.WorkspaceName, conn.TenantID)
 		if err != nil {
+			// PENDING-11 P-9: a refused sign-in is audited only once the IdP
+			// has proven the identity AND the workspace is known (an
+			// enterprise connection), so unauthenticated callers can't append
+			// to the admin stream. "not invited" and "not active" share one
+			// reason.
+			if conn.TenantID != nil && AuditSignInFailure(conn.TenantID, *conn.TenantID, err) {
+				s.record(ctx, audit.Entry{
+					TenantID:   *conn.TenantID,
+					ActorEmail: authCtx.Email,
+					Action:     ActionSignInFailed,
+					TargetType: "identity_connection",
+					TargetID:   conn.ID,
+					Details:    map[string]any{"client": false, "reason": SignInFailedReasonNotPermitted},
+				})
+			}
 			// The IdP proved who they are; this workspace just has not granted
 			// them access. That is a distinct, actionable outcome for the user —
 			// not a generic auth failure.
@@ -132,6 +148,15 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			fail("token_issue_failed")
 			return
 		}
+		s.record(ctx, audit.Entry{
+			TenantID:    core.TenantID,
+			ActorUserID: core.UserID,
+			ActorEmail:  core.Email,
+			Action:      ActionSignIn,
+			TargetType:  "user",
+			TargetID:    core.UserID,
+			Details:     map[string]any{"client": false, "connection_id": conn.ID},
+		})
 		ttl, _ := time.ParseDuration(s.cfg.JWTRefreshTTL)
 		http.SetCookie(w, &http.Cookie{
 			Name:     "refresh_token",

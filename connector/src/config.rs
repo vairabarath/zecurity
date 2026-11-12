@@ -24,6 +24,7 @@
 //   log_level                   — "info"
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
 //   state_dir                   — /var/lib/zecurity-connector (where certs, keys, state.json are saved)
+//   zecurity_log_analytics      — unset (off); "v1" prints ANALYTICS lines (analytics.rs)
 //
 // Called by: main.rs at startup via ConnectorConfig::load()
 
@@ -152,6 +153,12 @@ pub struct ConnectorConfig {
     ///   state.json         — connector_id, trust_domain, enrollment metadata
     #[serde(default = "default_state_dir")]
     pub state_dir: String,
+
+    /// ZECURITY_LOG_ANALYTICS: "v1" prints one `ANALYTICS {json}` line per
+    /// access decision to stdout for a SIEM agent (PENDING-11 §9 W-2).
+    /// Unset means off.
+    #[serde(default)]
+    pub zecurity_log_analytics: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -245,5 +252,13 @@ mod tests {
         );
         let cfg = from_toml("controller_addr = \"c:9090\"\nshield_tunnel_limit = 64");
         assert_eq!(cfg.shield_tunnel_limit, 64);
+    }
+
+    #[test]
+    fn log_analytics_is_off_unless_set() {
+        let cfg = from_toml("controller_addr = \"c:9090\"");
+        assert_eq!(cfg.zecurity_log_analytics, None);
+        let cfg = from_toml("controller_addr = \"c:9090\"\nzecurity_log_analytics = \"v1\"");
+        assert_eq!(cfg.zecurity_log_analytics.as_deref(), Some("v1"));
     }
 }

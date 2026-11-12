@@ -60,6 +60,8 @@ const HANDLED_AT_CALL_SITE: Record<string, string> = {
   'pages/InviteAccept.tsx initiateAuth': 'try/catch → setError',
   'pages/Login.tsx initiateAuth': 'try/catch in callers → setError',
   'pages/signup/Step3Auth.tsx initiateAuth': 'try/catch + hook error state',
+  'components/audit/AuditExportSection.tsx create': 'try/catch → setError in the sink dialog',
+  'components/audit/AuditExportSection.tsx update': 'try/catch → setError in the sink dialog',
 }
 
 const SOURCES = import.meta.glob(['../**/*.tsx', '!../**/*.test.tsx'], {

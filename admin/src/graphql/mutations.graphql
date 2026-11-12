@@ -523,3 +523,106 @@ mutation SetResourcePolicy($resourceId: ID!, $policyId: ID!) {
   }
 }
 
+
+# PENDING-11 P-8: SIEM export sinks (AUDIT_ADMIN). The signing secret is
+# returned by create and rotate only; callers use fetchPolicy 'no-cache'.
+mutation CreateAuditExportSink($input: CreateAuditExportSinkInput!) {
+  createAuditExportSink(input: $input) {
+    signingSecret
+    sink {
+      id
+      name
+      kind
+      url
+      streams
+      enabled
+      authHeaderName
+      splunkIndex
+      splunkSource
+      splunkSourcetype
+      createdAt
+      updatedAt
+      status {
+        stream
+        cursorSeq
+        headSeq
+        lag
+        lastSuccessAt
+        lastError
+        failingSince
+        oldestPendingAt
+        lagging
+      }
+    }
+  }
+}
+
+mutation UpdateAuditExportSink($id: ID!, $input: UpdateAuditExportSinkInput!) {
+  updateAuditExportSink(id: $id, input: $input) {
+    id
+    name
+    kind
+    url
+    streams
+    enabled
+    authHeaderName
+    splunkIndex
+    splunkSource
+    splunkSourcetype
+    createdAt
+    updatedAt
+    status {
+      stream
+      cursorSeq
+      headSeq
+      lag
+      lastSuccessAt
+      lastError
+      failingSince
+      oldestPendingAt
+      lagging
+    }
+  }
+}
+
+mutation RotateAuditExportSinkSecret($id: ID!) {
+  rotateAuditExportSinkSecret(id: $id) {
+    signingSecret
+    sink {
+      id
+      name
+      kind
+      url
+      streams
+      enabled
+      authHeaderName
+      splunkIndex
+      splunkSource
+      splunkSourcetype
+      createdAt
+      updatedAt
+      status {
+        stream
+        cursorSeq
+        headSeq
+        lag
+        lastSuccessAt
+        lastError
+        failingSince
+        oldestPendingAt
+        lagging
+      }
+    }
+  }
+}
+
+mutation DeleteAuditExportSink($id: ID!) {
+  deleteAuditExportSink(id: $id)
+}
+
+mutation TestAuditExportSink($id: ID!) {
+  testAuditExportSink(id: $id) {
+    ok
+    error
+  }
+}

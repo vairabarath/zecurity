@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/audit"
 )
 
 var ErrNotFound = errors.New("invitation not found")
@@ -128,21 +129,23 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 	}
 	defer tx.Rollback(ctx)
 
-	tag, err := tx.Exec(ctx,
+	var invitationID string
+	err = tx.QueryRow(ctx,
 		`UPDATE invitations
 		    SET status = 'accepted'
 		  WHERE token = $1
 		    AND workspace_id = $2
 		    AND email = $3
 		    AND status = 'pending'
-		    AND expires_at > NOW()`,
+		    AND expires_at > NOW()
+		RETURNING id::text`,
 		token, workspaceID, email,
-	)
+	).Scan(&invitationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("accept invitation: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
 	}
 
 	// Activate the workspace_members row that was created at invite time.
@@ -158,6 +161,19 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 	)
 	if err != nil {
 		return fmt.Errorf("activate workspace_members: %w", err)
+	}
+
+	// PENDING-11 P-9: audited atomically, as the last write (lock order).
+	if err := audit.RecordTx(ctx, tx, audit.Entry{
+		TenantID:    workspaceID,
+		ActorUserID: userID,
+		ActorEmail:  email,
+		Action:      "invitation.accept",
+		TargetType:  "invitation",
+		TargetID:    invitationID,
+		Details:     map[string]any{"client": false},
+	}); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

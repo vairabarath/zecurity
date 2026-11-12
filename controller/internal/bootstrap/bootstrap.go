@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/appmeta" // WorkspaceTrustDomain for bootstrap INSERT
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
@@ -228,6 +229,20 @@ func (s *Service) runBootstrapTransaction(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert admin workspace_member: %w", err)
+	}
+
+	// PENDING-11 P-9: the workspace's admin stream starts with its own
+	// creation (the heads exist: 053's AFTER INSERT trigger on workspaces).
+	if err := audit.RecordTx(ctx, tx, audit.Entry{
+		TenantID:    tenantID,
+		ActorUserID: userID,
+		ActorEmail:  email,
+		Action:      "workspace.create",
+		TargetType:  "workspace",
+		TargetID:    tenantID,
+		Details:     map[string]any{"slug": slug, "name": displayName, "provider": in.Provider},
+	}); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

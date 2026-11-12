@@ -13,13 +13,17 @@ import (
 // resolver itself, each with the reason.
 var mutationsAuditedElsewhere = map[string]string{
 	"InitiateAuth":       "anonymous login start; changes no workspace state",
-	"TestIdpConnection":  "read-only probe of the IdP; changes nothing",
 	"ApproveDevice":      "audited in setDeviceApproval",
 	"UnapproveDevice":    "audited in setDeviceApproval",
 	"AcceptScimConflict": "audited in scim.DirectoryService.AcceptLink",
 	"RejectScimConflict": "audited in scim.DirectoryService.Reject",
 	"ReopenScimConflict": "audited in scim.DirectoryService.Reopen",
 	"SetMemberRole":      "audited in-transaction by setMemberRole (audit.RecordTx)",
+	// PENDING-11 P-8: sink changes are audited in the store's transaction.
+	"CreateAuditExportSink":       "audited in-transaction by auditexport.Store.Create",
+	"UpdateAuditExportSink":       "audited in-transaction by auditexport.Store.Update",
+	"RotateAuditExportSinkSecret": "audited in-transaction by auditexport.Store.RotateSecret",
+	"DeleteAuditExportSink":       "audited in-transaction by auditexport.Store.Delete",
 }
 
 // Every admin change leaves an audit row (live run 2026-10-29, O-2): each

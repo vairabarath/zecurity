@@ -7,6 +7,10 @@ services:
       POSTGRES_USER: ztna
       POSTGRES_PASSWORD: ztna_dev_secret
       POSTGRES_DB: ztna_platform
+      # PENDING-11 (D-12): login password for the controller's runtime role
+      # ztna_app, set by migrations/zz_app_role_login.sh. The controller
+      # connects as ztna_app; ztna stays the schema owner (tests, psql).
+      APP_DB_PASSWORD: ztna_app_dev_secret
     ports:
       - "5432:5432"
     volumes:

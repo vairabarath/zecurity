@@ -17,7 +17,6 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/audit"
-	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/permission"
@@ -323,106 +322,17 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 // that probe runs, SCIM stays disabled unless an identity.mapping.break_glass
 // override is in effect.
 func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*graph.IdpTestResult, error) {
-	tc := tenant.MustGet(ctx)
-
-	conn, err := r.IdpStore.GetByID(ctx, id)
-	if err != nil {
-		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return nil, apperr.UserErrorf("testIdpConnection: connection not found")
-		}
-		return nil, fmt.Errorf("testIdpConnection: %w", err)
+	res, err := r.testIdpConnection(ctx, id)
+	if err == nil && res != nil {
+		// PENDING-11 P-9: the outcome only; probe messages can echo IdP
+		// responses, so they stay out of the audit row.
+		r.auditIdp(ctx, tenant.MustGet(ctx), "idp.test", id, map[string]any{
+			"ok":                   res.Ok,
+			"mapping_state":        res.MappingState,
+			"scim_enabled_allowed": res.ScimEnabledAllowed,
+		})
 	}
-	// Tenant guard: only test your own connection (GetByID is not tenant-scoped).
-	if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
-		return nil, apperr.UserErrorf("testIdpConnection: connection not found")
-	}
-
-	// 1. OIDC discovery probe (issuer reachability + required endpoints).
-	//
-	// The provider is built with the connection's REAL client secret (this used
-	// to pass ""), because step 1b below authenticates the client. GetByID
-	// returns the decrypted secret; it is never surfaced in the result.
-	p := providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, conn.ClientSecret, conn.DiscoveryURL, conn.Scopes)
-	issuer, perr := p.Probe(ctx)
-	if perr != nil {
-		msg := perr.Error()
-		reason := "OIDC discovery failed: " + msg
-		return &graph.IdpTestResult{
-			Ok:                 false,
-			Message:            &msg,
-			MappingState:       string(scim.MappingUnproven),
-			ScimEnabledAllowed: false,
-			Reason:             &reason,
-		}, nil
-	}
-
-	// 1b. Client-credential verification — the same primitive create/update use,
-	// so "Test connection" cannot report success on a connection that could not
-	// actually authenticate. Read-only: it never mutates the connection.
-	//
-	// Ok=false unless the credentials are POSITIVELY verified; an inconclusive
-	// probe is reported as a failure and must never be worded as verified.
-	if cerr := verifyOIDCCredentials(ctx,
-		conn.Provider, conn.Issuer, conn.DiscoveryURL, conn.Scopes,
-		conn.ClientID, conn.ClientSecret, r.OIDCRedirectURI,
-	); cerr != nil {
-		msg := cerr.Error()
-		return &graph.IdpTestResult{
-			Ok:                 false,
-			Issuer:             &issuer,
-			Message:            &msg,
-			MappingState:       string(scim.MappingUnproven),
-			ScimEnabledAllowed: false,
-			Reason:             &msg,
-		}, nil
-	}
-
-	// 2. Mapping-config validation (fail-closed). The gate never reports
-	// "proven" without a real round-trip (RoundTripVerified stays false in
-	// Phase 4), so ScimEnabledAllowed is false unless an override applies.
-	gate := scim.NewMappingGate(conn.Provider)
-	res, err := gate.Evaluate(ctx, conn.SubjectClaim, conn.ScimIdentifier, scim.BreakGlassOverride{})
-	if err != nil {
-		return nil, fmt.Errorf("testIdpConnection mapping gate: %w", err)
-	}
-
-	// 3. Active mapping round-trip probe (ADR-025 §3.1, Phase 5's deferred
-	// POST→GET→verify→DELETE check). Only run when the mapping config itself
-	// is valid — a malformed config has nothing to probe and the gate's own
-	// config-invalid Reason from step 2 should stand. Proves scimIdentifier
-	// only; see ProbeMapping's doc comment for why subjectClaim cannot be
-	// verified this way. Never mints a SCIM token, never touches scim_tokens,
-	// never drives the public /scim/v2 endpoint.
-	if cfgErr := scim.ValidateMappingConfig(conn.SubjectClaim, conn.ScimIdentifier); cfgErr == nil {
-		ds := r.ScimStore.DirectoryService()
-		probe := ds.ProbeMapping(ctx, conn)
-		res = res.WithRoundTrip(probe.Verified, conn.SubjectClaim, conn.ScimIdentifier)
-		if !probe.Verified {
-			res.Reason = probe.Reason
-		}
-	}
-
-	// TestIdpConnection PROVES the mapping; it must never ENABLE SCIM itself.
-	// ADR-025 §3.2 makes UpdateScimConfig the one dedicated path for turning
-	// scim_enabled on — TestIdpConnection is a verification/test operation
-	// only. Always persist false here, regardless of res.ScimEnabledAllowed
-	// (which the GraphQL response below still reports truthfully — a
-	// verified round-trip is real proof the admin can act on). The database
-	// stays fail-closed after this call in every case; the admin's next step
-	// is an explicit UpdateScimConfig(scimEnabled: true), which re-runs its
-	// own MappingGate check independently before it will actually flip the
-	// column.
-	if err := r.IdpStore.SetSCIMEnabled(ctx, tc.TenantID, id, false); err != nil {
-		return nil, fmt.Errorf("testIdpConnection set scim_enabled: %w", err)
-	}
-
-	return &graph.IdpTestResult{
-		Ok:                 true,
-		Issuer:             &issuer,
-		MappingState:       string(res.MappingState),
-		ScimEnabledAllowed: res.ScimEnabledAllowed,
-		Reason:             &res.Reason,
-	}, nil
+	return res, err
 }
 
 // UpdateScimConfig is the resolver for the updateScimConfig field.

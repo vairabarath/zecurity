@@ -4,6 +4,7 @@ import {
   Box,
   ChevronDown,
   Download,
+  History,
   Laptop,
   LayoutDashboard,
   Network,
@@ -179,6 +180,7 @@ export function Sidebar() {
           <>
             <NavItem to="/idp-connections" label="Identity Providers" icon={KeyRound} />
             <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
+            <NavItem to="/audit-log"      label="Audit Log"      icon={History} />
             <NavItem to="/devices"        label="Devices"        icon={Laptop} />
             <PoliciesSection />
             <NavItem to="/install"        label="Install Client" icon={Download} />
