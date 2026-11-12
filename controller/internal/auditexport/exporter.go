@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,6 +42,10 @@ type Exporter struct {
 
 	mu       sync.Mutex
 	inFlight map[cursorKey]bool
+
+	// catchUps counts catchUp calls, so a test can tell "drained in one
+	// claim" from "one batch per poll" without timing it.
+	catchUps atomic.Int64
 }
 
 type cursorKey struct {
@@ -96,6 +101,7 @@ func (e *Exporter) Run(ctx context.Context) {
 // to catchUpBudget, so catch-up after an outage or from "all history" isn't
 // limited to one batch per poll.
 func (e *Exporter) catchUp(ctx context.Context, k cursorKey) {
+	e.catchUps.Add(1)
 	deadline := time.Now().Add(catchUpBudget)
 	for time.Now().Before(deadline) {
 		n, err := e.DeliverOnce(ctx, k.sinkID, k.stream)

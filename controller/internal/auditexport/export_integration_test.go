@@ -533,7 +533,10 @@ func strPtr(s string) *string { return &s }
 
 func boolPtr(b bool) *bool { return &b }
 
-// Run drains a backlog beyond one batch without waiting a poll per batch.
+// Run drains a backlog beyond one batch without waiting a poll per batch:
+// one claimed catch-up delivers every batch. Counted, not timed: a
+// wall-clock "within one poll interval" check failed under full-suite load
+// although the behaviour was right (PENDING-09 follow-up).
 func TestExporterRun_CatchesUpWithinOnePoll(t *testing.T) {
 	_, app, ws, store, rc, exp := setup(t)
 	ctx := context.Background()
@@ -552,14 +555,19 @@ func TestExporterRun_CatchesUpWithinOnePoll(t *testing.T) {
 	done := make(chan struct{})
 	go func() { exp.Run(runCtx); close(done) }()
 	defer func() { cancel(); <-done }()
-	deadline := time.Now().Add(PollInterval) // well under the 3 polls one-batch-per-poll would need
+	deadline := time.Now().Add(catchUpBudget) // a backstop only; the check is the count below
 	for time.Now().Before(deadline) {
 		if seq, _, _ := cursor(t, app, sink.ID, audit.StreamAdmin); seq == 1201 {
+			// 1201 events are 3 batches: one-batch-per-poll would need 3
+			// catch-ups (one per poll); the catch-up loop needs one.
+			if n := exp.catchUps.Load(); n != 1 {
+				t.Fatalf("backlog drained in %d catch-ups, want 1", n)
+			}
 			checkChain(t, ws, audit.StreamAdmin, rc.events("admin"))
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	seq, _, _ := cursor(t, app, sink.ID, audit.StreamAdmin)
-	t.Fatalf("cursor = %d after one poll interval, want 1201", seq)
+	t.Fatalf("cursor = %d after %v, want 1201", seq, catchUpBudget)
 }

@@ -167,6 +167,8 @@ Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun
 
 **Not run live (covered by tests):** max-lifetime expiry (same sweep, other column), expired-token logout, the IdP-disable user-wide revoke, the stale-generation regression, and the enrolment race.
 
-**Follow-ups:**
-- revoke the previous device at re-login (D-8);
-- harden the `auditexport` timing test.
+**Follow-ups, done 2026-11-12:**
+- **D-8, re-login by a different user (decided by Sathiya: same user, leave as is; different user, end the previous session).** `zecurity-client login` compares the saved login's email with the new one, case-insensitively. If it belongs to another user, it ends that session over the pinned channel, and the controller then revokes the device enrolled under it, even with an expired token. This runs after `PostLoginState`, so the old device's revocation cannot shut the daemon down mid-switch. The same user signing in again keeps today's behaviour: the previous device ends when its own session does.
+  - Unit test: `is_different_user`. The client suite passes (354).
+  - Not checked live: the local test login has one identity. The server path it uses (sign-out revokes that session's device) passed live in test C.
+- **`auditexport` timing flake.** `TestExporterRun_CatchesUpWithinOnePoll` asserted the 1200-event backlog drained within one 2 s poll interval, which failed under full-suite load. It now counts `catchUp` calls (one claimed catch-up versus three for one batch per poll), with the 30 s catch-up budget as a backstop. A mutant that delivers one batch per catch-up fails it ("drained in 3 catch-ups, want 1").
