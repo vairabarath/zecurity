@@ -495,3 +495,68 @@ run to settle. The installer script has not been executed.
   unsupported (controller unchanged; fails closed unless
   `allow_unsupported`).
 
+## 12. Android client: what is built (A1, provisional)
+
+Branch `feat/client-android` (on top of `feat/client-windows`). The user
+chose a **Flutter** app, instead of the Kotlin + UniFFI plan in section 5.
+
+### Shape
+
+- **The daemon runs unchanged inside the app's `VpnService` process**
+  (`android:process=":vpn"`), started over JNI. Its deliberate exits
+  (shutdown request, revoked device) end that process only, never the UI.
+- **The Flutter UI plays the Linux CLI's role.** It calls the client core
+  through `dart:ffi` (`libzecurity_ffi.so`, crate `client/ffi`) and sends
+  the same newline-delimited JSON IPC over a socket in the app's private
+  files directory.
+- **The VPN interface comes from the service.** When the daemon brings the
+  tunnel up, it asks over JNI for an interface with one `/32` route per
+  allowed resource IP (`ZecurityNative.establish`). It gets back the file
+  descriptor and wraps it with the `tun` crate (`client/src/tun_android.rs`).
+  Routes are fixed at creation, so every resource change restarts the tunnel.
+  The app excludes itself from its own VPN, so the daemon's QUIC and gRPC
+  traffic never enters the tunnel.
+- **Login keeps the loopback callback.** The core hands the authorization URL
+  to the UI, which opens it in the browser. No controller change was made.
+- **Same limits as Windows:** capture is per IP, not per port (D-W1); DNS-name
+  resources report "not supported on Android yet"; posture reports only the
+  OS name and version.
+- **The crate is now a library** (`zecurity_core`, `src/lib.rs`) plus a thin
+  CLI binary.
+
+### Build
+
+```bash
+ROOT_PEM=/path/to/controller-root.pem client/mobile/scripts/build-native.sh
+BUILD_DIR=/somewhere/with/space client/mobile/scripts/build-apk.sh   # → client/mobile/dist/zecurity-client.apk
+```
+
+Needs Flutter stable (built with 3.50), the Android SDK with NDK
+28.2.13676358, JDK 17, `cargo-ndk`, and the Rust targets
+`aarch64-linux-android` and `x86_64-linux-android`.
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux build and tests after the library split | 364/364 |
+| Windows build | unchanged, clean |
+| Android native library (arm64-v8a, x86_64) and release APK | build; `flutter analyze` clean |
+| Emulator, Android 16 x86_64 | app starts; the daemon runs in `:vpn`; settings save; the daemon's status reaches the UI |
+| Sign-in, Connect (VPN interface), reaching a resource | **not run**: no controller or connector was running |
+
+The emulator run found one real bug, now fixed. R8 had stripped the JNI
+callback, and the VPN service crashed at start.
+
+### Not built yet
+
+- The sign-in, connect, resource access, revocation and reboot journeys on a
+  device.
+- `android.*` posture checks and Keystore-backed device keys (A2).
+- DNS-name resources (D-A1).
+- Release signing and store packaging.
+- A foreground-service type review for Play policy. The app currently uses
+  `specialUse`.
+- The behaviour when the user revokes the VPN in system settings: the service
+  stops, and the daemon is not told first.
+
