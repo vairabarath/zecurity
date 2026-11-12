@@ -25,9 +25,9 @@ Three independently reviewable PRs. Options and rationale: [[D-03-Relay-Pools-Op
 
 | PR | Scope | Schema | Proto | Connector | Relay |
 |---|---|---|---|---|---|
-| 1 | Pools, tenant primary pool, per-pool lists, per-pool guard, residency placement validation, API + console | `056_relay_pools.sql` | — | — | — |
-| 2 | Failover pool, reconciler with hold-down, audit, API + console | `057_relay_pool_failover.sql` | — | — | — |
-| 3 | Relay-side residency enforcement: policy version, lease, acknowledgement, immediate revocation | `058_relay_pool_policy.sql` | additive fields in `relay.v1` heartbeat | — | yes |
+| 1 | Pools, tenant primary pool, per-pool lists, per-pool guard, residency placement validation, API + console | `057_relay_pools.sql` | — | — | — |
+| 2 | Failover pool, reconciler with hold-down, audit, API + console | `058_relay_pool_failover.sql` | — | — | — |
+| 3 | Relay-side residency enforcement: policy version, lease, acknowledgement, immediate revocation | `059_relay_pool_policy.sql` | additive fields in `relay.v1` heartbeat | — | yes |
 
 Each PR is labelled `[schema: reset DB]` where it adds a migration (pre-production rule: recreate the local DB).
 
@@ -48,7 +48,7 @@ Kept as is: the connector only dials relays in its current list (`connector/src/
 
 ## PR 1: relay pools and tenant primary pool
 
-### Schema `056_relay_pools.sql`
+### Schema `057_relay_pools.sql`
 
 ```sql
 CREATE TABLE relay_pools (
@@ -153,7 +153,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON relay_pools TO ztna_app;   -- 053 grants
 
 ## PR 2: controller-driven failover
 
-### Schema `057_relay_pool_failover.sql`
+### Schema `058_relay_pool_failover.sql`
 
 ```sql
 ALTER TABLE workspaces  ADD COLUMN relay_failover_pool_id UUID REFERENCES relay_pools(id) ON DELETE RESTRICT,
@@ -210,7 +210,7 @@ ALTER TABLE relay_pools ADD COLUMN exhausted_at         TIMESTAMPTZ,   -- set: p
 
 ## PR 3: relay-side residency enforcement
 
-### Schema `058_relay_pool_policy.sql`
+### Schema `059_relay_pool_policy.sql`
 
 ```sql
 ALTER TABLE relay_pools ADD COLUMN policy_version BIGINT NOT NULL DEFAULT 1;   -- bumped in the same tx as any change to the pool's authorized workspace set
@@ -314,7 +314,7 @@ Ticked only after merge **and** live check ([[Pending-Live-Tests]]).
 
 Built on `docs/relay-pools-decision`. Controller changes; the console part is listed separately when done.
 
-- **Schema** `056_relay_pools.sql`: as planned, plus:
+- **Schema** `057_relay_pools.sql`: as planned, plus:
   - a CHECK that the default pool stays plain (no region, never residency);
   - pool names trimmed;
   - an explicit `GRANT … ON relay_pools TO ztna_app`.
