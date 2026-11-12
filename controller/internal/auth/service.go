@@ -76,6 +76,11 @@ type Service interface {
 	// the current access token's expiry. Satisfies identity.SessionInvalidator.
 	InvalidateUserSessions(ctx context.Context, userID string) error
 
+	// SessionDeadlines returns a live session's idle and absolute deadlines,
+	// or ErrSessionNotFound (PENDING-09 D-1: devices are bound to the session
+	// they were enrolled under).
+	SessionDeadlines(ctx context.Context, userID, sid string) (SessionDeadlines, error)
+
 	// VerifyAccessToken parses and verifies a Zecurity JWT and returns the
 	// embedded identity claims. Returns an error if the token is invalid,
 	// expired, or signed with a different key/issuer.
@@ -95,6 +100,9 @@ type AccessTokenClaims struct {
 	// the current value before issuing device certificates (certificate audit
 	// bugs 4/5), as /auth/refresh does.
 	Generation int
+	// SessionID is the sid claim: the refresh session this token belongs to
+	// ("" for tokens minted without one).
+	SessionID string
 	// ExpiresAt is the token's exp claim (zero if absent). Long-lived calls
 	// (the WatchChanges hint stream, FU-8) end when it passes, so a stream is
 	// never authorized beyond its token.
