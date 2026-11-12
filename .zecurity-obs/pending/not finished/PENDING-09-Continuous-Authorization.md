@@ -151,9 +151,21 @@ The Context above is out of date: connectors have no 60 s TTL any more, and Opti
 
 Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun_CatchesUpWithinOnePoll`) failed once under full-suite load and passes alone: follow-up, unrelated. Client: 353 pass.
 
-**Live run (pending):** needs the shared DB reset for 056.
-- **Real tunnels:** `logout` cuts the tunnel; a console `/auth/logout` while it is up leaves it working; the sweep cuts within 60 s.
-- **Idle and max expiry:** simulated by moving the deadlines into the past, since the TTLs are not read from env.
+**Live run (2026-11-12): PASS.**
+
+**Setup:**
+- Shared local DB reset with 056; this branch's controller (as `ztna_app`) and connector, with the connector in its own container; workspace `p09live`.
+- A sandbox client daemon (root, via the Orca terminal) tunnelling a rate-limited 200 MB download from a file server on the connector's Docker network.
+
+| Test | Result |
+|---|---|
+| Enrolment binds the session | device row has `session_id`, idle deadline +168 h, max deadline +720 h |
+| A: console sign-in, then `/auth/logout`, while the tunnel download runs | logout 204, then refresh 401; `auth.sign_out` audited; device **not** revoked; download kept running; connector cancelled nothing |
+| B: idle expiry (deadline moved into the past as the owner role at 07:59:04.98; the 168 h TTL is not configurable) | sweep revoked at 07:59:25.89 (next tick); connector `revoked sessions torn down count=1` at 07:59:25.93; download aborted (curl exit 56 after 15.8 MB); audit `device.revoked`, `source: session`, `reason: session_idle`, system actor |
+| C: `zecurity-client logout` during a tunnel download (after a new login, new device) | typed 07:59:59.30, device revoked 07:59:59.97, connector cut 07:59:59.99, download aborted (exit 56); `Logged out of p09live.` |
+| Audit of C (found live, fixed) | `RevokeDevice` (the device's own revoke, called by `logout` before `Logout`) wrote no audit row, so only `auth.sign_out` showed. It now writes `device.revoked`, `source: self`, `reason: signed_out`, once per revocation. Re-checked live on a third device; test `TestRevokeDevice_AuditsTheDevicesOwnRevokeOnce`. |
+
+**Not run live (covered by tests):** max-lifetime expiry (same sweep, other column), expired-token logout, the IdP-disable user-wide revoke, the stale-generation regression, and the enrolment race.
 
 **Follow-ups:**
 - revoke the previous device at re-login (D-8);

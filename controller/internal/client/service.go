@@ -954,8 +954,22 @@ func (s *Service) RevokeDevice(ctx context.Context, req *clientv1.RevokeDeviceRe
 
 	// Soft revoke: set revoked_at = NOW(). Idempotent — repeated calls on an
 	// already-revoked device are a no-op success.
-	if err := revokeClientDevice(ctx, s.pool, req.GetDeviceId(), claims.UserID, claims.TenantID); err != nil {
+	revoked, err := revokeClientDevice(ctx, s.pool, req.GetDeviceId(), claims.UserID, claims.TenantID)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "revoke device: %v", err)
+	}
+	// PENDING-09 live run: the device's own revoke (zecurity-client logout)
+	// wrote no audit row. Record it once, for a revocation this call made.
+	if revoked > 0 {
+		s.recordAudit(ctx, audit.Entry{
+			TenantID:    claims.TenantID,
+			ActorUserID: claims.UserID,
+			ActorEmail:  claims.Email,
+			Action:      "device.revoked",
+			TargetType:  "client_device",
+			TargetID:    req.GetDeviceId(),
+			Details:     map[string]any{"source": "self", "reason": "signed_out"},
+		})
 	}
 
 	// Bump the workspace policy version so the SPIFFE is dropped from

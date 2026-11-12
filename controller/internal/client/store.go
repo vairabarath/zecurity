@@ -320,8 +320,10 @@ func updateClientDeviceCertOnRenewal(
 // cannot revoke a row that doesn't belong to the caller. Idempotent on already-
 // revoked rows: the AND revoked_at IS NULL clause makes repeated calls a no-op
 // and preserves the original revocation timestamp for audit.
-func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID, workspaceID string) error {
-	_, err := db.Exec(ctx,
+// It returns the number of rows revoked (0 if the device was already
+// revoked), so the caller audits only a revocation it actually made.
+func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID, workspaceID string) (int64, error) {
+	tag, err := db.Exec(ctx,
 		`UPDATE client_devices
 		    SET revoked_at = NOW()
 		  WHERE id           = $1
@@ -331,9 +333,9 @@ func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID,
 		deviceID, userID, workspaceID,
 	)
 	if err != nil {
-		return fmt.Errorf("revoke client_device: %w", err)
+		return 0, fmt.Errorf("revoke client_device: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // revokeUserDevices revokes every one of a user's client devices within a

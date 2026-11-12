@@ -109,3 +109,26 @@ func TestEnrollDevice_SessionEndingDuringEnrollmentLeavesNoDevice(t *testing.T) 
 		t.Fatalf("raced enrollment left %d device rows (%v)", n, err)
 	}
 }
+
+// zecurity-client logout revokes its own device through RevokeDevice; that
+// revocation is audited once (a repeat call revokes nothing and writes
+// nothing). Found in the PENDING-09 live run: it used to write no row.
+func TestRevokeDevice_AuditsTheDevicesOwnRevokeOnce(t *testing.T) {
+	f := newDeviceHistoryFixture(t)
+	deviceID, _, _ := f.enrolled("self-revoke")
+	for i := 0; i < 2; i++ {
+		if _, err := f.svc.RevokeDevice(f.ctx, &clientv1.RevokeDeviceRequest{AccessToken: "token", DeviceId: deviceID}); err != nil {
+			t.Fatalf("RevokeDevice %d: %v", i, err)
+		}
+	}
+	var n int
+	var source, reason string
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*), max(details->>'source'), max(details->>'reason') FROM audit_logs
+		  WHERE action = 'device.revoked' AND target_id = $1`, deviceID).Scan(&n, &source, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || source != "self" || reason != "signed_out" {
+		t.Fatalf("audit rows %d source %q reason %q, want 1 self signed_out", n, source, reason)
+	}
+}
