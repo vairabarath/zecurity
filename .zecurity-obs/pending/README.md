@@ -45,7 +45,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
 | [PENDING-07b](not%20finished/PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging (separate app vs shared; alpha = CLI) | operator | P1 | 07a |
 | ✅ [PENDING-08](finished/PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15 | zero-trust | P2 | — |
-| [PENDING-09](not%20finished/PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — *Option B (bounded) implemented in Sprint 15; full decision (A/C) still open* | zero-trust | P2 | ADR-001 |
+| ✅ [PENDING-09](finished/PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — **implemented (PR #198)**: live-session cut on ACL change, device revoked when its login session ends; risk-scored step-up (C) deferred to PENDING-06 | zero-trust | P2 | ADR-001, PENDING-06 |
 | ✅ [PENDING-10](finished/PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — **all 4 phases complete** (Health/Readiness, Fleet Prometheus metrics, OTel distributed tracing, Alerts & Dashboards) | operations | P1 | — |
 | ✅ [PENDING-11](finished/PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — **implemented (PR #187)**: hash-chained audit streams, append-only `ztna_app`, webhook / Splunk HEC / Amazon S3 export, connector access lines | operations | P2 | PENDING-10, PENDING-19 |
 | [PENDING-12](not%20finished/PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt* | operations | P2 | ADR-013 |
@@ -101,8 +101,9 @@ P2 = differentiation / maturity.
 8. **PENDING-05** — SCIM directory sync *(needs 04)*.
 9. **PENDING-06** — MFA / step-up *(needs 04; relates to 09)*.
 10. **PENDING-13** — client device lifecycle + cert renewal. *Provides 02's client-device revoke trigger.*
-11. **PENDING-09** — continuous / re-evaluated authorization. *Option B (bounded) landed early,
-    in Sprint 15, alongside 08; Options A/C still pending team decision.*
+11. **PENDING-09** — continuous / re-evaluated authorization. ✅ **Done — PR #198 (2026-11-12)**:
+    live sessions cut on any access change, and a device revoked when its login session ends;
+    risk-scored step-up (Option C) deferred to PENDING-06.
 12. **PENDING-08** — device posture *(best alongside 09)*. ✅ **Done — Sprint 15**, ahead of this
     sequencing (landed before 04/05/06/13 rather than after).
 
