@@ -100,6 +100,45 @@ func (h *ReadHandlers) GetRelay(w http.ResponseWriter, r *http.Request) {
 	writeReadJSON(w, d)
 }
 
+// ── relay pools (D-37 … D-41) ───────────────────────────────────────────────
+
+// ListRelayPools: GET /provider/relay-pools (relay.read: relay-ops too).
+// Counts only; never tenant names.
+func (h *ReadHandlers) ListRelayPools(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadRelays(actor, Target{Type: "relay_pool"})) {
+		return
+	}
+	pools, err := providerquery.ListRelayPools(r.Context(), h.db)
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, map[string]any{"items": pools})
+}
+
+// GetRelayPool: GET /provider/relay-pools/{id} (relay.read). The tenant list
+// is included only for callers allowed tenant.read (super-admin, D-41);
+// relay-ops get counts only.
+func (h *ReadHandlers) GetRelayPool(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadRelays(actor, Target{Type: "relay_pool", ID: id})) {
+		return
+	}
+	if !providerquery.IsUUID(id) {
+		writeReadError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	withTenants := h.authz.CanReadTenants(actor, Target{Type: "tenant"}) == nil
+	d, err := providerquery.GetRelayPool(r.Context(), h.db, id, withTenants)
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, d)
+}
+
 // ── tenants ──────────────────────────────────────────────────────────────────
 
 // ListTenants: GET /provider/tenants?status=&limit=&cursor=  (not audited)

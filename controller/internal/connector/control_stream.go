@@ -21,6 +21,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/relay/relaylist"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
 	"google.golang.org/grpc"
@@ -33,16 +34,25 @@ import (
 // RelayPlacementStore is the subset of relay.Store used by the connector
 // control-stream handlers. Defined as an interface for testability.
 type RelayPlacementStore interface {
+	// PlacementAllowed reports whether a connector of workspaceID may be
+	// recorded as placed on relayID (D-40): always for a non-residency
+	// workspace, and for a residency workspace only on a relay in one of its
+	// authorized pools.
+	PlacementAllowed(ctx context.Context, workspaceID, relayID string) (bool, error)
 	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error)
 	DeletePlacement(ctx context.Context, connectorID string) (bool, error)
 	BumpLastConfirmed(ctx context.Context, connectorID string) error
 }
 
-// LabelledRelayListSource builds the ADR-016 LabelledRelayList that the
-// controller pushes to connector control streams. Implemented by *relay.Store
-// (BuildLabelledRelayList). Defined as an interface so tests can stub it.
+// LabelledRelayListSource builds the ADR-016 LabelledRelayLists that the
+// controller pushes to connector control streams: one per relay pool, and each
+// connector gets its workspace's pool's list (D-38). Implemented by
+// *relay.Store. Defined as an interface so tests can stub it.
 type LabelledRelayListSource interface {
-	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
+	// BuildRelayLists builds every pool's list and every workspace's pool.
+	BuildRelayLists(ctx context.Context) (*relaylist.Set, error)
+	// BuildLabelledRelayListForWorkspace builds one workspace's list.
+	BuildLabelledRelayListForWorkspace(ctx context.Context, workspaceID string) (*pb.LabelledRelayList, error)
 }
 
 // TransportChangeNotifier fires a transport-plane topology change (ADR-017)
@@ -540,29 +550,20 @@ func truncateForLog(s string) string {
 	return s
 }
 
-// BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
-// connected connector. A wedged connector whose send queue is full is logged
-// and skipped — SyncRelayList (FU-6) or the C4 push at reconnect will catch it
-// up. The pool change that triggered this broadcast is the source of truth in
-// the relay store.
-func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
-	for _, c := range r.relayListClients() {
-		if _, err := c.sendRelayList(list, false); err != nil {
-			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
-		}
-	}
-}
-
-// SyncRelayList (FU-6) sends list only to the connected streams whose last
-// enqueued list has a different version: one that missed a broadcast (failed
-// build, full send queue) or received two broadcasts out of order. Streams
-// already on this version get nothing. Returns how many streams were sent it.
-func (r *ConnectorRegistry) SyncRelayList(list *pb.LabelledRelayList) int {
+// BroadcastRelayLists sends every connected connector its workspace's pool's
+// list (D-38), but only where that list differs from the last one the stream
+// was sent: lists are versioned by content, so a change to one pool reaches
+// only the connectors of the workspaces using that pool, and an unchanged
+// list never costs a connector a probe sweep. A wedged connector whose send
+// queue is full is logged and skipped; RunRelayListSync (FU-6) or the C4 push
+// at reconnect catches it up. The relay store is the source of truth.
+// Returns how many streams were sent a list.
+func (r *ConnectorRegistry) BroadcastRelayLists(set *relaylist.Set) int {
 	n := 0
 	for _, c := range r.relayListClients() {
-		sent, err := c.sendRelayList(list, true)
+		sent, err := c.sendRelayList(set.ForWorkspace(c.tenantID), true)
 		if err != nil {
-			log.Printf("control stream: sync labelled relay list to connector %s: %v", c.connectorID, err)
+			log.Printf("control stream: send labelled relay list to connector %s: %v", c.connectorID, err)
 			continue
 		}
 		if sent {
@@ -572,10 +573,10 @@ func (r *ConnectorRegistry) SyncRelayList(list *pb.LabelledRelayList) int {
 	return n
 }
 
-// RunRelayListSync calls SyncRelayList with a freshly built list every
+// RunRelayListSync calls BroadcastRelayLists with freshly built lists every
 // interval until ctx ends, so a relay list change that a post-commit broadcast
-// failed to deliver (drain, revoke, eviction) reaches every connected
-// connector within one interval.
+// failed to deliver (drain, revoke, eviction, a pool change) reaches every
+// connected connector within one interval.
 func (r *ConnectorRegistry) RunRelayListSync(ctx context.Context, src LabelledRelayListSource, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -584,13 +585,13 @@ func (r *ConnectorRegistry) RunRelayListSync(ctx context.Context, src LabelledRe
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			list, err := src.BuildLabelledRelayList(ctx)
+			set, err := src.BuildRelayLists(ctx)
 			if err != nil {
-				log.Printf("relay list sync: build list: %v", err)
+				log.Printf("relay list sync: build lists: %v", err)
 				continue
 			}
-			if n := r.SyncRelayList(list); n > 0 {
-				log.Printf("relay list sync: sent list version %d to %d connector(s) that were behind", list.GetVersion(), n)
+			if n := r.BroadcastRelayLists(set); n > 0 {
+				log.Printf("relay list sync: sent the current list to %d connector(s) that were behind", n)
 			}
 		}
 	}
@@ -729,10 +730,11 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		log.Printf("control stream: send shield revocation list to connector %s: %v", connectorID, err)
 		return status.Errorf(codes.Unavailable, "shield revocation list unavailable: %v", err)
 	}
-	// ADR-016 C4: push the current eligible relay pool so the connector can
-	// pick a Tier 1 relay at startup without waiting for the next pool change.
+	// ADR-016 C4: push the current eligible relays of the workspace's pool
+	// (D-38) so the connector can pick a Tier 1 relay at startup without
+	// waiting for the next change.
 	if h.RelayListSrc != nil {
-		if list, err := h.RelayListSrc.BuildLabelledRelayList(ctx); err != nil {
+		if list, err := h.RelayListSrc.BuildLabelledRelayListForWorkspace(ctx, tenantID); err != nil {
 			log.Printf("control stream: build labelled relay list for connector %s: %v", connectorID, err)
 		} else if _, err := client.sendRelayList(list, false); err != nil {
 			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
@@ -1093,17 +1095,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	// cache on a real placement transition — not on every heartbeat.
 	if h.RelayStore != nil {
 		if r.RelayId != "" {
-			attachedAt := time.Unix(r.RelayAttachedAtUnix, 0).UTC()
-			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
-			if err != nil {
-				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
-			} else if changed && h.TransportNotifier != nil {
-				// Relay placement changed → transport-plane topology change for
-				// this connector only. Never the ACL (Track B invariant).
-				if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
-					log.Printf("control stream: notify topology after relay placement connector=%s: %v", connectorID, err)
-				}
-			}
+			h.recordRelayPlacement(ctx, client, connectorID, r.RelayId, time.Unix(r.RelayAttachedAtUnix, 0).UTC(), "heartbeat")
 		} else {
 			// Empty relay_id — connector is not attached. Delete any stale placement.
 			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
@@ -1156,17 +1148,7 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			log.Printf("control stream: relay state connector=%s reason=%s with empty relay_id — ignoring", connectorID, r.Reason)
 			return
 		}
-		attachedAt := time.Unix(r.ObservedAtUnix, 0).UTC()
-		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "event")
-		if err != nil {
-			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
-			return
-		}
-		if changed && h.TransportNotifier != nil {
-			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
-				log.Printf("control stream: notify topology after relay event connector=%s: %v", connectorID, err)
-			}
-		}
+		h.recordRelayPlacement(ctx, client, connectorID, r.RelayId, time.Unix(r.ObservedAtUnix, 0).UTC(), "event")
 	case "disconnected":
 		changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
 		if err != nil {

@@ -301,8 +301,8 @@ func TestTenantQueries_FixedStatementCount(t *testing.T) {
 	if _, err := GetTenant(context.Background(), cq, first); err != nil {
 		t.Fatal(err)
 	}
-	if cq.n != 4 {
-		t.Fatalf("GetTenant ran %d statements, want 4 (tenant+counts, networks, connectors, shields)", cq.n)
+	if cq.n != 5 {
+		t.Fatalf("GetTenant ran %d statements, want 5 (tenant+counts, networks, connectors, shields, relay pool)", cq.n)
 	}
 }
 
@@ -533,21 +533,23 @@ func jsonKeys(t *testing.T, v any) []string {
 func TestTenantDTOSurface(t *testing.T) {
 	summary := []string{"ca_not_after", "counts", "created_at", "id", "name", "slug", "status", "trust_domain"}
 	detail := append(append([]string{}, summary...), "connectors", "connectors_truncated", "remote_networks",
-		"remote_networks_truncated", "shields", "shields_truncated")
+		"relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
 	sort.Strings(detail)
 	agent := []string{"active", "disconnected", "pending", "revoked"}
 	for name, c := range map[string]struct {
 		v    any
 		want []string
 	}{
-		"TenantSummary":       {TenantSummary{}, summary},
-		"TenantDetail":        {TenantDetail{}, detail},
-		"TenantCounts":        {TenantCounts{}, []string{"client_devices", "connectors", "policies", "remote_networks", "shields", "users"}},
-		"PolicyCounts":        {PolicyCounts{}, []string{"access_rules", "groups", "resource_policies", "resources"}},
-		"AgentCounts":         {AgentCounts{}, agent},
-		"UserCounts":          {UserCounts{}, []string{"active", "deleted", "locked", "suspended"}},
-		"DeviceCounts":        {DeviceCounts{}, []string{"active", "re_enroll_required", "renew_pending", "revoked"}},
-		"TenantRemoteNetwork": {TenantRemoteNetwork{}, []string{"id", "name", "status"}},
+		"TenantSummary":           {TenantSummary{}, summary},
+		"TenantDetail":            {TenantDetail{}, detail},
+		"TenantCounts":            {TenantCounts{}, []string{"client_devices", "connectors", "policies", "remote_networks", "shields", "users"}},
+		"PolicyCounts":            {PolicyCounts{}, []string{"access_rules", "groups", "resource_policies", "resources"}},
+		"AgentCounts":             {AgentCounts{}, agent},
+		"UserCounts":              {UserCounts{}, []string{"active", "deleted", "locked", "suspended"}},
+		"DeviceCounts":            {DeviceCounts{}, []string{"active", "re_enroll_required", "renew_pending", "revoked"}},
+		"TenantRemoteNetwork":     {TenantRemoteNetwork{}, []string{"id", "name", "status"}},
+		"TenantRelayPool":         {TenantRelayPool{}, []string{"eligible_relays", "id", "name", "previous", "region", "residency"}},
+		"TenantRelayPoolPrevious": {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
 		"TenantConnector": {TenantConnector{}, []string{"cert_not_after", "id", "last_heartbeat_at", "name",
 			"remote_network_id", "revoked_at", "status", "version"}},
 		"TenantShield": {TenantShield{}, []string{"cert_not_after", "connector_id", "id", "last_heartbeat_at", "name",

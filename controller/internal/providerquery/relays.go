@@ -47,10 +47,22 @@ type RelaySummary struct {
 	// Bandwidth (F5) is null when the relay doesn't report byte counters (an
 	// older relay, or none received yet) and for revoked or deleted relays.
 	Bandwidth *RelayBandwidth `json:"bandwidth"`
+	// Pool is the relay pool the relay belongs to (D-37).
+	Pool RelayPoolRef `json:"pool"`
 
 	// connectionCountAt is when ConnectionCount was measured; it decides
 	// DrainState and is not part of the response.
 	connectionCountAt *time.Time
+}
+
+// RelayPoolRef names a relay pool and its placement attributes (D-37).
+// Residency is the pool's setting; it is routing only (R1) until relay-side
+// enforcement exists (D-40).
+type RelayPoolRef struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Region    *string `json:"region"`
+	Residency bool    `json:"residency"`
 }
 
 // RelayBandwidth is a relay's forwarded-bytes rate on bridged client streams,
@@ -139,10 +151,11 @@ type RelayDetail struct {
 	CertificatesTruncated bool               `json:"certificates_truncated"`
 	Attachments           []RelayAttachment  `json:"attachments"`
 	AttachmentsTruncated  bool               `json:"attachments_truncated"`
-	// InRelayList: the relay is in the list published to connectors now.
-	// EligibleRelayCount: how many relays are. Both use the predicate the list
-	// and the drain guard use; the console warns before revoking or deleting
-	// the only listed relay (advisory; Sprint 22 Phase D, P3).
+	// InRelayList: the relay is in its pool's list published to connectors
+	// now. EligibleRelayCount: how many relays of the same pool are (per pool
+	// since D-41, like the list and the drain guard). The console warns before
+	// revoking or deleting the only listed relay of a pool (advisory; Sprint 22
+	// Phase D, P3).
 	InRelayList        bool  `json:"in_relay_list"`
 	EligibleRelayCount int64 `json:"eligible_relay_count"`
 }
@@ -163,7 +176,14 @@ const relaySummaryColumns = `
        r.last_heartbeat_at,
        (SELECT count(*) FROM connector_relay_placement p WHERE p.relay_id = r.id),
        r.created_at, r.drain_started_at, r.connection_count_at,
-       r.bytes_sampled_at, r.bytes_rate_window_seconds, r.bytes_to_connector_per_sec, r.bytes_to_client_per_sec`
+       r.bytes_sampled_at, r.bytes_rate_window_seconds, r.bytes_to_connector_per_sec, r.bytes_to_client_per_sec,
+       rp.id::text, rp.name, rp.region, rp.residency`
+
+// relayFrom joins each relay to its pool; every query using
+// relaySummaryColumns selects FROM it.
+const relayFrom = `
+  FROM relays r
+  JOIN relay_pools rp ON rp.id = r.pool_id`
 
 func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	var s RelaySummary
@@ -174,6 +194,7 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 		&s.CapacityLabel, &s.ConnectionCount, &s.MaxConnections, &s.CertSerial, &s.CertNotAfter,
 		&s.LastHeartbeatAt, &s.AttachedConnectors, &s.CreatedAt, &s.DrainingSince, &s.connectionCountAt,
 		&bwAt, &bwWindow, &bwToConnector, &bwToClient,
+		&s.Pool.ID, &s.Pool.Name, &s.Pool.Region, &s.Pool.Residency,
 	}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return RelaySummary{}, err
@@ -237,8 +258,7 @@ func ListRelays(ctx context.Context, q Querier, hb HeartbeatSource, f RelayFilte
 	ct, cid := keysetArgs(cur)
 
 	rows, err := q.Query(ctx, `
-SELECT`+relaySummaryColumns+`
-  FROM relays r
+SELECT`+relaySummaryColumns+relayFrom+`
  WHERE (($1::text IS NULL AND r.status <> 'deleted') OR r.status = $1)
    AND ($2::timestamptz IS NULL OR (r.created_at, r.id) < ($2, $3::uuid))
  ORDER BY r.created_at DESC, r.id DESC
@@ -286,8 +306,7 @@ func GetRelay(ctx context.Context, q Querier, hb HeartbeatSource, id string) (Re
 	s, err := scanRelaySummary(q.QueryRow(ctx, `
 SELECT`+relaySummaryColumns+`, r.dns_allowlist, r.ip_allowlist,
        r.id IN (SELECT id FROM relays WHERE `+eligible.Where+`),
-       (SELECT count(*) FROM relays WHERE `+eligible.Where+`)
-  FROM relays r
+       (SELECT count(*) FROM relays WHERE pool_id = r.pool_id AND `+eligible.Where+`)`+relayFrom+`
  WHERE r.id = $1`, id), &d.DNSAllowlist, &d.IPAllowlist, &d.InRelayList, &d.EligibleRelayCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RelayDetail{}, ErrNotFound

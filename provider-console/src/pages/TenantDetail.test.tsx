@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { TenantDetail } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
+import { TENANT_DEFAULT_POOL } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 // The audited-fetch invariant (OQ-1): every successful GET
@@ -46,6 +47,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
     connectors_truncated: false,
     shields: [{ id: '12121212-1111-2222-3333-444444444444', name: 'db-1', status: 'active', connector_id: CONN, remote_network_id: NET, cert_not_after: iso(40 * DAY), last_heartbeat_at: iso(-120_000) }],
     shields_truncated: false,
+    relay_pool: TENANT_DEFAULT_POOL,
     ...over,
   }
 }
@@ -209,7 +211,8 @@ describe('Tenant detail: content', () => {
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const links = within(screen.getByRole('main')).getAllByRole('link').map((a) => a.getAttribute('href'))
-    expect(links).toEqual(['/tenants']) // only "Back to tenants"
+    // "Back to tenants" and the tenant's relay pool (D-38); never a tenant detail.
+    expect(links).toEqual(['/tenants', `/relay-pools/${TENANT_DEFAULT_POOL.id}`])
   })
 
   it('renders no identity data even if the response carried some', async () => {
@@ -234,13 +237,14 @@ describe('Tenant detail: content', () => {
     expect(screen.getAllByText('Showing the first 200 entries.')).toHaveLength(3)
   })
 
-  it('is read-only: the only button is Refresh', async () => {
+  it('the only buttons are Refresh and Change pool (D-41); loading sends GETs only', async () => {
     signedInAs(superAdminMe)
-    mockFetch({ [`GET /provider/tenants/${ID}`]: ok() })
+    const { calls } = mockFetch({ [`GET /provider/tenants/${ID}`]: ok() })
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Change pool'])
+    expect(calls.every((c) => c.method === 'GET')).toBe(true)
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
   })
 })

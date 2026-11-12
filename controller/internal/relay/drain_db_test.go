@@ -15,6 +15,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay/eligible"
+	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
 )
 
 // Sprint 22 Phase D (D-32, D-31) over the real relay and provider stores on a
@@ -39,12 +40,24 @@ func (e *adminEnv) exec(t *testing.T, sql string, args ...any) {
 	}
 }
 
-// published is the relay ids in the list connectors receive, and its version.
+// published is the relay ids in the list connectors of a default-pool
+// workspace receive, and its version. It builds the list both ways connectors
+// get it, the broadcast set and the connect-time push, and fails if they
+// disagree (D-38).
 func (e *adminEnv) published(t *testing.T) ([]string, uint64) {
 	t.Helper()
-	list, err := e.store.BuildLabelledRelayList(context.Background())
+	set, err := e.store.BuildRelayLists(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	list := set.ForPool(relaypool.DefaultPoolID)
+	connectTime, err := e.store.BuildLabelledRelayListForWorkspace(context.Background(), "00000000-0000-0000-0000-00000000abcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connectTime.GetVersion() != list.GetVersion() || len(connectTime.GetRelays()) != len(list.GetRelays()) {
+		t.Fatalf("connect-time list (v%d, %d relays) differs from the broadcast list (v%d, %d relays)",
+			connectTime.GetVersion(), len(connectTime.GetRelays()), list.GetVersion(), len(list.GetRelays()))
 	}
 	ids := make([]string, 0, len(list.Relays))
 	for _, r := range list.Relays {
@@ -135,7 +148,7 @@ func TestDrainDB_SharedEligibilityPredicate(t *testing.T) {
 }
 
 // AT-D1, AT-D4: drain leaves the list and changes the version; resume restores
-// both. The connect-time push uses the same BuildLabelledRelayList, so a
+// both. The connect-time push builds the same list (published checks), so a
 // reconnecting connector gets the list without the drained relay (AT-D12).
 func TestDrainDB_DrainAndResume(t *testing.T) {
 	e := newAdminEnv(t, false)
@@ -555,7 +568,7 @@ func TestDrainDB_BroadcastFailureKeepsDrain(t *testing.T) {
 	if !sameIDs(flags.marked, []string{a}) {
 		t.Fatalf("draining flag calls %v, want one for the drained relay", flags.marked)
 	}
-	// Connect-time push (control_stream.go) uses BuildLabelledRelayList.
+	// Connect-time push (control_stream.go): published builds it too.
 	if ids, _ := e.published(t); !sameIDs(ids, []string{b}) {
 		t.Fatalf("connect-time list %v, want only relay-b", ids)
 	}

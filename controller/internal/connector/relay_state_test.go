@@ -22,12 +22,24 @@ type fakeRelayStore struct {
 	upsertErr         error
 	deleteErr         error
 	bumpErr           error
+	// D-40 placement check: relays to refuse, or an error for every check.
+	refuseRelays map[string]bool
+	checkErr     error
+	upserts      int
+}
+
+func (f *fakeRelayStore) PlacementAllowed(_ context.Context, _, relayID string) (bool, error) {
+	if f.checkErr != nil {
+		return false, f.checkErr
+	}
+	return !f.refuseRelays[relayID], nil
 }
 
 func (f *fakeRelayStore) UpsertPlacement(_ context.Context, connectorID, relayID string, _ time.Time, source string) (bool, error) {
 	f.upsertConnectorID = connectorID
 	f.upsertRelayID = relayID
 	f.upsertSource = source
+	f.upserts++
 	return f.upsertChanged, f.upsertErr
 }
 

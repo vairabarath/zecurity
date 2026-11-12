@@ -25,6 +25,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/health"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
 )
 
 // HTTP integration tests for the Phase R read routes: real RequireProvider,
@@ -245,6 +246,8 @@ func newReadEnv(t *testing.T) *readEnv {
 	// pattern would panic here).
 	mux.Handle("GET /provider/relays", rp(http.HandlerFunc(h.ListRelays)))
 	mux.Handle("GET /provider/relays/{id}", rp(http.HandlerFunc(h.GetRelay)))
+	mux.Handle("GET /provider/relay-pools", rp(http.HandlerFunc(h.ListRelayPools)))
+	mux.Handle("GET /provider/relay-pools/{id}", rp(http.HandlerFunc(h.GetRelayPool)))
 	mux.Handle("GET /provider/tenants", rp(http.HandlerFunc(h.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", rp(http.HandlerFunc(h.GetTenant)))
 	mux.Handle("GET /provider/audit", rp(http.HandlerFunc(h.QueryAudit)))
@@ -311,6 +314,8 @@ func TestReadRoutes_AuthMatrix(t *testing.T) {
 	}{
 		{"/provider/relays", 200},
 		{"/provider/relays/" + e.relayID, 200},
+		{"/provider/relay-pools", 200},
+		{"/provider/relay-pools/" + relaypool.DefaultPoolID, 200},
 		{"/provider/tenants", 403},
 		{"/provider/tenants/" + e.tenantID, 403},
 		{"/provider/audit", 403},
@@ -711,8 +716,9 @@ func TestTenantDetail_OneRepeatableReadSnapshot(t *testing.T) {
 	if e.db.begins != 1 || e.db.iso != pgx.RepeatableRead {
 		t.Fatalf("begins=%d iso=%v, want one REPEATABLE READ transaction", e.db.begins, e.db.iso)
 	}
-	if e.db.txReads != 4 || e.db.poolReads != 0 {
-		t.Fatalf("reads: %d in the transaction, %d on the pool; want 4 and 0", e.db.txReads, e.db.poolReads)
+	// tenant+counts, networks, connectors, shields, relay pool (D-38).
+	if e.db.txReads != 5 || e.db.poolReads != 0 {
+		t.Fatalf("reads: %d in the transaction, %d on the pool; want 5 and 0", e.db.txReads, e.db.poolReads)
 	}
 }
 

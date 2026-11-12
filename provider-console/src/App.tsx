@@ -13,6 +13,8 @@ import { Mfa } from '@/pages/Mfa'
 import { NotFound } from '@/pages/NotFound'
 import { ProviderUsers } from '@/pages/ProviderUsers'
 import { RelayDetail } from '@/pages/RelayDetail'
+import { RelayPoolDetail } from '@/pages/RelayPoolDetail'
+import { RelayPools } from '@/pages/RelayPools'
 import { Relays } from '@/pages/Relays'
 import { TenantDetail } from '@/pages/TenantDetail'
 import { Tenants } from '@/pages/Tenants'
@@ -41,6 +43,10 @@ export function AppRoutes() {
           <Route element={<RequireRole roles={rolesFor('relays')} />}>
             <Route path="relays" element={<Relays />} />
             <Route path="relays/:id" element={<RelayDetail />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('relay-pools')} />}>
+            <Route path="relay-pools" element={<RelayPools />} />
+            <Route path="relay-pools/:id" element={<RelayPoolDetail />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('tenants')} />}>
             <Route path="tenants" element={<Tenants />} />

@@ -8,6 +8,8 @@ import { CapacityTier } from '@/components/Capacity'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
 import { RelayDrainCard } from '@/components/RelayDrainCard'
+import { RelayPoolCard } from '@/components/RelayPoolCard'
+import { PoolLink } from '@/components/PoolBadges'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -20,8 +22,9 @@ import { formatDateTime, formatScope } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 
 // Relay detail (Phase P, relay.read). One request when the page opens;
-// Refresh and Retry are the only other reads. The writes are the Drain card
-// (Phase D, both roles) and the Danger zone (Phase X, super-admin). Certificate state
+// Refresh and Retry are the only other reads. The writes are Move to pool
+// (D-41, both roles), the Drain card (Phase D, both roles) and the Danger
+// zone (Phase X, super-admin). Certificate state
 // comes from the API alone: "Current" is is_current, revocation is
 // revoked_at/revocation_reason; only the expiry badge is derived (bucketFor).
 
@@ -227,6 +230,9 @@ function RelayView({
               <span className="font-mono">{r.public_addr ?? '—'}</span>
             </Fact>
             <Fact label="Address scope">{formatScope(r.address_scope)}</Fact>
+            <Fact label="Relay pool">
+              <PoolLink pool={r.pool} />
+            </Fact>
             <Fact label="Version">
               <span className="font-mono">{r.version ?? '—'}</span>
             </Fact>
@@ -376,6 +382,7 @@ function RelayView({
         <TruncatedNote show={r.attachments_truncated} />
       </Section>
 
+      <RelayPoolCard relay={r} onDone={onActionDone} />
       <RelayDrainCard relay={r} onDone={onActionDone} />
       <RelayDangerZone relay={r} onDone={onActionDone} />
     </div>

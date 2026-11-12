@@ -91,6 +91,7 @@ func TestReadActionNames(t *testing.T) {
 func TestDecide_RelayMutationMatrix(t *testing.T) {
 	a := NewAuthz()
 	target := Target{Type: "relay", ID: "r1"}
+	poolTarget := Target{Type: "relay_pool", ID: "p1"}
 	checks := []struct {
 		name  string
 		check func(Actor) error
@@ -101,10 +102,20 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		{ActionRelayDelete, func(x Actor) error { return a.CanDeleteRelay(x, target) }},
 		{ActionRelayDrain, func(x Actor) error { return a.CanDrainRelay(x, target) }},
 		{ActionRelayResume, func(x Actor) error { return a.CanResumeRelay(x, target) }},
+		// Relay pools (D-41).
+		{ActionRelayPoolCreate, func(x Actor) error { return a.CanCreateRelayPool(x, poolTarget) }},
+		{ActionRelayPoolUpdate, func(x Actor) error { return a.CanUpdateRelayPool(x, poolTarget, false) }},
+		{ActionRelayPoolSetPlacement, func(x Actor) error { return a.CanUpdateRelayPool(x, poolTarget, true) }},
+		{ActionRelayPoolDelete, func(x Actor) error { return a.CanDeleteRelayPool(x, poolTarget) }},
+		{ActionRelayMove, func(x Actor) error { return a.CanMoveRelay(x, target) }},
+		{ActionTenantRelayPoolAssign, func(x Actor) error { return a.CanAssignTenantRelayPool(x, Target{Type: "tenant", ID: "w1"}) }},
 	}
 	allowed := map[string]map[string]bool{
-		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true, ActionRelayDrain: true, ActionRelayResume: true},
-		RoleRelayOps:   {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayDrain: true, ActionRelayResume: true},
+		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true, ActionRelayDrain: true, ActionRelayResume: true,
+			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolSetPlacement: true, ActionRelayPoolDelete: true, ActionRelayMove: true, ActionTenantRelayPoolAssign: true},
+		// relay-ops: pools and relay moves, never region/residency or tenant assignment.
+		RoleRelayOps: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayDrain: true, ActionRelayResume: true,
+			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolDelete: true, ActionRelayMove: true},
 		"":             {},
 		"Relay-Ops":    {},
 		"relay-ops ":   {},

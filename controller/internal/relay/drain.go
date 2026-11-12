@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 )
 
 // Relay drain and resume (Sprint 22 Phase D, Decision Record D-32).
@@ -16,8 +15,8 @@ import (
 // A draining relay has drain_started_at set. eligible.Where leaves it out of
 // the relay list published to connectors, so no new placements reach it and
 // connectors migrate away through their existing path (no connector, relay or
-// proto change). Draining the last eligible relay is refused; resume puts the
-// relay back. Drain is an availability tool, not a security control: revoke
+// proto change). Draining the last eligible relay of a pool in use is refused
+// (per pool since D-41); resume puts the relay back. Drain is an availability tool, not a security control: revoke
 // is the control.
 
 var (
@@ -25,88 +24,76 @@ var (
 	errLastEligibleRelay = errors.New("relay is the last eligible relay")
 )
 
-// DrainRelay sets drain_started_at, refusing to drain the last eligible relay.
-// One transaction locks the target and every eligible relay in id order (one
-// statement, so two drains always lock in the same order). A drain waiting on
-// a concurrent one re-checks eligible.Where against the committed row (READ
-// COMMITTED), so two drains of the last two eligible relays can't both pass.
-// inTx (the audit row) runs in the same transaction. changed=false means the
-// relay was already draining: nothing is written and inTx doesn't run.
+// DrainRelay sets drain_started_at, refusing to drain the last eligible relay
+// of a pool in use (D-32, per pool since D-41: a pool that is a workspace's
+// primary pool, or the default pool). One transaction locks the relay's pool
+// row, then the target and every eligible relay of that pool in id order, so
+// two drains, or a drain and a move, of a pool's last two eligible relays
+// serialise and can't both pass; a drain waiting on another re-checks
+// eligible.Where against the committed rows (READ COMMITTED). Draining is
+// refused even when the pool's tenants have a failover pool: failover is for
+// emergencies (D-41). inTx (the audit row) runs in the same transaction.
+// changed=false means the relay was already draining: nothing is written and
+// inTx doesn't run.
 func (s *Store) DrainRelay(ctx context.Context, relayID string,
 	inTx func(ctx context.Context, tx pgx.Tx, drainStartedAt time.Time) error) (changed bool, err error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return false, fmt.Errorf("begin drain relay: %w", err)
-	}
-	defer tx.Rollback(ctx)
+	err = s.withPoolRetry(ctx, "drain relay", func(tx pgx.Tx) error {
+		changed = false
+		poolID, err := relayPoolOf(ctx, tx, relayID)
+		if err != nil {
+			return err
+		}
+		if _, err := lockPools(ctx, tx, poolID); err != nil {
+			return err
+		}
+		l, err := lockRelayAndPoolPeers(ctx, tx, relayID, poolID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !l.found:
+			return ErrRelayNotFound
+		case l.poolID != poolID:
+			return errPoolChangedConcurrently
+		case l.status == "deleted":
+			return errAlreadyDeleted
+		case l.status == "revoked":
+			return errAlreadyRevoked
+		case l.status == "pending":
+			return errInvalidState
+		case l.draining:
+			return nil
+		}
+		if l.eligible && l.eligibleInPool == 1 {
+			used, err := poolInUse(ctx, tx, poolID)
+			if err != nil {
+				return fmt.Errorf("check pool use: %w", err)
+			}
+			if used {
+				return errLastEligibleRelay
+			}
+		}
 
-	rows, err := tx.Query(ctx, `
-		SELECT id::text, status, drain_started_at IS NOT NULL, `+eligible.Where+`
-		  FROM relays
-		 WHERE id = $1 OR `+eligible.Where+`
-		 ORDER BY id
-		   FOR UPDATE`, relayID)
-	if err != nil {
-		return false, fmt.Errorf("lock relays for drain: %w", err)
-	}
-	var (
-		found, targetDraining, targetEligible bool
-		targetStatus                          string
-		eligibleCount                         int
-	)
-	for rows.Next() {
-		var id, status string
-		var draining, isEligible bool
-		if err := rows.Scan(&id, &status, &draining, &isEligible); err != nil {
-			rows.Close()
-			return false, fmt.Errorf("scan relay for drain: %w", err)
+		// FU-7: the controller's clock, read after the row locks are held. The
+		// drain window is measured against connection_count_at, which is also
+		// the controller's clock (the heartbeat's receive time); the database's
+		// NOW() is the transaction start, before any lock wait, and may be
+		// skewed.
+		var started time.Time
+		if err := tx.QueryRow(ctx,
+			`UPDATE relays SET drain_started_at = $2, updated_at = NOW() WHERE id = $1 RETURNING drain_started_at`,
+			relayID, time.Now().UTC()).Scan(&started); err != nil {
+			return fmt.Errorf("mark relay draining: %w", err)
 		}
-		if isEligible {
-			eligibleCount++
+		if inTx != nil {
+			if err := inTx(ctx, tx, started); err != nil {
+				return err
+			}
 		}
-		if id == relayID {
-			found, targetStatus, targetDraining, targetEligible = true, status, draining, isEligible
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("lock relays for drain: %w", err)
-	}
-
-	switch {
-	case !found:
-		return false, ErrRelayNotFound
-	case targetStatus == "deleted":
-		return false, errAlreadyDeleted
-	case targetStatus == "revoked":
-		return false, errAlreadyRevoked
-	case targetStatus == "pending":
-		return false, errInvalidState
-	case targetDraining:
-		return false, nil
-	case targetEligible && eligibleCount == 1:
-		return false, errLastEligibleRelay
-	}
-
-	// FU-7: the controller's clock, read after the row locks are held. The
-	// drain window is measured against connection_count_at, which is also the
-	// controller's clock (the heartbeat's receive time); the database's NOW()
-	// is the transaction start, before any lock wait, and may be skewed.
-	var started time.Time
-	if err := tx.QueryRow(ctx,
-		`UPDATE relays SET drain_started_at = $2, updated_at = NOW() WHERE id = $1 RETURNING drain_started_at`,
-		relayID, time.Now().UTC()).Scan(&started); err != nil {
-		return false, fmt.Errorf("mark relay draining: %w", err)
-	}
-	if inTx != nil {
-		if err := inTx(ctx, tx, started); err != nil {
-			return false, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit drain relay: %w", err)
-	}
-	return true, nil
+		changed = true
+		return nil
+	})
+	return changed, err
 }
 
 // ResumeRelay clears drain_started_at under the row lock. inTx (the audit row)

@@ -12,6 +12,7 @@ import {
   queryAudit,
   type CertificateParams,
 } from './reads'
+import { DEFAULT_POOL } from '@/test/pools'
 import type { CertificateExpiryResult, Page, RelayDetail, RelaySummary, TenantDetail } from './types'
 
 const RELAY_ID = '11111111-2222-3333-4444-555555555555'
@@ -36,6 +37,7 @@ const relay: RelaySummary = {
   draining_since: null,
   drain_state: null,
   bandwidth: null,
+  pool: DEFAULT_POOL,
 }
 
 function signedIn() {

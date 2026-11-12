@@ -2,6 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { Page, RelayBandwidth, RelayDetail, RelaySummary } from '@/api/types'
 import { mockFetch, superAdminMe } from '@/test/fetch'
+import { DEFAULT_POOL } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 import { formatRate, windowText } from '@/lib/format'
 
@@ -16,7 +17,7 @@ function summary(over: Partial<RelaySummary>): RelaySummary {
     public_addr: '203.0.113.5:9093', address_scope: 'public', capacity_label: 'high',
     connection_count: 12, max_connections: 500, cert_serial: 'abc', cert_not_after: null,
     last_heartbeat_at: null, attached_connectors: 1, created_at: '2026-10-01T00:00:00Z',
-    draining_since: null, drain_state: null, bandwidth: null, ...over,
+    draining_since: null, drain_state: null, bandwidth: null, pool: DEFAULT_POOL, ...over,
   }
 }
 

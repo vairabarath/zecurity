@@ -119,6 +119,8 @@ type TenantDetail struct {
 	ConnectorsTruncated     bool                  `json:"connectors_truncated"`
 	Shields                 []TenantShield        `json:"shields"`
 	ShieldsTruncated        bool                  `json:"shields_truncated"`
+	// RelayPool is the tenant's relay pool (D-38).
+	RelayPool TenantRelayPool `json:"relay_pool"`
 }
 
 // TenantFilter narrows ListTenants. Status "" means every status except
@@ -311,6 +313,9 @@ SELECT id::text, name, status, connector_id::text, remote_network_id::text, cert
 		return sh, err
 	}); err != nil {
 		return TenantDetail{}, fmt.Errorf("tenant shields: %w", err)
+	}
+	if d.RelayPool, err = tenantRelayPool(ctx, q, id); err != nil {
+		return TenantDetail{}, err
 	}
 	return d, nil
 }

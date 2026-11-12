@@ -29,6 +29,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
 )
 
 // Sprint 22 Phase A (D-17, D-31) over the real relay and provider stores on a
@@ -36,17 +37,18 @@ import (
 // needs the isolated Valkey (AUTH_TEST_VALKEY_URL).
 
 type adminEnv struct {
-	pool     *pgxpool.Pool
-	store    *Store
-	handler  *AdminHandler
-	mux      *http.ServeMux
-	superID  string
-	opsID    string
-	mu       sync.Mutex
-	fanout   []string
-	drains   []string // OnRelayDrainChanged calls, "drain:<id>" / "resume:<id>"
-	rdb      valkeycompat.Cmdable
-	rdbClose func()
+	pool      *pgxpool.Pool
+	store     *Store
+	handler   *AdminHandler
+	mux       *http.ServeMux
+	superID   string
+	opsID     string
+	mu        sync.Mutex
+	fanout    []string
+	drains    []string // OnRelayDrainChanged calls, "drain:<id>" / "resume:<id>"
+	publishes int      // OnRelayPoolChanged calls
+	rdb       valkeycompat.Cmdable
+	rdbClose  func()
 }
 
 func newAdminEnv(t *testing.T, withValkey bool) *adminEnv {
@@ -120,6 +122,18 @@ func newAdminEnv(t *testing.T, withValkey bool) *adminEnv {
 	e.mux.HandleFunc("DELETE /provider/relays/{id}", e.handler.Delete)
 	e.mux.HandleFunc("POST /provider/relays/{id}/drain", e.handler.Drain)
 	e.mux.HandleFunc("POST /provider/relays/{id}/resume", e.handler.Resume)
+	// Relay pools (D-37 … D-41).
+	e.handler.OnRelayPoolChanged = func(context.Context) error {
+		e.mu.Lock()
+		e.publishes++
+		e.mu.Unlock()
+		return nil
+	}
+	e.mux.HandleFunc("POST /provider/relay-pools", e.handler.CreatePool)
+	e.mux.HandleFunc("PATCH /provider/relay-pools/{id}", e.handler.UpdatePool)
+	e.mux.HandleFunc("DELETE /provider/relay-pools/{id}", e.handler.DeletePool)
+	e.mux.HandleFunc("POST /provider/relays/{id}/pool", e.handler.MoveRelay)
+	e.mux.HandleFunc("PUT /provider/tenants/{id}/relay-pool", e.handler.AssignTenantPool)
 	return e
 }
 
@@ -551,7 +565,7 @@ func TestAdminDB_CreateByRelayOps(t *testing.T) {
 	if len(rows) != 1 || rows[0]["ip"] != "192.0.2.10" || strings.Contains(rows[0]["details"].(map[string]any)["name"].(string), out.ProvisioningToken) {
 		t.Fatalf("create audit: %+v", rows)
 	}
-	if d := rows[0]["details"].(map[string]any); d["before"] != nil || !reflect.DeepEqual(d["after"], map[string]any{"name": "relay-new", "status": "pending"}) {
+	if d := rows[0]["details"].(map[string]any); d["before"] != nil || !reflect.DeepEqual(d["after"], map[string]any{"name": "relay-new", "status": "pending", "pool_id": relaypool.DefaultPoolID}) {
 		t.Fatalf("create before/after: %v -> %v", d["before"], d["after"])
 	}
 	for _, row := range rows {
