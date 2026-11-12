@@ -15,8 +15,14 @@
 //   has no O-6 loss. It is not hash-chained: the chained copy is the
 //   controller's `access` stream.
 // - A failed write (closed stdout) is ignored; it must never stop a tunnel.
+// - The write happens on its own thread behind a bounded queue: a log reader
+//   that stops reading (a stalled journald or Docker log driver) fills the
+//   queue and lines are dropped and counted, instead of a blocking stdout
+//   write stalling the tunnel task that made the decision.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -26,8 +32,19 @@ use time::OffsetDateTime;
 pub const SCHEMA: &str = "zecurity.connector.analytics.v1";
 pub const LINE_PREFIX: &str = "ANALYTICS ";
 
-/// Set once at startup when analytics are on; holds the workspace id.
-static ENABLED: OnceLock<String> = OnceLock::new();
+/// Lines that may wait for the writer thread before new ones are dropped.
+pub const QUEUE_CAPACITY: usize = 4096;
+
+/// Set once at startup when analytics are on.
+static ENABLED: OnceLock<Sink> = OnceLock::new();
+
+/// Lines dropped because the queue was full, not yet reported.
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+struct Sink {
+    workspace_id: String,
+    tx: SyncSender<String>,
+}
 
 /// Parses the ZECURITY_LOG_ANALYTICS setting. Unset or empty means off,
 /// "v1" means on; anything else is an error (the caller logs it and stays off).
@@ -41,9 +58,59 @@ pub fn parse_setting(value: Option<&str>) -> Result<bool, String> {
     }
 }
 
-/// Turns the analytics lines on. Called once from main after enrollment.
+/// Turns the analytics lines on and starts the writer thread. Called once
+/// from main after enrollment; later calls do nothing.
 pub fn enable(workspace_id: &str) {
-    let _ = ENABLED.set(workspace_id.to_owned());
+    if ENABLED.get().is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::sync_channel::<String>(QUEUE_CAPACITY);
+    let sink = Sink {
+        workspace_id: workspace_id.to_owned(),
+        tx,
+    };
+    if ENABLED.set(sink).is_err() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("analytics-writer".into())
+        .spawn(move || {
+            let stdout = std::io::stdout();
+            for line in rx {
+                report_dropped();
+                let mut out = stdout.lock();
+                let _ = out.write_all(line.as_bytes());
+                let _ = out.flush();
+            }
+        });
+    if let Err(e) = spawned {
+        // Lines then fill the queue and are dropped; tunnels are unaffected.
+        tracing::warn!(error = %e, "access analytics writer thread did not start");
+    }
+}
+
+/// Logs (from the writer thread, where blocking is harmless) how many lines
+/// were dropped since the last report.
+fn report_dropped() {
+    let n = DROPPED.swap(0, Ordering::Relaxed);
+    if n > 0 {
+        tracing::warn!(
+            dropped = n,
+            "access analytics: stdout was not keeping up; lines were dropped"
+        );
+    }
+}
+
+/// Queues a full line (newline included) without blocking. Returns false
+/// when it was dropped.
+fn enqueue(tx: &SyncSender<String>, line: String) -> bool {
+    match tx.try_send(line) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
 }
 
 pub fn enabled() -> bool {
@@ -145,20 +212,17 @@ pub fn format_line(workspace_id: &str, d: &AccessDecision<'_>, now: OffsetDateTi
     }
 }
 
-/// Writes the line to stdout when analytics are on.
+/// Queues the line for stdout when analytics are on. Never blocks.
 pub fn emit(d: &AccessDecision<'_>) {
-    let Some(workspace_id) = ENABLED.get() else {
+    let Some(sink) = ENABLED.get() else {
         return;
     };
-    let mut line = format_line(workspace_id, d, OffsetDateTime::now_utc());
+    let mut line = format_line(&sink.workspace_id, d, OffsetDateTime::now_utc());
     if line.is_empty() {
         return;
     }
     line.push('\n');
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let _ = out.write_all(line.as_bytes());
-    let _ = out.flush();
+    enqueue(&sink.tx, line);
 }
 
 #[cfg(test)]
@@ -241,6 +305,18 @@ mod tests {
         assert_eq!(line.lines().count(), 1);
         let v = parse(&line);
         assert_eq!(v["resource"]["destination"], "evil\"\n.example");
+    }
+
+    #[test]
+    fn full_queue_drops_and_counts_instead_of_blocking() {
+        // No reader: the queue fills and further lines are dropped at once.
+        let (tx, _rx) = mpsc::sync_channel::<String>(2);
+        let before = DROPPED.load(Ordering::Relaxed);
+        assert!(enqueue(&tx, "a\n".into()));
+        assert!(enqueue(&tx, "b\n".into()));
+        assert!(!enqueue(&tx, "c\n".into()));
+        assert!(!enqueue(&tx, "d\n".into()));
+        assert!(DROPPED.load(Ordering::Relaxed) >= before + 2);
     }
 
     #[test]
