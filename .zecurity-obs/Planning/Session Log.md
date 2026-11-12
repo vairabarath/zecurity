@@ -3772,3 +3772,9 @@ serves on `127.0.0.1:9102`.
   - Android 16 emulator: app start, daemon in `:vpn`, settings save, and status reach the UI. This found and fixed an R8 stripping of the JNI callback.
 - Not run: sign-in, connect, resource access (no controller or connector was running).
 - Builds on the dev disk: the ext4 build image grew to 60 GB; it holds the SDK, NDK, Flutter, emulator and Gradle.
+
+## 2026-11-12 — M1: iOS app source (I1 provisional; not built)
+- Branch `feat/client-ios` (on `feat/client-android`), local commits, not pushed.
+- Shared mobile layer (`crate::mobile`, `tun_mobile.rs`), utun framing (`utun.rs`, Linux-tested), iOS entry `zc_start_daemon` in `client/ffi`, Flutter iOS Runner + `ZecurityTunnel` packet tunnel extension, `build-ios-native.sh` (XCFramework), Xcode setup in `client/mobile/ios/README.md`. Docs §13.
+- Gates: Linux 369/369; Windows build; Android library + APK + emulator start unchanged; `flutter analyze` clean. iOS Rust type-check not possible on Linux (`ring` needs SDK headers); Swift/Xcode not built; nothing run on iOS.
+- Disk: all build caches and the Rust toolchain for cross builds moved to the dev-disk build image; `client/target` cache and the added rustup targets removed from /home (22 GB free).

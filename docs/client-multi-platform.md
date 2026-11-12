@@ -560,3 +560,64 @@ callback, and the VPN service crashed at start.
 - The behaviour when the user revokes the VPN in system settings: the service
   stops, and the daemon is not told first.
 
+
+## 13. iOS app: what is built (I1, provisional; source only)
+
+Branch `feat/client-ios`, on top of `feat/client-android`. The same Flutter
+app, plus a packet tunnel extension. **Written on Linux: nothing iOS-specific
+has been compiled, signed or run.** Building needs a Mac with Xcode; running
+needs an Apple developer team with the Network Extension entitlement and a
+real iPhone. The steps are in `client/mobile/ios/README.md`.
+
+### Shape
+
+- **The daemon runs unchanged in the packet tunnel extension**
+  (`ios/ZecurityTunnel/PacketTunnelProvider.swift`), started with
+  `zc_start_daemon`. iOS runs an extension only while its VPN is on, so the
+  app starts the tunnel with no resource routes just to run the daemon.
+  Consequence: the VPN icon shows from setup onwards, even while signed out.
+- **The Flutter UI plays the CLI's role**, as on Android: the same `zc_*`
+  calls (through `DynamicLibrary.process()`, since the core is linked
+  statically) and the same IPC socket, here in the App Group container
+  `group.io.zecurity.client`.
+- **The VPN interface:** Swift applies the network settings with one `/32`
+  per resource IP. The daemon finds the extension's utun descriptor (a
+  kernel-control socket scan, as WireGuard does) and `dup()`s it, so dropping
+  it never closes the tunnel. Tunnel-down calls a release hook that removes
+  the routes. Each interface is numbered, so a stale release after a restart
+  is ignored.
+- **utun framing** (4-byte Darwin address family header) is
+  `client/src/utun.rs`, unit-tested on Linux.
+- **The shared mobile layer:** `crate::android` became `crate::mobile` and
+  `tun_android.rs` became `tun_mobile.rs`, both built for Android and iOS.
+- **Login** opens the identity provider in `SFSafariViewController` inside
+  the app, because leaving the app would suspend it before the loopback
+  callback arrives.
+- **Same limits as Android:** per-IP capture (D-W1), DNS-name resources
+  unsupported, posture reports the OS only (version supplied by Swift).
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux tests, with the 5 utun framing tests | 369/369 |
+| Windows build; Android library, APK and emulator start | unchanged, pass |
+| `flutter analyze` (shared Dart, incl. iOS branches) | clean |
+| Rust type-check for `aarch64-apple-ios` | **not possible here**: `ring` needs the iOS SDK headers |
+| Swift, Xcode project, linking, signing | **not built** |
+| Anything on an iPhone | **not run** |
+
+### To check on the first device run
+
+- The app-to-extension Unix socket in the App Group container (fallback:
+  `NETunnelProviderSession.sendProviderMessage`).
+- Extension memory under iOS's ~50 MB limit (two tokio workers; data-plane
+  buffers are still the desktop sizes).
+- The utun descriptor lookup and the in-app login callback.
+
+### Not built yet
+
+- The extension target in `project.pbxproj` (added by hand in Xcode once,
+  per the README, then committed).
+- `ios.*` posture checks, Keychain/Secure Enclave keys, DNS names, App Store
+  packaging.
