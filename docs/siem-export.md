@@ -148,7 +148,7 @@ Each batch is one object:
 - optional key prefix (`A-Z a-z 0-9 / _ . -`, no leading, trailing or double `/`);
 - access key ID and secret access key.
 
-**Endpoint** is only for S3-compatible stores (`https://host[:port]`, path-style).
+**Endpoint** is only for S3-compatible stores (`https://host[:port]`, path-style). Tested with MinIO.
 
 **How credentials behave:**
 - The secret access key is write-only. It is sealed at rest and never shown again.
