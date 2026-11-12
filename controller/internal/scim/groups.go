@@ -303,7 +303,7 @@ func (s *DirectoryService) ReplaceGroup(ctx context.Context, sc *scope, idOrExte
 		return nil, newSCIMError(500, "", "commit replace group: "+err.Error())
 	}
 	if s.notifier != nil {
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if err := s.touchSyncInstance(ctx, sc, s.CurrentSyncInstance(ctx, sc)); err != nil {
 		return nil, newSCIMError(500, "", err.Error())
@@ -427,7 +427,7 @@ func (s *DirectoryService) PatchGroup(ctx context.Context, sc *scope, idOrExtern
 		return nil, serr
 	}
 	if s.notifier != nil {
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if err := s.touchSyncInstance(ctx, sc, s.CurrentSyncInstance(ctx, sc)); err != nil {
 		return nil, newSCIMError(500, "", err.Error())
@@ -452,7 +452,7 @@ func (s *DirectoryService) DeleteGroup(ctx context.Context, sc *scope, idOrExter
 		return newSCIMError(404, "", "group not found")
 	}
 	if s.notifier != nil {
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	return nil
 }
