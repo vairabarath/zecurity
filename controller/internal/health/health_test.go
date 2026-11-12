@@ -307,3 +307,14 @@ func TestEvaluate_CallerCancellationNotCached(t *testing.T) {
 		t.Fatalf("cached status = %s, want ready", got)
 	}
 }
+
+// Critical labels each registered check by name (provider health read).
+func TestRegistry_Critical(t *testing.T) {
+	r := NewRegistry(time.Second, time.Second)
+	r.Register(NewDatabaseChecker(nil))
+	r.Register(NewOutboxChecker(nil))
+	got := r.Critical()
+	if len(got) != 2 || !got["database"] || got["outbox"] {
+		t.Fatalf("Critical() = %v, want database critical, outbox not", got)
+	}
+}

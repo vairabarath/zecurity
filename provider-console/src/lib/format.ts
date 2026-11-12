@@ -48,3 +48,40 @@ export function formatScope(scope: string | null | undefined): string {
   if (!scope) return '—'
   return SCOPES[scope] ?? scope
 }
+
+/** "10 minutes", "24 hours": a CRL validity in words (CA hierarchy, F15). */
+export function validityText(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const h = seconds / 3600
+    return `${h} ${h === 1 ? 'hour' : 'hours'}`
+  }
+  if (seconds % 60 === 0) {
+    const m = seconds / 60
+    return `${m} ${m === 1 ? 'minute' : 'minutes'}`
+  }
+  return `${seconds} seconds`
+}
+
+const RATE_UNITS = ['B/s', 'kB/s', 'MB/s', 'GB/s', 'TB/s']
+
+/** "1.2 MB/s": bytes per second in decimal (SI) units, as reported (F5). */
+export function formatRate(bytesPerSec: number): string {
+  let v = Math.max(0, bytesPerSec)
+  let i = 0
+  while (v >= 1000 && i < RATE_UNITS.length - 1) {
+    v /= 1000
+    i++
+  }
+  const digits = i === 0 || v >= 100 ? 0 : 1
+  return `${v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })} ${RATE_UNITS[i]}`
+}
+
+/** "5 minutes", "30 seconds": an averaging window in words, rounded (F5). */
+export function windowText(seconds: number): string {
+  const s = Math.round(seconds)
+  if (s >= 90) {
+    const m = Math.round(s / 60)
+    return `${m} ${m === 1 ? 'minute' : 'minutes'}`
+  }
+  return `${s} ${s === 1 ? 'second' : 'seconds'}`
+}

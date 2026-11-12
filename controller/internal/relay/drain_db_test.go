@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -162,6 +163,16 @@ func TestDrainDB_DrainAndResume(t *testing.T) {
 		audits[0]["ip"] != "192.0.2.10" || d["reason"] != "kernel upgrade" {
 		t.Fatalf("relay.drain audit row: %+v", audits[0])
 	}
+	// F17: draining false -> true, with the drain start the store recorded.
+	var startedAt time.Time
+	if err := e.pool.QueryRow(context.Background(), `SELECT drain_started_at FROM relays WHERE id = $1`, a).Scan(&startedAt); err != nil {
+		t.Fatal(err)
+	}
+	stamp := startedAt.UTC().Format(time.RFC3339Nano)
+	if d := audits[0]["details"].(map[string]any); !reflect.DeepEqual(d["before"], map[string]any{"draining": false}) ||
+		!reflect.DeepEqual(d["after"], map[string]any{"draining": true, "drain_started_at": stamp}) {
+		t.Fatalf("relay.drain before/after: %v -> %v (drain_started_at %s)", d["before"], d["after"], stamp)
+	}
 
 	if r := e.do(t, provider.RoleSuperAdmin, http.MethodPost, resumePath(a), nil, nil); r.code != http.StatusNoContent {
 		t.Fatalf("resume: %d %s", r.code, r.body)
@@ -177,6 +188,10 @@ func TestDrainDB_DrainAndResume(t *testing.T) {
 	if len(resumes) != 1 || resumes[0]["target"] != a || resumes[0]["ip"] != "192.0.2.10" ||
 		resumes[0]["details"].(map[string]any)["drained_since"] == nil {
 		t.Fatalf("relay.resume audit rows: %+v", resumes)
+	}
+	if d := resumes[0]["details"].(map[string]any); !reflect.DeepEqual(d["before"], map[string]any{"draining": true, "drain_started_at": stamp}) ||
+		!reflect.DeepEqual(d["after"], map[string]any{"draining": false}) {
+		t.Fatalf("relay.resume before/after: %v -> %v", d["before"], d["after"])
 	}
 	if hooks := e.drainHooks(); !sameIDs(hooks, []string{"drain:" + a, "resume:" + a}) {
 		t.Fatalf("drain hooks %v, want one drain then one resume", hooks)
@@ -441,7 +456,7 @@ func TestDrainDB_RecordHeartbeatStoresMeasuredAt(t *testing.T) {
 	id := e.eligibleRelay(t, "relay-a")
 	measured := time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)
 	if err := e.store.RecordHeartbeat(context.Background(), id, "s", time.Now().Add(time.Hour), "1.0", "h",
-		"", 0, "", "relay-a.relay.test:9093", 7, 100, measured); err != nil {
+		"", 0, "", "relay-a.relay.test:9093", 7, 100, measured, nil); err != nil {
 		t.Fatal(err)
 	}
 	var count int

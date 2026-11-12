@@ -162,7 +162,7 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
         </Button>
       </header>
 
-      <section aria-label="Overview" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      <section aria-label="Overview" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <CountTile label="Users" value={c.users.active.toLocaleString()}>
           <span aria-label="User counts">
             {c.users.active} active · {c.users.suspended} suspended · {c.users.locked} locked · {c.users.deleted} deleted
@@ -177,6 +177,12 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
         </CountTile>
         <CountTile label="Shields" value={c.shields.active.toLocaleString()}>
           {agentSummary(c.shields)}
+        </CountTile>
+        <CountTile label="Policies" value={c.policies.resources.toLocaleString()}>
+          <span aria-label="Policy counts">
+            {c.policies.resources} resources · {c.policies.groups} groups · {c.policies.access_rules} access rules ·{' '}
+            {c.policies.resource_policies} resource policies
+          </span>
         </CountTile>
         <CountTile label="Workspace CA" value={<ExpiryBadge notAfter={t.ca_not_after} />}>
           {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks

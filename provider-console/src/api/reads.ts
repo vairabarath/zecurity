@@ -3,7 +3,9 @@ import type {
   AuditEntry,
   CertificateExpiryResult,
   CertificateKind,
+  HealthResult,
   Page,
+  PKIHierarchy,
   RelayDetail,
   RelayStatus,
   RelaySummary,
@@ -57,6 +59,12 @@ const RELAY_LIST_KEYS = ['status', 'limit', 'cursor'] as const
 const TENANT_LIST_KEYS = ['status', 'limit', 'cursor'] as const
 const AUDIT_KEYS = ['action', 'target_type', 'target_id', 'provider_email', 'since', 'until', 'limit', 'cursor'] as const
 const CERTIFICATE_KEYS = ['within', 'kind', 'tenant_id', 'limit', 'cursor'] as const
+const PKI_KEYS = ['limit', 'cursor'] as const
+
+export interface PKIParams {
+  limit?: number
+  cursor?: string
+}
 
 /**
  * "?a=1&b=2" from the allowlisted keys of params, skipping undefined, null
@@ -104,4 +112,14 @@ export function queryAudit(params?: AuditQueryParams): Promise<Page<AuditEntry>>
 
 export function getCertificates(params?: CertificateParams): Promise<CertificateExpiryResult> {
   return request<CertificateExpiryResult>('GET', '/provider/certificates' + buildQuery(params, CERTIFICATE_KEYS))
+}
+
+/** CA hierarchy and CRL status (cert.read: super-admin). Not audited. */
+export function getPki(params?: PKIParams): Promise<PKIHierarchy> {
+  return request<PKIHierarchy>('GET', '/provider/pki' + buildQuery(params, PKI_KEYS))
+}
+
+/** Control-plane health (health.read: super-admin). Not audited. */
+export function getHealth(): Promise<HealthResult> {
+  return request<HealthResult>('GET', '/provider/health')
 }

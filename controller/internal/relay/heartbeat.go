@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -32,7 +33,7 @@ const (
 )
 
 type heartbeatStore interface {
-	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time) error
+	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32, measuredAt time.Time, bandwidth *BandwidthSample) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
 	// LoadRelayByID lets Provision validate the operator-registered row
 	// (status + SAN allowlists) before the provisioning token is burned.
@@ -127,6 +128,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		req.ConnectionCount,
 		req.MaxConnections,
 		receivedAt,
+		bandwidthSample(req),
 	); err != nil {
 		log.Printf("relay heartbeat: record %s: %v", relayID, err)
 		metrics.RecordRelayHeartbeat("rejected")
@@ -207,6 +209,20 @@ func (s *Service) notifyRelayTopology(ctx context.Context, relayID string) {
 			log.Printf("relay heartbeat: notify topology workspace %s: %v", wsID, err)
 		}
 	}
+}
+
+// bandwidthSample is the heartbeat's byte counters (F5), or nil when the
+// relay doesn't report them (an older relay) or a value doesn't fit the
+// database's signed 64-bit column.
+func bandwidthSample(req *relaypb.HeartbeatRequest) *BandwidthSample {
+	if req.BytesClientToConnector == nil || req.BytesConnectorToClient == nil {
+		return nil
+	}
+	up, down, uptime := req.GetBytesClientToConnector(), req.GetBytesConnectorToClient(), req.GetUptimeSeconds()
+	if up > math.MaxInt64 || down > math.MaxInt64 || uptime > math.MaxInt64 {
+		return nil
+	}
+	return &BandwidthSample{ToConnector: int64(up), ToClient: int64(down), UptimeSeconds: int64(uptime)}
 }
 
 func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial string, certNotAfter time.Time, version, hostname string, addr relayAddressObservation) (shouldWriteDB bool, metadataChanged bool, err error) {

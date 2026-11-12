@@ -43,6 +43,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auditexport"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/certalert"
 	"github.com/yourorg/ztna/controller/internal/changehint"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
@@ -648,6 +649,8 @@ func main() {
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
 	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
+	mux.Handle("GET /provider/pki", requireProvider(http.HandlerFunc(providerReads.PKI)))
+	mux.Handle("GET /provider/health", requireProvider(http.HandlerFunc(providerReads.Health)))
 
 	// Health & Readiness (PENDING-10 Phase 1).
 	// Bounded check timeouts and 1s result caching prevent probe storms from saturating downstream services.
@@ -657,6 +660,7 @@ func main() {
 	healthRegistry.Register(health.NewValkeyChecker(connectorValkey))
 	healthRegistry.Register(health.NewPKIChecker(controllerRotator))
 	healthRegistry.Register(health.NewOutboxChecker(outboxProcessor))
+	providerReads.SetHealth(healthRegistry) // GET /provider/health (quick-win F25)
 
 	mux.Handle("/livez", health.LivenessHandler())
 	mux.Handle("/readyz", healthRegistry.PublicReadinessHandler())
@@ -856,6 +860,24 @@ func main() {
 			}
 		}
 	})
+
+	// F14 (D-36): daily certificate expiry email to super-admins, over the
+	// invitation SMTP settings (stdout when SMTP_HOST is unset). Checked a
+	// minute after start, then hourly; at most one email per UTC day.
+	if envOr("CERT_EXPIRY_ALERTS", "true") != "false" {
+		certAlerts := &certalert.Job{
+			DB:         db.Pool,
+			Controller: controllerRotator,
+			Sender:     inviteEmailer,
+			Audit:      providerStore,
+			Marker:     valkeycompat.NewAdapter(connectorValkey),
+		}
+		workers.Go("cert-expiry-alert", func() {
+			certAlerts.Run(ctx, time.Minute, time.Hour)
+		})
+	} else {
+		log.Printf("cert expiry alert: disabled (CERT_EXPIRY_ALERTS=false)")
+	}
 
 	workers.Go("hourly-ticker", func() {
 

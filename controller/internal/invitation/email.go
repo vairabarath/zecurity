@@ -60,3 +60,30 @@ func (e *Emailer) SendInvitation(inv *Invitation, workspaceName string) error {
 	}
 	return nil
 }
+
+// SendPlain sends one plain-text email (used by the certificate expiry alert,
+// F14). Subject and recipient must be single lines. If SMTP is not configured
+// (host == ""), it logs the subject and recipient to stdout instead (dev mode).
+func (e *Emailer) SendPlain(to, subject, body string) error {
+	if strings.ContainsAny(to, "\r\n") || strings.ContainsAny(subject, "\r\n") {
+		return fmt.Errorf("send email: recipient and subject must be single lines")
+	}
+	if e.host == "" {
+		log.Printf("[EMAIL] To: %s | Subject: %s (SMTP not configured; not sent)", to, subject)
+		return nil
+	}
+	msg := strings.Join([]string{
+		"From: " + e.from,
+		"To: " + to,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		body,
+	}, "\r\n")
+	auth := smtp.PlainAuth("", e.from, e.password, e.host)
+	if err := smtp.SendMail(e.host+":"+e.port, auth, e.from, []string{to}, []byte(msg)); err != nil {
+		return fmt.Errorf("send email: %w", err)
+	}
+	return nil
+}

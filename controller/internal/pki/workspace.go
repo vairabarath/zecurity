@@ -628,7 +628,7 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 		return nil, fmt.Errorf("generate CRL serial: %w", err)
 	}
 
-	thisUpdate, nextUpdate := crlWindow(time.Now().UTC(), 24*time.Hour)
+	thisUpdate, nextUpdate := crlWindow(time.Now().UTC(), WorkspaceCRLValidity)
 	template := &x509.RevocationList{
 		Number:                    crlSerial,
 		ThisUpdate:                thisUpdate,

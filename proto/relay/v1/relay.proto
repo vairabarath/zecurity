@@ -72,6 +72,13 @@ message HeartbeatRequest {
   // Connector-revocation Phase D (design §9): canonical SPIFFE ids
   // (spiffe://<td>/connector/<uuid>) of the connectors registered right now.
   repeated string registered_connector_spiffe_ids = 8;
+  // F5 (relay bandwidth): bytes the relay has forwarded on bridged client
+  // streams since its process started, per direction. Cumulative counters:
+  // the controller derives a rate from two samples and treats a decrease, or
+  // an uptime shorter than the gap, as a restart. Unset = not reported (an
+  // older relay), which is not the same as zero traffic.
+  optional uint64 bytes_client_to_connector = 9;
+  optional uint64 bytes_connector_to_client = 10;
 }
 
 message HeartbeatResponse {

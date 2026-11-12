@@ -24,6 +24,7 @@ function tenant(over: Partial<TenantSummary>): TenantSummary {
       remote_networks: 2,
       users: { active: 40, suspended: 1, locked: 0, deleted: 2 },
       client_devices: { active: 30, re_enroll_required: 1, renew_pending: 0, revoked: 4 },
+      policies: { resources: 12, groups: 4, access_rules: 9, resource_policies: 2 },
     },
     ...over,
   }
@@ -50,6 +51,8 @@ describe('Tenants list', () => {
     expect(a.getByText('2')).toBeInTheDocument()
     expect(a.getByText('40')).toBeInTheDocument()
     expect(a.getByText('30')).toBeInTheDocument()
+    // F8: resources, with the rest of the policy in the cell's title
+    expect(a.getByText('12')).toHaveAttribute('title', '4 groups · 9 access rules · 2 resource policies')
     const b = within(screen.getByRole('row', { name: 'Beta' }))
     expect(b.getByText('suspended')).toBeInTheDocument()
     expect(b.getByText('—')).toBeInTheDocument()

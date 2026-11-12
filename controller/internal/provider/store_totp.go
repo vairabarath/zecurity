@@ -95,8 +95,9 @@ func (s *Store) ConfirmTOTP(ctx context.Context, id string, step int64, ip strin
 			Action:         AuditTOTPEnroll,
 			TargetType:     "provider_user",
 			TargetID:       u.ID,
-			Details:        map[string]any{"email": u.Email},
-			IPAddress:      ip,
+			Details: WithChange(map[string]any{"email": u.Email},
+				map[string]any{"totp": TOTPStatePending}, map[string]any{"totp": TOTPStateEnabled}),
+			IPAddress: ip,
 		}); err != nil {
 			return err
 		}
@@ -148,8 +149,13 @@ func (s *Store) ResetOperatorTOTP(ctx context.Context, actor AuditActor, id, rea
 		if tag.RowsAffected() == 0 {
 			return ErrTOTPNotEnrolled
 		}
+		before := TOTPStatePending
+		if target.TOTPEnabledAt != nil {
+			before = TOTPStateEnabled
+		}
 		return s.auditOperator(ctx, tx, actor, AuditTOTPReset, target,
-			map[string]any{"email": target.Email, "reason": reason})
+			WithChange(map[string]any{"email": target.Email, "reason": reason},
+				map[string]any{"totp": before}, map[string]any{"totp": TOTPStateNone}))
 	})
 }
 
@@ -163,10 +169,11 @@ func (s *Store) RecoverAdmin(ctx context.Context, email, passwordHash string) (b
 		var id, role string
 		var disabledAt, enabledAt *time.Time
 		var ct *string
+		var mustChange bool
 		err := tx.QueryRow(ctx,
-			`SELECT id::text, role, disabled_at, totp_enabled_at, totp_secret_ciphertext
+			`SELECT id::text, role, disabled_at, totp_enabled_at, totp_secret_ciphertext, must_change_password
                FROM provider_users WHERE email = $1 FOR UPDATE`, normalizeEmail(email),
-		).Scan(&id, &role, &disabledAt, &enabledAt, &ct)
+		).Scan(&id, &role, &disabledAt, &enabledAt, &ct, &mustChange)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrProviderUserNotFound
 		}
@@ -194,8 +201,28 @@ func (s *Store) RecoverAdmin(ctx context.Context, email, passwordHash string) (b
 			Action:        AuditRecoverAdmin,
 			TargetType:    "provider_user",
 			TargetID:      id,
-			Details:       map[string]any{"email": normalizeEmail(email), "totp_cleared": hadTOTP},
+			Details: WithChange(map[string]any{"email": normalizeEmail(email), "totp_cleared": hadTOTP},
+				map[string]any{"totp": totpState(enabledAt, ct), "must_change_password": mustChange},
+				map[string]any{"totp": TOTPStateNone, "must_change_password": true}),
 		})
 	})
 	return hadTOTP, err
+}
+
+// TOTP enrolment states recorded in audit before/after (F17). Never the
+// secret: only whether one is pending or confirmed.
+const (
+	TOTPStateNone    = "none"
+	TOTPStatePending = "pending"
+	TOTPStateEnabled = "enabled"
+)
+
+func totpState(enabledAt *time.Time, ciphertext *string) string {
+	switch {
+	case enabledAt != nil:
+		return TOTPStateEnabled
+	case ciphertext != nil:
+		return TOTPStatePending
+	}
+	return TOTPStateNone
 }

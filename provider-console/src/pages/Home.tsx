@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronRight, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { getCertificates, listRelays, queryAudit } from '@/api/reads'
-import type { AuditEntry, CertificateEntry, CertificateExpiryResult, Page, RelaySummary } from '@/api/types'
+import { getCertificates, getHealth, listRelays, queryAudit } from '@/api/reads'
+import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelaySummary } from '@/api/types'
 import { hasRole } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
+import { ControlPlaneHealth } from '@/components/ControlPlaneHealth'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { PageHeader } from '@/components/PageHeader'
 import { RoleBadge } from '@/components/RoleBadge'
@@ -23,8 +24,9 @@ import { cn } from '@/lib/utils'
 // polling, no focus refetch) and again only on Refresh:
 //   - GET /provider/relays, every page (relay.read: both roles);
 //   - super-admin only: GET /provider/certificates?within=168h (summary and
-//     the soonest expiries) and GET /provider/audit?limit=6.
-// relay-ops never requests certificates or audit (it would be refused).
+//     the soonest expiries), GET /provider/audit?limit=6 and GET
+//     /provider/health (control-plane health, quick-win F25).
+// relay-ops never requests certificates, audit or health (it would be refused).
 // Nothing here opens a tenant, so this page writes no audit entry.
 
 const RELAY_PAGE_LIMIT = 200
@@ -51,6 +53,7 @@ async function fetchFleet(): Promise<Fleet> {
 
 const fetchSoonCertificates = () => getCertificates({ within: '168h', limit: 6 })
 const fetchRecentAudit = () => queryAudit({ limit: 6 })
+const fetchHealth = () => getHealth()
 const skip = () => Promise.resolve(null)
 
 function greeting(hour: number): string {
@@ -74,6 +77,7 @@ export function Home() {
   const fleet = useDetailQuery(`relays|${round}`, fetchFleet)
   const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchSoonCertificates : skip)
   const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
+  const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
 
   if (!me) return null
   const refresh = () => setRound((n) => n + 1)
@@ -106,6 +110,7 @@ export function Home() {
         </Card>
 
         <div className="flex min-w-0 flex-[2_1_360px] flex-col gap-4">
+          {isSuperAdmin && <ControlPlaneHealth state={health.state} onRetry={refresh} />}
           {isSuperAdmin ? (
             <RecentActivity state={audit.state} onRetry={refresh} />
           ) : (

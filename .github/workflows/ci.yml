@@ -17,8 +17,9 @@
 #     database silently passes while testing almost nothing. Setting the
 #     variables is not enough; something has to check they arrived.
 #
-#   * `npm run lint` is non-blocking, for the same reason as clippy — see the
-#     note on that step.
+#   * `npm run lint` is non-blocking for admin, for the same reason as clippy
+#     — see the note on that step. The provider console's lint is clean, so
+#     there it is a blocking gate like its tests and build.
 
 name: CI
 
@@ -276,4 +277,38 @@ jobs:
 
       - name: build
         working-directory: admin
+        run: npm run build
+
+  provider-console:
+    name: provider console (react)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Same Node as the admin job (see the note there).
+          node-version: 24
+          cache: npm
+          cache-dependency-path: provider-console/package-lock.json
+
+      - name: npm ci
+        working-directory: provider-console
+        run: npm ci
+
+      # All blocking. Lint is clean here (unlike admin), so it is a gate from
+      # the start. The tests include the console's invariants: the API
+      # surface (api-surface.test.ts: every read and write on purpose) and
+      # the static source guards (no fetch outside the client, no console.,
+      # no localStorage).
+      - name: lint
+        working-directory: provider-console
+        run: npm run lint
+
+      - name: test
+        working-directory: provider-console
+        run: npm run test
+
+      - name: build
+        working-directory: provider-console
         run: npm run build

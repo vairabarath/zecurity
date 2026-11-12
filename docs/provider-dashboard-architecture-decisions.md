@@ -950,3 +950,18 @@ Made by the product/architecture owner after Sprint 21 shipped the read-only pro
 - `decide()` gains its first role exception (D-31). The relay revoke/delete handlers keep calling `CanRevokeRelay` / `CanDeleteRelay`; only the policy changes.
 - D-17 is implemented for relay revoke and delete: a required reason in the request body (not the URL) and a typed relay-name confirmation, checked by the server as well as the console.
 - Two schema files: `042_` (provider TOTP) and `043_` (relay drain). No proto change.
+
+## Decision record amendment — 2026-11-11: certificate status and expiry alerts (F15, F14)
+
+Made by the product/architecture owner while closing the provider dashboard Must-have list (`.zecurity-obs/Planning/Provider-Dashboard-Features.md`). Everything earlier stands.
+
+### Decided
+
+| # | Topic | Decision |
+|---|---|---|
+| D-35 | OCSP (F15) | **No OCSP responder.** Revocation is CRL-based by design: clients, connectors and relays check the workspace and relay CRLs. Nothing in the platform would query an OCSP responder without agent changes, so a responder would only add attack surface. F15 is complete with revoke actions, published CRLs and the CRL status view (`GET /provider/pki`). Revisit only if an external relying party needs OCSP. |
+| D-36 | Expiry alerting (F14) | A **daily email to every active super-admin**, sent over the existing SMTP settings (`SMTP_*`; stdout in dev). Scope: the certificates the provider owns. Platform CAs (root, intermediate, workspace CAs) are listed from **30 days** before expiry. Automatically renewed certificates (relays, the controller's gRPC certificate) are listed only within **24 hours** of expiry or once **expired**, which means a renewal is overdue. Tenant agent certificates (connectors, shields, client devices) are short-lived (typically 7 days), renew themselves and stay on the console's Certificates page. At most one email per UTC day; no email when nothing is in scope; every send audited (`cert_expiry.alert_sent`, actor `system:cert-expiry-alert`). `CERT_EXPIRY_ALERTS=false` turns it off. Configurable rules, other channels and other recipients belong to F26 (alert rules). |
+
+### Consequences
+
+- No schema, proto or console change. The job lives in `controller/internal/certalert` and reuses the certificate inventory query (`providerquery.CertificateExpiry`), the invitation SMTP sender and a Valkey once-a-day marker (single controller, D-02).

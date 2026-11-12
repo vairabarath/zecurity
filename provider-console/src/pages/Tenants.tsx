@@ -90,6 +90,7 @@ export function Tenants() {
                   <TableHead className="text-right">Networks</TableHead>
                   <TableHead className="text-right">Users</TableHead>
                   <TableHead className="text-right">Devices</TableHead>
+                  <TableHead className="text-right">Resources</TableHead>
                   <TableHead>Workspace CA</TableHead>
                 </TableRow>
               </TableHeader>
@@ -127,6 +128,12 @@ export function Tenants() {
                     </TableCell>
                     <TableCell className="text-right font-mono text-[13px] tabular-nums" title="Active devices">
                       {t.counts.client_devices.active.toLocaleString()}
+                    </TableCell>
+                    <TableCell
+                      className="text-right font-mono text-[13px] tabular-nums"
+                      title={`${t.counts.policies.groups} groups · ${t.counts.policies.access_rules} access rules · ${t.counts.policies.resource_policies} resource policies`}
+                    >
+                      {t.counts.policies.resources.toLocaleString()}
                     </TableCell>
                     <TableCell>
                       <ExpiryBadge notAfter={t.ca_not_after} />

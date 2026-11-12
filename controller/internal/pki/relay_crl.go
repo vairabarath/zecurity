@@ -23,6 +23,14 @@ type RevokedEntry struct {
 // long a stale cache may be trusted (consumers deny once past nextUpdate).
 const relayCRLValidity = 10 * time.Minute
 
+// RelayCRLValidity and WorkspaceCRLValidity are exported for the provider
+// PKI read (quick-win F15), so the status it reports cannot drift from what
+// the CRL endpoints sign.
+const (
+	RelayCRLValidity     = relayCRLValidity
+	WorkspaceCRLValidity = 24 * time.Hour
+)
+
 // GenerateRelayCRL builds a DER-encoded CRL signed by the platform Intermediate CA
 // for the supplied revoked relay serials.
 //

@@ -273,8 +273,9 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 | FU-14 | **The connector's relay drain timeout doesn't cut streams.** *(Numbered FU-11 in PR #158; renumbered when #159's FU-11…FU-13 merged.)* After `relay_drain_timeout_secs` (120 s) `relay_selector` only aborts the old session task; each stream is a detached `tokio::spawn` (`connector/src/relay_handler.rs:167`), so running streams keep the old relay's QUIC connection open until they end. Found live in AT-D6: a 1 GiB download kept using the drained relay for 442 s. Fix: close the old QUIC connection (or abort tracked stream tasks) when the timeout fires, with a test; then the console's "up to 120 seconds" text is true. Connector change, so not in Sprint 22 (D-32). | AT-D6 lab run, 2026-10-30 | **Fixed** 2026-10-31 (branch `fix/connector-drain-timeout-cut`): the drain timeout closes the old relay connection. See Post-Sprint Fixes → FU-14 |
 | FU-15 | **A revoked session keeps delivering data for seconds (O-6, re-verified 2026-10-31).** With `curl --limit-rate 300K` cut mid-download by a member removal, the connector cancelled the session in 44 ms, but curl received **5.64 MB more over 18.6 s**. Cause: (1) on an authorization cancel the connector drops the device stream, which QUIC (quinn) finishes gracefully, so its already-queued data keeps flowing (the client logged `stream finished`, 4.2 s after the cancel); (2) the client then drains the ~4.4 MB it had queued for that flow at the app's pace. curl's own socket buffer held only ~86 KB. Nothing new is read from the resource after the cancel: the data was fetched before the cut, it just arrives late. Fix: the connector aborts (resets) a cancelled session's stream; the client drops an aborted flow's queued data and resets the app connection. A normal end stays a clean close (F-7). | Live E2E run O-6 (2026-10-29), re-verified 2026-10-31 | **Fixed** 2026-10-31 (branch `fix/fu15-revoked-session-tail`): the connector aborts a revoked session's stream (QUIC reset "RVKD") and tells the Shield; the client drops a failed flow's queue. Live: 18.6 s / 5.64 MB → 0.52 s / 0.18 MB; see the run record → O-6 |
 | FU-16 | **A revoked session's last ~1 MB still reaches the app over 2–3 s (L7/L8, FU-9 live run 2026-11-04).** With `curl --limit-rate 300K`, a member removal or a shield revocation left curl receiving for 2.3–3.2 s (0.84–1.10 MB) before its error. **Evidence:**<br>- the same on a connector-route resource (no FU-9 code) as on the shield route;<br>- the connector aborts the session at once (logged), and no connector traffic arrives after the cut (UDP receive counter on the client host);<br>- the client got FU-8's change hint and hot-removed the resource 25–40 ms after the cut.<br>**Suspected (not proven):** FU-8's immediate hot-remove interacts with FU-15's client-side queue drop (`client/src/net_stack.rs`, `RELAY_FAILED`), so the flow's queued data is delivered at the app's pace instead of being dropped. FU-15 measured 0.52 s / 0.18 MB before FU-8 existed.<br>**Next:**<br>- debug-level client logging of the flow's QUIC reset, its outcome and the queue drop;<br>- reproduce L7 and L8;<br>- find where the bytes are held and when they are released, and whether they are drained, dropped or delivered;<br>- compare with FU-15's result;<br>- then assign the fix to FU-8 or FU-15.<br>Don't change FU-9 for it. | FU-9 live run, [[Sprint22/Live-Run-FU9-2026-11-04]] | **Fixed** 2026-11-05 (PR #179, merge `945dd7ac`; branch `fix/fu16-revocation-tail`, commit `9bd6c315`). The revocation tail is **curl's own kernel socket buffer** (`Recv-Q`) at the cut, irreducible and no worse than a plain TCP RST; the FU-8/FU-15 suspicion is refuted. Found and fixed on the way: after a lost QUIC connection (connector stop) the client relayed quinn's buffered stream data at the app's pace (844–897 KB over ~34 s at 25 KB/s → 78 KB; 2.15 MB → 0.92 MB at 300 KB/s), and a relay task blocked on a full app queue couldn't see a reset. See Post-Sprint Fixes → FU-16 and [[Sprint22/FU16-Revocation-Tail-2026-11-05]] |
-| FU-17 | **A failed shield tunnel ends the device stream gracefully (F1, live run 2026-11-05 LT-1).** When a shield tunnel fails (dead shield link, stream error, end without `TunnelEnd`: `End::Failed` in `connector/src/agent_tunnel.rs` `relay_stream`), the connector only drops the device stream; quinn finishes a dropped stream gracefully, so the app receives everything the connector had queued (≈3.7 MB over ~95 s after the session was unregistered) and then a **clean FIN**: a truncated response looks like a normal end. FU-15 fixed this for `End::Aborted` only. Fix: abort (reset) the device stream on `End::Failed` too, with a test. | Live run [[Sprint22/Live-Run-Gaps-2026-11-05]] | Open |
-| FU-18 | **On `systemctl stop` the connector does not close its relay connection (F2, live run 2026-11-05 LT-3c).** `graceful_shutdown` (`connector/src/main.rs`) closes client QUIC connections, shield streams and says goodbye, but not the relay QUIC connection, so the relay learns of the stop at its 60 s idle timeout. Relayed clients receive relay-buffered data (1.7–4.0 MB) and then hang silently until the relay forwards a reset (+61–66 s); the direct path ends in < 1 s. Fix: close the relay connection(s) with a reason during shutdown (bounded wait). | Live run [[Sprint22/Live-Run-Gaps-2026-11-05]] | Open |
+| FU-17 | **A failed shield tunnel ends the device stream gracefully (F1, live run 2026-11-05 LT-1).** When a shield tunnel fails (dead shield link, stream error, end without `TunnelEnd`: `End::Failed` in `connector/src/agent_tunnel.rs` `relay_stream`), the connector only drops the device stream; quinn finishes a dropped stream gracefully, so the app receives everything the connector had queued (≈3.7 MB over ~95 s after the session was unregistered) and then a **clean FIN**: a truncated response looks like a normal end. FU-15 fixed this for `End::Aborted` only. Fix: abort (reset) the device stream on `End::Failed` too, with a test. | Live run [[Sprint22/Live-Run-Gaps-2026-11-05]] | **Fixed** 2026-11-06 (PR #185, merge `830d915e`). Verified live ([[Sprint22/Live-Run-FU17-FU18-2026-11-06]], R1/R2): curl now exits 56 (error) at +55–58 s on a dead shield link (was a clean close at +146 s), and a resource RST on the connector route resets the flow with TFLD |
+| FU-18 | **On `systemctl stop` the connector does not close its relay connection (F2, live run 2026-11-05 LT-3c).** `graceful_shutdown` (`connector/src/main.rs`) closes client QUIC connections, shield streams and says goodbye, but not the relay QUIC connection, so the relay learns of the stop at its 60 s idle timeout. Relayed clients receive relay-buffered data (1.7–4.0 MB) and then hang silently until the relay forwards a reset (+61–66 s); the direct path ends in < 1 s. Fix: close the relay connection(s) with a reason during shutdown (bounded wait). | Live run [[Sprint22/Live-Run-Gaps-2026-11-05]] | **Fixed for the connector** 2026-11-06 (PR #186, merge `0c24874f`). Verified live (R3): the relay learns of the stop at +0.6 s (was +65 s); at 300 KB/s flows fail at +7–8 s with no silent hang. The remaining slow-reader tail (+53–57 s at 25 KB/s) is in the relay: FU-19 |
+| FU-19 | **The relay bridge keeps forwarding a stream's buffered data after the connector's connection closed (live rerun 2026-11-06, R3).** After a connector stop the relay drops the connector at once, but each bridged stream keeps reading `pipe Connector to Client` until quinn reports the loss, which happens only after the stream's buffered data (up to its 1.25 MB receive window) has been handed out (the FU-16 R1 behaviour, fixed in the client but not in `relay/src/session.rs`). A 25 KB/s relayed download received 1.3–1.4 MB more and failed only at +53–57 s. Fix direction: in the bridge, watch the connector connection's `closed()` next to each read and reset the client stream at once with the forwarded code. Relay change only. | Live rerun [[Sprint22/Live-Run-FU17-FU18-2026-11-06]] | **Implemented, validated and verified live** 2026-11-06 (branch `fix/fu19-relay-bridge-connection-loss`, base `main` `20170380`): the bridge watches both connections and resets all four stream halves at once when either closes, forwarding its close code (SHDN, DRNT, else RLAB). See Post-Sprint Fixes → FU-19 |
 
 ## Post-Sprint Fixes
 
@@ -1050,3 +1051,56 @@ On the direct path the same stop ends flows in < 1 s.
 | F6 | `graceful_shutdown` does not call `close_all` | **Survives:** the `main.rs` wiring is not unit-tested; covered by review, to be covered by the live rerun |
 
 **Not yet validated live:** an LT-3c rerun (connector stop behind the relay) should show the relay logging the connector's close (SHDN) at once, and relayed flows failing within about a second instead of at +61–66 s.
+
+### Fix: FU-19 the relay bridge ends as soon as either side's connection closes
+**Status:** implemented and validated, not committed. Branch `fix/fu19-relay-bridge-connection-loss`, base `main` `20170380`.
+
+**Issue (live rerun 2026-11-06, R3):**
+- After a connector stop the relay dropped the connector at once (FU-18), but each bridged stream kept forwarding.
+- A 25 KB/s relayed download received 1.3–1.4 MB more, and failed only at +53–57 s with `pipe Connector to Client: read: connection lost` and a forwarded `RLAB`.
+
+**Root cause:** `relay/src/session.rs` `pipe_streams` only copied stream to stream. After a peer's `CONNECTION_CLOSE`, quinn keeps handing out a stream's buffered data (up to its 1.25 MB receive window) and reports the loss only once drained (FU-16 R1, fixed in the client but not in the relay).
+
+**Fix applied (`relay/src/session.rs`):**
+- `pipe_streams` takes the client and connector connections, and `select!`s (biased) the bridge against `connection_gone(client, connector)`:
+  - the bridge's own result wins when it already finished, so a normal end is unchanged;
+  - otherwise a closed connection ends the bridge with `PipeError::ConnectionGone(code)`, and all four stream halves are reset or stopped at once (the existing failure path).
+- **The forwarded code is the closing side's application close code:** a connector stop arrives as `SHDN` (FU-18), a drain cut as `DRNT` (FU-14). A close without a code (idle timeout, crash) arrives as `RLAB`.
+- `counted_copy` maps a read or write that failed because the connection closed to the same `ConnectionGone(code)`, so the code is forwarded whichever path notices first.
+- `spawn_lookup` / `handle_lookup_stream` pass the client connection through.
+- Relay only: no client, connector or proto change.
+- **Trade-off:** as in FU-16's client fix, data that quinn had buffered for a stream when its connection closed is not delivered. The close is an abrupt end, the same as on the direct path.
+
+**Tests (`relay/src/session.rs`, real QUIC client ↔ relay ↔ connector bridge):**
+- **New:**
+  - `a_closed_connector_connection_ends_the_bridge_at_once`: megabytes queued toward a client that isn't reading; the connector closes its connection with SHDN; the bridge ends within 2 s, and the client gets `Reset(SHDN)` without the backlog.
+  - `a_closed_client_connection_ends_the_bridge_at_once`: the connector gets `Reset` with the client's close code.
+  - `a_connection_lost_without_a_code_forwards_rlab`.
+- **Existing, unchanged and passing:** the reset/stop forwarding tests and `a_clean_end_is_still_a_clean_finish`.
+
+**Mutants M1–M5, all caught:**
+
+| Mutant | Change | Tests that fail |
+|---|---|---|
+| M1 | No connection watch (= `main`) | 2 tests |
+| M2 | A read on a closed connection not mapped to its close code | 1 test |
+| M3 | Close code dropped | 2 tests |
+| M4 | Always RLAB | 2 tests |
+| M5 | A closed connection treated as a clean end | 3 tests |
+
+Not mutation-tested: the bridge-first priority. It only matters when the bridge finishes and a connection closes in the same instant.
+
+**Results:**
+- `cd relay && cargo test`: 126 passed, 0 failed.
+- The new tests repeated 10×: 10/10.
+- Clippy: nothing in `session.rs`; the new code is `rustfmt`-clean.
+
+**Live check 2026-11-06 (before push):**
+- **Lab:** the relay built from this branch (`42368afb…`), the connector from `main`, direct path blocked so flows used the relay.
+- **Connector stop (R3), 25 KB/s ×2 and 300 KB/s ×1:**
+  - the relay logs `Connector removed from Relay registry` and `bridge ended … forwarded_code="0x5348444e" error="connector connection closed (close code 0x5348444e)"` in the same instant (+0.68 s, i.e. the stop command's latency);
+  - the client is reset with SHDN at +1.07 s, and curl exits 56 at +4–5 s (its own `Recv-Q`);
+  - bytes after the cut: **110 / 102 KB** at 25 KB/s (was 1.33–1.43 MB at +53–57 s), 922 KB at 300 KB/s (`Recv-Q` 997 KB).
+- **Regression:**
+  - a full 60 MB relayed download is intact (SHA-256 match, curl 0, no bridge error);
+  - a relay-path revocation still forwards the connector's RVKD (curl 56, 74 KB after the cut).
