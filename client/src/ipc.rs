@@ -121,6 +121,11 @@ pub fn ipc_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("ZECURITY_DAEMON_SOCKET") {
         return PathBuf::from(p);
     }
+    // Android: in the app's private files directory, reachable only by the
+    // app's own processes (the UI and the VPN service hosting the daemon).
+    #[cfg(target_os = "android")]
+    return crate::android::files_dir().join("daemon.sock");
+    #[cfg(not(target_os = "android"))]
     PathBuf::from("/run/zecurity-client/daemon.sock")
 }
 
@@ -284,7 +289,7 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
         return Ok(resp);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     let _ = tokio::process::Command::new("systemctl")
         .args(["start", "zecurity-client"])
         .status()
@@ -299,7 +304,11 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    send_ipc(req).await.context(if cfg!(windows) {
+    // Android: the app starts the daemon with its VPN service; there is
+    // nothing to start from here.
+    send_ipc(req).await.context(if cfg!(target_os = "android") {
+        "the Zecurity service is not running — reopen the Zecurity app"
+    } else if cfg!(windows) {
         "daemon could not be started — run: Get-Service zecurity-client (start it from an elevated PowerShell with Start-Service zecurity-client)"
     } else {
         "daemon could not be started — run: systemctl status zecurity-client"

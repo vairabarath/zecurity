@@ -1,6 +1,6 @@
 // The Linux collectors below are compiled, and unit-tested, on every
 // platform; on Windows only `collect` (OS report only) runs.
-#![cfg_attr(windows, allow(dead_code))]
+#![cfg_attr(any(windows, target_os = "android"), allow(dead_code))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -481,7 +481,7 @@ pub(crate) struct PostureReport {
     pub os_version: String,
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub(crate) async fn collect() -> PostureReport {
     collect_with(Path::new("/"), Arc::new(RealCommandRunner), DEFAULT_TIMEOUT).await
 }
@@ -504,6 +504,29 @@ pub(crate) async fn collect() -> PostureReport {
     PostureReport {
         checks: Vec::new(),
         os_name: "Windows".into(),
+        os_version: version,
+    }
+}
+
+/// Android: as on Windows, only the OS is reported (no `android.*` checks
+/// yet); the controller evaluates a required check as unsupported.
+#[cfg(target_os = "android")]
+pub(crate) async fn collect() -> PostureReport {
+    let version = match tokio::time::timeout(
+        DEFAULT_TIMEOUT,
+        RealCommandRunner.run("getprop", &["ro.build.version.release"]),
+    )
+    .await
+    {
+        Ok(Ok(out)) if out.status.success() => {
+            let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if v.is_empty() { "unknown".into() } else { v }
+        }
+        _ => "unknown".into(),
+    };
+    PostureReport {
+        checks: Vec::new(),
+        os_name: "Android".into(),
         os_version: version,
     }
 }

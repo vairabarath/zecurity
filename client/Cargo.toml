@@ -37,7 +37,6 @@ uuid = { version = "1", features = ["v4"] }
 # Phase 2 — add now so they compile clean:
 tonic      = { version = "0.12", features = ["tls"] }
 prost      = "0.13"
-open       = "5"
 rcgen      = "0.13"
 sha2       = "0.10"
 base64     = "0.22"
@@ -79,6 +78,11 @@ tss-esapi = "7"
 # resolves to avoid a duplicate second copy in the build.
 picky-asn1 = "0.10"
 picky-asn1-der = "0.5"
+
+# Opens the login page in the desktop browser; the Android app opens it itself
+# (crate::android::set_url_opener).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+open = "5"
 
 [target.'cfg(windows)'.dependencies]
 # Windows client: the daemon runs as a Windows Service (win_service.rs), and

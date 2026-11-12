@@ -277,6 +277,19 @@ fn bind_ipc_listener() -> Result<UnixListener> {
 /// Windows service, whose stdout goes nowhere.
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::new("info");
+    // Android: stdout goes nowhere; log to the app's files directory.
+    #[cfg(target_os = "android")]
+    {
+        let path = crate::android::files_dir().join("daemon.log");
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .try_init();
+            return;
+        }
+    }
     #[cfg(windows)]
     if crate::win_service::running_as_service() {
         let path = crate::win_service::log_path();
@@ -1147,6 +1160,11 @@ pub(crate) fn classify_applied(applied: &AppliedConfig, candidate: &AppliedConfi
 /// destructured exhaustively, so a field added later won't compile here
 /// until someone classifies it.
 fn resource_delta_allowed(applied: &AppliedConfig, candidate: &AppliedConfig) -> bool {
+    // An Android VPN interface's routes are fixed at creation: any resource
+    // change restarts the tunnel, which creates a new interface (tun_android).
+    if cfg!(target_os = "android") {
+        return false;
+    }
     let AppliedConfig {
         spiffe_id: a_spiffe,
         certificate_pem: a_cert,

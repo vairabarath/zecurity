@@ -44,6 +44,9 @@ pub mod win_service;
 #[cfg(target_os = "linux")]
 mod tpm;
 
+#[cfg(target_os = "android")]
+pub mod android;
+
 pub mod cmd {
     pub mod down;
     pub mod login;

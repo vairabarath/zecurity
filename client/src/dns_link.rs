@@ -103,13 +103,13 @@ pub(crate) fn status_line() -> Option<String> {
 /// re-applies even when the names didn't change (a new TUN link lost its
 /// resolved config). Returns the new state; never fails the caller: a DNS
 /// problem must not take IP resources down.
-#[cfg_attr(windows, allow(unreachable_code, unused_variables))]
+#[cfg_attr(any(windows, target_os = "android"), allow(unreachable_code, unused_variables))]
 pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> DnsState {
     let names = names_in(cfg);
     // Windows has no systemd-resolved; its equivalent (NRPT rules for the
     // names) is not built yet. IP resources are unaffected, exactly as on a
     // Linux host without resolved.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "android"))]
     return unsupported(names);
     let prev = state();
     if !force && prev.configured == names && prev.status.is_some() != names.is_empty() {
@@ -159,14 +159,20 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
     s
 }
 
-/// Windows: no names are routed; status says why when there are some.
-#[cfg(windows)]
+/// Windows and Android: no names are routed; status says why when there
+/// are some.
+#[cfg(any(windows, target_os = "android"))]
 fn unsupported(names: BTreeSet<String>) -> DnsState {
     name_map::with(|m| m.set_active(BTreeSet::new()));
     let s = DnsState {
         configured: BTreeSet::new(),
         status: (!names.is_empty())
-            .then(|| Err("DNS name resources are not supported on Windows yet".to_string())),
+            .then(|| {
+                Err(format!(
+                    "DNS name resources are not supported on {} yet",
+                    if cfg!(windows) { "Windows" } else { "Android" }
+                ))
+            }),
     };
     set_state(s.clone());
     s
@@ -188,7 +194,7 @@ mod tests {
     use crate::runtime::AppliedEntry;
     use std::cell::RefCell;
 
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "android"), allow(dead_code))]
     struct Rec {
         calls: RefCell<Vec<String>>,
         fail_on: Option<&'static str>,
@@ -269,8 +275,8 @@ mod tests {
 
     // One test drives the process-wide state in sequence, so parallel tests
     // can't interleave on it.
-    // The systemd-resolved path; Windows reports names as unsupported.
-    #[cfg(not(windows))]
+    // The systemd-resolved path; Windows and Android report names as unsupported.
+    #[cfg(not(any(windows, target_os = "android")))]
     #[test]
     fn sync_tracks_names_and_reports_failures() {
         let ok = Rec {

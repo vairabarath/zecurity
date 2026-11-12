@@ -36,7 +36,7 @@ pub trait ResourceKernel {
 pub(crate) trait CmdRunner {
     fn run(&self, program: &str, args: &[&str], stdin: Option<&str>) -> Result<()>;
     // Used only by the Linux fwmark-rule check.
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "android"), allow(dead_code))]
     fn output(&self, program: &str, args: &[&str]) -> Result<String>;
 }
 
