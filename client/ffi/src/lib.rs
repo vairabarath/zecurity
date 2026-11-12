@@ -263,7 +263,7 @@ mod jni_service {
     ) -> jint {
         let dir: String = match env.get_string(&files_dir) {
             Ok(s) => s.into(),
-            Err(_) => return -1,
+            Err(_) => return fail(&mut env),
         };
         super::install_crypto_provider();
         android::init(PathBuf::from(dir));
@@ -272,7 +272,7 @@ mod jni_service {
                 Ok(g) => {
                     let _ = NATIVE_CLASS.set(g);
                 }
-                Err(_) => return -1,
+                Err(_) => return fail(&mut env),
             }
         }
         if ESTABLISH.get().is_none() {
@@ -280,7 +280,7 @@ mod jni_service {
                 Ok(m) => {
                     let _ = ESTABLISH.set(m);
                 }
-                Err(_) => return -1,
+                Err(_) => return fail(&mut env),
             }
         }
         android::set_tun_provider(Box::new(establish_via_service));
@@ -305,6 +305,16 @@ mod jni_service {
             DAEMON_RUNNING.store(false, Ordering::SeqCst);
         });
         0
+    }
+
+    /// A JNI error leaves a Java exception pending, which would be thrown into
+    /// the service on return and crash its process: clear it and report -1.
+    fn fail(env: &mut JNIEnv) -> jint {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        -1
     }
 
     /// The daemon's TUN provider: `ZecurityNative.establish("ip,ip,...")`
