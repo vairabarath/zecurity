@@ -575,8 +575,33 @@ Wazuh supports both channels natively:
 ### Verification
 
 - **Gate (after merging `main`, 2026-11-12):** controller 1782 pass / 0 fail / 2 skip (the known two), all CI `*_TEST_DATABASE_URL` set; connector 335 pass; admin 294 pass, build OK.
-- **Live runs, all PASS:** backend S3 run (§8), console run in the Orca browser (§8), Wazuh webhook run (§8), Twingate-style S3 + connector-lines run with moto and Wazuh `aws-s3` (§9).
+- **Live runs, all PASS:** backend S3 run (§8), console run in the Orca browser (§8), Wazuh webhook run (§8), Twingate-style S3 + connector-lines run with moto and Wazuh `aws-s3` (§9), and the run on merged `main` with moto and MinIO (below).
 - **Security review (manual, 2026-11-12):** no vulnerabilities; two hardening fixes (non-blocking access lines; secret again on an S3 region change). Earlier push review: IPv6 blocklist fix.
+
+### Live run on merged `main` (2026-11-12): PASS
+
+**Setup:** the shared local DB recreated from `main` (migrations 001 … 055 in order, then `zz_app_role_login.sh`); controller built from `main` (5987f6e9), running as `ztna_app` with no append-only warning; workspace `p11main`. Two S3 sinks, both prefix `siem`, each with a writer key that may only `PutObject` under `zecurity-audit/siem/*`:
+- **moto 5.1.4** (S3 + SQS + STS, IAM enforced) behind a lab-CA TLS front, notifying an SQS queue that Wazuh 4.14.10's `aws-s3` subscriber reads;
+- **MinIO** (Chainguard build of MinIO's source, RELEASE.2026-11-10; MinIO no longer publishes images on Docker Hub or quay.io) with TLS and its own policy engine: a second, independent SigV4 implementation.
+
+The connector (branch build of `main`, `ZECURITY_LOG_ANALYTICS=v1`) ran in its own container; a sandbox client daemon drove real tunnels.
+
+| Check | Result |
+|---|---|
+| Both servers refuse an unknown key, a wrong signature, and a write outside `siem/` | moto and MinIO: `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `AccessDenied` |
+| `testAuditExportSink` on each sink | both `ok`: MinIO accepts the hand-written SigV4 as well as moto |
+| Region change without the secret (security-review fix) | refused; a prefix-only change accepted |
+| 5-minute window | admin 1–31 in one object once the oldest event was 5 min old |
+| Full batch at once (W-5 fix 74995a86) | access 1–500 written immediately as `1-500.jsonl.gz`, without waiting for the window (first live check; §9 covered it by test only) |
+| Both S3 servers down, 3 sign-ins | both sinks `lastError` "could not connect to the destination" (no URL), cursors held (admin 31, access 500); on restart `32-35` and `501-746` written, errors cleared |
+| Connector lines with the controller stopped | 3 `allow` lines written and decoded by Wazuh during the outage; the controller copy (`connector_logs` 749–751) arrived after restart |
+| Chain from Wazuh's copy (pulled from moto) | admin 1–35, access 1–752: no gaps, every `row_hash` and link OK, 0 duplicates |
+| Chain from MinIO, read directly | the same ranges, all OK, and every `row_hash` identical to the moto/Wazuh copy |
+| `zecurity-controller audit verify` | admin 1–35 OK, access 1–753 OK |
+| Decisions | 753 `allow` lines from the connector, all 753 decoded by Wazuh; the S3 access stream holds the same `allow` events (the 753rd was in the next batch) |
+| Wazuh decoders exactly as given in `docs/siem-export.md` | plain and journald forms decode (`wazuh-logtest`) |
+
+**Not reproduced in this run:** a connector `deny` line. A `deny` is logged only when a client asks for something the connector's ACL no longer allows. Here the client stopped routing first each time (access removed during a request loop, three times; and a resource bound to an `approved`-only device profile). Because the test host reaches the resource's Docker network directly, those requests went around the tunnel. The deny path is unchanged since its live PASS on 2026-11-06 (§9) and shares `emit_access_log` and the writer thread with `allow`.
 
 ### Known limits and follow-ups
 
