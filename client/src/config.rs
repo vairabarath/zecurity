@@ -67,8 +67,8 @@ fn system_conf_path() -> PathBuf {
 }
 
 /// `%ProgramData%\Zecurity`: the Windows client's system-wide directory
-/// (config, state, logs). The daemon restricts it to SYSTEM,
-/// Administrators and the enrolling user (win_security::secure_data_dir).
+/// (config, state, logs). Administrators and SYSTEM own it; the enrolled user
+/// may only read it (win_security::secure_data_dir).
 #[cfg(windows)]
 pub fn program_data_dir() -> PathBuf {
     std::env::var_os("ProgramData")
@@ -156,6 +156,24 @@ pub fn merged_with_existing(update: ClientConf) -> ClientConf {
     merged
 }
 
+/// Windows: the one system file, which only administrators may change (the
+/// SYSTEM daemon reads it; see win_security). No per-user fallback: the
+/// daemon would never see it.
+#[cfg(windows)]
+pub fn save(conf: &ClientConf) -> Result<PathBuf> {
+    let path = system_conf_path();
+    match std::fs::write(&path, toml::to_string_pretty(conf)?) {
+        Ok(()) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
+            "writing {} needs administrator rights: run `zecurity-client setup` from an \
+             elevated terminal",
+            path.display()
+        )),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(not(windows))]
 pub fn save(conf: &ClientConf) -> Result<PathBuf> {
     let system_path = system_conf_path();
     let user = dirs::config_dir()

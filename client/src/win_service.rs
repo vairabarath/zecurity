@@ -145,11 +145,9 @@ fn run_service() -> Result<()> {
         .set_service_status(status(ServiceState::Running, ServiceExitCode::Win32(0)))
         .context("report the service as running")?;
 
-    // Before the daemon reads config or state. Exit code 2 in `sc query`.
-    if let Err(e) = secure_data_dir() {
-        report_stopped(2);
-        return Err(e);
-    }
+    // Before the daemon reads config or state. service_main reports the
+    // failure (exit code 1 in `sc query`); nothing is logged to the file yet.
+    secure_data_dir()?;
 
     // daemon::run only returns on a startup error; deliberate exits go
     // through crate::exit_daemon, which reports Stopped first.

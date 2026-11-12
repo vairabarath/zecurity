@@ -12,9 +12,15 @@
 //! - the service creates the pipe owned by SYSTEM, and the CLI refuses a pipe
 //!   owned by anyone but SYSTEM or Administrators (no squatting while the
 //!   service is stopped);
-//! - the daemon refuses a data directory, or a file in it, owned by an
-//!   untrusted account (no pre-created `C:\ProgramData\Zecurity`), and sets a
-//!   protected DACL on it before reading anything.
+//! - the daemon refuses a data directory, or anything in it, that is a
+//!   reparse point (junction, symlink) or is owned by anyone but SYSTEM or
+//!   Administrators (no pre-created `C:\ProgramData\Zecurity`), and sets a
+//!   protected DACL on each directory before reading anything;
+//! - the enrolled user can read, and delete stale state files, but can never
+//!   create, rename or replace anything there. A user who could would be able
+//!   to swap `state` for a junction and have the SYSTEM daemon write, or set
+//!   ACLs, wherever it points. Config changes (`setup`) need an elevated
+//!   prompt for the same reason.
 //!
 //! The enrolling user's SID comes from the service's command line (admin-only
 //! service configuration), never from a user-writable file.
@@ -51,14 +57,39 @@ pub fn pipe_sddl(user_sid: Option<&str>, owner_system: bool) -> String {
     sddl
 }
 
-/// The data directory's DACL: protected (nothing inherited from
-/// `C:\ProgramData`, which grants Users read access), full control for
-/// SYSTEM, Administrators and the enrolling user, inherited by every file
-/// and subdirectory.
-pub fn data_dir_sddl(user_sid: Option<&str>) -> String {
+/// The directories under `%ProgramData%\Zecurity`, each with its own DACL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataDir {
+    /// `Zecurity` itself: holds client.conf.
+    Root,
+    /// `state`: the encrypted state and its key.
+    State,
+    /// `logs`: the daemon log.
+    Logs,
+}
+
+/// FILE_GENERIC_READ | FILE_GENERIC_EXECUTE: list and traverse a directory.
+const DIR_READ: &str = "0x1200a9";
+/// DIR_READ | FILE_DELETE_CHILD: also delete the files in it (logout, and
+/// login after a revocation, clear stale state from the CLI).
+const DIR_READ_DELETE_CHILD: &str = "0x1200e9";
+
+/// A data directory's DACL: protected (nothing inherited from
+/// `C:\ProgramData`, which lets Users create folders), full control for
+/// SYSTEM and Administrators on the directory and everything created in it.
+/// The enrolled user gets read access (plus deleting files in `state`), and
+/// never the right to add, rename or replace anything.
+pub fn data_dir_sddl(dir: DataDir, user_sid: Option<&str>) -> String {
     let mut sddl = String::from("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
     if let Some(sid) = user_sid.filter(|s| is_valid_sid(s)) {
-        sddl.push_str(&format!("(A;OICI;FA;;;{sid})"));
+        let user = match dir {
+            DataDir::Root => format!("(A;;{DIR_READ};;;{sid})(A;OIIO;FR;;;{sid})"),
+            DataDir::State => {
+                format!("(A;;{DIR_READ_DELETE_CHILD};;;{sid})(A;OIIO;FR;;;{sid})")
+            }
+            DataDir::Logs => format!("(A;OICI;{DIR_READ};;;{sid})"),
+        };
+        sddl.push_str(&user);
     }
     sddl
 }
@@ -77,14 +108,17 @@ mod imp {
     use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetNamedSecurityInfoW, GetSecurityInfo, SetNamedSecurityInfoW, SDDL_REVISION_1,
-        SE_FILE_OBJECT, SE_KERNEL_OBJECT,
+        GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, IsWellKnownSid, WinBuiltinAdministratorsSid,
-        WinLocalSystemSid, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        IsWellKnownSid, SetFileSecurityW, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    use super::DataDir;
 
     /// A security descriptor allocated by Windows (LocalAlloc), freed on drop.
     pub struct OwnedDescriptor(pub PSECURITY_DESCRIPTOR);
@@ -145,9 +179,25 @@ mod imp {
         }
     }
 
-    /// The owner of a file or directory, checked against SYSTEM,
-    /// Administrators and (if given) the enrolling user.
-    fn check_path_owner(path: &Path, user_sid: Option<&str>) -> Result<()> {
+    /// Refuses a junction, symlink or other reparse point: the SYSTEM daemon
+    /// must never act on a path that leads somewhere else.
+    fn reject_reparse_point(path: &Path) -> Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path)
+            .with_context(|| format!("inspect {}", path.display()))?;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!(
+                "{} is a junction or link; refusing to use it (an administrator should \
+                 remove it and reinstall the client)",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// The owner of a file or directory must be SYSTEM or Administrators:
+    /// nothing in the data directory is ever created by anyone else.
+    fn check_path_owner(path: &Path) -> Result<()> {
         let wide = wide_path(path);
         let mut owner: PSID = std::ptr::null_mut();
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -172,54 +222,39 @@ mod imp {
             );
         }
         let sd = OwnedDescriptor(sd);
+        let trusted = is_system_or_admins(owner);
         let owner_str = sid_string(owner);
-        let trusted =
-            is_system_or_admins(owner) || user_sid.is_some_and(|u| u == owner_str);
         drop(sd);
         if !trusted {
             bail!(
-                "{} is owned by {owner_str}, which is not SYSTEM, Administrators or the \
-                 enrolled user; refusing to use it (an administrator should remove it and \
-                 reinstall the client)",
+                "{} is owned by {owner_str}, not SYSTEM or Administrators; refusing to use \
+                 it (an administrator should remove it and reinstall the client)",
                 path.display()
             );
         }
         Ok(())
     }
 
-    /// Sets the protected data-directory DACL on `path` (inherited by its
-    /// contents).
-    fn set_data_dir_dacl(path: &Path, user_sid: Option<&str>) -> Result<()> {
-        let sd = descriptor_from_sddl(&super::data_dir_sddl(user_sid))
+    /// Sets a data directory's protected DACL. SetFileSecurityW changes this
+    /// one object only: it does not walk existing children, so it can never
+    /// carry the user's ACEs onto anything linked in below it.
+    fn set_dir_dacl(path: &Path, dir: DataDir, user_sid: Option<&str>) -> Result<()> {
+        let sd = descriptor_from_sddl(&super::data_dir_sddl(dir, user_sid))
             .context("build the data directory security descriptor")?;
-        let mut present = 0;
-        let mut defaulted = 0;
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        // SAFETY: `sd.0` is a valid descriptor; `dacl` points into it.
-        if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) }
-            == 0
-            || present == 0
-        {
-            bail!("data directory security descriptor has no DACL");
-        }
         let wide = wide_path(path);
-        // SAFETY: `wide` is NUL-terminated; `dacl` stays valid while `sd` lives.
-        let rc = unsafe {
-            SetNamedSecurityInfoW(
+        // SAFETY: `wide` is NUL-terminated; `sd` is a valid descriptor.
+        let ok = unsafe {
+            SetFileSecurityW(
                 wide.as_ptr(),
-                SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                dacl,
-                std::ptr::null(),
+                sd.0,
             )
         };
-        if rc != ERROR_SUCCESS {
+        if ok == 0 {
             bail!(
                 "restrict access to {}: {}",
                 path.display(),
-                std::io::Error::from_raw_os_error(rc as i32)
+                std::io::Error::last_os_error()
             );
         }
         Ok(())
@@ -227,25 +262,30 @@ mod imp {
 
     /// Run by the daemon (LocalSystem) before it reads config or state:
     /// creates `%ProgramData%\Zecurity` and its `state` and `logs`
-    /// directories if missing, refuses any of them (or any file in them)
-    /// owned by an untrusted account, and sets the protected DACL.
+    /// directories if missing; refuses any of them, or any entry in them,
+    /// that is a reparse point or not owned by SYSTEM/Administrators; and
+    /// sets each directory's protected DACL.
     pub fn secure_data_dir(user_sid: Option<&str>) -> Result<()> {
         let root = crate::config::program_data_dir();
-        let dirs = [root.clone(), root.join("state"), root.join("logs")];
-        for dir in &dirs {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("create {}", dir.display()))?;
-            check_path_owner(dir, user_sid)?;
-            set_data_dir_dacl(dir, user_sid)?;
+        let dirs = [
+            (root.clone(), DataDir::Root),
+            (root.join("state"), DataDir::State),
+            (root.join("logs"), DataDir::Logs),
+        ];
+        for (path, kind) in &dirs {
+            std::fs::create_dir_all(path)
+                .with_context(|| format!("create {}", path.display()))?;
+            reject_reparse_point(path)?;
+            check_path_owner(path)?;
+            set_dir_dacl(path, *kind, user_sid)?;
         }
-        for dir in &dirs {
-            for entry in std::fs::read_dir(dir)
-                .with_context(|| format!("list {}", dir.display()))?
+        for (path, _) in &dirs {
+            for entry in std::fs::read_dir(path)
+                .with_context(|| format!("list {}", path.display()))?
             {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    check_path_owner(&entry.path(), user_sid)?;
-                }
+                let entry = entry?.path();
+                reject_reparse_point(&entry)?;
+                check_path_owner(&entry)?;
             }
         }
         Ok(())
@@ -372,17 +412,51 @@ mod tests {
             pipe_sddl(Some("S-1-5-18)(A;;GA;;;WD"), false),
             "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
         );
-        assert_eq!(
-            data_dir_sddl(Some("S-1-1-0)(A;OICI;FA;;;WD")),
-            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-        );
+        for dir in [DataDir::Root, DataDir::State, DataDir::Logs] {
+            assert_eq!(
+                data_dir_sddl(dir, Some("S-1-1-0)(A;OICI;FA;;;WD")),
+                "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+            );
+        }
+    }
+
+    /// Windows' own SDDL parser accepts every descriptor the client builds.
+    #[cfg(windows)]
+    #[test]
+    fn every_descriptor_parses_on_windows() {
+        let u = Some("S-1-5-21-1-2-3-1001");
+        let mut all = vec![pipe_sddl(u, true), pipe_sddl(u, false), pipe_sddl(None, true)];
+        for dir in [DataDir::Root, DataDir::State, DataDir::Logs] {
+            all.push(data_dir_sddl(dir, u));
+            all.push(data_dir_sddl(dir, None));
+        }
+        for sddl in all {
+            descriptor_from_sddl(&sddl).unwrap_or_else(|e| panic!("{sddl}: {e}"));
+        }
     }
 
     #[test]
-    fn data_dir_sddl_is_protected_and_inherited() {
+    fn the_enrolled_user_can_read_but_never_add_or_replace_anything() {
+        let u = "S-1-5-21-1-2-3-1001";
         assert_eq!(
-            data_dir_sddl(Some("S-1-5-21-1-2-3-1001")),
-            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-21-1-2-3-1001)"
+            data_dir_sddl(DataDir::Root, Some(u)),
+            format!("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;{u})(A;OIIO;FR;;;{u})")
         );
+        assert_eq!(
+            data_dir_sddl(DataDir::State, Some(u)),
+            format!("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200e9;;;{u})(A;OIIO;FR;;;{u})")
+        );
+        assert_eq!(
+            data_dir_sddl(DataDir::Logs, Some(u)),
+            format!("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;{u})")
+        );
+        // The user's directory rights: read/list/traverse, plus delete-child
+        // on state. Never FILE_ADD_FILE (0x2), FILE_ADD_SUBDIRECTORY (0x4),
+        // DELETE (0x10000), WRITE_DAC (0x40000) or WRITE_OWNER (0x80000).
+        for mask in [0x1200a9u32, 0x1200e9] {
+            assert_eq!(mask & (0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000), 0);
+        }
+        assert_eq!(super::DIR_READ, "0x1200a9");
+        assert_eq!(super::DIR_READ_DELETE_CHILD, "0x1200e9");
     }
 }
