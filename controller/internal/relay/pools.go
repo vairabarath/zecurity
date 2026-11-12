@@ -174,24 +174,28 @@ func lockPools(ctx context.Context, tx pgx.Tx, ids ...string) (map[string]Pool, 
 	return out, nil
 }
 
-// poolInUse: the pool is a workspace's primary pool, or the default pool,
-// where every new workspace starts (D-41). The pool row must be locked.
+// poolInUse: the pool is a workspace's primary or failover pool, or the
+// default pool, where every new workspace starts (D-41). The pool row must be
+// locked.
 func poolInUse(ctx context.Context, tx pgx.Tx, poolID string) (bool, error) {
 	if poolID == relaypool.DefaultPoolID {
 		return true, nil
 	}
 	var used bool
 	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM workspaces WHERE relay_pool_id = $1)`, poolID).Scan(&used)
+		`SELECT EXISTS (SELECT 1 FROM workspaces WHERE relay_pool_id = $1 OR relay_failover_pool_id = $1)`, poolID).Scan(&used)
 	return used, err
 }
 
-// poolReferenced: any workspace names the pool, as primary or as the previous
-// pool of a migration (even an expired one: the reference is still stored).
+// poolReferenced: any workspace names the pool, as primary, failover, or the
+// previous pool of a migration (even an expired one: the reference is still
+// stored).
 func poolReferenced(ctx context.Context, tx pgx.Tx, poolID string) (bool, error) {
 	var used bool
-	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM workspaces WHERE relay_pool_id = $1 OR relay_pool_previous_id = $1)`, poolID).Scan(&used)
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM workspaces
+		                WHERE relay_pool_id = $1 OR relay_failover_pool_id = $1 OR relay_pool_previous_id = $1)`,
+		poolID).Scan(&used)
 	return used, err
 }
 
@@ -447,16 +451,44 @@ func (s *Store) MoveRelay(ctx context.Context, relayID, toPoolID string,
 // PoolAssignment is a workspace's relay pool assignment.
 type PoolAssignment struct {
 	PoolID            string
+	FailoverPoolID    *string
 	PreviousPoolID    *string
 	PreviousPoolUntil *time.Time
 }
 
-// AssignWorkspacePool sets a workspace's primary pool (D-38, D-41:
-// super-admin). The target pool must have an eligible relay. graceful keeps
-// the old pool authorized for window (D-40: a planned move; residency checks
-// accept it until then); otherwise the old pool loses authorization at once.
-// inTx gets the assignment before and after. changed=false: already there.
-func (s *Store) AssignWorkspacePool(ctx context.Context, workspaceID, toPoolID string, graceful bool, window time.Duration,
+var (
+	errFailoverSameAsPrimary  = errors.New("the failover pool is the primary pool")
+	errFailoverRegionMismatch = errors.New("the failover pool is in another region")
+	errFailoverNeedsResidency = errors.New("a residency primary pool needs a residency failover pool")
+)
+
+// validateFailover applies the D-39 rules to a primary and failover pool:
+// different pools, the same region (two pools without a region match only
+// when neither is a residency pool, which needs a region anyway), and a
+// residency primary needs a residency failover. Cross-region failover is not
+// allowed.
+func validateFailover(primary, failover Pool) error {
+	switch {
+	case primary.ID == failover.ID:
+		return errFailoverSameAsPrimary
+	case !equalStringPtr(primary.Region, failover.Region):
+		return errFailoverRegionMismatch
+	case primary.Residency && !failover.Residency:
+		return errFailoverNeedsResidency
+	}
+	return nil
+}
+
+// AssignWorkspacePool sets a workspace's primary pool and optional failover
+// pool (D-38, D-39; D-41: super-admin). Every newly assigned pool must have an
+// eligible relay, and a failover pool must follow the D-39 region rules. When
+// the primary changes, graceful keeps the old primary authorized for window
+// (D-40: a planned move; residency checks accept it until then); otherwise the
+// old pool loses authorization at once. Removing or changing only the
+// failover pool takes effect at once. inTx gets the assignment before and
+// after. changed=false: nothing differs.
+func (s *Store) AssignWorkspacePool(ctx context.Context, workspaceID, toPoolID string, failoverPoolID *string,
+	graceful bool, window time.Duration,
 	inTx func(ctx context.Context, tx pgx.Tx, before, after PoolAssignment) error) (changed bool, err error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -466,43 +498,71 @@ func (s *Store) AssignWorkspacePool(ctx context.Context, workspaceID, toPoolID s
 
 	var before PoolAssignment
 	err = tx.QueryRow(ctx, `
-		SELECT relay_pool_id::text, relay_pool_previous_id::text, relay_pool_previous_until
+		SELECT relay_pool_id::text, relay_failover_pool_id::text, relay_pool_previous_id::text, relay_pool_previous_until
 		  FROM workspaces WHERE id = $1 FOR UPDATE`, workspaceID).
-		Scan(&before.PoolID, &before.PreviousPoolID, &before.PreviousPoolUntil)
+		Scan(&before.PoolID, &before.FailoverPoolID, &before.PreviousPoolID, &before.PreviousPoolUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, ErrWorkspaceNotFound
 	}
 	if err != nil {
 		return false, fmt.Errorf("lock workspace: %w", err)
 	}
-	if before.PoolID == toPoolID {
+	if before.PoolID == toPoolID && equalStringPtr(before.FailoverPoolID, failoverPoolID) {
 		return false, nil
 	}
-	// Lock the target pool: a concurrent drain or move of its last eligible
-	// relay waits for this assignment (and then sees the pool in use), or this
-	// assignment waits for it (and then sees no eligible relay).
-	if _, err := lockPools(ctx, tx, toPoolID); err != nil {
+	// Lock the assigned pools (in id order): a concurrent drain or move of
+	// their last eligible relay waits for this assignment (and then sees the
+	// pool in use), or this assignment waits for it (and then sees no
+	// eligible relay).
+	ids := []string{toPoolID}
+	if failoverPoolID != nil && *failoverPoolID != toPoolID {
+		ids = append(ids, *failoverPoolID)
+	}
+	pools, err := lockPools(ctx, tx, ids...)
+	if err != nil {
 		return false, err
 	}
-	var eligibleCount int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM relays WHERE pool_id = $1 AND `+eligible.Where, toPoolID).Scan(&eligibleCount); err != nil {
-		return false, fmt.Errorf("count eligible relays: %w", err)
+	if failoverPoolID != nil {
+		if err := validateFailover(pools[toPoolID], pools[*failoverPoolID]); err != nil {
+			return false, err
+		}
 	}
-	if eligibleCount == 0 {
-		return false, errPoolHasNoEligibleRelay
+	// Only a newly assigned pool must have an eligible relay: a pool the
+	// workspace already uses is not re-checked, so a failover pool can still
+	// be added to (or changed for) a tenant whose primary is down.
+	for _, id := range ids {
+		if id == before.PoolID || (before.FailoverPoolID != nil && id == *before.FailoverPoolID) {
+			continue
+		}
+		var eligibleCount int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM relays WHERE pool_id = $1 AND `+eligible.Where, id).Scan(&eligibleCount); err != nil {
+			return false, fmt.Errorf("count eligible relays: %w", err)
+		}
+		if eligibleCount == 0 {
+			return false, errPoolHasNoEligibleRelay
+		}
 	}
 
-	after := PoolAssignment{PoolID: toPoolID}
-	if graceful {
-		from := before.PoolID
-		until := time.Now().UTC().Add(window)
-		after.PreviousPoolID, after.PreviousPoolUntil = &from, &until
+	after := PoolAssignment{PoolID: toPoolID, FailoverPoolID: failoverPoolID,
+		PreviousPoolID: before.PreviousPoolID, PreviousPoolUntil: before.PreviousPoolUntil}
+	if before.PoolID != toPoolID {
+		after.PreviousPoolID, after.PreviousPoolUntil = nil, nil
+		if graceful {
+			from := before.PoolID
+			until := time.Now().UTC().Add(window)
+			after.PreviousPoolID, after.PreviousPoolUntil = &from, &until
+		}
+	}
+	if after.PreviousPoolID != nil && *after.PreviousPoolID == toPoolID {
+		// Moving back to the pool still in its window: nothing to keep.
+		after.PreviousPoolID, after.PreviousPoolUntil = nil, nil
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE workspaces
-		   SET relay_pool_id = $2, relay_pool_previous_id = $3, relay_pool_previous_until = $4, updated_at = NOW()
-		 WHERE id = $1`, workspaceID, toPoolID, after.PreviousPoolID, after.PreviousPoolUntil); err != nil {
+		   SET relay_pool_id = $2, relay_failover_pool_id = $3,
+		       relay_pool_previous_id = $4, relay_pool_previous_until = $5, updated_at = NOW()
+		 WHERE id = $1`, workspaceID, toPoolID, failoverPoolID, after.PreviousPoolID, after.PreviousPoolUntil); err != nil {
 		return false, fmt.Errorf("assign workspace pool: %w", err)
 	}
 	if inTx != nil {

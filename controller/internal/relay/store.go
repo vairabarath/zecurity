@@ -813,7 +813,12 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 		lists[poolID] = newLabelledRelayList(relays)
 	}
 
-	wsRows, err := s.pool.Query(ctx, `SELECT id::text, relay_pool_id::text FROM workspaces`)
+	// Each workspace's effective pool (D-39): its failover pool while its
+	// primary is exhausted, otherwise its primary.
+	wsRows, err := s.pool.Query(ctx, `
+		SELECT w.id::text, `+relaypool.EffectivePool("p")+`::text
+		  FROM workspaces w
+		  JOIN relay_pools p ON p.id = w.relay_pool_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspace relay pools: %w", err)
 	}
@@ -833,13 +838,15 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 }
 
 // BuildLabelledRelayListForWorkspace builds one workspace's list (the
-// connect-time push): the eligible relays of its pool. An unknown workspace
+// connect-time push): the eligible relays of its effective pool (D-39). An unknown workspace
 // gets the default pool's list, where a new workspace starts.
 func (s *Store) BuildLabelledRelayListForWorkspace(ctx context.Context, workspaceID string) (*connectorpb.LabelledRelayList, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+labelledRelayColumns+`
 		  FROM relays
-		 WHERE pool_id = COALESCE((SELECT relay_pool_id FROM workspaces WHERE id = $1::uuid), '`+relaypool.DefaultPoolID+`'::uuid)
+		 WHERE pool_id = COALESCE((SELECT `+relaypool.EffectivePool("p")+`
+		                             FROM workspaces w JOIN relay_pools p ON p.id = w.relay_pool_id
+		                            WHERE w.id = $1::uuid), '`+relaypool.DefaultPoolID+`'::uuid)
 		   AND `+eligible.Where, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list labelled relays for workspace: %w", err)

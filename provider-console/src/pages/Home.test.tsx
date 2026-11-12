@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry, CertificateExpiryResult, Page, RelaySummary } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type RecordedCall } from '@/test/fetch'
-import { DEFAULT_POOL } from '@/test/pools'
+import { DEFAULT_POOL, POOLS, poolSummary } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 const iso = (ms: number) => new Date(Date.now() + ms).toISOString()
@@ -78,8 +78,11 @@ const HEALTH = {
   ],
 }
 
+const poolsOk = { status: 200, body: { items: POOLS } }
+
 const routes = {
   'GET /provider/relays': { status: 200, body: { items: RELAYS, next_cursor: null } },
+  'GET /provider/relay-pools': poolsOk,
   'GET /provider/certificates': { status: 200, body: CERTS },
   'GET /provider/audit': { status: 200, body: AUDIT },
   'GET /provider/health': { status: 200, body: HEALTH },
@@ -94,8 +97,8 @@ describe('Overview', () => {
     const { calls } = mockFetch(routes)
     renderApp('/', undefined, { strict: true })
     await screen.findByText('relay-low is in the low capacity tier')
-    await waitFor(() => expect(calls).toHaveLength(4))
-    expect(paths(calls).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relays'])
+    await waitFor(() => expect(calls).toHaveLength(5))
+    expect(paths(calls).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
     expect(qs(calls.find((c) => c.path === '/provider/certificates')!)).toEqual({ within: '168h', limit: '6' })
     expect(qs(calls.find((c) => c.path === '/provider/audit')!)).toEqual({ limit: '6' })
     expect(qs(calls.find((c) => c.path === '/provider/relays')!)).toEqual({ limit: '200' })
@@ -103,16 +106,16 @@ describe('Overview', () => {
       window.dispatchEvent(new Event('focus'))
       document.dispatchEvent(new Event('visibilitychange'))
     })
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(5)
     expect(calls.every((c) => c.method === 'GET' && !c.path.startsWith('/provider/tenants'))).toBe(true)
   })
 
-  it('relay-ops reads relays only: no certificate, audit or health request', async () => {
+  it('relay-ops reads relays and relay pools only: no certificate, audit or health request', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch(routes)
     renderApp('/')
     await screen.findByText('relay-low is in the low capacity tier')
-    expect(paths(calls)).toEqual(['GET /provider/relays'])
+    expect(paths(calls).sort()).toEqual(['GET /provider/relay-pools', 'GET /provider/relays'])
     expect(screen.getByRole('heading', { name: 'Your access' })).toBeInTheDocument()
     expect(screen.queryByText('Certificates needing action')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Recent operator activity' })).not.toBeInTheDocument()
@@ -122,6 +125,7 @@ describe('Overview', () => {
   it('reads every relay page by cursor', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch({
+      'GET /provider/relay-pools': poolsOk,
       'GET /provider/relays': (c) =>
         qs(c).cursor
           ? { status: 200, body: { items: [RELAYS[2]], next_cursor: null } }
@@ -129,7 +133,7 @@ describe('Overview', () => {
     })
     renderApp('/')
     await screen.findByText('relay-idle is inactive')
-    expect(calls.map(qs)).toEqual([{ limit: '200' }, { limit: '200', cursor: 'p2' }])
+    expect(calls.filter((c) => c.path === '/provider/relays').map(qs)).toEqual([{ limit: '200' }, { limit: '200', cursor: 'p2' }])
     expect(screen.getByText(/of 2 active/).parentElement).toHaveTextContent('1 of 2 active')
   })
 
@@ -160,10 +164,10 @@ describe('Overview', () => {
     const { calls } = mockFetch(routes)
     renderApp('/')
     await screen.findByText('relay-low is in the low capacity tier')
-    await waitFor(() => expect(calls).toHaveLength(4))
+    await waitFor(() => expect(calls).toHaveLength(5))
     await userEvent.setup().click(screen.getByRole('button', { name: 'Refresh overview' }))
-    await waitFor(() => expect(calls).toHaveLength(8))
-    expect(paths(calls.slice(4)).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relays'])
+    await waitFor(() => expect(calls).toHaveLength(10))
+    expect(paths(calls.slice(5)).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
   })
 
   it('a failed source shows Retry without hiding the rest', async () => {
@@ -186,7 +190,7 @@ describe('Overview: draining relays', () => {
   ] as const)('%s', async (state, over, note) => {
     signedInAs(relayOpsMe)
     const d = relay({ id: '55555555-5555-5555-5555-555555555555', name: 'relay-drain', draining_since: iso(-MIN), drain_state: state, ...over })
-    mockFetch({ 'GET /provider/relays': { status: 200, body: { items: [RELAYS[0], d], next_cursor: null } } })
+    mockFetch({ 'GET /provider/relays': { status: 200, body: { items: [RELAYS[0], d], next_cursor: null } }, 'GET /provider/relay-pools': poolsOk })
     renderApp('/')
     const link = await screen.findByRole('link', { name: /relay-drain is draining/ })
     expect(link).toHaveAttribute('href', `/relays/${d.id}`)
@@ -224,5 +228,29 @@ describe('Overview: control-plane health (F25)', () => {
     await screen.findByText('relay-low is in the low capacity tier')
     expect(await screen.findByText(/Couldn’t load control-plane health/)).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Your session' })).toBeInTheDocument()
+  })
+})
+
+// D-39: pools the controller reports as failed over need attention (both roles).
+describe('Overview: failed-over relay pools', () => {
+  it('lists a failed-over pool with a link; healthy and recovering pools are not listed', async () => {
+    signedInAs(relayOpsMe)
+    const failed = poolSummary({ id: 'eeeeeeee-0000-0000-0000-0000000000f1', name: 'eu-1', is_default: false, state: 'failed_over', exhausted_at: iso(-3 * MIN) })
+    const recovering = poolSummary({ id: 'eeeeeeee-0000-0000-0000-0000000000f2', name: 'us-1', is_default: false, state: 'recovering', eligible_since: iso(-MIN) })
+    mockFetch({ ...routes, 'GET /provider/relay-pools': { status: 200, body: { items: [POOLS[0], failed, recovering] } } })
+    renderApp('/')
+    const link = await screen.findByRole('link', { name: /Relay pool eu-1 has failed over/ })
+    expect(link).toHaveAttribute('href', `/relay-pools/${failed.id}`)
+    expect(link).toHaveTextContent('No eligible relay since 3 min ago')
+    expect(screen.queryByText(/us-1/)).not.toBeInTheDocument()
+  })
+
+  it('a failed pool read offers Retry without hiding the relay items', async () => {
+    signedInAs(relayOpsMe)
+    mockFetch({ ...routes, 'GET /provider/relay-pools': { status: 500, body: { error: 'server_error' } } })
+    renderApp('/')
+    await screen.findByText('relay-low is in the low capacity tier')
+    expect(screen.getByText(/Couldn’t load everything/)).toBeInTheDocument()
+    expect(screen.queryByText('Nothing needs attention right now.')).not.toBeInTheDocument()
   })
 })

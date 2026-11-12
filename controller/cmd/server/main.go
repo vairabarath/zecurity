@@ -341,7 +341,32 @@ func main() {
 	// (F11) shared with the connect-time push, and a stream is only sent a list
 	// that differs from its last one, so a change to one pool reaches only that
 	// pool's tenants and a connector re-probes exactly when its list changed.
+	// D-39: failover state is reconciled before every publish, so a list
+	// built after an eviction or a drain reflects a primary that just became
+	// exhausted (or recovered). Each switch is audited by the system.
+	failbackHoldDown := mustDuration("RELAY_POOL_FAILBACK_HOLDDOWN", relay.DefaultFailbackHoldDown)
+	if failbackHoldDown < relay.MinFailbackHoldDown {
+		log.Fatalf("RELAY_POOL_FAILBACK_HOLDDOWN=%s is below the minimum %s", failbackHoldDown, relay.MinFailbackHoldDown)
+	}
+	auditPoolSwitch := func(ctx context.Context, tx pgx.Tx, t relay.PoolTransition) error {
+		details := map[string]any{"pool_name": t.PoolName, "tenants": t.Tenants}
+		if t.ExhaustedAt != nil {
+			details["exhausted_since"] = t.ExhaustedAt.UTC()
+		}
+		log.Printf("relay pool failover: %s pool=%s (%s) tenants=%d", t.Action, t.PoolName, t.PoolID, t.Tenants)
+		return providerStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderEmail: relay.PoolFailoverActor,
+			Action:        t.Action,
+			TargetType:    "relay_pool",
+			TargetID:      t.PoolID,
+			Details:       details,
+		})
+	}
 	publishRelayList := func(ctx context.Context) error {
+		if _, err := relayStore.ReconcilePools(ctx, time.Now(), failbackHoldDown, auditPoolSwitch); err != nil {
+			// Publish anyway with the stored state: a list must not wait on it.
+			log.Printf("relay pool failover: reconcile before publish: %v", err)
+		}
 		set, err := relayStore.BuildRelayLists(ctx)
 		if err != nil {
 			return fmt.Errorf("build lists: %w", err)
@@ -830,6 +855,11 @@ func main() {
 
 	workers.Go("relay-expiry-loop", func() {
 		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	})
+	// D-39: completes failback hold-downs (and catches exhaustion) even when
+	// no eviction or operator action triggers a publish.
+	workers.Go("relay-pool-failover-loop", func() {
+		relay.RunPoolReconcileLoop(ctx, relayStore, 30*time.Second, failbackHoldDown, auditPoolSwitch, publishRelayList)
 	})
 
 	// FU-6: re-send the current relay list to any connector a post-commit

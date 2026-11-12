@@ -118,3 +118,59 @@ func TestRelayPoolReads_RelayAndTenantNameTheirPool(t *testing.T) {
 		t.Fatalf("expired migration still shown: %+v", tp.RelayPool.Previous)
 	}
 }
+
+// D-39: tenant detail names the failover pool and whether it is in use;
+// pools show their failover state and how many tenants fail over to them.
+func TestRelayPoolReads_FailoverState(t *testing.T) {
+	e := newReadEnv(t)
+	fo := scalar[string](t, e.pool, `INSERT INTO relay_pools (name) VALUES ('backup') RETURNING id::text`)
+	exec(t, e.pool, `UPDATE workspaces SET relay_failover_pool_id = $2 WHERE id = $1`, e.tenantID, fo)
+
+	type tenantPool struct {
+		RelayPool struct {
+			Failover *struct {
+				ID string `json:"id"`
+			} `json:"failover"`
+			UsingFailover   bool    `json:"using_failover"`
+			FailedOverSince *string `json:"failed_over_since"`
+		} `json:"relay_pool"`
+	}
+	read := func() tenantPool {
+		t.Helper()
+		r := e.get(t, "/provider/tenants/"+e.tenantID, e.superTok)
+		var tp tenantPool
+		if err := json.Unmarshal([]byte(r.body), &tp); err != nil || r.code != 200 {
+			t.Fatalf("tenant detail %d %s: %v", r.code, r.body, err)
+		}
+		return tp
+	}
+	if tp := read(); tp.RelayPool.Failover == nil || tp.RelayPool.Failover.ID != fo || tp.RelayPool.UsingFailover {
+		t.Fatalf("healthy primary with a failover pool: %+v", tp.RelayPool)
+	}
+	exec(t, e.pool, `UPDATE relay_pools SET exhausted_at = now() WHERE id = $1`, relaypool.DefaultPoolID)
+	if tp := read(); !tp.RelayPool.UsingFailover || tp.RelayPool.FailedOverSince == nil {
+		t.Fatalf("exhausted primary: %+v, want using_failover with a since time", tp.RelayPool)
+	}
+
+	r := e.get(t, "/provider/relay-pools", e.opsTok)
+	var list struct {
+		Items []struct {
+			ID              string `json:"id"`
+			State           string `json:"state"`
+			FailoverTenants int    `json:"failover_tenants"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &list); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range list.Items {
+		got[p.ID] = p.State
+		if p.ID == fo && p.FailoverTenants != 1 {
+			t.Fatalf("failover pool failover_tenants %d, want 1", p.FailoverTenants)
+		}
+	}
+	if got[relaypool.DefaultPoolID] != relaypool.StateFailedOver || got[fo] != relaypool.StateHealthy {
+		t.Fatalf("pool states %v", got)
+	}
+}

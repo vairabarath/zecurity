@@ -22,7 +22,7 @@ import (
 //	PATCH  /provider/relay-pools/{id}           relay-ops (region/residency: super-admin) {name?, region?, residency?} → 204
 //	DELETE /provider/relay-pools/{id}           relay-ops                                  → 204
 //	POST   /provider/relays/{id}/pool           relay-ops   {pool_id, reason}              → 204
-//	PUT    /provider/tenants/{id}/relay-pool    super-admin {pool_id, reason, migration}   → 204
+//	PUT    /provider/tenants/{id}/relay-pool    super-admin {pool_id, failover_pool_id?, reason, migration} → 204
 //
 // Every mutation commits with its audit row (before/after, F17). Moves and
 // assignments publish the relay lists after commit (connectors of the affected
@@ -90,6 +90,12 @@ func writePoolError(w http.ResponseWriter, what string, err error) {
 		provider.WriteError(w, http.StatusConflict, "already_deleted")
 	case errors.Is(err, errAlreadyRevoked):
 		provider.WriteError(w, http.StatusConflict, "already_revoked")
+	case errors.Is(err, errFailoverSameAsPrimary):
+		provider.WriteError(w, http.StatusBadRequest, "failover_same_as_primary")
+	case errors.Is(err, errFailoverRegionMismatch):
+		provider.WriteError(w, http.StatusBadRequest, "failover_region_mismatch")
+	case errors.Is(err, errFailoverNeedsResidency):
+		provider.WriteError(w, http.StatusBadRequest, "failover_needs_residency")
 	default:
 		log.Printf("relay pools: %s: %v", what, err)
 		provider.WriteError(w, http.StatusInternalServerError, "server_error")
@@ -361,13 +367,17 @@ func (h *AdminHandler) MoveRelay(w http.ResponseWriter, r *http.Request) {
 }
 
 type assignPoolRequest struct {
-	PoolID    string `json:"pool_id"`
-	Reason    string `json:"reason"`
-	Migration string `json:"migration"`
+	PoolID string `json:"pool_id"`
+	// FailoverPoolID is the failover pool (D-39); absent or null means none.
+	// The request is the whole assignment: omitting it removes a failover pool.
+	FailoverPoolID *string `json:"failover_pool_id"`
+	Reason         string  `json:"reason"`
+	Migration      string  `json:"migration"`
 }
 
-// AssignTenantPool: PUT /provider/tenants/{id}/relay-pool {pool_id, reason,
-// migration: "graceful" (default) | "immediate"}. Super-admin only.
+// AssignTenantPool: PUT /provider/tenants/{id}/relay-pool {pool_id,
+// failover_pool_id?, reason, migration: "graceful" (default) | "immediate"}.
+// Super-admin only. The migration mode applies when the primary pool changes.
 func (h *AdminHandler) AssignTenantPool(w http.ResponseWriter, r *http.Request) {
 	actor, ok := actorOr500(w, r, "assign")
 	if !ok {
@@ -391,6 +401,14 @@ func (h *AdminHandler) AssignTenantPool(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	var failoverPool *string
+	if req.FailoverPoolID != nil {
+		id, ok := bodyPoolID(w, *req.FailoverPoolID)
+		if !ok {
+			return
+		}
+		failoverPool = &id
+	}
 	reason, ok := requireReason(w, req.Reason)
 	if !ok {
 		return
@@ -410,7 +428,7 @@ func (h *AdminHandler) AssignTenantPool(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	changed, err := h.Store.AssignWorkspacePool(ctx, workspaceID, toPool, graceful, window,
+	changed, err := h.Store.AssignWorkspacePool(ctx, workspaceID, toPool, failoverPool, graceful, window,
 		func(ctx context.Context, tx pgx.Tx, before, after PoolAssignment) error {
 			mode := "immediate"
 			if graceful {
@@ -442,7 +460,7 @@ func (h *AdminHandler) AssignTenantPool(w http.ResponseWriter, r *http.Request) 
 }
 
 func assignmentAudit(a PoolAssignment) map[string]any {
-	out := map[string]any{"relay_pool_id": a.PoolID}
+	out := map[string]any{"relay_pool_id": a.PoolID, "failover_pool_id": a.FailoverPoolID}
 	if a.PreviousPoolID != nil {
 		out["previous_pool_id"] = *a.PreviousPoolID
 		out["previous_pool_until"] = a.PreviousPoolUntil.UTC()
