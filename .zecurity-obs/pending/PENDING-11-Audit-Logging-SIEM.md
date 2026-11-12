@@ -531,6 +531,10 @@ Wazuh supports both channels natively:
 - **Other changes:** HTTP 400 is no longer worded as a region problem, and the docs add the `/root/.aws/config` region the Wazuh module requires.
 - **Gate:** 1754 pass / 0 fail / 2 skip.
 
+**Post-run fixes (security review, 2026-11-12):**
+- **Connector, a stalled log reader could stall tunnels.** `analytics::emit` wrote to stdout under its lock from the async tunnel task; a log reader that stopped reading would block it. Now `emit` does a non-blocking `try_send` into a bounded queue (`QUEUE_CAPACITY` 4096) drained by an `analytics-writer` thread; a full queue drops the line and counts it, and the writer thread logs the count. Test `full_queue_drops_and_counts_instead_of_blocking`.
+- **Store, a region change kept the secret on an S3-compatible endpoint.** The secret-again rule compared only the access key ID plus the derived URL, and with an endpoint the region isn't in the URL. Now `s3Target` compares bucket, region, endpoint and access key ID, matching the API, console and docs. Not a leak (the key still went to the same host), but the rule didn't match what it said. `TestS3Sink_UpdateCredentialRules` gains a `region` case that fails on the old code.
+
 **Not covered live:**
 - the journald `localfile` block on an agent (only the decoder was checked, with logtest);
 - the Docker journald log driver;

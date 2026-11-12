@@ -22,6 +22,8 @@ Set `ZECURITY_LOG_ANALYTICS=v1` in the connector's environment, then restart the
 
 At startup the connector logs `access analytics lines on (ZECURITY_LOG_ANALYTICS=v1)`. Any value other than `v1` is refused with a warning, and the lines stay off.
 
+The lines are written by a separate thread, so a log collector that stops reading never slows a tunnel. If it falls behind by more than 4096 lines, new lines are dropped and the connector logs a warning with the number dropped. The controller's hash-chained `access` stream is the complete record.
+
 ### Line format
 
 Every access decision prints one line to stdout:

@@ -144,6 +144,9 @@ func TestS3Sink_UpdateCredentialRules(t *testing.T) {
 		"bucket":   with(func(c *S3Config) { c.Bucket = "attacker-bucket" }),
 		"endpoint": with(func(c *S3Config) { c.Endpoint = "https://attacker.example.net" }),
 		"key id":   with(func(c *S3Config) { c.AccessKeyID = "AKIAOTHERKEY0000" }),
+		// With an S3-compatible endpoint the region isn't in the URL; it
+		// still needs the secret again.
+		"region": with(func(c *S3Config) { c.Region = "us-east-1" }),
 	} {
 		if _, err := store.Update(ctx, UpdateInput{WorkspaceID: ws, ID: sink.ID, Config: c}); !errors.As(err, &ie) ||
 			!strings.Contains(ie.Msg, "secret access key again") {

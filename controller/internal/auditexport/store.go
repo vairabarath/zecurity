@@ -229,13 +229,14 @@ func (s *Store) deriveURL(kind string, cfg json.RawMessage) (string, bool, error
 	return u, true, nil
 }
 
-// s3AccessKeyIDOf reads access_key_id from an S3 sink's config.
-func s3AccessKeyIDOf(cfg json.RawMessage) string {
-	var c struct {
-		AccessKeyID string `json:"access_key_id"`
-	}
+// s3Target is what an S3 sink's secret access key was entered for: the
+// destination and key pair. The prefix is not part of it (same bucket, same
+// key). The region counts even when an S3-compatible endpoint keeps the URL
+// unchanged, so the rule matches what the console and docs say.
+func s3Target(cfg json.RawMessage) [4]string {
+	var c S3Config
 	_ = json.Unmarshal(cfg, &c)
-	return c.AccessKeyID
+	return [4]string{c.Bucket, c.Region, c.Endpoint, c.AccessKeyID}
 }
 
 // Create validates and stores a new sink, its cursors and its audit row in
@@ -458,9 +459,9 @@ func (s *Store) Update(ctx context.Context, in UpdateInput) (Sink, error) {
 				if derived != cur.URL {
 					in.URL = &derived // checked below like any URL change
 				}
-				// A secret must not be paired with an access key ID it wasn't
-				// entered for (§9 W-3).
-				if s3AccessKeyIDOf(cfg) != s3AccessKeyIDOf(cur.Config) && in.AuthHeader == nil {
+				// A secret must not follow a bucket, region, endpoint or access
+				// key ID it wasn't entered for (§9 W-3).
+				if s3Target(cfg) != s3Target(cur.Config) && in.AuthHeader == nil {
 					return inputErr("changing the S3 bucket, region, endpoint or access key ID requires entering the secret access key again")
 				}
 				s3Config = cfg
