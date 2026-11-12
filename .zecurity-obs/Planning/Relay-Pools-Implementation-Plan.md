@@ -16,6 +16,13 @@ tags:
 
 Three independently reviewable PRs. Options and rationale: [[D-03-Relay-Pools-Options]]. Binding decisions: D-37 … D-41.
 
+## Operating model (2026-11-12, D-38)
+
+- **Default = global, connector chooses.** Every relay and tenant starts in the `default` pool. A connector of a default tenant receives the whole fleet and picks the nearest relay itself by measured latency (ADR-016 `relay_selector.rs`: HIGH tier first, then MEDIUM, fastest within a tier). No region setting is needed for latency.
+- **Pools on request.** A super-admin creates a pool and assigns a tenant only when a customer asks: residency, or a dedicated pool. Manual work stays limited to those customers.
+- **Dedicated relays.** A relay is in exactly one pool (D-37), so relays moved into a residency or dedicated pool stop serving default tenants. Keep relays in `default` unless they are dedicated; don't create pools for latency alone.
+- **Follow-ups (not in PRs 1–3):** bulk tenant move; a configurable pool for new tenants; tenant-requested pool changes approved by a super-admin; automatic assignment at signup (needs a decision on the region source, with F36).
+
 | PR | Scope | Schema | Proto | Connector | Relay |
 |---|---|---|---|---|---|
 | 1 | Pools, tenant primary pool, per-pool lists, per-pool guard, residency placement validation, API + console | `056_relay_pools.sql` | — | — | — |
@@ -302,3 +309,44 @@ Ticked only after merge **and** live check ([[Pending-Live-Tests]]).
 
 - Lease length vs outage tolerance: 10 minutes means a controller outage longer than that stops relay traffic for **residency** tenants (non-residency pools are unaffected). Confirm after the PR 3 live check.
 - Behaviour of the graceful window when the destination pool is in another region: allowed (the old region stays authorized only for the window), but the console should warn on a cross-region move of a residency tenant.
+
+## PR 1 implementation record (branch `feat/relay-pools-pr1`)
+
+Built on `docs/relay-pools-decision`. Controller changes; the console part is listed separately when done.
+
+- **Schema** `056_relay_pools.sql`: as planned, plus:
+  - a CHECK that the default pool stays plain (no region, never residency);
+  - pool names trimmed;
+  - an explicit `GRANT … ON relay_pools TO ztna_app`.
+- **Packages:**
+  - `internal/relay/relaypool`: default pool id, region validation, the `AuthorizedPools` SQL helper. Standard library only, so `providerquery` stays free of `net/http` (D-04; the first version imported the gRPC types and `TestPackageDoesNotImportNetHTTP` caught it).
+  - `internal/relay/relaylist`: the per-pool list `Set` connectors are sent.
+- **Lists:**
+  - `BuildLabelledRelayList` (global) is removed;
+  - `BuildRelayLists` (all pools plus each workspace's pool) and `BuildLabelledRelayListForWorkspace` (connect-time) share one row-to-entry function and the content fingerprint.
+- **Broadcasts:** `ConnectorRegistry.BroadcastRelayLists` replaces `BroadcastRelayList`/`SyncRelayList`. It now sends only lists that differ from a stream's last one (it used to resend unconditionally), so a change to one pool reaches only that pool's tenants. `RunRelayListSync` uses the same function.
+- **Guard:**
+  - `DrainRelay` and `MoveRelay` lock the pool row, then the target and the pool's eligible relays, and retry if the relay moved pools in between;
+  - "in use" = some workspace's primary pool, or the default pool.
+- **Assignment:** `AssignWorkspacePool` locks the workspace row, then the target pool, and refuses a pool without an eligible relay. `graceful` sets `relay_pool_previous_*`; `immediate` clears them.
+- **Placement validation:**
+  - `connector.recordRelayPlacement`, called from heartbeats and relay events, uses `Store.PlacementAllowed`;
+  - a refused placement is not recorded, and the stored placement is deleted with a topology notify;
+  - audited once per connector/relay transition as `relay.placement_rejected` (actor `system:relay-placement`);
+  - check errors are fail-closed.
+- **API:**
+  - `POST/PATCH/DELETE /provider/relay-pools[/{id}]`, `POST /provider/relays/{id}/pool`, `PUT /provider/tenants/{id}/relay-pool`;
+  - reads `GET /provider/relay-pools[/{id}]` (the tenant list only for `tenant.read`, i.e. super-admin);
+  - relays carry `pool`; tenant detail carries `relay_pool` (5 statements, still one REPEATABLE READ transaction);
+  - relay detail `eligible_relay_count` is now per pool.
+- **Authz:**
+  - `relay.pool.create|update|delete` and `relay.move` (relay-ops);
+  - `relay.pool.set_placement` (super-admin exception);
+  - `tenant.relay_pool.assign` (super-admin via `tenant.*`).
+- **Setting:** `RELAY_POOL_MIGRATION_WINDOW` (Go duration, default `5m`; startup refuses anything under 120 s). Add it to `controller/.env.example` (left out: the edit was blocked by tooling).
+- **Tests:**
+  - `relay/pools_db_test.go` (9 DB-backed tests: constraints, validation, role boundaries, list isolation, per-pool guard, a concurrent drain/move race over 8 rounds, region immutability, placement authorization with graceful/immediate windows, move audit and errors);
+  - `connector/placement_test.go` and per-pool cases in `relay_list_sync_test.go`;
+  - authz matrix;
+  - `provider/pools_read_test.go`.
+  - Mutation check: disabling the drain guard, the placement check, the assignment eligibility check, or the window expiry each makes a test fail.
