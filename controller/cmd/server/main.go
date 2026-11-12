@@ -48,6 +48,7 @@ import (
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/devicesession"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/health"
@@ -205,8 +206,14 @@ func main() {
 	// always presents the redirect URI actually registered with the IdP.
 	oidcRedirectURI := mustEnv("GOOGLE_REDIRECT_URI")
 
+	// PENDING-09 C-1: a client device is revoked when the login session it
+	// was enrolled under ends (sign-out, expiry, server-side revocation). The
+	// policy notifier is attached once it exists, before serving.
+	devSessions := devicesession.New(db.Pool, func(ctx context.Context, e audit.Entry) { _ = audit.Record(ctx, db.Pool, e) })
+
 	authSvc, err := auth.NewService(auth.Config{
-		Pool: db.Pool,
+		Pool:     db.Pool,
+		Sessions: devSessions,
 		// PENDING-11 P-9 / S-11: auth.* rows in the workspace admin stream.
 		Audit:              func(ctx context.Context, e audit.Entry) { _ = audit.Record(ctx, db.Pool, e) },
 		IdentityService:    identitySvc,
@@ -305,6 +312,7 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
+	devSessions.SetNotifier(policyNotifier)
 	policy.RegisterExpiryNotifier(func(workspaceID string) {
 		if err := policyNotifier.NotifyPolicyChange(
 			context.Background(),
@@ -826,6 +834,11 @@ func main() {
 		retentionBatchSize,
 		nil,
 	)
+	// PENDING-09 D-4: revoke devices whose session idled out or reached its
+	// max lifetime (those end without any event).
+	workers.Go("device-session-sweep", func() {
+		devSessions.Run(ctx)
+	})
 	workers.Go("posture-retention", func() {
 		retentionWorker.Run(ctx)
 	})

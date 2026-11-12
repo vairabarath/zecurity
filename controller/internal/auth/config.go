@@ -29,6 +29,10 @@ type Config struct {
 	// (PENDING-11 P-9, S-11). Optional; nil disables auth auditing.
 	Audit AuditRecorder
 
+	// Sessions is told when sessions are refreshed or end, so the client
+	// devices enrolled under them follow (PENDING-09 C-1). Optional.
+	Sessions SessionObserver
+
 	// Pool is the pgx connection pool, passed to the bootstrap service.
 	// Provided by: db.Pool (internal/db/pool.go, Member 4)
 	Pool *pgxpool.Pool

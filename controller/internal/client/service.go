@@ -480,6 +480,19 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		}
 		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
 	}
+	// PENDING-09 D-1: bind the device to the live login session the token
+	// belongs to; the device is revoked when that session ends. A token with
+	// no session, or whose session has ended, cannot enroll a device.
+	if tokenClaims.SessionID == "" {
+		return nil, status.Error(codes.Unauthenticated, "access token has no session; sign in again")
+	}
+	deadlines, err := s.authSvc.SessionDeadlines(ctx, tokenClaims.UserID, tokenClaims.SessionID)
+	if err != nil {
+		if errors.Is(err, auth.ErrSessionNotFound) {
+			return nil, status.Error(codes.Unauthenticated, "session has ended; sign in again")
+		}
+		return nil, status.Errorf(codes.Internal, "look up session: %v", err)
+	}
 
 	block, _ := pem.Decode([]byte(req.GetCsrPem()))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -507,7 +520,8 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}
 	trustDomain := appmeta.WorkspaceTrustDomain(slug)
 
-	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs())
+	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs(),
+		deviceSession{id: tokenClaims.SessionID, deadlines: deadlines})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "insert client device: %v", err)
 	}

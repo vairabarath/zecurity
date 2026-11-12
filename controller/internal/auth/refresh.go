@@ -161,10 +161,12 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 		role = dbRole
 		if err := identity.CheckLifecycle(status); err != nil {
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+			s.userSessionsEnded(ctx, userID, "sessions_revoked")
 			return "", "", dead("session revoked")
 		}
 		if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+			s.userSessionsEnded(ctx, userID, "sessions_revoked")
 			return "", "", dead("session revoked")
 		}
 	}
@@ -202,6 +204,7 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// TTL window.
 	if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
 		s.redisClient.DeleteRefreshSession(ctx, userID, sid)
+		s.sessionEnded(ctx, userID, sid, "session_expired")
 		return "", "", dead("refresh token max lifetime exceeded")
 	}
 
@@ -243,6 +246,7 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	if sid == "" {
 		s.redisClient.DeleteRefreshSession(ctx, userID, "")
 	}
+	s.sessionRefreshed(ctx, userID, newSID)
 	return newAccessToken, newRefreshToken, nil
 }
 
