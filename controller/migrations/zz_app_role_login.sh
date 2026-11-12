@@ -1,6 +1,6 @@
 #!/bin/sh
 # PENDING-11 S-5 (D-12): give the runtime role ztna_app (created NOLOGIN by
-# 051_audit_chain.sql) a login and password. Runs once, after every *.sql file
+# 053_audit_chain.sql) a login and password. Runs once, after every *.sql file
 # (docker-entrypoint-initdb.d runs files in name order). DB-backed tests apply
 # only *.sql and use SET ROLE ztna_app instead.
 set -eu

@@ -1,4 +1,4 @@
--- 051_audit_chain.sql — PENDING-11 S1a: audit hash chain + D-12 append-only.
+-- 053_audit_chain.sql — PENDING-11 S1a: audit hash chain + D-12 append-only.
 --
 -- 1. Two hash-chained streams per workspace (P-1, P-2):
 --      admin  = audit_logs

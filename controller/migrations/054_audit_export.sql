@@ -1,7 +1,7 @@
--- 052_audit_export.sql — PENDING-11 S1b: SIEM export sinks and cursors (P-5, P-6, P-8).
+-- 054_audit_export.sql — PENDING-11 S1b: SIEM export sinks and cursors (P-5, P-6, P-8).
 --
 -- A sink is one destination (webhook or Splunk HEC) for one workspace's
--- hash-chained audit streams (051). Each sink keeps one cursor per stream: the
+-- hash-chained audit streams (053). Each sink keeps one cursor per stream: the
 -- last seq the destination acknowledged. Delivery is at-least-once; the
 -- exporter advances the cursor only after a 2xx.
 --
@@ -9,7 +9,7 @@
 -- sealed with pki.EncryptSecret under "audit-export-sink:<sink id>" and are
 -- never returned after create/rotate.
 --
--- Privileges: 051's ALTER DEFAULT PRIVILEGES gives ztna_app normal DML here.
+-- Privileges: 053's ALTER DEFAULT PRIVILEGES gives ztna_app normal DML here.
 
 CREATE TABLE audit_export_sinks (
     id                UUID        PRIMARY KEY,

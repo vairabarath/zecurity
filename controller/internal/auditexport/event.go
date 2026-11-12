@@ -1,5 +1,5 @@
 // Package auditexport ships a workspace's hash-chained audit streams
-// (internal/audit, migration 051) to external SIEMs (PENDING-11 P-5 … P-8).
+// (internal/audit, migration 053) to external SIEMs (PENDING-11 P-5 … P-8).
 //
 // One exporter inside the controller (D-02) tails each stream by its gap-free
 // seq, per sink cursor, and hands batches to an Adapter (webhook, Splunk

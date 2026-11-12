@@ -11,7 +11,7 @@ import (
 )
 
 // Stream names one hash-chained audit stream of a workspace (PENDING-11 P-1).
-// The chain itself is maintained by the database (migration 051): a BEFORE
+// The chain itself is maintained by the database (migration 053): a BEFORE
 // INSERT trigger assigns each row a gap-free, commit-ordered seq and
 // row_hash = sha256(prev_hash || canonical(row)).
 type Stream string

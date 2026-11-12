@@ -232,7 +232,7 @@ func (s *Service) runBootstrapTransaction(
 	}
 
 	// PENDING-11 P-9: the workspace's admin stream starts with its own
-	// creation (the heads exist: 051's AFTER INSERT trigger on workspaces).
+	// creation (the heads exist: 053's AFTER INSERT trigger on workspaces).
 	if err := audit.RecordTx(ctx, tx, audit.Entry{
 		TenantID:    tenantID,
 		ActorUserID: userID,

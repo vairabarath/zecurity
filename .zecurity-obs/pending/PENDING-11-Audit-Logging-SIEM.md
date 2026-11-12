@@ -117,7 +117,7 @@ Each stream is ordered and hash-chained on its own. Provider rows live in anothe
 
 ### P-2. Hash chain and the export cursor come from one mechanism
 
-Migration `051_audit_chain.sql` does the following:
+Migration `053_audit_chain.sql` (built as 051, renumbered at merge) does the following:
 
 - It adds a table `audit_stream_heads (workspace_id, stream, last_seq bigint, last_hash bytea)`. It has one row per workspace and stream, and the row is created lazily.
 - It adds `seq bigint`, `prev_hash bytea` and `row_hash bytea` to `audit_logs` and `connector_logs`, with `UNIQUE (workspace, seq)`.
@@ -461,7 +461,7 @@ Wazuh supports both channels natively:
   - It goes through the shared SSRF-safe client (P-6). The default endpoint is `https://<bucket>.s3.<region>.amazonaws.com`.
   - This avoids adding aws-sdk-go-v2 and keeps the dial-time SSRF guard in charge.
 - **W-7 Schema and console.**
-  - `053_audit_export_s3.sql` drops the kind CHECK from 052 and adds it back with `'s3'` (052 itself is never edited; `[schema: reset DB]`).
+  - `055_audit_export_s3.sql` (built as 053) drops the kind CHECK from 054 and adds it back with `'s3'` (052 itself is never edited; `[schema: reset DB]`).
   - The GraphQL enum gains `S3`.
   - The console's Audit export form gains an "Amazon S3" kind.
 - **W-8 Docs.** One setup section per channel, like Twingate's:
@@ -480,7 +480,7 @@ Wazuh supports both channels natively:
   - `s3.go` (adapter, key, gzip NDJSON, `URLDeriver`) and `sigv4.go` (hand-written PutObject signing);
   - exporter `Windowed` batching;
   - store rules: URL derived from config; secret required; secret again on a bucket, region, endpoint or access key ID change; no URL, ClearAuth or auth header on S3;
-  - `053_audit_export_s3.sql`; GraphQL `S3` kind, `S3Input` and `s3*` fields.
+  - `055_audit_export_s3.sql`; GraphQL `S3` kind, `S3Input` and `s3*` fields.
   - Gate: 1753 pass / 0 fail / 2 skip (the known two).
   - SigV4 is checked against AWS's published get-vanilla and S3 PUT examples, and against botocore.
   - The wire path is the signed path. Prefixes are limited to `A-Z a-z 0-9 / _ . -`, since botocore sends `+` literally while an encoder would sign `%2B`.
@@ -534,6 +534,8 @@ Wazuh supports both channels natively:
 **Post-run fixes (security review, 2026-11-12):**
 - **Connector, a stalled log reader could stall tunnels.** `analytics::emit` wrote to stdout under its lock from the async tunnel task; a log reader that stopped reading would block it. Now `emit` does a non-blocking `try_send` into a bounded queue (`QUEUE_CAPACITY` 4096) drained by an `analytics-writer` thread; a full queue drops the line and counts it, and the writer thread logs the count. Test `full_queue_drops_and_counts_instead_of_blocking`.
 - **Store, a region change kept the secret on an S3-compatible endpoint.** The secret-again rule compared only the access key ID plus the derived URL, and with an endpoint the region isn't in the URL. Now `s3Target` compares bucket, region, endpoint and access key ID, matching the API, console and docs. Not a leak (the key still went to the same host), but the rule didn't match what it said. `TestS3Sink_UpdateCredentialRules` gains a `region` case that fails on the old code.
+
+**Merge with main (2026-11-12): migrations renumbered.** Main took 051 (`051_provider_audit_append_only.sql`, F17) and 052 (`052_relay_bandwidth.sql`, F5) while this work was in review, so ours became `053_audit_chain.sql`, `054_audit_export.sql` and `055_audit_export_s3.sql` (built and live-run as 051 … 053; contents unchanged apart from cross-references). F17's append-only triggers and this note's `ztna_app` REVOKE on `provider_audit_logs` both apply; F5's new `relays` columns get `ztna_app` DML through the default privileges. Gate after the merge: 1782 pass / 0 fail / 2 skip (one timing flake in `TestDisconnectWatcher_RevokedUntouchedNoNotify` under full-suite load, 3/3 pass on rerun, untouched code); admin 294 pass.
 
 **Not covered live:**
 - the journald `localfile` block on an agent (only the decoder was checked, with logtest);
