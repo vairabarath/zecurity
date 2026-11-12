@@ -1,25 +1,72 @@
 import { Link } from 'react-router-dom'
-import type { RelayPoolRef, RelayPoolSummary } from '@/api/types'
+import type { RelayPoolRef, RelayPoolSummary, RelaySummary } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
 
 // Pool labels shared by the relay, pool and tenant pages (D-37, D-40).
 //
-// Residency is routing only until relay-side enforcement ships and is
-// live-checked (D-40, PR 3): the pool's relay list is guidance, relays still
-// accept every workspace. The badge says so in its own text, never just
-// "Residency", so it can't be read as a guarantee.
+// Residency (D-40). A pool's relays enforce it only when the pool read says
+// `residency_enforced`; nothing else may be shown as "enforced". Where only a
+// pool ref is at hand (relay and tenant pages carry no enforcement flag) the
+// badge says "Residency" and points to the pool page, claiming nothing.
 
+export const RESIDENCY_ENFORCED_NOTE =
+  'Relays in this pool accept only this pool’s tenants. A removed tenant’s sessions end at the relay’s next heartbeat (30 seconds at most by default). If a relay loses the controller for longer than its lease (10 minutes by default), it stops serving this pool’s tenants until the controller is back.'
+
+export const RESIDENCY_NOT_ENFORCED_NOTE =
+  'At least one active relay in this pool doesn’t support the workspace policy or hasn’t applied the current version yet (for example an older relay build, or a change made since its last heartbeat). Traffic is routed to the pool, but its relays don’t enforce residency.'
+
+export const RESIDENCY_UNKNOWN_NOTE = 'A residency pool. Whether its relays enforce residency is shown on the pool’s page.'
+
+/** What a residency pool's checkbox means (create and edit dialogs). */
 export const RESIDENCY_NOTE =
-  'Routing only: this pool’s tenants are offered only its relays, but relays don’t enforce residency yet (relay-side enforcement isn’t shipped), so residency is not enforced and must not be promised to tenants.'
+  'Tenants of a residency pool are offered only its relays. Its relays enforce it (accept only its tenants) once every active relay supports the workspace policy and has applied it; the pool’s page shows whether that is the case.'
 
-export function ResidencyBadge({ residency }: { residency: boolean }) {
+/**
+ * `enforced` is the pool read's residency_enforced; leave it undefined where
+ * only a pool ref is known, and the badge makes no enforcement claim.
+ */
+export function ResidencyBadge({ residency, enforced }: { residency: boolean; enforced?: boolean }) {
   if (!residency) return <span className="text-muted-foreground">—</span>
+  const [label, note, variant, data] =
+    enforced === true
+      ? (['Residency (enforced)', RESIDENCY_ENFORCED_NOTE, 'success', 'enforced'] as const)
+      : enforced === false
+        ? (['Residency (not enforced)', RESIDENCY_NOT_ENFORCED_NOTE, 'warning', 'not-enforced'] as const)
+        : (['Residency', RESIDENCY_UNKNOWN_NOTE, 'secondary', 'unknown'] as const)
   return (
-    <Badge variant="info" className="whitespace-nowrap" title={RESIDENCY_NOTE} data-residency="routing-only">
-      Residency (routing only)
-      <span className="sr-only">. {RESIDENCY_NOTE}</span>
+    <Badge variant={variant} className="whitespace-nowrap" title={note} data-residency={data}>
+      {label}
+      <span className="sr-only">. {note}</span>
+    </Badge>
+  )
+}
+
+/**
+ * A relay's workspace-policy state (D-40), for relays in residency pools;
+ * "—" elsewhere. Only the API's own flags; nothing is derived.
+ */
+export function RelayPolicyBadge({ relay }: { relay: Pick<RelaySummary, 'pool' | 'policy'> }) {
+  if (!relay.pool.residency) return <span className="text-muted-foreground">—</span>
+  const p = relay.policy
+  if (!p.supported) {
+    return (
+      <Badge variant="destructive" className="whitespace-nowrap" data-policy="unsupported" title="An older relay build: it can’t enforce the workspace policy, so residency isn’t enforced on this relay.">
+        Not supported
+      </Badge>
+    )
+  }
+  if (!p.current) {
+    return (
+      <Badge variant="warning" className="whitespace-nowrap" data-policy="applying" title="It applies the pool’s current policy at its next heartbeat.">
+        Applying…
+      </Badge>
+    )
+  }
+  return (
+    <Badge variant="success" className="whitespace-nowrap" data-policy="enforcing" title="It has applied the pool’s current policy and accepts only the pool’s tenants.">
+      Enforcing
     </Badge>
   )
 }

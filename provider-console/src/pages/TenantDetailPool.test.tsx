@@ -87,11 +87,15 @@ describe('Tenant detail: relay pool section', () => {
     expect(section.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('a residency pool reads as routing only', async () => {
+  it('a residency pool shows "Residency" with no enforcement claim (the tenant read has no enforcement flag)', async () => {
     setup(tenant({ relay_pool: EU_TENANT_POOL }))
     const section = within(await screen.findByRole('region', { name: 'Relay pool' }))
     expect(section.getByText('eu-central-1')).toBeInTheDocument()
-    expect(section.getByText(/Residency \(routing only\)/)).toHaveTextContent(/not enforced/)
+    const badge = section.getAllByText(/^Residency/).find((el) => el.hasAttribute('data-residency'))!
+    expect(badge).toHaveTextContent(/^Residency\./) // label "Residency" + screen-reader note
+    expect(badge).toHaveAttribute('data-residency', 'unknown')
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/shown on the pool’s page/))
+    expect(section.queryByText(/\(enforced\)|\(not enforced\)/)).not.toBeInTheDocument()
   })
 
   it('shows the failover pool with its region and eligible relays, and warns when it has none', async () => {

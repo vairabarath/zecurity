@@ -49,10 +49,22 @@ type RelaySummary struct {
 	Bandwidth *RelayBandwidth `json:"bandwidth"`
 	// Pool is the relay pool the relay belongs to (D-37).
 	Pool RelayPoolRef `json:"pool"`
+	// Policy is what the relay reports about its workspace policy (D-40,
+	// relay-pools PR 3).
+	Policy RelayPolicyStatus `json:"policy"`
 
 	// connectionCountAt is when ConnectionCount was measured; it decides
 	// DrainState and is not part of the response.
 	connectionCountAt *time.Time
+}
+
+// RelayPolicyStatus: Supported means the relay can enforce a workspace
+// policy; AppliedVersion is the version it last reported (null: none yet);
+// Current means it has applied its pool's current version.
+type RelayPolicyStatus struct {
+	Supported      bool   `json:"supported"`
+	AppliedVersion *int64 `json:"applied_version"`
+	Current        bool   `json:"current"`
 }
 
 // RelayPoolRef names a relay pool and its placement attributes (D-37).
@@ -177,7 +189,8 @@ const relaySummaryColumns = `
        (SELECT count(*) FROM connector_relay_placement p WHERE p.relay_id = r.id),
        r.created_at, r.drain_started_at, r.connection_count_at,
        r.bytes_sampled_at, r.bytes_rate_window_seconds, r.bytes_to_connector_per_sec, r.bytes_to_client_per_sec,
-       rp.id::text, rp.name, rp.region, rp.residency`
+       rp.id::text, rp.name, rp.region, rp.residency,
+       r.policy_supported, r.policy_version_acked, rp.policy_version`
 
 // relayFrom joins each relay to its pool; every query using
 // relaySummaryColumns selects FROM it.
@@ -189,16 +202,19 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	var s RelaySummary
 	var bwAt *time.Time
 	var bwWindow, bwToConnector, bwToClient *float64
+	var poolPolicyVersion int64
 	dest := append([]any{
 		&s.ID, &s.Name, &s.Status, &s.Version, &s.Hostname, &s.PublicAddr, &s.AddressScope,
 		&s.CapacityLabel, &s.ConnectionCount, &s.MaxConnections, &s.CertSerial, &s.CertNotAfter,
 		&s.LastHeartbeatAt, &s.AttachedConnectors, &s.CreatedAt, &s.DrainingSince, &s.connectionCountAt,
 		&bwAt, &bwWindow, &bwToConnector, &bwToClient,
 		&s.Pool.ID, &s.Pool.Name, &s.Pool.Region, &s.Pool.Residency,
+		&s.Policy.Supported, &s.Policy.AppliedVersion, &poolPolicyVersion,
 	}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return RelaySummary{}, err
 	}
+	s.Policy.Current = s.Policy.Supported && s.Policy.AppliedVersion != nil && *s.Policy.AppliedVersion == poolPolicyVersion
 	s.CertNotAfter = utcPtr(s.CertNotAfter)
 	s.LastHeartbeatAt = utcPtr(s.LastHeartbeatAt)
 	s.CreatedAt = s.CreatedAt.UTC()

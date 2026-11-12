@@ -4,7 +4,7 @@ import { moveRelayToPool } from '@/api/pools'
 import type { RelayDetail } from '@/api/types'
 import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
-import { PoolLink, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
+import { PoolLink, RegionCode, RelayPolicyBadge, ResidencyBadge } from '@/components/PoolBadges'
 import { PoolSelect } from '@/components/PoolSelect'
 import { ReasonField } from '@/components/ReasonField'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -55,6 +55,17 @@ export function RelayPoolCard({ relay, onDone }: { relay: RelayDetail; onDone: (
               <ResidencyBadge residency={p.residency} />
             </dd>
           </div>
+          {p.residency && (
+            <div className="flex flex-col gap-1">
+              <dt className="text-xs font-medium tracking-wide text-muted-foreground">Workspace policy</dt>
+              <dd className="inline-flex flex-wrap items-center gap-2">
+                <RelayPolicyBadge relay={relay} />
+                <span className="text-[13px] text-subtle-foreground">
+                  {relay.policy.applied_version === null ? 'no version applied' : `applied version ${relay.policy.applied_version}`}
+                </span>
+              </dd>
+            </div>
+          )}
           <div className="flex flex-col gap-1">
             <dt className="text-xs font-medium tracking-wide text-muted-foreground">Eligible relays in this pool</dt>
             <dd className="font-mono">{relay.eligible_relay_count}</dd>

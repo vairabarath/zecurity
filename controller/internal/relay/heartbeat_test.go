@@ -40,6 +40,24 @@ type fakeHeartbeatStore struct {
 	revokedAnswer []string
 	revokedErr    error
 	revokedAsked  [][]string
+	// PR 3 (D-40): the workspace policy answer, and the acks recorded.
+	policy    WorkspacePolicy
+	policyErr error
+	acks      []policyAck
+}
+
+type policyAck struct {
+	supported bool
+	applied   uint64
+}
+
+func (s *fakeHeartbeatStore) RelayWorkspacePolicy(context.Context, string) (WorkspacePolicy, error) {
+	return s.policy, s.policyErr
+}
+
+func (s *fakeHeartbeatStore) RecordPolicyAck(_ context.Context, _ string, supported bool, applied uint64) error {
+	s.acks = append(s.acks, policyAck{supported, applied})
+	return nil
 }
 
 func (s *fakeHeartbeatStore) RevokedConnectorSPIFFEIDs(_ context.Context, ids []string) ([]string, error) {

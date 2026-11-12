@@ -351,3 +351,10 @@ func TestValidateIPSANs(t *testing.T) {
 func (f *fakeProvisionStore) RevokedConnectorSPIFFEIDs(context.Context, []string) ([]string, error) {
 	return nil, nil
 }
+
+// PR 3 (D-40): provisioning tests don't exercise the workspace policy.
+func (s *fakeProvisionStore) RelayWorkspacePolicy(context.Context, string) (WorkspacePolicy, error) {
+	return WorkspacePolicy{}, nil
+}
+
+func (s *fakeProvisionStore) RecordPolicyAck(context.Context, string, bool, uint64) error { return nil }

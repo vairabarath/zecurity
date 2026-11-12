@@ -381,7 +381,7 @@ func TestRelayBandwidth(t *testing.T) {
 func TestRelayDTOSurface(t *testing.T) {
 	summary := []string{"address_scope", "attached_connectors", "bandwidth", "capacity_label", "cert_not_after", "cert_serial",
 		"connection_count", "created_at", "drain_state", "draining_since", "hostname", "id", "last_heartbeat_at",
-		"max_connections", "name", "pool", "public_addr", "status", "version"}
+		"max_connections", "name", "policy", "pool", "public_addr", "status", "version"}
 	detail := append(append([]string{}, summary...), "attachments", "attachments_truncated", "certificates",
 		"certificates_truncated", "dns_allowlist", "eligible_relay_count", "in_relay_list", "ip_allowlist")
 	sort.Strings(detail)
@@ -397,12 +397,13 @@ func TestRelayDTOSurface(t *testing.T) {
 		// in tenant_list, which is null unless the caller may read tenants.
 		"RelayPoolRef": {RelayPoolRef{}, []string{"id", "name", "region", "residency"}},
 		"RelayPoolSummary": {RelayPoolSummary{}, []string{"created_at", "eligible_relays", "eligible_since", "exhausted_at",
-			"failover_tenants", "id", "is_default", "name", "region", "relays", "residency", "state", "tenants"}},
+			"failover_tenants", "id", "is_default", "name", "policy_version", "region", "relays", "residency", "residency_enforced", "state", "tenants"}},
 		"RelayPoolDetail": {RelayPoolDetail{}, []string{"created_at", "eligible_relays", "eligible_since", "exhausted_at",
-			"failover_tenants", "id", "is_default", "name", "region", "relay_list", "relay_list_truncated", "relays", "residency",
-			"state", "tenant_list", "tenant_list_truncated", "tenants"}},
-		"RelayPoolRelay":  {RelayPoolRelay{}, []string{"eligible", "id", "name", "status"}},
-		"RelayPoolTenant": {RelayPoolTenant{}, []string{"id", "name", "slug"}},
+			"failover_tenants", "id", "is_default", "name", "policy_version", "region", "relay_list", "relay_list_truncated", "relays", "residency",
+			"residency_enforced", "state", "tenant_list", "tenant_list_truncated", "tenants"}},
+		"RelayPolicyStatus": {RelayPolicyStatus{}, []string{"applied_version", "current", "supported"}},
+		"RelayPoolRelay":    {RelayPoolRelay{}, []string{"eligible", "id", "name", "policy", "status"}},
+		"RelayPoolTenant":   {RelayPoolTenant{}, []string{"id", "name", "slug"}},
 	} {
 		b, _ := json.Marshal(c.v)
 		var m map[string]any

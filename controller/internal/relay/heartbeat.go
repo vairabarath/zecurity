@@ -46,6 +46,10 @@ type heartbeatStore interface {
 	// registered connector identities are revoked.
 	RevokedConnectorSPIFFEIDs(ctx context.Context, spiffeIDs []string) ([]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
+	// Relay pools PR 3 (D-40): the relay's pool's workspace policy, and the
+	// relay's report of what it applied.
+	RelayWorkspacePolicy(ctx context.Context, relayID string) (WorkspacePolicy, error)
+	RecordPolicyAck(ctx context.Context, relayID string, supported bool, applied uint64) error
 }
 
 // topologyChangeNotifier is the transport-plane notifier (ADR-017). A relay
@@ -107,11 +111,11 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	revoked := s.revokedConnectorSubset(ctx, relayID, req.RegisteredConnectorSpiffeIds)
 	if !shouldWriteDB {
 		metrics.RecordRelayHeartbeat("accepted")
-		return &relaypb.HeartbeatResponse{
+		return s.withWorkspacePolicy(ctx, relayID, req, &relaypb.HeartbeatResponse{
 			ServerTimeUnix:            time.Now().UTC().Unix(),
 			NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
 			RevokedConnectorSpiffeIds: revoked,
-		}, nil
+		}), nil
 	}
 
 	if err := s.store.RecordHeartbeat(
@@ -165,11 +169,33 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		}
 	}
 	metrics.RecordRelayHeartbeat("accepted")
-	return &relaypb.HeartbeatResponse{
+	return s.withWorkspacePolicy(ctx, relayID, req, &relaypb.HeartbeatResponse{
 		ServerTimeUnix:            time.Now().UTC().Unix(),
 		NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
 		RevokedConnectorSpiffeIds: revoked,
-	}, nil
+	}), nil
+}
+
+// withWorkspacePolicy adds the relay's pool's workspace policy to a heartbeat
+// response (D-40, relay-pools PR 3) and records what the relay reported. On
+// every heartbeat, throttled or not, so the lease is renewed each time. A
+// lookup failure leaves the policy out (version 0): the relay keeps its last
+// policy and its lease is not renewed, so a controller error can never tell a
+// residency relay that nothing is enforced.
+func (s *Service) withWorkspacePolicy(ctx context.Context, relayID string, req *relaypb.HeartbeatRequest, resp *relaypb.HeartbeatResponse) *relaypb.HeartbeatResponse {
+	if err := s.store.RecordPolicyAck(ctx, relayID, req.GetWorkspacePolicySupported(), req.GetWorkspacePolicyVersionApplied()); err != nil {
+		log.Printf("relay heartbeat: record policy ack %s: %v", relayID, err)
+	}
+	policy, err := s.store.RelayWorkspacePolicy(ctx, relayID)
+	if err != nil {
+		log.Printf("relay heartbeat: workspace policy %s: %v — sending none (the relay keeps its last policy)", relayID, err)
+		return resp
+	}
+	resp.WorkspacePolicyEnforced = policy.Enforced
+	resp.AllowedWorkspaceIds = policy.Workspace
+	resp.WorkspacePolicyVersion = policy.Version
+	resp.WorkspacePolicyLeaseSeconds = uint32(s.policyLease / time.Second)
+	return resp
 }
 
 // revokedConnectorSubset looks up which registered connector identities are

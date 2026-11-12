@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { RelayDetail, RelaySummary } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
-import { DEFAULT_POOL, DEFAULT_POOL_ID, EMPTY_POOL_ID, EU_POOL, EU_POOL_ID, POOLS } from '@/test/pools'
+import { DEFAULT_POOL, DEFAULT_POOL_ID, EMPTY_POOL_ID, EU_POOL, EU_POOL_ID, POOLS, RELAY_POLICY } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 // Relay pools on the Relays list, Add relay and relay detail (D-37, D-41).
@@ -30,7 +30,7 @@ function relay(over: Partial<RelaySummary> = {}): RelaySummary {
     draining_since: null,
     drain_state: null,
     bandwidth: null,
-    pool: DEFAULT_POOL,
+    pool: DEFAULT_POOL, policy: RELAY_POLICY,
     ...over,
   }
 }

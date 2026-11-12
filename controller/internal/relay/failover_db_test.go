@@ -129,7 +129,7 @@ func TestFailoverDB_StateMachine(t *testing.T) {
 	}
 	// A dip during the hold-down restarts it.
 	e.setActive(t, p1, false)
-	if reconcile(t1.Add(4 * time.Minute)) || e.poolState(t, primary) != relaypool.StateFailedOver {
+	if reconcile(t1.Add(4*time.Minute)) || e.poolState(t, primary) != relaypool.StateFailedOver {
 		t.Fatal("a dip during recovery returns to failed_over without a switch")
 	}
 	e.setActive(t, p1, true)

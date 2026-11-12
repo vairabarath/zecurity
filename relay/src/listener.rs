@@ -15,6 +15,7 @@ use crate::crl::RevocationStatus;
 use crate::session;
 use crate::state::RelayState;
 use crate::tls;
+use crate::workspace_policy::{unix_now, WorkspacePolicy};
 
 /// Pure fail-closed revocation decision: only `NotRevoked` may proceed to
 /// bridging. `Revoked` and `Unavailable` are both rejected — an unknown
@@ -80,6 +81,7 @@ pub async fn run_listener(
     bind_addr: SocketAddr,
     certs: Arc<CertManager>,
     state: Arc<RelayState>,
+    policy: Arc<WorkspacePolicy>,
     limits: RuntimeLimits,
     crl: crate::crl::WorkspaceCrlManager,
     stop: impl std::future::Future<Output = ()>,
@@ -135,6 +137,7 @@ pub async fn run_listener(
             }
         };
         let state = state.clone();
+        let policy = policy.clone();
         let crl = crl.clone();
         let certs = certs.clone();
         let session_limits = session_limits.clone();
@@ -179,7 +182,7 @@ pub async fn run_listener(
             );
             // Track-2: reject a revoked connector/client on the outer mTLS. Fail closed.
             let intermediate_ca_pem = certs.current().intermediate_ca_pem.clone();
-            match tls::peer_revocation(&connection, &intermediate_ca_pem) {
+            let workspace_id = match tls::peer_revocation(&connection, &intermediate_ca_pem) {
                 Ok(pr) => {
                     let status = crl
                         .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
@@ -189,13 +192,33 @@ pub async fn run_listener(
                         connection.close(0u32.into(), reason);
                         return;
                     }
+                    pr.workspace_id
                 }
                 Err(error) => {
                     warn!(error = %error, "cannot derive peer revocation context — failing closed");
                     connection.close(0u32.into(), b"revocation context error");
                     return;
                 }
-            }
+            };
+            // Relay pools PR 3 (D-40): the workspace policy decides whether
+            // this workspace may use the relay. The peer stays registered by
+            // workspace for the whole session, so a later policy (or lease
+            // expiry) can end it — connector registrations and client
+            // sessions alike.
+            let _peer = match policy.admit(&workspace_id, &connection, unix_now()) {
+                Ok(guard) => guard,
+                Err(reason) => {
+                    warn!(
+                        workspace_id = %workspace_id,
+                        spiffe_id = %identity.uri,
+                        role = %identity.role,
+                        reason = %String::from_utf8_lossy(reason),
+                        "refusing Relay peer: workspace policy"
+                    );
+                    connection.close(0u32.into(), reason);
+                    return;
+                }
+            };
             if let Err(error) =
                 session::handle_connection(connection, identity, state, session_limits).await
             {
@@ -466,6 +489,15 @@ mod revocation_issuer_tests {
 
     /// Starts the production listener; returns its address.
     async fn start_relay(pki: &TestPki, crl_http: String) -> SocketAddr {
+        start_relay_with_policy(pki, crl_http, WorkspacePolicy::allow_all()).await
+    }
+
+    /// Starts the production listener with `policy`; returns its address.
+    async fn start_relay_with_policy(
+        pki: &TestPki,
+        crl_http: String,
+        policy: Arc<WorkspacePolicy>,
+    ) -> SocketAddr {
         let key = pki.relay_key();
         let dir = std::env::temp_dir().join(format!("relay-s1-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -487,6 +519,7 @@ mod revocation_issuer_tests {
             addr,
             manager,
             RelayState::new(),
+            policy,
             limits(),
             WorkspaceCrlManager::new(crl_http),
             std::future::pending(),
@@ -502,6 +535,9 @@ mod revocation_issuer_tests {
         "peer certificate revoked",
         "revocation state unavailable",
         "revocation context error",
+        "workspace not allowed on this relay",
+        "workspace policy lease expired",
+        "no workspace policy yet",
     ];
 
     #[derive(Debug, PartialEq)]
@@ -644,6 +680,7 @@ mod revocation_issuer_tests {
             addr,
             manager,
             RelayState::new(),
+            WorkspacePolicy::allow_all(),
             limits(),
             WorkspaceCrlManager::new(crl_http),
             async move {
@@ -737,6 +774,95 @@ mod revocation_issuer_tests {
             matches!(outcome, Outcome::Rejected(_)),
             "revoked tenant-A leaf with a forged tenant-B copy of its CA: {outcome:?} after a \
              successful handshake; CRLs fetched: {fetched:?} (tenant A = {TENANT_A}, tenant B = {TENANT_B})"
+        );
+    }
+
+    fn policy_response(version: u64, allowed: &[&str]) -> crate::relay::v1::HeartbeatResponse {
+        crate::relay::v1::HeartbeatResponse {
+            workspace_policy_version: version,
+            workspace_policy_enforced: true,
+            allowed_workspace_ids: allowed.iter().map(|s| s.to_string()).collect(),
+            workspace_policy_lease_seconds: 600,
+            ..Default::default()
+        }
+    }
+
+    async fn setup_with_policy(
+        policy: Arc<WorkspacePolicy>,
+    ) -> (TestPki, TestWorkspaceCa, TestWorkspaceCa, SocketAddr) {
+        crate::test_support::install_crypto_provider();
+        let pki = TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let ca_b = pki.workspace_ca(TENANT_B);
+        let crls = HashMap::from([
+            (TENANT_A.to_owned(), ca_a.crl(&[])),
+            (TENANT_B.to_owned(), ca_b.crl(&[])),
+        ]);
+        let crl_http = spawn_crl_server(crls, Fetched::default()).await;
+        let relay = start_relay_with_policy(&pki, crl_http, policy).await;
+        (pki, ca_a, ca_b, relay)
+    }
+
+    /// D-40 accept path: an enforcing policy admits only listed workspaces;
+    /// a relay with no policy yet refuses every workspace peer.
+    #[tokio::test]
+    async fn workspace_policy_gates_peers_at_accept() {
+        let policy = WorkspacePolicy::in_memory();
+        let (pki, ca_a, ca_b, relay) = setup_with_policy(policy.clone()).await;
+
+        let (leaf, key) = ca_a.client_leaf(GOOD_SERIAL);
+        assert_eq!(
+            connect(&pki, relay, vec![leaf, ca_a.der()], key).await,
+            Outcome::Rejected("no workspace policy yet".into())
+        );
+
+        policy.apply(
+            &policy_response(3, &[TENANT_A]),
+            crate::workspace_policy::unix_now(),
+        );
+        let (leaf, key) = ca_b.client_leaf(GOOD_SERIAL);
+        assert_eq!(
+            connect(&pki, relay, vec![leaf, ca_b.der()], key).await,
+            Outcome::Rejected("workspace not allowed on this relay".into())
+        );
+        let (leaf, key) = ca_a.client_leaf(GOOD_SERIAL);
+        let outcome = connect(&pki, relay, vec![leaf, ca_a.der()], key).await;
+        assert!(
+            matches!(outcome, Outcome::Admitted(_)),
+            "allowed workspace must be admitted, got {outcome:?}"
+        );
+    }
+
+    /// D-40 revocation through the real listener: a policy that drops the
+    /// workspace of an admitted, still-connected peer ends it at once.
+    #[tokio::test]
+    async fn applied_policy_ends_admitted_peer_of_dropped_workspace() {
+        let policy = WorkspacePolicy::in_memory();
+        let now = crate::workspace_policy::unix_now();
+        policy.apply(&policy_response(3, &[TENANT_A, TENANT_B]), now);
+        let (pki, _ca_a, ca_b, relay) = setup_with_policy(policy.clone()).await;
+
+        let (leaf, key) = ca_b.client_leaf(GOOD_SERIAL);
+        let peer =
+            tokio::spawn(async move { connect(&pki, relay, vec![leaf, ca_b.der()], key).await });
+        // Wait until the listener admitted and registered the peer.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while policy.peer_count() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "peer never admitted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        policy.apply(&policy_response(4, &[TENANT_A]), now);
+        // Well inside the 1 s session timeout that would otherwise close it.
+        let outcome = tokio::time::timeout(Duration::from_millis(900), peer)
+            .await
+            .expect("peer must be ended promptly")
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Rejected("workspace not allowed on this relay".into())
         );
     }
 }

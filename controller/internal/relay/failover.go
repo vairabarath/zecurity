@@ -170,8 +170,9 @@ func (s *Store) reconcilePool(ctx context.Context, poolID string, now time.Time,
 	}
 }
 
-// RunPoolReconcileLoop runs ReconcilePools every interval until ctx ends, and
-// publishes the relay lists when an effective pool changed. It completes a
+// RunPoolReconcileLoop runs ExpireMigrationWindows and ReconcilePools every
+// interval until ctx ends, and publishes the relay lists when an effective
+// pool changed. It completes a
 // hold-down even when nothing else happens (no eviction, no operator action).
 func RunPoolReconcileLoop(ctx context.Context, store *Store, interval, holdDown time.Duration,
 	audit func(ctx context.Context, tx pgx.Tx, t PoolTransition) error, publish func(ctx context.Context) error) {
@@ -182,6 +183,13 @@ func RunPoolReconcileLoop(ctx context.Context, store *Store, interval, holdDown 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// D-40 (PR 3): close ended graceful migration windows; the old
+			// pool's relays then drop the workspace at their next heartbeat.
+			if n, err := store.ExpireMigrationWindows(ctx, time.Now()); err != nil {
+				log.Printf("relay pools: expire migration windows: %v", err)
+			} else if n > 0 {
+				log.Printf("relay pools: closed %d migration window(s)", n)
+			}
 			changed, err := store.ReconcilePools(ctx, time.Now(), holdDown, audit)
 			if err != nil {
 				log.Printf("relay pool failover: reconcile: %v", err)

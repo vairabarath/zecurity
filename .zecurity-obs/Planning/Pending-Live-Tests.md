@@ -20,6 +20,8 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F5 | Relay bandwidth | #193 | ☑ 2026-11-12 |
 | F14 | Daily certificate expiry email | #195 | ☑ 2026-11-12 |
 | F4 / F9 (+ F10 routing) | Relay pools PR 1: tenant pools, per-pool relay lists, per-pool guard (D-37 … D-41) | #200 | ☐ |
+| F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201 | ☐ |
+| F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | PR pending | ☐ |
 
 Add each Must-have item here as it merges.
 
@@ -110,6 +112,34 @@ Setup:
    - relay-ops: can create, rename and delete pools and move relays; cannot set region/residency or assign tenants (console hides it; API 403); sees tenant counts, never names.
    - super-admin: all of it.
 7. **Residency placement check (optional):** make pool A a residency pool (only while unused), assign the tenant, and report a placement on another pool's relay. It is not recorded, the relay path is removed, and one `relay.placement_rejected` audit row appears.
+
+## F11: Relay pools PR 2, failover (#201, migration `058_relay_pool_failover.sql`)
+Run together with PR 1 and PR 3 after all three are merged (one DB reset). Setup as for PR 1, plus a failover pool in the same region with its own relay.
+
+1. **Assign:** tenant 1 gets primary A and failover B (same region). Cross-region or residency mismatches are refused (`failover_region_mismatch` / `failover_needs_residency`).
+2. **Failover:** stop A's only relay.
+   - About 1.5–2.5 minutes later the pool shows **Failed over**, tenant detail shows "Using failover pool B since …", and the connector migrates to B's relay.
+   - Audit `relay_pool.failover` by `system:relay-pool-failover`.
+3. **Hold-down:** start A's relay. The pool shows **Recovering**; the tenant stays on B.
+   - Stop and start the relay again within 5 minutes: the hold-down restarts.
+4. **Failback:** 5 minutes after A is continuously eligible, the tenant returns to A make-before-break. Audit `relay_pool.failback`.
+5. **Restart:** restart the controller while failed over. The tenant stays on B, and the state is kept.
+6. **Guards:** draining A's last relay is refused even with a failover pool; drain or delete of B (used as failover) is refused.
+7. **No fallback:** with no failover pool, or both pools down, the relay path is gone and nothing falls back to `default`.
+
+## F10: Relay pools PR 3, relay-side residency enforcement (migration `059_relay_pool_policy.sql`, relay change)
+Needs the new relay build on every relay of the residency pool.
+
+1. **Enforced:** make pool R a residency pool (region set, before tenants use it) with the new relay build, and assign tenant 1.
+   - Within a heartbeat the relay reports policy support and the current version; pool R reads **Residency (enforced)**; relays show "Enforcing".
+2. **Refusal at the relay:** point a connector of tenant 2 (not assigned to R) at R's relay (manual list or old ranking). The relay refuses it ("workspace not allowed on this relay"); relay log and no placement.
+3. **Immediate revocation:** reassign tenant 1 away from R with `migration: immediate`. Within one heartbeat (≤ 30 s) R's relay ends tenant 1's connector and client sessions.
+4. **Graceful move:** reassign with `migration: graceful`. Traffic keeps flowing on R until the window ends (5 minutes), then the relay drops the tenant within ~1 minute (window close + heartbeat).
+5. **Lease:** block R's relay from the controller (firewall) for longer than `RELAY_POLICY_LEASE` (set it to 2m for the test).
+   - Before expiry the relay keeps serving; at expiry it ends tenant sessions and refuses new ones.
+   - When the path is restored, service returns at the next heartbeat.
+6. **Restart:** restart the relay during an outage; the persisted policy keeps its original lease expiry. Restart with no state file: workspace peers are refused until the first heartbeat.
+7. **Mixed versions:** an old relay build in R makes the pool read **Residency (not enforced)** and the relay "Not supported".
 
 ## Results log
 | Date | ID | Result | Notes |

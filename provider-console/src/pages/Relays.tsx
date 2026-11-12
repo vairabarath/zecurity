@@ -14,7 +14,7 @@ import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
-import { PoolLink, RegionCode } from '@/components/PoolBadges'
+import { PoolLink, RegionCode, RelayPolicyBadge } from '@/components/PoolBadges'
 import { ProvisioningTokenDialog, type IssuedRelay } from '@/components/ProvisioningTokenDialog'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Badge } from '@/components/ui/badge'
@@ -32,7 +32,8 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // (D-31). Hiding the button is UX only; the controller decides.
 // Relay pools (D-37): Pool and Region columns, and a pool filter over the
 // page already loaded (the API has no pool filter, so it narrows this page
-// only and sends nothing).
+// only and sends nothing). Policy (D-40): for relays in residency pools,
+// whether the relay enforces the pool's workspace policy.
 
 const CAN_CREATE = ['super-admin', 'relay-ops'] as const
 
@@ -162,6 +163,7 @@ export function Relays() {
                   <TableHead>Status</TableHead>
                   <TableHead>Pool</TableHead>
                   <TableHead>Region</TableHead>
+                  <TableHead>Policy</TableHead>
                   <TableHead>Version</TableHead>
                   <TableHead>Connections</TableHead>
                   <TableHead>Bandwidth</TableHead>
@@ -200,6 +202,9 @@ export function Relays() {
                     </TableCell>
                     <TableCell>
                       <RegionCode region={r.pool.region} />
+                    </TableCell>
+                    <TableCell>
+                      <RelayPolicyBadge relay={r} />
                     </TableCell>
                     <TableCell className="font-mono text-[13px] text-subtle-foreground">{r.version ?? '—'}</TableCell>
                     <TableCell className="min-w-36">
