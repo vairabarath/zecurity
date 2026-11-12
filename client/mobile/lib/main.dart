@@ -1,6 +1,7 @@
-// Zecurity mobile client: the Android counterpart of `zecurity-client`'s
-// CLI. The daemon runs in the app's VPN service process; this UI talks to it
-// through the client core (native.dart), the way the CLI does on Linux.
+// Zecurity mobile client: the Android and iOS counterpart of
+// `zecurity-client`'s CLI. The daemon runs in the app's VPN service process
+// (iOS: its packet tunnel extension); this UI talks to it through the client
+// core (native.dart), the way the CLI does on Linux.
 
 import 'dart:async';
 
@@ -189,8 +190,10 @@ class _HomePageState extends State<HomePage> {
           if (url != null) await Host.openUrl(url);
           switch (p.str('state')) {
             case 'done':
+              await Host.closeBrowser();
               return 'Signed in.';
             case 'error':
+              await Host.closeBrowser();
               return p.error ?? 'Sign-in failed.';
           }
           await Future<void>.delayed(const Duration(milliseconds: 750));

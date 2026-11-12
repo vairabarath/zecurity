@@ -1,9 +1,10 @@
-// The Rust client core (libzecurity_ffi.so, built from client/ffi) behind
+// The Rust client core (libzecurity_ffi, built from client/ffi) behind
 // dart:ffi. Every native call blocks (network, the daemon's socket), so each
 // one runs on a short-lived isolate, never on the UI isolate.
 
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:io' show Platform;
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
@@ -13,12 +14,16 @@ typedef _OneArgNative = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _FreeNative = Void Function(Pointer<Utf8>);
 typedef _FreeDart = void Function(Pointer<Utf8>);
 
-const _library = 'libzecurity_ffi.so';
+/// Android: the shared library packaged in the APK. iOS: the static library
+/// linked into the app itself (see ios/README.md).
+DynamicLibrary _openCore() => Platform.isIOS
+    ? DynamicLibrary.process()
+    : DynamicLibrary.open('libzecurity_ffi.so');
 
 /// Calls `zc_<name>` with an optional string argument and decodes the JSON
 /// it returns. Runs on whichever isolate calls it.
 Map<String, dynamic> _invoke(String name, String? arg) {
-  final lib = DynamicLibrary.open(_library);
+  final lib = _openCore();
   final free = lib.lookupFunction<_FreeNative, _FreeDart>('zc_free');
   Pointer<Utf8> out;
   if (arg == null) {

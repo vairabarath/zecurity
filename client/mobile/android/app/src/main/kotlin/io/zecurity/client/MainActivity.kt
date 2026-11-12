@@ -58,6 +58,8 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                 }
+                // The login page opens in the browser app on Android; nothing to close.
+                "closeBrowser" -> result.success(true)
                 else -> result.notImplemented()
             }
         }

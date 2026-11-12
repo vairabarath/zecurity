@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds libzecurity_ffi.so (client/ffi: the Rust client core) for the
-# Android app into android/app/src/main/jniLibs/<abi>/.
+# Android app into android/app/src/main/jniLibs/<abi>/, or into
+# JNI_OUT/<abi>/ when set (keeps the build output out of the repo; then pass
+# the same JNI_OUT to build-apk.sh).
 #
 # The client trusts only the platform root CA compiled into it, so, as with
 # client/scripts/dev-build.sh, the build embeds a controller's root:
@@ -34,6 +36,6 @@ profile=()
 [[ "${PROFILE:-release}" == release ]] && profile=(--release)
 
 cd "$client/ffi"
-cargo ndk -t arm64-v8a -t x86_64 --platform 24 \
-  -o "$mobile/android/app/src/main/jniLibs" build "${profile[@]}"
-ls -l "$mobile"/android/app/src/main/jniLibs/*/libzecurity_ffi.so
+out="${JNI_OUT:-$mobile/android/app/src/main/jniLibs}"
+cargo ndk -t arm64-v8a -t x86_64 --platform 24 -o "$out" build "${profile[@]}"
+ls -l "$out"/*/libzecurity_ffi.so

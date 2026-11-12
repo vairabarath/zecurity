@@ -1,5 +1,6 @@
-// The Android side (MainActivity.kt): files directory, the daemon's service,
-// the VPN permission prompt, and opening the login page.
+// The platform side (Android: MainActivity.kt; iOS: AppDelegate.swift): files
+// directory, the daemon's service (iOS: the tunnel extension), the VPN
+// permission prompt, and the login page.
 
 import 'package:flutter/services.dart';
 
@@ -20,4 +21,7 @@ class Host {
 
   static Future<void> openUrl(String url) =>
       _channel.invokeMethod('openUrl', {'url': url});
+
+  /// Closes the in-app login page (iOS); nothing to do on Android.
+  static Future<void> closeBrowser() => _channel.invokeMethod('closeBrowser');
 }
