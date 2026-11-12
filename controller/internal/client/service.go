@@ -545,6 +545,20 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		}
 		return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
 	}
+	// PENDING-09: re-check the session now that the device row exists. A
+	// session ended between the first check and the insert ran its device
+	// revoke before this row existed; every session-end path deletes the
+	// session before revoking, so it is seen as gone here. Refuse like the
+	// lifecycle race above: the signed certificate is never returned.
+	if _, err := s.authSvc.SessionDeadlines(ctx, tokenClaims.UserID, tokenClaims.SessionID); err != nil {
+		if _, derr := s.pool.Exec(ctx, `DELETE FROM client_devices WHERE id = $1`, deviceID); derr != nil {
+			log.Printf("EnrollDevice: remove device of ended session %s: %v", deviceID, derr)
+		}
+		if errors.Is(err, auth.ErrSessionNotFound) {
+			return nil, status.Error(codes.Unauthenticated, "session has ended; sign in again")
+		}
+		return nil, status.Errorf(codes.Internal, "re-check session: %v", err)
+	}
 	s.recordAudit(ctx, audit.Entry{
 		TenantID:    tokenClaims.TenantID,
 		ActorUserID: tokenClaims.UserID,

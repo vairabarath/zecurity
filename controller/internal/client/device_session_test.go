@@ -73,3 +73,39 @@ func TestEnrollDevice_RefusesWithoutLiveSession(t *testing.T) {
 		t.Fatalf("refused enrollments left %d device rows (%v)", n, err)
 	}
 }
+
+// endsMidEnrollAuth reports the session live at the first check and ended
+// at the re-check after the device row is inserted.
+type endsMidEnrollAuth struct {
+	postureTestAuth
+	calls int
+}
+
+func (a *endsMidEnrollAuth) SessionDeadlines(ctx context.Context, u, sid string) (auth.SessionDeadlines, error) {
+	a.calls++
+	if a.calls == 1 {
+		return a.postureTestAuth.SessionDeadlines(ctx, u, sid)
+	}
+	return auth.SessionDeadlines{}, auth.ErrSessionNotFound
+}
+
+// A session that ends while EnrollDevice runs (its device revoke ran before
+// the row existed) is caught by the re-check after the insert: no device is
+// left bound to a dead session, and no certificate is returned.
+func TestEnrollDevice_SessionEndingDuringEnrollmentLeavesNoDevice(t *testing.T) {
+	f := newDeviceHistoryFixture(t)
+	claims := &auth.AccessTokenClaims{UserID: f.userID, TenantID: f.wsID, Email: "history@example.test", Generation: 1}
+	a := &endsMidEnrollAuth{postureTestAuth: postureTestAuth{claims: claims}}
+	f.svc.authSvc = a
+	csrPEM, _ := makeClientCSR(t)
+	resp, err := f.svc.EnrollDevice(f.ctx, &clientv1.EnrollDeviceRequest{
+		AccessToken: "token", CsrPem: csrPEM, DeviceName: "raced", Os: "linux",
+	})
+	if status.Code(err) != codes.Unauthenticated || resp != nil || a.calls != 2 {
+		t.Fatalf("resp=%v err=%v calls=%d, want Unauthenticated after 2 checks", resp, err, a.calls)
+	}
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM client_devices WHERE name = 'raced'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("raced enrollment left %d device rows (%v)", n, err)
+	}
+}

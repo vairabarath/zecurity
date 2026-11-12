@@ -117,3 +117,44 @@ The Context above is out of date: connectors have no 60 s TTL any more, and Opti
 | D-8 | **Out of scope (follow-up).** A re-login leaves the previous device active until its own session ends (D-4 then revokes it). Revoking it at re-login is a separate change. |
 
 **Schema:** `056_client_device_session.sql` `[schema: reset DB]`.
+
+## Build (2026-11-12, local branch `fix/pending09-scim-notify-log`, not pushed)
+
+- **a4528303, C-4:** SCIM's six post-commit `NotifyPolicyChange` calls go through one helper that logs errors. Note: `NotifyPolicyChange` only fails on an empty workspace id. The push is asynchronous and never reports back, so for every caller a failed push is recovered by the 15 s heartbeat compile.
+- **C-1 build** `[schema: reset DB]`: `056_client_device_session.sql`, `internal/devicesession` (manager and 60 s sweep), `auth.SessionObserver` (`Config.Sessions`), `AccessTokenClaims.SessionID`, `auth.Service.SessionDeadlines`; `EnrollDevice` binds the device to its session; client `logout` refreshes an expired token first.
+
+**What ends a device (as built):**
+
+| Event | Devices revoked | Reason in audit |
+|---|---|---|
+| `zecurity-client logout` (`Logout` RPC; checked: only `cmd/logout.rs` calls it, so `down`, daemon shutdown and re-login don't) | the devices of that session | `signed_out` |
+| Refresh refused at the session's max lifetime | the devices of that session | `session_expired` |
+| Refresh with a token whose user is no longer active, or whose generation is stale | **only the token's own session** (see the review fix below) | `sessions_revoked` |
+| `InvalidateUserSessions`, reached only from a generation bump: IdP connection disabled (`setIdpConnectionStatus`) or deleted (`deleteIdpConnection`), and SCIM deprovision (`AfterBump`) | all of the user's devices | `sessions_revoked` |
+| Sweep, every 60 s: `session_idle_until` or `session_max_until` passed | the devices whose deadline passed | `session_idle` / `session_expired` |
+| Console sign-out | none (the browser's sid is on no device) | — |
+
+**Review fixes before the live run:**
+- **Stale-generation refresh** (advisor). The refresh-time lifecycle and generation checks run before the refresh token is compared, and they accept an expired access token. A user-wide revoke there would let a stale console tab (from before an IdP disable/re-enable) revoke the user's newer devices, on every refresh. They now end only the token's own session. Test `TestSessionObserver_StaleGenerationRefreshEndsOnlyItsOwnSession` fails on the user-wide version.
+- **Enrollment race** (automated security review). A session ending between enrollment's session check and its insert would have left a device bound to a dead session, until the 7-day idle sweep. Two fixes:
+  - every session-end path now deletes the session before revoking (sign-out used to revoke first);
+  - `EnrollDevice` re-checks the session after inserting the device and refuses (row deleted, cert never returned) if it is gone.
+  Either the re-check sees the session gone or the revoke sees the row. Test `TestEnrollDevice_SessionEndingDuringEnrollmentLeavesNoDevice`.
+
+**Accepted:** on SCIM deprovision, `AfterBump` → `InvalidateUserSessions` revokes the devices synchronously, before the `device.trust.revoke.requested` outbox handler. The handler then finds 0 rows and skips its single `source: scim` row with the `correlation_id`. Each device still gets a `device.revoked` row (`source: session`, `reason: sessions_revoked`), and the generation bump is audited with actor `scim`.
+
+**Tests:**
+- `devicesession` 6;
+- auth 6 (observer hooks incl. expired-token sign-out, stale-generation regression, `SessionDeadlines`);
+- client enrollment 3;
+- mutation checks: the session-scoping and stale-generation tests fail on the broken code.
+
+Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun_CatchesUpWithinOnePoll`) failed once under full-suite load and passes alone: follow-up, unrelated. Client: 353 pass.
+
+**Live run (pending):** needs the shared DB reset for 056.
+- **Real tunnels:** `logout` cuts the tunnel; a console `/auth/logout` while it is up leaves it working; the sweep cuts within 60 s.
+- **Idle and max expiry:** simulated by moving the deadlines into the past, since the TTLs are not read from env.
+
+**Follow-ups:**
+- revoke the previous device at re-login (D-8);
+- harden the `auditexport` timing test.

@@ -77,12 +77,14 @@ func (s *serviceImpl) EndSession(ctx context.Context, accessToken string) {
 		// Malformed / wrong signature — do not touch Redis.
 		return
 	}
-	// PENDING-09 C-1 (D-3): devices enrolled under this session end with it.
-	// Before the Valkey delete, and whether or not the session still exists,
-	// so a sign-out with an expired token (or after the session idled out)
-	// still revokes the device. A browser session's sid is on no device.
-	s.sessionEnded(ctx, claims.Subject, claims.SessionID, "signed_out")
 	ended, err := s.redisClient.EndRefreshSession(ctx, claims.Subject, claims.SessionID)
+	// PENDING-09 C-1 (D-3): devices enrolled under this session end with it,
+	// whether or not the session still existed (a sign-out with an expired
+	// token, or after the session idled out) and even if the Valkey delete
+	// failed. AFTER the delete: EnrollDevice re-checks the session after
+	// inserting its device, so either that re-check sees the session gone or
+	// this revoke sees the device row. A browser session's sid is on no device.
+	s.sessionEnded(ctx, claims.Subject, claims.SessionID, "signed_out")
 	if err != nil {
 		// Logged server-side only — reporting it would leak liveness.
 		log.Printf("auth logout: delete refresh session user=%s: %v", claims.Subject, err)
