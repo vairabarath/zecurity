@@ -396,10 +396,11 @@ func TestRelayDTOSurface(t *testing.T) {
 		// Relay pools (D-37 … D-41): counts and names only; tenant names only
 		// in tenant_list, which is null unless the caller may read tenants.
 		"RelayPoolRef": {RelayPoolRef{}, []string{"id", "name", "region", "residency"}},
-		"RelayPoolSummary": {RelayPoolSummary{}, []string{"created_at", "eligible_relays", "id", "is_default", "name",
-			"region", "relays", "residency", "tenants"}},
-		"RelayPoolDetail": {RelayPoolDetail{}, []string{"created_at", "eligible_relays", "id", "is_default", "name",
-			"region", "relay_list", "relay_list_truncated", "relays", "residency", "tenant_list", "tenant_list_truncated", "tenants"}},
+		"RelayPoolSummary": {RelayPoolSummary{}, []string{"created_at", "eligible_relays", "eligible_since", "exhausted_at",
+			"failover_tenants", "id", "is_default", "name", "region", "relays", "residency", "state", "tenants"}},
+		"RelayPoolDetail": {RelayPoolDetail{}, []string{"created_at", "eligible_relays", "eligible_since", "exhausted_at",
+			"failover_tenants", "id", "is_default", "name", "region", "relay_list", "relay_list_truncated", "relays", "residency",
+			"state", "tenant_list", "tenant_list_truncated", "tenants"}},
 		"RelayPoolRelay":  {RelayPoolRelay{}, []string{"eligible", "id", "name", "status"}},
 		"RelayPoolTenant": {RelayPoolTenant{}, []string{"id", "name", "slug"}},
 	} {

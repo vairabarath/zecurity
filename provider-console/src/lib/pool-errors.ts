@@ -9,7 +9,7 @@ import { ErrorCode } from '@/api/types'
 
 export interface PoolFailure {
   message: string
-  field?: 'name' | 'region' | 'reason'
+  field?: 'name' | 'region' | 'reason' | 'failover'
   refresh?: boolean
 }
 
@@ -47,11 +47,11 @@ export function poolEditFailure(err: unknown, edit: PoolEdit, poolName = 'This p
       return { field: 'region', message: 'Residency needs a region. Enter a region code or turn residency off.' }
     case ErrorCode.poolInUse:
       return {
-        message: `${poolName} is used by tenants, so its region and residency can’t change. Create a new pool with the region and residency you want and move the tenants to it instead.`,
+        message: `${poolName} is used by tenants (as their primary or failover pool), so its region and residency can’t change. Create a new pool with the region and residency you want and move the tenants to it instead.`,
       }
     case ErrorCode.poolNotEmpty:
       return {
-        message: `${poolName} still has relays or tenants. Move its relays to another pool and its tenants to another pool, then delete it.`,
+        message: `${poolName} still has relays or tenants (including tenants using it as their failover pool). Move its relays to another pool and reassign those tenants, then delete it.`,
       }
     case ErrorCode.defaultPool:
       return { refresh: true, message: 'The default pool can’t be renamed, changed or deleted.' }
@@ -80,7 +80,7 @@ export function moveRelayFailure(err: unknown, relayName: string): PoolFailure {
   switch (err.code) {
     case ErrorCode.lastEligibleRelay:
       return {
-        message: `${relayName} is the last eligible relay of its pool, and tenants use that pool, so it can’t leave it. Add, move or resume another relay in that pool first, or move those tenants to another pool.`,
+        message: `${relayName} is the last eligible relay of its pool, and tenants use that pool (as their primary or failover pool), so it can’t leave it, even when those tenants have a failover pool. Add, move or resume another relay in that pool first, or reassign those tenants.`,
       }
     case ErrorCode.reasonRequired:
       return { field: 'reason', message: 'Enter a reason. It is recorded in the provider audit log.' }
@@ -110,14 +110,20 @@ export function assignPoolFailure(err: unknown, tenantName: string): PoolFailure
   switch (err.code) {
     case ErrorCode.poolHasNoEligibleRelay:
       return {
-        message: 'That pool has no eligible relay, so the tenant’s relay path would stop working. Add or resume a relay in it first, or choose another pool.',
+        message: 'A chosen pool (primary or failover) has no eligible relay, so it couldn’t carry this tenant’s relay traffic. Add or resume a relay in it first, or choose another pool.',
       }
+    case ErrorCode.failoverSameAsPrimary:
+      return { field: 'failover', message: 'The failover pool must be a different pool from the primary.' }
+    case ErrorCode.failoverRegionMismatch:
+      return { field: 'failover', message: 'The failover pool must be in exactly the same region as the primary. Cross-region failover isn’t allowed.' }
+    case ErrorCode.failoverNeedsResidency:
+      return { field: 'failover', message: 'The primary is a residency pool, so the failover pool must be a residency pool in the same region.' }
     case ErrorCode.reasonRequired:
       return { field: 'reason', message: 'Enter a reason. It is recorded in the provider audit log.' }
     case ErrorCode.reasonTooLong:
       return { field: 'reason', message: 'Keep the reason to 500 characters or fewer.' }
     case ErrorCode.poolNotFound:
-      return { message: 'That pool no longer exists. Close this dialog and open it again to pick another.' }
+      return { message: 'A chosen pool (primary or failover) no longer exists. Close this dialog and open it again to pick another.' }
     case ErrorCode.invalidMigration:
       return { message: 'Choose Graceful or Immediate.' }
     case ErrorCode.forbidden:

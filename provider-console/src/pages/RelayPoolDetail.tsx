@@ -5,7 +5,7 @@ import { getRelayPool } from '@/api/reads'
 import type { RelayPoolDetail as RelayPoolDetailDTO } from '@/api/types'
 import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
-import { DefaultPoolBadge, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
+import { DefaultPoolBadge, HOLD_DOWN_NOTE, PoolStateBadge, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
 import { DeletePoolDialog, PlacementDialog, RenamePoolDialog } from '@/components/PoolDialogs'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
 import { StatusBadge } from '@/components/StatusBadge'
@@ -123,6 +123,8 @@ function PoolView({
   const [edit, setEdit] = useState<Edit | null>(null)
   const canManage = !p.is_default && hasRole(role, PROVIDER_ROLES)
   const canPlace = !p.is_default && hasRole(role, ['super-admin'])
+  // As primary or failover pool (D-39): either way, the controller refuses region/residency changes.
+  const inUse = p.tenants + p.failover_tenants > 0
   const done = (n: RelayActionNotice) => {
     setEdit(null)
     onActionDone(n)
@@ -155,9 +157,26 @@ function PoolView({
       {poolStranded(p) && (
         <Alert variant="destructive" role="alert">
           <AlertDescription>
-            Tenants use this pool but it has no eligible relay: their relay paths are down (direct connections still
-            work), and there is no fallback to another pool. Add, move or resume a relay in this pool, or move the
-            tenants to another pool.
+            Tenants use this pool but it has no eligible relay: tenants without a working failover pool have no relay
+            path (direct connections still work), and it can’t take over for tenants using it as their failover pool.
+            Add, move or resume a relay in this pool, or reassign the tenants.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {p.state === 'failed_over' && (
+        <Alert role="status" data-pool-state="failed_over">
+          <AlertDescription>
+            Failed over since {formatDateTime(p.exhausted_at)}: tenants of this pool that have a failover pool are using
+            it. They switch back once this pool has had an eligible relay for the hold-down ({HOLD_DOWN_NOTE}).
+          </AlertDescription>
+        </Alert>
+      )}
+      {p.state === 'recovering' && (
+        <Alert role="status" data-pool-state="recovering">
+          <AlertDescription>
+            Recovering: eligible again since {formatDateTime(p.eligible_since)}. Tenants still on their failover pool
+            switch back once it has stayed eligible for the hold-down ({HOLD_DOWN_NOTE}).
           </AlertDescription>
         </Alert>
       )}
@@ -177,8 +196,16 @@ function PoolView({
           <Fact label="Eligible relays">
             <span className="font-mono">{p.eligible_relays}</span>
           </Fact>
+          <Fact label="State">
+            <PoolStateBadge pool={p} />
+          </Fact>
           <Fact label="Tenants">
             <span className="font-mono">{p.tenants}</span>
+          </Fact>
+          <Fact label="Failover for">
+            <span className="font-mono">
+              {p.failover_tenants} tenant{p.failover_tenants === 1 ? '' : 's'}
+            </span>
           </Fact>
           <Fact label="Pool ID">
             <span className="break-all font-mono text-subtle-foreground">{p.id}</span>
@@ -223,6 +250,7 @@ function PoolView({
       </Card>
 
       <Card>
+        {/* The API lists the tenants whose primary pool this is; failover tenants are a count only. */}
         <h2 className="px-5 py-4 font-semibold">Tenants</h2>
         {p.tenant_list === null ? (
           <p className="px-5 pb-5 text-sm text-muted-foreground">
@@ -230,7 +258,7 @@ function PoolView({
             shown to super-admins only.
           </p>
         ) : p.tenant_list.length === 0 ? (
-          <p className="px-5 pb-5 text-sm text-muted-foreground">No tenants use this pool.</p>
+          <p className="px-5 pb-5 text-sm text-muted-foreground">No tenants use this pool as their primary pool.</p>
         ) : (
           <Table aria-label="Pool tenants">
             <TableHeader>
@@ -276,11 +304,11 @@ function PoolView({
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="max-w-xl text-sm text-subtle-foreground">
                     <span className="font-medium text-foreground">Region and residency.</span>{' '}
-                    {p.tenants > 0
-                      ? 'Tenants use this pool, so these can’t change. Create a new pool with the region and residency you want and move the tenants to it instead.'
+                    {inUse
+                      ? 'Tenants use this pool (as their primary or failover pool), so these can’t change. Create a new pool with the region and residency you want and move the tenants to it instead.'
                       : 'Can change only while no tenant uses the pool.'}
                   </p>
-                  <Button variant="outline" disabled={p.tenants > 0} onClick={() => setEdit('placement')}>
+                  <Button variant="outline" disabled={inUse} onClick={() => setEdit('placement')}>
                     Edit region and residency
                   </Button>
                 </div>

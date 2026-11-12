@@ -26,6 +26,14 @@ type RelayPoolSummary struct {
 	EligibleRelays int64     `json:"eligible_relays"`
 	Tenants        int64     `json:"tenants"`
 	CreatedAt      time.Time `json:"created_at"`
+	// Failover (D-39). FailoverTenants: workspaces using this pool as their
+	// failover pool. State: healthy | failed_over | recovering (its tenants
+	// with a failover pool use that pool unless healthy). ExhaustedAt and
+	// EligibleSince are the stored state behind it.
+	FailoverTenants int64      `json:"failover_tenants"`
+	State           string     `json:"state"`
+	ExhaustedAt     *time.Time `json:"exhausted_at"`
+	EligibleSince   *time.Time `json:"eligible_since"`
 }
 
 // RelayPoolRelay is one relay in pool detail.
@@ -57,16 +65,20 @@ const relayPoolSummarySelect = `
 SELECT p.id::text, p.name, p.region, p.residency, p.created_at,
        (SELECT count(*) FROM relays WHERE pool_id = p.id AND status <> 'deleted'),
        (SELECT count(*) FROM relays WHERE pool_id = p.id AND ` + eligible.Where + `),
-       (SELECT count(*) FROM workspaces WHERE relay_pool_id = p.id)
+       (SELECT count(*) FROM workspaces WHERE relay_pool_id = p.id),
+       (SELECT count(*) FROM workspaces WHERE relay_failover_pool_id = p.id),
+       p.exhausted_at, p.eligible_since
   FROM relay_pools p`
 
 func scanRelayPoolSummary(row pgx.Row) (RelayPoolSummary, error) {
 	var s RelayPoolSummary
 	if err := row.Scan(&s.ID, &s.Name, &s.Region, &s.Residency, &s.CreatedAt,
-		&s.Relays, &s.EligibleRelays, &s.Tenants); err != nil {
+		&s.Relays, &s.EligibleRelays, &s.Tenants, &s.FailoverTenants, &s.ExhaustedAt, &s.EligibleSince); err != nil {
 		return RelayPoolSummary{}, err
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
+	s.ExhaustedAt, s.EligibleSince = utcPtr(s.ExhaustedAt), utcPtr(s.EligibleSince)
+	s.State = relaypool.State(s.ExhaustedAt, s.EligibleSince)
 	s.IsDefault = s.ID == relaypool.DefaultPoolID
 	return s, nil
 }
@@ -136,12 +148,24 @@ SELECT id::text, slug, name
 	return d, nil
 }
 
-// TenantRelayPool is the relay pool section of tenant detail (D-38, D-40).
-// Previous is set while a graceful migration keeps the old pool authorized.
+// TenantRelayPool is the relay pool section of tenant detail (D-38, D-39,
+// D-40). Previous is set while a graceful migration keeps the old pool
+// authorized. Failover is the failover pool, if any; UsingFailover reports
+// that the primary is exhausted, so connectors get the failover pool's relays
+// since FailedOverSince.
 type TenantRelayPool struct {
 	RelayPoolRef
-	EligibleRelays int64                    `json:"eligible_relays"`
-	Previous       *TenantRelayPoolPrevious `json:"previous"`
+	EligibleRelays  int64                    `json:"eligible_relays"`
+	Previous        *TenantRelayPoolPrevious `json:"previous"`
+	Failover        *TenantFailoverPool      `json:"failover"`
+	UsingFailover   bool                     `json:"using_failover"`
+	FailedOverSince *time.Time               `json:"failed_over_since"`
+}
+
+// TenantFailoverPool is a tenant's failover pool.
+type TenantFailoverPool struct {
+	RelayPoolRef
+	EligibleRelays int64 `json:"eligible_relays"`
 }
 
 // TenantRelayPoolPrevious is the pool a tenant is migrating away from.
@@ -156,17 +180,38 @@ func tenantRelayPool(ctx context.Context, q Querier, workspaceID string) (Tenant
 	var prevID, prevName, prevRegion *string
 	var prevResidency *bool
 	var prevUntil *time.Time
+	var foID, foName, foRegion *string
+	var foResidency *bool
+	var foEligible *int64
+	var exhaustedAt *time.Time
 	err := q.QueryRow(ctx, `
 SELECT p.id::text, p.name, p.region, p.residency,
        (SELECT count(*) FROM relays WHERE pool_id = p.id AND `+eligible.Where+`),
-       pp.id::text, pp.name, pp.region, pp.residency, w.relay_pool_previous_until
+       pp.id::text, pp.name, pp.region, pp.residency, w.relay_pool_previous_until,
+       fo.id::text, fo.name, fo.region, fo.residency,
+       CASE WHEN fo.id IS NULL THEN NULL
+            ELSE (SELECT count(*) FROM relays WHERE pool_id = fo.id AND `+eligible.Where+`) END,
+       p.exhausted_at
   FROM workspaces w
   JOIN relay_pools p ON p.id = w.relay_pool_id
   LEFT JOIN relay_pools pp ON pp.id = w.relay_pool_previous_id AND w.relay_pool_previous_until > NOW()
+  LEFT JOIN relay_pools fo ON fo.id = w.relay_failover_pool_id
  WHERE w.id = $1`, workspaceID).Scan(&t.ID, &t.Name, &t.Region, &t.Residency, &t.EligibleRelays,
-		&prevID, &prevName, &prevRegion, &prevResidency, &prevUntil)
+		&prevID, &prevName, &prevRegion, &prevResidency, &prevUntil,
+		&foID, &foName, &foRegion, &foResidency, &foEligible, &exhaustedAt)
 	if err != nil {
 		return TenantRelayPool{}, fmt.Errorf("tenant relay pool: %w", err)
+	}
+	if foID != nil {
+		t.Failover = &TenantFailoverPool{
+			RelayPoolRef:   RelayPoolRef{ID: *foID, Name: *foName, Region: foRegion, Residency: *foResidency},
+			EligibleRelays: *foEligible,
+		}
+		// The same rule as relaypool.EffectivePool.
+		if exhaustedAt != nil {
+			t.UsingFailover = true
+			t.FailedOverSince = utcPtr(exhaustedAt)
+		}
 	}
 	if prevID != nil && prevUntil != nil {
 		t.Previous = &TenantRelayPoolPrevious{

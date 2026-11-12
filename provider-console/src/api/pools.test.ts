@@ -10,6 +10,7 @@ import { createRelay } from './relays'
 const POOL = 'eeeeeeee-0000-0000-0000-0000000000e1'
 const RELAY = '11111111-1111-1111-1111-111111111111'
 const TENANT = 'aaaaaaaa-1111-2222-3333-444444444444'
+const FAILOVER = 'eeeeeeee-0000-0000-0000-0000000000e3'
 
 describe('relay-pool writes', () => {
   it('create without placement sends the name only (what relay-ops may send)', async () => {
@@ -49,9 +50,13 @@ describe('relay-pool writes', () => {
       [`PUT /provider/tenants/${TENANT}/relay-pool`]: { status: 204 },
     })
     await moveRelayToPool(RELAY, POOL, 'rebalance')
-    await assignTenantRelayPool(TENANT, POOL, 'EU customer', 'immediate')
+    await assignTenantRelayPool(TENANT, POOL, null, 'EU customer', 'immediate')
+    await assignTenantRelayPool(TENANT, POOL, FAILOVER, 'add failover', 'graceful')
     expect(calls[0]).toMatchObject({ method: 'POST', body: { pool_id: POOL, reason: 'rebalance' }, search: '' })
-    expect(calls[1]).toMatchObject({ method: 'PUT', body: { pool_id: POOL, reason: 'EU customer', migration: 'immediate' }, search: '' })
+    // D-39: the body is the whole assignment, so failover_pool_id is always present (null removes it).
+    expect(calls[1]).toMatchObject({ method: 'PUT', search: '' })
+    expect(calls[1].body).toEqual({ pool_id: POOL, failover_pool_id: null, reason: 'EU customer', migration: 'immediate' })
+    expect(calls[2].body).toEqual({ pool_id: POOL, failover_pool_id: FAILOVER, reason: 'add failover', migration: 'graceful' })
   })
 
   it('Add relay sends pool_id only when one is chosen', async () => {

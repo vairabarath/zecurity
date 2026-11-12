@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronRight, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { getCertificates, getHealth, listRelays, queryAudit } from '@/api/reads'
-import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelaySummary } from '@/api/types'
+import { getCertificates, getHealth, listRelayPools, listRelays, queryAudit } from '@/api/reads'
+import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelayPoolSummary, RelaySummary } from '@/api/types'
 import { hasRole } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ControlPlaneHealth } from '@/components/ControlPlaneHealth'
@@ -23,6 +23,8 @@ import { cn } from '@/lib/utils'
 // APIs, each requested once per visit (useDetailQuery: StrictMode-safe, no
 // polling, no focus refetch) and again only on Refresh:
 //   - GET /provider/relays, every page (relay.read: both roles);
+//   - GET /provider/relay-pools (relay.read: both roles; counts only), for
+//     pools the controller has failed over (D-39);
 //   - super-admin only: GET /provider/certificates?within=168h (summary and
 //     the soonest expiries), GET /provider/audit?limit=6 and GET
 //     /provider/health (control-plane health, quick-win F25).
@@ -54,6 +56,7 @@ async function fetchFleet(): Promise<Fleet> {
 const fetchSoonCertificates = () => getCertificates({ within: '168h', limit: 6 })
 const fetchRecentAudit = () => queryAudit({ limit: 6 })
 const fetchHealth = () => getHealth()
+const fetchPools = () => listRelayPools()
 const skip = () => Promise.resolve(null)
 
 function greeting(hour: number): string {
@@ -75,6 +78,7 @@ export function Home() {
   const isSuperAdmin = hasRole(me?.role, ['super-admin'])
 
   const fleet = useDetailQuery(`relays|${round}`, fetchFleet)
+  const pools = useDetailQuery(`pools|${round}`, fetchPools)
   const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchSoonCertificates : skip)
   const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
   const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
@@ -106,7 +110,7 @@ export function Home() {
               Needs attention
             </h2>
           </div>
-          <Attention fleet={fleet.state} certs={isSuperAdmin ? certs.state : undefined} onRetry={refresh} />
+          <Attention fleet={fleet.state} pools={pools.state} certs={isSuperAdmin ? certs.state : undefined} onRetry={refresh} />
         </Card>
 
         <div className="flex min-w-0 flex-[2_1_360px] flex-col gap-4">
@@ -335,6 +339,19 @@ function relayItems(relays: RelaySummary[]): AttentionItem[] {
   return items
 }
 
+/** Pools the controller reports as failed over (D-39); the state is never derived here. */
+function poolItems(pools: RelayPoolSummary[]): AttentionItem[] {
+  return pools
+    .filter((p) => p.state === 'failed_over')
+    .map((p) => ({
+      key: `pool:${p.id}`,
+      to: `/relay-pools/${encodeURIComponent(p.id)}`,
+      tag: <Badge variant="destructive">Failed over</Badge>,
+      title: `Relay pool ${p.name} has failed over`,
+      note: `No eligible relay since ${formatRelative(p.exhausted_at)}; its tenants with a failover pool are using it`,
+    }))
+}
+
 function certificateItems(entries: CertificateEntry[]): AttentionItem[] {
   // Relay certificates are already covered by the relay items above.
   return entries
@@ -350,14 +367,16 @@ function certificateItems(entries: CertificateEntry[]): AttentionItem[] {
 
 function Attention({
   fleet,
+  pools,
   certs,
   onRetry,
 }: {
   fleet: DetailState<Fleet>
+  pools: DetailState<{ items: RelayPoolSummary[] }>
   certs?: DetailState<CertificateExpiryResult | null>
   onRetry: () => void
 }) {
-  if (fleet.status === 'loading' || certs?.status === 'loading') {
+  if (fleet.status === 'loading' || pools.status === 'loading' || certs?.status === 'loading') {
     return (
       <div aria-busy="true" aria-label="Loading attention items" className="flex flex-col gap-2 p-5">
         <Skeleton className="h-8 w-full" />
@@ -366,10 +385,11 @@ function Attention({
     )
   }
   const items = [
+    ...(pools.status === 'ready' ? poolItems(pools.data.items) : []),
     ...(certs?.status === 'ready' && certs.data ? certificateItems(certs.data.items) : []),
     ...(fleet.status === 'ready' ? relayItems(fleet.data.relays) : []),
   ]
-  const failed = fleet.status !== 'ready' || (certs !== undefined && certs.status !== 'ready')
+  const failed = fleet.status !== 'ready' || pools.status !== 'ready' || (certs !== undefined && certs.status !== 'ready')
 
   return (
     <div>

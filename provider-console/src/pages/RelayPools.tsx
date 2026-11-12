@@ -6,7 +6,7 @@ import type { RelayPoolSummary } from '@/api/types'
 import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { PageHeader } from '@/components/PageHeader'
-import { DefaultPoolBadge, PoolLink, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
+import { DefaultPoolBadge, PoolLink, PoolStateBadge, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
 import { CreatePoolDialog } from '@/components/PoolDialogs'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -20,7 +20,8 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 
 // Relay pools (D-37 … D-41; relay.read: super-admin and relay-ops). One
 // request when the page opens; Refresh and Retry are the only other reads.
-// The list is counts only (never tenant names). The one write here is
+// The list is counts only (never tenant names). The failover state (D-39) is
+// the controller's; the console only shows it. The one write here is
 // Create pool (both roles; region and residency fields for super-admin
 // only). Rename, region/residency and delete live on the pool's page.
 
@@ -122,9 +123,11 @@ function PoolTable({ pools }: { pools: RelayPoolSummary[] }) {
       {stranded.length > 0 && (
         <Alert variant="destructive" role="alert">
           <AlertDescription>
-            {stranded.map((p) => p.name).join(', ')} {stranded.length === 1 ? 'has' : 'have'} tenants but no eligible
-            relay: those tenants’ relay paths are down (direct connections still work). Add, move or resume a relay in{' '}
-            {stranded.length === 1 ? 'that pool' : 'those pools'}, or move the tenants to another pool.
+            {stranded.map((p) => p.name).join(', ')} {stranded.length === 1 ? 'is' : 'are'} used by tenants but{' '}
+            {stranded.length === 1 ? 'has' : 'have'} no eligible relay: tenants without a working failover pool have no
+            relay path (direct connections still work), and {stranded.length === 1 ? 'it' : 'they'} can’t take over as a
+            failover pool. Add, move or resume a relay in {stranded.length === 1 ? 'that pool' : 'those pools'}, or
+            reassign the tenants.
           </AlertDescription>
         </Alert>
       )}
@@ -135,9 +138,11 @@ function PoolTable({ pools }: { pools: RelayPoolSummary[] }) {
               <TableHead>Pool</TableHead>
               <TableHead>Region</TableHead>
               <TableHead>Residency</TableHead>
+              <TableHead>State</TableHead>
               <TableHead className="text-right">Relays</TableHead>
               <TableHead className="text-right">Eligible relays</TableHead>
               <TableHead className="text-right">Tenants</TableHead>
+              <TableHead className="text-right">Failover for</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -155,11 +160,14 @@ function PoolTable({ pools }: { pools: RelayPoolSummary[] }) {
                 <TableCell>
                   <ResidencyBadge residency={p.residency} />
                 </TableCell>
+                <TableCell>
+                  <PoolStateBadge pool={p} withTime />
+                </TableCell>
                 <TableCell className="text-right font-mono text-[13px] tabular-nums">{p.relays}</TableCell>
                 <TableCell className="text-right font-mono text-[13px] tabular-nums">
                   <span className="inline-flex items-center justify-end gap-2">
                     {poolStranded(p) && (
-                      <Badge variant="destructive" title="Tenants use this pool but it has no eligible relay">
+                      <Badge variant="destructive" title="Tenants use this pool (as primary or failover) but it has no eligible relay">
                         <AlertTriangle className="size-3" aria-hidden />
                         No eligible relay
                       </Badge>
@@ -168,6 +176,9 @@ function PoolTable({ pools }: { pools: RelayPoolSummary[] }) {
                   </span>
                 </TableCell>
                 <TableCell className="text-right font-mono text-[13px] tabular-nums">{p.tenants}</TableCell>
+                <TableCell className="text-right font-mono text-[13px] tabular-nums" aria-label={`Failover for ${p.failover_tenants} tenants`}>
+                  {p.failover_tenants}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

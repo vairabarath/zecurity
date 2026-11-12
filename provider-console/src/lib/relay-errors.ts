@@ -71,7 +71,7 @@ export function drainActionFailure(err: unknown, action: DrainAction, relayName:
   switch (err.code) {
     case ErrorCode.lastEligibleRelay:
       return {
-        message: `${relayName} is the last eligible relay in its pool, and tenants use that pool, so it can’t be drained. Add, move or resume another relay in the pool first, or move those tenants to another pool.`,
+        message: `${relayName} is the last eligible relay in its pool, and tenants use that pool (as their primary or failover pool), so it can’t be drained, even when those tenants have a failover pool. Add, move or resume another relay in the pool first, or reassign those tenants.`,
       }
     case ErrorCode.reasonTooLong:
       return { field: 'reason', message: 'Keep the reason to 500 characters or fewer.' }

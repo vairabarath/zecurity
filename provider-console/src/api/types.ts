@@ -105,6 +105,10 @@ export const ErrorCode = {
   poolNotFound: 'pool_not_found',
   poolHasNoEligibleRelay: 'pool_has_no_eligible_relay',
   invalidMigration: 'invalid_migration',
+  // failover pool (D-39)
+  failoverSameAsPrimary: 'failover_same_as_primary',
+  failoverRegionMismatch: 'failover_region_mismatch',
+  failoverNeedsResidency: 'failover_needs_residency',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -281,8 +285,19 @@ export interface RelayPoolSummary extends RelayPoolRef {
   eligible_relays: number
   /** Workspaces whose pool this is. */
   tenants: number
+  /** Workspaces using this pool as their failover pool (D-39). */
+  failover_tenants: number
+  /** Failover state (D-39); tracked only for pools some tenant uses as primary with a failover pool. */
+  state: RelayPoolState
+  /** failed_over: since when the pool has had no eligible relay. */
+  exhausted_at: string | null
+  /** recovering: since when it has had an eligible relay again (switch-back after the hold-down). */
+  eligible_since: string | null
   created_at: string
 }
+
+export const RELAY_POOL_STATES = ['healthy', 'failed_over', 'recovering'] as const
+export type RelayPoolState = (typeof RELAY_POOL_STATES)[number]
 
 export interface RelayPoolRelay {
   id: string
@@ -319,6 +334,11 @@ export interface TenantRelayPool extends RelayPoolRef {
   eligible_relays: number
   /** Set while a graceful migration keeps the old pool authorized, until `until`. */
   previous: (RelayPoolRef & { until: string }) | null
+  /** The failover pool (D-39), or null when the tenant has none. */
+  failover: (RelayPoolRef & { eligible_relays: number }) | null
+  /** The controller has switched the tenant to its failover pool (the primary has no eligible relay). */
+  using_failover: boolean
+  failed_over_since: string | null
 }
 
 export const TENANT_STATUSES = ['provisioning', 'active', 'suspended', 'deleted'] as const

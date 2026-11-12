@@ -350,3 +350,43 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
   - authz matrix;
   - `provider/pools_read_test.go`.
   - Mutation check: disabling the drain guard, the placement check, the assignment eligibility check, or the window expiry each makes a test fail.
+
+## PR 2 implementation record (branch `feat/relay-pools-pr2`, on top of PR 1)
+
+- **Schema** `058_relay_pool_failover.sql`:
+  - `workspaces.relay_failover_pool_id`, with a CHECK that it differs from the primary;
+  - `relay_pools.exhausted_at` and `eligible_since`, with a CHECK that `eligible_since` needs `exhausted_at`.
+- **Effective pool** (`relaypool.EffectivePool`): the failover pool while the primary is exhausted and a failover is set, otherwise the primary (an exhausted primary without failover stays, so its list is empty). Both list builders use it, so the broadcast and connect-time lists stay identical.
+- **Authorized pools** gain the failover pool (always, not only while failed over). Failover and failback never fall outside residency checks; same region by rule.
+- **Reconciler** `relay.ReconcilePools(now, holdDown, audit)` checks each pool in its own transaction under the pool row lock:
+  - exhaustion → failover at once (audited);
+  - eligible again → `eligible_since` set;
+  - a dip restarts the hold-down;
+  - failback after `RELAY_POOL_FAILBACK_HOLDDOWN` (default 5m, minimum 1m), audited.
+  - State is kept only for pools that some workspace uses as primary **with** a failover pool. Otherwise it's cleared, so a new or unused pool is never "recovering" (a tenant assigned to a fresh pool would otherwise run on failover for 5 minutes).
+  - **Runs:** before every relay-list publish, and every 30 s in `relay-pool-failover-loop`, which publishes only when an effective pool changed.
+  - **Audit:** `relay_pool.failover` and `relay_pool.failback`, actor `system:relay-pool-failover`, details pool name, tenant count, `exhausted_since`.
+- **Assignment** (`PUT /provider/tenants/{id}/relay-pool`): `failover_pool_id` is optional, and the body is the whole assignment (omitting it removes the failover).
+  - Rules (400): `failover_same_as_primary`, `failover_region_mismatch`, `failover_needs_residency`.
+  - Both pools must have an eligible relay; both pool rows are locked in id order.
+  - The migration window applies only when the primary changes.
+- **Guards:** being a failover pool counts as "in use" (drain/move of its last relay, delete, region/residency change). Draining a primary's last relay stays refused even with a failover pool.
+- **Reads:**
+  - pools gain `state` (healthy | failed_over | recovering), `exhausted_at`, `eligible_since` and `failover_tenants`;
+  - tenant detail gains `failover`, `using_failover` and `failed_over_since`;
+  - the state function lives in `relaypool` (stdlib only, so providerquery stays free of `net/http`).
+- **Tests:**
+  - `relay/failover_db_test.go`:
+    - the state machine with a fixed clock (failover, idempotent repeats, recovery, the hold-down restarting on a dip, survival across a restart, failback, audit order);
+    - no fallback without a failover pool, or when both pools are exhausted;
+    - assignment rules, including the DB CHECK;
+    - the guard counting failover use;
+    - placement including the failover pool.
+  - `provider/pools_read_test.go`: failover state reads.
+  - **Mutation check:** removing the hold-down, not restarting it on a dip, allowing cross-region, or ignoring failover use in the guard each fails a test.
+- **Fix found while building the console:** assignment checks for an eligible relay only in **newly** assigned pools. Before the fix, a failover pool couldn't be added to a tenant whose primary was already down, which is exactly when it's needed. Test: `TestFailoverDB_AddFailoverWhilePrimaryIsDown`.
+- **Console:**
+  - failover pool in tenant detail and in the Change pool dialog, which always sends `failover_pool_id` (`null` = none); options that break a rule are disabled with the reason;
+  - pool state badges and failover-tenant counts;
+  - failed-over pools listed in the Overview "Needs attention";
+  - 598 tests pass, lint and build pass.

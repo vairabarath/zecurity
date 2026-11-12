@@ -42,12 +42,20 @@ export function moveRelayToPool(relayId: string, poolId: string, reason: string)
 }
 
 /**
- * A tenant's relay pool (super-admin only). `graceful` keeps the old pool
- * authorized for the migration window so connectors move make-before-break;
- * `immediate` drops it at once.
+ * A tenant's relay pools (super-admin only). The body is the whole
+ * assignment (D-39): `failoverPoolId` null removes the failover pool, so it
+ * is always sent. `graceful` keeps the old primary authorized for the
+ * migration window so connectors move make-before-break; `immediate` drops it
+ * at once (it matters only when the primary changes).
  */
-export function assignTenantRelayPool(tenantId: string, poolId: string, reason: string, migration: PoolMigration): Promise<void> {
+export function assignTenantRelayPool(
+  tenantId: string,
+  poolId: string,
+  failoverPoolId: string | null,
+  reason: string,
+  migration: PoolMigration,
+): Promise<void> {
   return request<void>('PUT', `/provider/tenants/${encodeURIComponent(tenantId)}/relay-pool`, {
-    body: { pool_id: poolId, reason, migration },
+    body: { pool_id: poolId, failover_pool_id: failoverPoolId ?? null, reason, migration },
   })
 }

@@ -1,5 +1,5 @@
 import { MAX_DANGER_REASON } from '@/components/ConfirmDangerDialog'
-import type { RelayPoolSummary } from '@/api/types'
+import type { RelayPoolRef, RelayPoolSummary } from '@/api/types'
 
 /** "eu-1 · eu-central-1 · 2 eligible relays": what a picker needs to choose a pool. */
 export function poolOptionLabel(p: RelayPoolSummary): string {
@@ -21,7 +21,28 @@ export function reasonValid(s: string): boolean {
   return n > 0 && n <= MAX_DANGER_REASON
 }
 
-/** Tenants use the pool but none of its relays is eligible: their relay path is down (D-38 fails closed). */
-export function poolStranded(p: Pick<RelayPoolSummary, 'tenants' | 'eligible_relays'>): boolean {
-  return p.tenants > 0 && p.eligible_relays === 0
+/**
+ * Tenants use the pool (as primary or failover) but none of its relays is
+ * eligible: primary tenants without a working failover have no relay path
+ * (D-38 fails closed), and failover tenants have nothing to fail over to.
+ */
+export function poolStranded(p: Pick<RelayPoolSummary, 'tenants' | 'failover_tenants' | 'eligible_relays'>): boolean {
+  return p.tenants + p.failover_tenants > 0 && p.eligible_relays === 0
+}
+
+/**
+ * Why `failover` can't be the failover pool of `primary` (D-39), or null when
+ * it can: a different pool, exactly the same region (two pools without a
+ * region match), a residency primary needs a residency failover, and at
+ * least one eligible relay. Mirrors the controller, which checks again.
+ */
+export function failoverProblem(
+  primary: Pick<RelayPoolRef, 'id' | 'region' | 'residency'>,
+  failover: Pick<RelayPoolSummary, 'id' | 'region' | 'residency' | 'eligible_relays'>,
+): string | null {
+  if (primary.id === failover.id) return 'the primary pool'
+  if ((primary.region ?? null) !== (failover.region ?? null)) return 'another region'
+  if (primary.residency && !failover.residency) return 'not a residency pool'
+  if (failover.eligible_relays === 0) return 'no eligible relay'
+  return null
 }
