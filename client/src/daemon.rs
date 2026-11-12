@@ -171,7 +171,7 @@ pub async fn run() -> Result<()> {
     #[cfg(unix)]
     let listener = bind_ipc_listener()?;
     #[cfg(windows)]
-    let mut pipe = crate::ipc::create_pipe_server(true, &conf.ipc_user_sid)
+    let mut pipe = crate::ipc::create_pipe_server(true)
         .context("create the IPC named pipe")?;
     #[cfg(windows)]
     info!(pipe = %crate::ipc::ipc_pipe_name(), "IPC named pipe ready");
@@ -220,7 +220,7 @@ pub async fn run() -> Result<()> {
             error!(error = %e, "IPC accept error");
             continue;
         }
-        let next = match crate::ipc::create_pipe_server(false, &conf.ipc_user_sid) {
+        let next = match crate::ipc::create_pipe_server(false) {
             Ok(next) => next,
             Err(e) => {
                 error!(error = %e, "create the next IPC pipe instance");

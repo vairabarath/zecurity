@@ -188,6 +188,7 @@ mod tests {
     use crate::runtime::AppliedEntry;
     use std::cell::RefCell;
 
+    #[cfg_attr(windows, allow(dead_code))]
     struct Rec {
         calls: RefCell<Vec<String>>,
         fail_on: Option<&'static str>,
@@ -268,6 +269,8 @@ mod tests {
 
     // One test drives the process-wide state in sequence, so parallel tests
     // can't interleave on it.
+    // The systemd-resolved path; Windows reports names as unsupported.
+    #[cfg(not(windows))]
     #[test]
     fn sync_tracks_names_and_reports_failures() {
         let ok = Rec {

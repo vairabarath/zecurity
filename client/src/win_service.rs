@@ -35,13 +35,21 @@ static RUNNING_AS_SERVICE: AtomicBool = AtomicBool::new(false);
 
 define_windows_service!(ffi_service_main, service_main);
 
-/// Entry point for `zecurity-client daemon` on Windows.
-pub fn run() -> Result<()> {
+/// Entry point for `zecurity-client daemon` on Windows. `ipc_user_sid` is
+/// the enrolling user's SID from the (admin-only) service command line.
+pub fn run(ipc_user_sid: Option<String>) -> Result<()> {
+    if let Some(sid) = ipc_user_sid.as_deref() {
+        if !crate::win_security::is_valid_sid(sid) {
+            anyhow::bail!("--ipc-user-sid {sid:?} is not a valid SID");
+        }
+    }
+    crate::ipc::set_pipe_user_sid(ipc_user_sid);
     match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
         Ok(()) => Ok(()),
         Err(windows_service::Error::Winapi(e))
             if e.raw_os_error() == Some(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) =>
         {
+            secure_data_dir()?;
             runtime()?.block_on(crate::daemon::run())
         }
         Err(e) => Err(e).context("start the Windows service dispatcher"),
@@ -74,6 +82,19 @@ pub fn report_stopped(code: i32) {
         };
         let _ = handle.set_service_status(status(ServiceState::Stopped, exit_code));
     }
+}
+
+/// Locks down `%ProgramData%\Zecurity` before the daemon reads anything
+/// from it (see win_security). A failure stops the daemon: it must not use
+/// a directory someone else controls.
+fn secure_data_dir() -> Result<()> {
+    if crate::ipc::pipe_user_sid().is_none() {
+        eprintln!(
+            "zecurity-client: no --ipc-user-sid; only SYSTEM and Administrators can use the daemon"
+        );
+    }
+    crate::win_security::secure_data_dir(crate::ipc::pipe_user_sid())
+        .context("secure %ProgramData%\\Zecurity")
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -123,6 +144,12 @@ fn run_service() -> Result<()> {
     handle
         .set_service_status(status(ServiceState::Running, ServiceExitCode::Win32(0)))
         .context("report the service as running")?;
+
+    // Before the daemon reads config or state. Exit code 2 in `sc query`.
+    if let Err(e) = secure_data_dir() {
+        report_stopped(2);
+        return Err(e);
+    }
 
     // daemon::run only returns on a startup error; deliberate exits go
     // through crate::exit_daemon, which reports Stopped first.

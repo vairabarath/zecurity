@@ -31,6 +31,8 @@ mod tun_shared;
 #[allow(dead_code)]
 mod tun_windows_tests;
 mod tunnel_pool;
+#[cfg(any(windows, test))]
+mod win_security;
 #[cfg(windows)]
 mod win_service;
 #[cfg(target_os = "linux")]
@@ -103,7 +105,13 @@ enum Commands {
     /// Run as background daemon (launched by systemd, or the Windows Service
     /// Control Manager — not for direct use)
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Windows: SID of the enrolling user, the one non-admin account the
+        /// IPC pipe and data directory admit. Set in the service command line
+        /// by client-install.ps1 (admin-only); ignored on Linux.
+        #[arg(long)]
+        ipc_user_sid: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -116,8 +124,8 @@ fn main() -> anyhow::Result<()> {
     // On Windows the daemon is a service: the Service Control Manager's
     // dispatcher must own this thread, and it starts its own runtime.
     #[cfg(windows)]
-    if matches!(cli.command, Commands::Daemon) {
-        return win_service::run();
+    if let Commands::Daemon { ipc_user_sid } = cli.command {
+        return win_service::run(ipc_user_sid);
     }
 
     // What #[tokio::main] expanded to before the Windows port.
@@ -143,7 +151,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
         Commands::Logout => cmd::logout::run().await,
         Commands::Up => cmd::up::run().await,
         Commands::Down => cmd::down::run().await,
-        Commands::Daemon => daemon::run().await,
+        Commands::Daemon { .. } => daemon::run().await,
     }
 }
 

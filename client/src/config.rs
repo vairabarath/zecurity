@@ -14,11 +14,6 @@ pub struct ClientConf {
     /// Only set in dev. Empty = use compiled-in constant from appmeta.
     #[serde(default)]
     pub http_base_url: String,
-    /// Windows only: the SID of the enrolling user, the one non-admin account
-    /// the daemon's IPC pipe admits (ipc::pipe_sddl). Written by
-    /// client-install.ps1; unused on Linux, where the daemon runs as that user.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub ipc_user_sid: String,
 }
 
 impl ClientConf {
@@ -72,8 +67,8 @@ fn system_conf_path() -> PathBuf {
 }
 
 /// `%ProgramData%\Zecurity`: the Windows client's system-wide directory
-/// (config, state, logs). The installer grants the enrolling user write
-/// access, matching Linux, where the daemon runs as that user.
+/// (config, state, logs). The daemon restricts it to SYSTEM,
+/// Administrators and the enrolling user (win_security::secure_data_dir).
 #[cfg(windows)]
 pub fn program_data_dir() -> PathBuf {
     std::env::var_os("ProgramData")
@@ -128,9 +123,6 @@ pub fn load() -> Result<ClientConf> {
             if !c.http_base_url.is_empty() {
                 merged.http_base_url = c.http_base_url;
             }
-            if !c.ipc_user_sid.is_empty() {
-                merged.ipc_user_sid = c.ipc_user_sid;
-            }
             found = true;
         }
     }
@@ -143,7 +135,7 @@ pub fn load() -> Result<ClientConf> {
 }
 
 /// Windows: `setup` updates the one system file instead of replacing it, so
-/// the installer's values (controller addresses, `ipc_user_sid`) survive.
+/// the installer's values (controller addresses) survive.
 /// Fields left empty in `update` keep their current values.
 #[cfg(windows)]
 pub fn merged_with_existing(update: ClientConf) -> ClientConf {
