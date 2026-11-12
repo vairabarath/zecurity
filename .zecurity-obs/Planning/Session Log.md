@@ -3759,3 +3759,16 @@ serves on `127.0.0.1:9102`.
   - Clippy adds no new warnings.
 - Provisional: D-W1 (IP-level capture) and D-W2 (per-machine daemon) await the decision record.
 - Next: a first run on a real Windows host (the W1 gate in the note, §3).
+
+## 2026-11-12 — M1: Android app (Flutter, A1 provisional)
+- Branch `feat/client-android`, on top of `feat/client-windows`; local commits, not pushed.
+  - The client crate is now a library (`zecurity_core`) plus a thin CLI binary.
+  - `client/ffi` builds `libzecurity_ffi.so` (C ABI for Dart, JNI for the VPN service).
+  - `client/mobile` is the Flutter app.
+- Design: the unchanged daemon runs in the VpnService `:vpn` process; the UI uses the same IPC as the CLI; the VPN interface has one `/32` per resource IP; any resource change restarts the tunnel; the app is excluded from its own VPN. Docs: `docs/client-multi-platform.md` §12.
+- Gates:
+  - Linux 364/364; Windows build unchanged.
+  - Android native library and release APK build; `flutter analyze` clean.
+  - Android 16 emulator: app start, daemon in `:vpn`, settings save, and status reach the UI. This found and fixed an R8 stripping of the JNI callback.
+- Not run: sign-in, connect, resource access (no controller or connector was running).
+- Builds on the dev disk: the ext4 build image grew to 60 GB; it holds the SDK, NDK, Flutter, emulator and Gradle.
