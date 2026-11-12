@@ -12,13 +12,13 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 
 | ID | Feature | PR | Status |
 |---|---|---|---|
-| F8 | Tenant detail: policy counts | #190 | ☐ |
-| F15 / F16 | CA hierarchy and CRL status (F15 OCSP closed, D-35) | #190 | ☐ |
-| F25 | Control-plane health on Overview | #190 | ☐ |
-| F38 | Audit export (CSV, JSON) | #190 | ☐ |
-| F17 | Append-only audit log, before/after | #192 | ☐ |
-| F5 | Relay bandwidth | #193 | ☐ |
-| F14 | Daily certificate expiry email | PR pending | ☐ |
+| F8 | Tenant detail: policy counts | #190 | ☑ 2026-11-12 |
+| F15 / F16 | CA hierarchy and CRL status (F15 OCSP closed, D-35) | #190 | ☑ 2026-11-12 |
+| F25 | Control-plane health on Overview | #190 | ☑ 2026-11-12 |
+| F38 | Audit export (CSV, JSON) | #190 | ☑ 2026-11-12 |
+| F17 | Append-only audit log, before/after | #192 | ☑ 2026-11-12 |
+| F5 | Relay bandwidth | #193 | ☑ 2026-11-12 |
+| F14 | Daily certificate expiry email | #195 | ☑ 2026-11-12 |
 
 Add each Must-have item here as it merges.
 
@@ -93,3 +93,10 @@ Needs SMTP configured on the controller (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` a
 ## Results log
 | Date | ID | Result | Notes |
 |---|---|---|---|
+| 2026-11-12 | F25 | Pass | Overview health card matches /provider/health; relay-ops view checked. |
+| 2026-11-12 | F17 | Pass | UPDATE/DELETE/TRUNCATE on provider_audit_logs refused with SQLSTATE 42501 (run inside BEGIN…ROLLBACK); role, disable/enable, reset rows carry before/after. |
+| 2026-11-12 | F38 | Pass | CSV and JSON export match the filtered page; formula cells prefixed with '. The 10,000-row cap was accepted from its unit test (Barath). |
+| 2026-11-12 | F8 | Pass | Empty tenant 0/0/0/0; with data, the console shows 1 resource, 1 group, 1 access rule, 1 resource policy = DB. Each open writes one tenant.read. Wording: "1 resources · 1 groups" (plural, minor). |
+| 2026-11-12 | F15 / F16 | Pass | Root, Intermediate and workspace CA rows correct. Revoking relay local-f17: relay CRL 0 → 1. Revoking client device 153df98b in the admin UI: workspace zero CRL 0 → 1. relay-ops: no Certificates nav, /certificates → forbidden page, API 403. "Show more" (>50 workspaces) covered by CAHierarchy.test.tsx (5/5), not run live. |
+| 2026-11-12 | F5 | Pass | Relay manoj-f5 on manojinkyank (192.168.1.53). Idle 0 B/s. 1 GiB through the relay in 37.6 s; stored to-clients 17,937,550 B/s over a 60 s window (= 1 GiB / 60 s), to-connectors 33 B/s; list, tooltip and detail card agree. Restart: next sample null → "Measuring…", then rates, no spike. Pre-#193 relay build (local-f17) → "Not reported"; revoked relay → "Not reported". Relay log: 273 lines, 0 ERROR/WARN/panic. |
+| 2026-11-12 | F14 | Pass | Email checked in the inbox (Barath): subject "Zecurity: 1 certificate needs attention", section "Expires within 24 hours (1)" with relay name, serial and expiry; scope footer; no tenant agent certificates; superadmin@zecurity.local bounced (NXDOMAIN, expected). Nothing in scope → no email, no audit row, day marker set. In scope: manoj-f5 relay stopped and its stored cert_not_after set to now+12 h (a connected relay's heartbeat rewrites it from the real certificate, so the relay must be offline), marker cleared, controller restarted: "sent to 2 of 2 super-admins (1 certificates)"; audit cert_expiry.alert_sent by system:cert-expiry-alert, details {lt_24h:1, sent:2, failed:0, recipients:2}, no addresses. Restart the same day: nothing resent. CERT_EXPIRY_ALERTS=false: log "cert expiry alert: disabled". Expiry restored, relay restarted. Test super-admin mail.zecurity@gmail.com added for the run, disabled afterwards. |
