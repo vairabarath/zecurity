@@ -1,23 +1,25 @@
 ---
 type: adr
-status: approved
+status: implemented
 id: PENDING-11
 domain: operations
 priority: P2
 created: 2026-07-03
-updated: 2026-11-05
+updated: 2026-11-12
 related:
   - PENDING-10-Observability
   - PENDING-15-Durable-Outbox-Infrastructure
   - PENDING-19-Workspace-RBAC
-tags: [pending, adr, operations, audit, siem, compliance]
+tags: [pending, finished, adr, operations, audit, siem, compliance]
 ---
 
 # PENDING-11: Audit logging and SIEM export
 
+> **Implemented (2026-11-12), PR #187** `[schema: reset DB]`: S-1 … S-11 and the §9 Twingate-style delivery (W-1 … W-8). What shipped, where it lives and how it was verified: **§10 Implementation summary**. The status lines below are the build history.
+
 **Status:** approved 2026-11-05 (Sathiya accepted O-1 … O-7 as recommended: S-5 … S-11). Build: S1a → S1b → S2 → S3, one PR. **S1a built 2026-11-05** (fc3561c1 on local `feat/pending11-siem`: migration 051, `ztna_app`, `audit.VerifyStream`; gate 1719/0/2). Lock order: workspace FOR KEY SHARE, then head (found while testing: the FK check after a BEFORE trigger would otherwise deadlock against a workspace FOR UPDATE + audit transaction).
 **S1b built 2026-11-06** (local `feat/pending11-siem`): migration `052_audit_export.sql`, P-9 audit gaps, `internal/auditexport` (exporter, webhook + Splunk HEC, SSRF-safe client, sealed secrets), GraphQL sink API + `auditLogs` behind `AUDIT_ADMIN` / `CONSOLE_READ`, access-event retention worker, `zecurity-controller audit verify`. Decisions taken while building are in §7. **S2 built 2026-11-06** (b4565fde): `/audit-log` page and Settings → Audit export. **S3 live run PASS 2026-11-06** (§8).
-**Base:** `main` (89655c83). Migrations: `051_`, `052_`.
+**Base:** `main` (89655c83 at design time; `main` merged in before the PR merged). Migrations: `053_audit_chain.sql`, `054_audit_export.sql`, `055_audit_export_s3.sql` (built as 051 … 053, renumbered 2026-11-12 after `main` took 051/052 for F17 and F5).
 **Scope:** its own epic. It also builds D-12 (DB-enforced append-only audit), which the Decision Record left to this phase.
 
 ---
@@ -542,6 +544,47 @@ Wazuh supports both channels natively:
 - the Docker journald log driver;
 - the 500-event "full batch" path (integration test only);
 - real AWS (moto stood in, with IAM enforcement on).
+
+
+## 10. Implementation summary (as merged, PR #187)
+
+### What shipped
+
+| Area | What | Where |
+|---|---|---|
+| Hash-chained streams (S-1, S-4) | Two streams per workspace: `admin` (`audit_logs`) and `access` (`connector_logs`). A BEFORE INSERT trigger takes the workspace FOR KEY SHARE, then the `audit_stream_heads` row, and stamps a gap-free, commit-ordered `seq` plus `row_hash` (SHA-256 over canonical bytes and the previous hash). `seq` is also the export cursor. | `053_audit_chain.sql`; `internal/audit/chain.go`, `canonical.go` |
+| D-12 append-only (S-5) | Runtime role `ztna_app` (NOLOGIN in SQL, login via `zz_app_role_login.sh` with `APP_DB_PASSWORD`): no UPDATE/DELETE/TRUNCATE on `audit_logs`, `connector_logs`, `provider_audit_logs`; SELECT only on heads; no DELETE on `workspaces` (cascade bypass). Startup check `audit.CheckAppendOnly`: fatal outside `ENV=development`, warning in development. | `053_audit_chain.sql`; `internal/audit/audit.go`; `cmd/server/main.go`; `.env.example` (`DATABASE_URL` as `ztna_app`) |
+| Retention (S-6) | Access events purged after `ACCESS_LOG_RETENTION_DAYS` (default and floor 90, floor enforced in SQL by `audit_purge_access`, one workspace per call, prefix-only, checkpoint kept). The admin stream is kept forever. A sink behind the purge gets one `export.gap` event. | `internal/audit/retention.go`; `053_audit_chain.sql` |
+| Admin-audit gaps (P-9, S-11) | Sign-in/out, failed sign-in (own enterprise connection only), invite accept, device enrol, sign-up, `idp.test`, client sign-in events. | `internal/auth`, `internal/invitation`, `internal/client`, resolvers |
+| Exporter (P-5) | In-process, polls every 2 s, up to 500 events per batch, 10 s delivery timeout, backoff on failure, at-least-once (consumers deduplicate on workspace, stream, seq). Windowed adapters (S3) wait until the oldest event is 5 min old unless a full batch is pending. | `internal/auditexport/exporter.go` |
+| Adapters (S-2, S-8, W-3) | HTTPS webhook (HMAC signature header), Splunk HEC, Amazon S3 (gzip NDJSON objects `<prefix>/zecurity/v1/<ws>/<stream>/YYYY/MM/DD/HH/<first>-<last>.jsonl.gz`, hand-written SigV4 PutObject). | `adapter.go`, `adapters.go`, `s3.go`, `sigv4.go` |
+| Outbound safety | One SSRF-safe client for every sink: https only, public addresses only (checked at dial; IPv6 only 2000::/3), no redirects. Secrets (auth header, HEC token, S3 secret key) sealed, write-only, never logged or audited; changing the destination requires entering the secret again. | `httpclient.go`, `store.go` |
+| Sink API (S-7) | GraphQL `auditExportSinks`, create/update/delete/test/rotate, up to 3 sinks per workspace, behind `AUDIT_ADMIN` (Admin, Security); `auditLogs` behind `CONSOLE_READ`. | `graph/audit.graphqls`; `resolvers/audit_export_helpers.go`; `internal/rbac` |
+| Console (S-9) | `/audit-log` page (filter, paging) and Settings → Audit export (webhook, Splunk HEC, Amazon S3; test, rotate, pause, status). | `admin/src/pages/AuditLog.tsx`, `components/audit/` |
+| Verify CLI | `zecurity-controller audit verify` recomputes canonical bytes in Go from raw columns (does not trust the DB's function) and reports gaps, edits and deletions. | `cmd/server/audit_verify.go` |
+| Connector access lines (W-2) | `ZECURITY_LOG_ANALYTICS=v1`: one `ANALYTICS {json}` line per access decision on stdout, written by an `analytics-writer` thread through a bounded queue (4096); a stalled reader drops and counts lines, never stalls a tunnel. Off by default; no proto change. | `connector/src/analytics.rs` |
+| Docs | Setup for webhook, HEC, S3 and Wazuh (decoders, `aws-s3`, journald). | `docs/siem-export.md` |
+
+### Configuration
+
+- `DATABASE_URL` must use `ztna_app`; `APP_DB_PASSWORD` gives it a login (compose).
+- `ACCESS_LOG_RETENTION_DAYS` (default 90, minimum 90).
+- `AUDIT_EXPORT_DEV_ALLOW_PRIVATE`, `AUDIT_EXPORT_DEV_CA_FILE`: lab only, honoured only with `ENV=development`.
+- Connector: `ZECURITY_LOG_ANALYTICS=v1`.
+
+### Verification
+
+- **Gate (after merging `main`, 2026-11-12):** controller 1782 pass / 0 fail / 2 skip (the known two), all CI `*_TEST_DATABASE_URL` set; connector 335 pass; admin 294 pass, build OK.
+- **Live runs, all PASS:** backend S3 run (§8), console run in the Orca browser (§8), Wazuh webhook run (§8), Twingate-style S3 + connector-lines run with moto and Wazuh `aws-s3` (§9).
+- **Security review (manual, 2026-11-12):** no vulnerabilities; two hardening fixes (non-blocking access lines; secret again on an S3 region change). Earlier push review: IPv6 blocklist fix.
+
+### Known limits and follow-ups
+
+- Access events are lost while a connector is disconnected from the controller (S-10 / O-6); the connector's local `ANALYTICS` lines are the complete record for that window.
+- Not run against real AWS (moto with IAM enforcement stood in). Not checked live: Wazuh reading journald on an agent; the Docker journald log driver.
+- Not in v1: provider audit log export, signed external checkpoints, WORM / Object Lock, syslog, OCSF, session-close and byte-count events.
+- `gqlgen` needs `GOTOOLCHAIN=go1.26.2` (Go 1.27 breaks it); revert its `go.mod` tidy.
+- Every local DB must be recreated after pulling (`docker compose down -v && docker compose up -d`) and `controller/.env` pointed at `ztna_app`.
 
 ---
 

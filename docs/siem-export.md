@@ -7,7 +7,7 @@ Zecurity gets audit and access events into a SIEM the way Twingate does, over tw
 | 1. Connector access log | One line per access decision, printed by each connector | Real time | None (local, unchained) |
 | 2. Amazon S3 export | The workspace's `admin` and `access` audit streams, as gzip NDJSON files in your bucket | About 5 minutes | Hash chain on every event |
 
-The webhook and Splunk HEC sinks (Settings → Audit export) still exist alongside these. Design: `.zecurity-obs/pending/PENDING-11-Audit-Logging-SIEM.md` §9.
+The webhook and Splunk HEC sinks (Settings → Audit export) still exist alongside these. Design: `.zecurity-obs/pending/finished/PENDING-11-Audit-Logging-SIEM.md` §9 (implementation summary: §10).
 
 ---
 

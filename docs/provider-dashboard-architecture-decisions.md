@@ -22,7 +22,7 @@
 | `.zecurity-obs/pending/PENDING-07b-Provider-Console-Packaging.md` | pending | CLI-first alpha, separate app for Beta/GA |
 | `.zecurity-obs/pending/PENDING-06-MFA-Step-Up-Auth.md` | pending | MFA delegation via `acr`/`amr`, step-up |
 | `.zecurity-obs/pending/PENDING-10-Observability.md` | pending | Prometheus + OTel direction |
-| `.zecurity-obs/pending/PENDING-11-Audit-Logging-SIEM.md` | pending | Tamper-evidence, SIEM export |
+| `.zecurity-obs/pending/finished/PENDING-11-Audit-Logging-SIEM.md` | implemented (PR #187) | Tamper-evidence, SIEM export |
 | `.zecurity-obs/pending/PENDING-12-Controller-HA-Multi-Region.md` | pending | HA options A/B/C |
 | ADR-016 (controller-labelled, connector-probed relay), ADR-017 (transport propagation), ADR-020 (relay provisioning), ADR-027 (serial CRLs) | accepted / implemented | Relay selection, transport plane, PKI revocation |
 
