@@ -108,13 +108,12 @@ mod imp {
     use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
-        SE_KERNEL_OBJECT,
+        GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
         IsWellKnownSid, SetFileSecurityW, WinBuiltinAdministratorsSid, WinLocalSystemSid,
-        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -273,15 +272,14 @@ mod imp {
             (root.join("logs"), DataDir::Logs),
         ];
         for (path, kind) in &dirs {
-            std::fs::create_dir_all(path)
-                .with_context(|| format!("create {}", path.display()))?;
+            std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
             reject_reparse_point(path)?;
             check_path_owner(path)?;
             set_dir_dacl(path, *kind, user_sid)?;
         }
         for (path, _) in &dirs {
-            for entry in std::fs::read_dir(path)
-                .with_context(|| format!("list {}", path.display()))?
+            for entry in
+                std::fs::read_dir(path).with_context(|| format!("list {}", path.display()))?
             {
                 let entry = entry?.path();
                 reject_reparse_point(&entry)?;
@@ -334,7 +332,9 @@ mod imp {
     #[cfg(test)]
     pub fn current_user_sid() -> Result<String> {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        };
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         let mut token: HANDLE = std::ptr::null_mut();
@@ -376,7 +376,9 @@ mod tests {
 
     #[test]
     fn sid_validation_accepts_only_plain_sid_strings() {
-        assert!(is_valid_sid("S-1-5-21-1004336348-1177238915-682003330-1001"));
+        assert!(is_valid_sid(
+            "S-1-5-21-1004336348-1177238915-682003330-1001"
+        ));
         assert!(is_valid_sid("S-1-5-18"));
         for bad in [
             "",
@@ -425,7 +427,11 @@ mod tests {
     #[test]
     fn every_descriptor_parses_on_windows() {
         let u = Some("S-1-5-21-1-2-3-1001");
-        let mut all = vec![pipe_sddl(u, true), pipe_sddl(u, false), pipe_sddl(None, true)];
+        let mut all = vec![
+            pipe_sddl(u, true),
+            pipe_sddl(u, false),
+            pipe_sddl(None, true),
+        ];
         for dir in [DataDir::Root, DataDir::State, DataDir::Logs] {
             all.push(data_dir_sddl(dir, u));
             all.push(data_dir_sddl(dir, None));

@@ -149,7 +149,16 @@ Log "installed binary to $InstallBin"
 # first is refused, never adopted. The daemon re-checks and re-applies this
 # on every start (win_security.rs).
 $trusted = @('S-1-5-18', 'S-1-5-32-544')
-if (Test-Path $DataDir) {
+# A junction or symlink here would make every step below (owner check, ACLs,
+# config write) act on whatever it points to.
+function Assert-NotReparsePoint([string]$p) {
+    $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Fail "$p is a junction or link. Inspect and remove the link (not its target), then re-run."
+    }
+}
+Assert-NotReparsePoint $DataDir
+if (Test-Path -LiteralPath $DataDir) {
     $ownerSid = (Get-Acl $DataDir).GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($trusted -notcontains $ownerSid) {
         Fail "$DataDir already exists and is owned by $ownerSid, not SYSTEM or Administrators. Inspect and remove it, then re-run."
@@ -157,11 +166,11 @@ if (Test-Path $DataDir) {
 } else {
     New-Item -ItemType Directory -Path $DataDir | Out-Null
 }
-& icacls.exe $DataDir /setowner '*S-1-5-32-544' | Out-Null
+& icacls.exe $DataDir /setowner '*S-1-5-32-544' /L | Out-Null
 # SYSTEM and Administrators: full control. The user: list the folder and
 # read its files, nothing else. (The daemon sets the same on every start, and
 # the state and logs folders' own rules; see win_security.rs.)
-& icacls.exe $DataDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*${Sid}:(RX)" "*${Sid}:(OI)(IO)(R)" | Out-Null
+& icacls.exe $DataDir /L /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*${Sid}:(RX)" "*${Sid}:(OI)(IO)(R)" | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "could not restrict access to $DataDir" }
 Log "data directory: $DataDir (SYSTEM and Administrators; $User may read)"
 
@@ -180,15 +189,22 @@ if ($Workspace -or $ControllerAddr -or $ControllerHttpAddr) {
         $base = if ($ControllerHttpAddr -match '^https?://') { $ControllerHttpAddr } else { "http://$ControllerHttpAddr" }
         $lines += "http_base_url = `"$base`""
     }
-    Set-Content -Path $ConfigFile -Value $lines -Encoding ascii
+    Assert-NotReparsePoint $DataDir
+    Assert-NotReparsePoint $ConfigFile
+    Set-Content -LiteralPath $ConfigFile -Value $lines -Encoding ascii
+    # The daemon accepts only SYSTEM/Administrators-owned files; a file an
+    # elevated admin creates may be owned by that admin's own account.
+    & icacls.exe $ConfigFile /setowner '*S-1-5-32-544' /L | Out-Null
     Log "wrote $ConfigFile"
 }
 
 # ── Service ─────────────────────────────────────────────────────────────────
+# New-Service, not sc.exe: Windows PowerShell 5.1 mangles the embedded quotes
+# of a native argument, and an unquoted "C:\Program Files\..." service path
+# is the classic unquoted-service-path hole. LocalSystem is the default.
 $binPath = "`"$InstallBin`" daemon --ipc-user-sid $Sid"
-& sc.exe create $ServiceName binPath= $binPath start= auto obj= LocalSystem DisplayName= 'Zecurity Client' | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "sc.exe create failed ($LASTEXITCODE)" }
-& sc.exe description $ServiceName 'Zecurity ZTNA client daemon' | Out-Null
+New-Service -Name $ServiceName -BinaryPathName $binPath -StartupType Automatic `
+    -DisplayName 'Zecurity Client' -Description 'Zecurity ZTNA client daemon' | Out-Null
 # Restart on failure, like Restart=on-failure: after a crash, and (failureflag)
 # after a non-zero exit, e.g. no workspace configured yet. A deliberate stop
 # (device revoked, shutdown request) exits 0 and is not restarted.

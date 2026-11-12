@@ -23,8 +23,8 @@ use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result};
 
-pub(crate) use crate::tun_shared::{CmdRunner, SystemRunner};
 pub use crate::tun_shared::{AllowedFlow, ResourceKernel};
+pub(crate) use crate::tun_shared::{CmdRunner, SystemRunner};
 
 /// Adapter name; also the interface alias `netsh` addresses routes by.
 pub(crate) const ADAPTER_NAME: &str = "zecurity0";
@@ -138,11 +138,11 @@ impl TunManager {
             tun::create_as_async(&config)
         })
         .await
-            .context("create Wintun adapter task")?
-            .context(
-                "create Wintun adapter zecurity0 (wintun.dll must be next to \
+        .context("create Wintun adapter task")?
+        .context(
+            "create Wintun adapter zecurity0 (wintun.dll must be next to \
                  zecurity-client.exe, and the service must run as LocalSystem)",
-            )?;
+        )?;
 
         // The adapter may have been reopened from a previous run with its
         // routes still attached.

@@ -163,7 +163,16 @@ pub fn merged_with_existing(update: ClientConf) -> ClientConf {
 pub fn save(conf: &ClientConf) -> Result<PathBuf> {
     let path = system_conf_path();
     match std::fs::write(&path, toml::to_string_pretty(conf)?) {
-        Ok(()) => Ok(path),
+        Ok(()) => {
+            // The daemon accepts only SYSTEM/Administrators-owned files
+            // (win_security); a file an elevated admin creates may be owned
+            // by that admin's own account.
+            let _ = std::process::Command::new("icacls")
+                .arg(&path)
+                .args(["/setowner", "*S-1-5-32-544", "/L"])
+                .output();
+            Ok(path)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
             "writing {} needs administrator rights: run `zecurity-client setup` from an \
              elevated terminal",

@@ -312,22 +312,22 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
 mod windows_pipe_tests {
     use super::*;
 
-    use std::sync::Mutex;
-
     /// The tests share the ZECURITY_DAEMON_PIPE variable.
-    static PIPE_ENV: Mutex<()> = Mutex::new(());
+    static PIPE_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn use_test_pipe(suffix: &str) {
         let name = format!(r"\\.\pipe\zecurity-client-test-{}-{suffix}", std::process::id());
         std::env::set_var("ZECURITY_DAEMON_PIPE", name);
-        set_pipe_user_sid(Some("S-1-5-18".into()));
+        // Admit the account running the tests, elevated or not.
+        let me = crate::win_security::current_user_sid().expect("current user SID");
+        set_pipe_user_sid(Some(me));
     }
 
     /// A second "first" instance of the same name must fail: no squatting.
     /// (Wine 8 does not enforce FILE_FLAG_FIRST_PIPE_INSTANCE; real Windows does.)
     #[tokio::test]
     async fn pipe_name_cannot_be_claimed_twice() {
-        let _env = PIPE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = PIPE_ENV.lock().await;
         use_test_pipe("first");
         let _server = create_pipe_server(true).expect("create secured pipe");
         assert!(create_pipe_server(true).is_err());
@@ -356,7 +356,7 @@ mod windows_pipe_tests {
     /// response (the transport itself, without the owner check).
     #[tokio::test]
     async fn secured_pipe_carries_a_request_and_response() {
-        let _env = PIPE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = PIPE_ENV.lock().await;
         use_test_pipe("rt");
         let server = create_pipe_server(true).expect("create secured pipe");
         let serve = tokio::spawn(serve_one(server));
@@ -374,7 +374,7 @@ mod windows_pipe_tests {
     /// sent to it.
     #[tokio::test]
     async fn client_refuses_a_pipe_not_owned_by_system() {
-        let _env = PIPE_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = PIPE_ENV.lock().await;
         use_test_pipe("impostor");
         let me = crate::win_security::current_user_sid().expect("current user SID");
         let sddl = format!("O:{me}D:P(A;;GA;;;WD)");
