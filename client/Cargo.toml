@@ -3,6 +3,10 @@ name = "zecurity-client"
 version = "1.0.12"
 edition = "2021"
 
+[lib]
+name = "zecurity_core"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zecurity-client"
 path = "src/main.rs"
