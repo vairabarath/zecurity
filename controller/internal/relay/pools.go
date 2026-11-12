@@ -255,6 +255,11 @@ func (s *Store) UpdatePool(ctx context.Context, poolID string, change PoolChange
 	if err != nil {
 		return false, fmt.Errorf("update relay pool: %w", err)
 	}
+	if placementChanged { // residency on/off changes what its relays enforce (D-40)
+		if err := bumpPolicyVersions(ctx, tx, poolID); err != nil {
+			return false, err
+		}
+	}
 	if inTx != nil {
 		if err := inTx(ctx, tx, before, after); err != nil {
 			return false, err
@@ -437,6 +442,11 @@ func (s *Store) MoveRelay(ctx context.Context, relayID, toPoolID string,
 			`UPDATE relays SET pool_id = $2, updated_at = NOW() WHERE id = $1`, relayID, toPoolID); err != nil {
 			return fmt.Errorf("move relay: %w", err)
 		}
+		// The relay now gets the destination's policy: bump it so its version
+		// is newer than anything the relay applied before (D-40).
+		if err := bumpPolicyVersions(ctx, tx, toPoolID); err != nil {
+			return err
+		}
 		if inTx != nil {
 			if err := inTx(ctx, tx, pools[fromID], pools[toPoolID]); err != nil {
 				return err
@@ -564,6 +574,11 @@ func (s *Store) AssignWorkspacePool(ctx context.Context, workspaceID, toPoolID s
 		       relay_pool_previous_id = $4, relay_pool_previous_until = $5, updated_at = NOW()
 		 WHERE id = $1`, workspaceID, toPoolID, failoverPoolID, after.PreviousPoolID, after.PreviousPoolUntil); err != nil {
 		return false, fmt.Errorf("assign workspace pool: %w", err)
+	}
+	// D-40: every pool the workspace was or now is authorized on gets a new
+	// policy version, so its relays apply the change at their next heartbeat.
+	if err := bumpPolicyVersions(ctx, tx, append(assignmentPools(before), assignmentPools(after)...)...); err != nil {
+		return false, err
 	}
 	if inTx != nil {
 		if err := inTx(ctx, tx, before, after); err != nil {

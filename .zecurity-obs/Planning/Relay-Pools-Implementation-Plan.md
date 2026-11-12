@@ -390,3 +390,41 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
   - pool state badges and failover-tenant counts;
   - failed-over pools listed in the Overview "Needs attention";
   - 598 tests pass, lint and build pass.
+
+## PR 3 implementation record (branch `feat/relay-pools-pr3`, on top of PR 2)
+
+- **Proto** (additive, `relay.v1`):
+  - `HeartbeatRequest` 11 `workspace_policy_supported`, 12 `workspace_policy_version_applied`;
+  - `HeartbeatResponse` 4 `workspace_policy_enforced`, 5 `allowed_workspace_ids`, 6 `workspace_policy_version`, 7 `workspace_policy_lease_seconds`;
+  - version 0 = "no policy in this response". Only the relay compiles this proto (connector, client and shield unaffected).
+- **Schema** `059_relay_pool_policy.sql`:
+  - `relay_policy_version_seq`, **one sequence for every pool**, so versions only increase for a relay, also across a move between pools (a per-pool counter would make a moved relay ignore its new pool's lower version);
+  - `relay_pools.policy_version`;
+  - `relays.policy_supported`, `policy_version_acked` and `policy_acked_at`;
+  - a sequence grant to `ztna_app`.
+- **Version bumps** (same transaction as the change):
+  - tenant assignment: every pool before and after;
+  - region/residency change;
+  - relay move: destination pool;
+  - closing an expired graceful migration window: `ExpireMigrationWindows`, on the 30 s failover loop, which bumps the old pool.
+- **Heartbeat:** every response (full or throttled) carries the pool's policy:
+  - allowed = workspaces whose primary, failover or (open-window) previous pool it is;
+  - lease `RELAY_POLICY_LEASE` (default 10m, minimum 4 heartbeats = 2m);
+  - the relay's report is recorded;
+  - a lookup failure sends version 0, so the relay keeps its last policy and the lease isn't renewed.
+- **Relay** (`relay/src/workspace_policy.rs`; `heartbeat.rs`, `listener.rs`, `main.rs`):
+  - **Apply:** version 0 ignored without renewal; older ignored; same version renews the lease; newer replaces.
+  - **Admit:** decided per connection at accept, after the CRL check (`workspace not allowed on this relay` / `workspace policy lease expired` / `no workspace policy yet`). Admitted peers are tracked by workspace.
+  - **Revocation:** a policy that drops a workspace closes its connector and client connections at once; bridged streams end with them.
+  - **Lease:** a 1 s lease watch ends sessions at expiry even with no heartbeat.
+  - **No policy yet:** fail closed until the first heartbeat.
+  - **Persistence:** `<RELAY_STATE_DIR>/workspace-policy.json` (atomic write, 0600). It keeps the original lease end, and is bound to the relay id plus the Intermediate CA hash, so a policy from a reset controller or another relay is discarded.
+  - **Rollout:** a new relay talking to an old controller only ever gets version 0 and refuses all peers, so **upgrade the controller before the relays**.
+- **Reads:**
+  - relays carry `policy {supported, applied_version, current}`;
+  - pools carry `residency_enforced` (a residency pool with at least one active relay, all supporting and current) and `policy_version`;
+  - pool detail relays carry `policy`.
+- **Console:** "Residency (enforced)" only when `residency_enforced`; otherwise "Residency (not enforced)" with the blocking relays named. Per-relay policy indicator: Enforcing, Applying…, Not supported.
+- **Tests:**
+  - controller: heartbeat policy on both paths; lookup failure sends version 0; lease bounds; DB-backed allowed set, bumps, window expiry, move monotonicity, acks; `residency_enforced` read;
+  - relay: 18 new tests (policy rules with an explicit clock, persistence, revocation and lease over real QUIC, listener accept path); 145 relay tests pass, clippy has no new warnings.

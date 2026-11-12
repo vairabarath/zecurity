@@ -208,6 +208,19 @@ export interface RelaySummary {
   bandwidth: RelayBandwidth | null
   /** The relay pool it belongs to (D-37); every relay has exactly one. */
   pool: RelayPoolRef
+  /** Workspace-policy enforcement on this relay (D-40). */
+  policy: RelayPolicyStatus
+}
+
+/**
+ * D-40: `supported` the relay build can enforce a workspace policy;
+ * `applied_version` the policy version it last reported applying (null: none);
+ * `current` it has applied its pool's current policy version.
+ */
+export interface RelayPolicyStatus {
+  supported: boolean
+  applied_version: number | null
+  current: boolean
 }
 
 /**
@@ -265,9 +278,9 @@ export interface RelayDetail extends RelaySummary {
 
 /**
  * A relay pool and its placement attributes (D-37). `region` is a validated
- * code or null. `residency` is the pool's setting only: until relay-side
- * enforcement ships (D-40) it is routing only and never enforced, so the
- * console must not present it as a residency guarantee.
+ * code or null. `residency` is the pool's setting only; whether its relays
+ * enforce it is `residency_enforced` on the pool reads (D-40), so a bare ref
+ * must never be presented as enforced.
  */
 export interface RelayPoolRef {
   id: string
@@ -285,6 +298,14 @@ export interface RelayPoolSummary extends RelayPoolRef {
   eligible_relays: number
   /** Workspaces whose pool this is. */
   tenants: number
+  /**
+   * D-40: a residency pool with at least one active relay, all of whose
+   * active relays support the policy and have applied the current version.
+   * Only this flag may be shown as "enforced".
+   */
+  residency_enforced: boolean
+  /** The pool's current workspace-policy version (D-40). */
+  policy_version: number
   /** Workspaces using this pool as their failover pool (D-39). */
   failover_tenants: number
   /** Failover state (D-39); tracked only for pools some tenant uses as primary with a failover pool. */
@@ -304,6 +325,8 @@ export interface RelayPoolRelay {
   name: string
   status: string
   eligible: boolean
+  /** Workspace-policy state against this pool's current policy_version (D-40). */
+  policy: RelayPolicyStatus
 }
 
 export interface RelayPoolTenant {

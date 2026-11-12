@@ -2,10 +2,10 @@ import { useState, type ReactNode } from 'react'
 import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { getRelayPool } from '@/api/reads'
-import type { RelayPoolDetail as RelayPoolDetailDTO } from '@/api/types'
+import type { RelayPoolDetail as RelayPoolDetailDTO, RelayPoolRelay } from '@/api/types'
 import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
-import { DefaultPoolBadge, HOLD_DOWN_NOTE, PoolStateBadge, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
+import { DefaultPoolBadge, HOLD_DOWN_NOTE, PoolStateBadge, RegionCode, RelayPolicyBadge, ResidencyBadge } from '@/components/PoolBadges'
 import { DeletePoolDialog, PlacementDialog, RenamePoolDialog } from '@/components/PoolDialogs'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
 import { StatusBadge } from '@/components/StatusBadge'
@@ -26,8 +26,17 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 // API sent. Writes: rename and delete (both roles), region and residency
 // (super-admin only); none for the default pool. Hiding them is UX only; the
 // controller authorizes every request.
+//
+// Residency (D-40): residency_enforced is the pool's verdict; each relay in
+// relay_list carries its own policy flags, shown per relay for a residency
+// pool. Nothing is derived beyond listing the relays that block enforcement.
 
 type Edit = 'rename' | 'placement' | 'delete'
+
+/** Active relays that keep residency from being enforced: no support, or not on the current version. */
+function blockers(relays: RelayPoolRelay[]): RelayPoolRelay[] {
+  return relays.filter((r) => r.status === 'active' && (!r.policy.supported || !r.policy.current))
+}
 
 const back = (
   <Link to="/relay-pools" className="inline-flex items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-primary">
@@ -120,6 +129,8 @@ function PoolView({
 }) {
   const role = useSessionStore((s) => s.me?.role)
   const navigate = useNavigate()
+  const blocking = blockers(p.relay_list)
+  const activeMembers = p.relay_list.filter((r) => r.status === 'active').length
   const [edit, setEdit] = useState<Edit | null>(null)
   const canManage = !p.is_default && hasRole(role, PROVIDER_ROLES)
   const canPlace = !p.is_default && hasRole(role, ['super-admin'])
@@ -138,7 +149,7 @@ function PoolView({
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="font-display text-[26px] font-semibold tracking-[-0.02em]">{p.name}</h1>
             {p.is_default && <DefaultPoolBadge />}
-            <ResidencyBadge residency={p.residency} />
+            <ResidencyBadge residency={p.residency} enforced={p.residency_enforced} />
           </div>
           <p className="text-sm text-subtle-foreground">created {formatDateTime(p.created_at)}</p>
         </div>
@@ -160,6 +171,24 @@ function PoolView({
             Tenants use this pool but it has no eligible relay: tenants without a working failover pool have no relay
             path (direct connections still work), and it can’t take over for tenants using it as their failover pool.
             Add, move or resume a relay in this pool, or reassign the tenants.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {p.residency && !p.residency_enforced && (
+        <Alert role="note" data-residency="not-enforced">
+          <AlertDescription>
+            Residency is not enforced: traffic is routed to this pool, but its relays don’t enforce it yet.{' '}
+            {activeMembers === 0
+              ? 'The pool has no active relay.'
+              : blocking.length > 0
+                ? `Blocking enforcement: ${blocking
+                    .map((r) => `${r.name} (${r.policy.supported ? 'applying the current policy' : 'relay build doesn’t support the policy'})`)
+                    .join(', ')}.`
+                : p.relay_list_truncated
+                  ? 'The blocking relays aren’t among the first 200 listed here.'
+                  : 'Every active relay listed reports the current policy now; refresh in a moment.'}{' '}
+            Relays that don’t support the policy need a newer relay build; the others apply it at their next heartbeat.
           </AlertDescription>
         </Alert>
       )}
@@ -188,7 +217,7 @@ function PoolView({
             <RegionCode region={p.region} />
           </Fact>
           <Fact label="Residency">
-            <ResidencyBadge residency={p.residency} />
+            <ResidencyBadge residency={p.residency} enforced={p.residency_enforced} />
           </Fact>
           <Fact label="Relays">
             <span className="font-mono">{p.relays}</span>
@@ -196,6 +225,11 @@ function PoolView({
           <Fact label="Eligible relays">
             <span className="font-mono">{p.eligible_relays}</span>
           </Fact>
+          {p.residency && (
+            <Fact label="Policy version">
+              <span className="font-mono">{p.policy_version}</span>
+            </Fact>
+          )}
           <Fact label="State">
             <PoolStateBadge pool={p} />
           </Fact>
@@ -227,6 +261,7 @@ function PoolView({
                 <TableHead>Relay</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Eligible</TableHead>
+                {p.residency && <TableHead>Policy</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -241,6 +276,11 @@ function PoolView({
                     <StatusBadge status={r.status} />
                   </TableCell>
                   <TableCell>{r.eligible ? <Badge variant="success">Eligible</Badge> : <Badge variant="secondary">Not eligible</Badge>}</TableCell>
+                  {p.residency && (
+                    <TableCell>
+                      <RelayPolicyBadge relay={{ pool: p, policy: r.policy }} />
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

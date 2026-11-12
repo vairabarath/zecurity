@@ -34,14 +34,22 @@ type RelayPoolSummary struct {
 	State           string     `json:"state"`
 	ExhaustedAt     *time.Time `json:"exhausted_at"`
 	EligibleSince   *time.Time `json:"eligible_since"`
+	// ResidencyEnforced (D-40, PR 3): a residency pool with at least one
+	// active relay, every active relay of which supports the workspace
+	// policy and has applied the pool's current version. Only then may the
+	// console say residency is enforced; otherwise it is routing only.
+	ResidencyEnforced bool  `json:"residency_enforced"`
+	PolicyVersion     int64 `json:"policy_version"`
 }
 
-// RelayPoolRelay is one relay in pool detail.
+// RelayPoolRelay is one relay in pool detail, with its workspace policy
+// status (D-40, PR 3) so the page needs no fleet-wide read.
 type RelayPoolRelay struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Eligible bool   `json:"eligible"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	Status   string            `json:"status"`
+	Eligible bool              `json:"eligible"`
+	Policy   RelayPolicyStatus `json:"policy"`
 }
 
 // RelayPoolTenant is one tenant in pool detail (super-admin only).
@@ -67,13 +75,19 @@ SELECT p.id::text, p.name, p.region, p.residency, p.created_at,
        (SELECT count(*) FROM relays WHERE pool_id = p.id AND ` + eligible.Where + `),
        (SELECT count(*) FROM workspaces WHERE relay_pool_id = p.id),
        (SELECT count(*) FROM workspaces WHERE relay_failover_pool_id = p.id),
-       p.exhausted_at, p.eligible_since
+       p.exhausted_at, p.eligible_since,
+       p.residency
+         AND EXISTS (SELECT 1 FROM relays WHERE pool_id = p.id AND status = 'active')
+         AND NOT EXISTS (SELECT 1 FROM relays WHERE pool_id = p.id AND status = 'active'
+                            AND NOT (policy_supported AND policy_version_acked IS NOT DISTINCT FROM p.policy_version)),
+       p.policy_version
   FROM relay_pools p`
 
 func scanRelayPoolSummary(row pgx.Row) (RelayPoolSummary, error) {
 	var s RelayPoolSummary
 	if err := row.Scan(&s.ID, &s.Name, &s.Region, &s.Residency, &s.CreatedAt,
-		&s.Relays, &s.EligibleRelays, &s.Tenants, &s.FailoverTenants, &s.ExhaustedAt, &s.EligibleSince); err != nil {
+		&s.Relays, &s.EligibleRelays, &s.Tenants, &s.FailoverTenants, &s.ExhaustedAt, &s.EligibleSince,
+		&s.ResidencyEnforced, &s.PolicyVersion); err != nil {
 		return RelayPoolSummary{}, err
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
@@ -122,11 +136,12 @@ func GetRelayPool(ctx context.Context, q Querier, id string, withTenants bool) (
 	}
 	d := RelayPoolDetail{RelayPoolSummary: s}
 	if d.RelayList, d.RelayListCut, err = collect(ctx, q, `
-SELECT id::text, name, status, `+eligible.Where+`
+SELECT id::text, name, status, `+eligible.Where+`, policy_supported, policy_version_acked
   FROM relays WHERE pool_id = $1 AND status <> 'deleted'
  ORDER BY name, id LIMIT $2`, id, func(r pgx.Rows) (RelayPoolRelay, error) {
 		var x RelayPoolRelay
-		err := r.Scan(&x.ID, &x.Name, &x.Status, &x.Eligible)
+		err := r.Scan(&x.ID, &x.Name, &x.Status, &x.Eligible, &x.Policy.Supported, &x.Policy.AppliedVersion)
+		x.Policy.Current = x.Policy.Supported && x.Policy.AppliedVersion != nil && *x.Policy.AppliedVersion == s.PolicyVersion
 		return x, err
 	}); err != nil {
 		return RelayPoolDetail{}, fmt.Errorf("relay pool relays: %w", err)

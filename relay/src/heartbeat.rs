@@ -13,6 +13,7 @@ use crate::relay::v1::relay_service_client::RelayServiceClient;
 use crate::relay::v1::{HeartbeatRequest, HeartbeatResponse};
 use crate::session::{ACTIVE_STREAMS, BYTES_CLIENT_TO_CONNECTOR, BYTES_CONNECTOR_TO_CLIENT};
 use crate::state::RelayState;
+use crate::workspace_policy::{unix_now, WorkspacePolicy};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,7 +100,12 @@ impl HeartbeatTransport for GrpcHeartbeat {
 
 /// Runs until the controller reports this relay revoked (terminal), then
 /// returns; the caller stops serving (F-8).
-pub async fn run(cfg: RelayConfig, certs: Arc<CertManager>, state: Arc<RelayState>) {
+pub async fn run(
+    cfg: RelayConfig,
+    certs: Arc<CertManager>,
+    state: Arc<RelayState>,
+    policy: Arc<WorkspacePolicy>,
+) {
     let transport = GrpcHeartbeat {
         controller_addr: cfg.controller_addr.clone(),
     };
@@ -108,6 +114,7 @@ pub async fn run(cfg: RelayConfig, certs: Arc<CertManager>, state: Arc<RelayStat
         HeartbeatSettings::from_config(&cfg),
         certs,
         state,
+        policy,
     )
     .await
 }
@@ -120,6 +127,7 @@ pub async fn run_with<T: HeartbeatTransport>(
     settings: HeartbeatSettings,
     certs: Arc<CertManager>,
     state: Arc<RelayState>,
+    policy: Arc<WorkspacePolicy>,
 ) {
     let started_at = Instant::now();
     let hostname = read_hostname();
@@ -135,6 +143,7 @@ pub async fn run_with<T: HeartbeatTransport>(
             &hostname,
             started_at,
             &state,
+            &policy,
         )
         .await
         {
@@ -168,6 +177,7 @@ pub async fn run_with<T: HeartbeatTransport>(
 
 /// Runs one connection. Returns Ok(()) only when the certificate changed
 /// (caller reconnects with the new identity); errors end the connection.
+#[allow(clippy::too_many_arguments)]
 async fn run_connected<T: HeartbeatTransport>(
     transport: &T,
     settings: &HeartbeatSettings,
@@ -176,6 +186,7 @@ async fn run_connected<T: HeartbeatTransport>(
     hostname: &str,
     started_at: Instant,
     state: &RelayState,
+    policy: &WorkspacePolicy,
 ) -> Result<()> {
     let mut conn = transport.connect(material).await?;
     info!(serial = %material.serial_hex, "Relay heartbeat connected");
@@ -196,6 +207,9 @@ async fn run_connected<T: HeartbeatTransport>(
             bytes_connector_to_client: Some(
                 BYTES_CONNECTOR_TO_CLIENT.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            // Relay pools PR 3 (D-40).
+            workspace_policy_supported: true,
+            workspace_policy_version_applied: policy.applied_version(),
         };
         let response = transport.send(&mut conn, request).await?;
         // Connector-revocation Phase D: drop revoked connectors (sticky set).
@@ -207,6 +221,9 @@ async fn run_connected<T: HeartbeatTransport>(
                 "controller reported revoked connectors"
             );
         }
+        // D-40: apply the pool's workspace policy (a failed heartbeat never
+        // gets here, so the lease keeps running down).
+        policy.apply(&response, unix_now());
 
         info!(
             server_time_unix = response.server_time_unix,
@@ -302,6 +319,7 @@ mod tests {
                 server_time_unix: 0,
                 next_heartbeat_seconds: 3600,
                 revoked_connector_spiffe_ids: vec![],
+                ..Default::default()
             })
         }
     }
@@ -342,6 +360,7 @@ mod tests {
                 server_time_unix: 0,
                 next_heartbeat_seconds: 3600,
                 revoked_connector_spiffe_ids: self.revoked.clone(),
+                ..Default::default()
             })
         }
     }
@@ -370,11 +389,98 @@ mod tests {
                     server_time_unix: 0,
                     next_heartbeat_seconds: 1,
                     revoked_connector_spiffe_ids: vec![self.revoked.clone()],
+                    ..Default::default()
                 })
             } else {
                 anyhow::bail!("controller unreachable")
             }
         }
+    }
+
+    /// Answers every heartbeat with workspace policy version 5 and records
+    /// (supported, applied version) from each request.
+    #[derive(Clone, Default)]
+    struct PolicyTransport {
+        sent: Arc<Mutex<Vec<(bool, u64)>>>,
+    }
+
+    impl HeartbeatTransport for PolicyTransport {
+        type Conn = ();
+
+        async fn connect(&self, _material: &CertMaterial) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _conn: &mut (),
+            request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            self.sent.lock().unwrap().push((
+                request.workspace_policy_supported,
+                request.workspace_policy_version_applied,
+            ));
+            Ok(HeartbeatResponse {
+                next_heartbeat_seconds: 1,
+                workspace_policy_enforced: true,
+                allowed_workspace_ids: vec!["aaaaaaaa-0000-0000-0000-000000000001".into()],
+                workspace_policy_version: 5,
+                workspace_policy_lease_seconds: 600,
+                ..Default::default()
+            })
+        }
+    }
+
+    /// D-40: every request reports policy support and the applied version
+    /// (0 before any policy), and the response's policy is applied.
+    #[tokio::test]
+    async fn heartbeat_reports_and_applies_the_workspace_policy() {
+        let pki = TestPki::new();
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-hb-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let policy = WorkspacePolicy::in_memory();
+        let transport = PolicyTransport::default();
+        let settings = HeartbeatSettings {
+            listen_port: 9093,
+            max_connections: 16,
+            default_interval: Duration::from_secs(3600),
+        };
+        let task = tokio::spawn(run_with(
+            transport.clone(),
+            settings,
+            manager,
+            RelayState::new(),
+            policy.clone(),
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while transport.sent.lock().unwrap().len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "second heartbeat never sent"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        task.abort();
+        let sent = transport.sent.lock().unwrap().clone();
+        assert_eq!(sent[..2], [(true, 0), (true, 5)]);
+        assert_eq!(policy.applied_version(), 5);
+        assert!(policy
+            .check("aaaaaaaa-0000-0000-0000-000000000001", unix_now())
+            .is_ok());
+        assert!(policy
+            .check("bbbbbbbb-0000-0000-0000-000000000002", unix_now())
+            .is_err());
     }
 
     /// AD-5 (D20): a failing heartbeat keeps the revoked set.
@@ -413,6 +519,7 @@ mod tests {
             settings,
             manager,
             state.clone(),
+            WorkspacePolicy::in_memory(),
         ));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while transport.sends.load(std::sync::atomic::Ordering::SeqCst) < 2 {
@@ -481,6 +588,7 @@ mod tests {
             settings,
             manager,
             state.clone(),
+            WorkspacePolicy::in_memory(),
         ));
 
         tokio::time::timeout(Duration::from_secs(5), c1.closed())
@@ -568,6 +676,7 @@ mod tests {
             settings,
             manager,
             RelayState::new(),
+            WorkspacePolicy::in_memory(),
         ));
         tokio::time::sleep(Duration::from_secs(60)).await;
         let finished = task.is_finished();
@@ -658,6 +767,7 @@ mod tests {
             settings,
             manager.clone(),
             RelayState::new(),
+            WorkspacePolicy::in_memory(),
         ));
 
         assert_eq!(

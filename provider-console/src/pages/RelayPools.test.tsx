@@ -3,11 +3,12 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { RelayPoolDetail } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
-import { DEFAULT_POOL_ID, EMPTY_POOL_ID, EU_POOL, EU_POOL_ID, POOLS, poolSummary } from '@/test/pools'
+import { DEFAULT_POOL_ID, EMPTY_POOL_ID, EU_POOL, EU_POOL_ID, POOLS, poolSummary, RELAY_POLICY } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 // Relay pools (D-37 … D-41): both roles read; relay-ops never see tenant
-// names nor region/residency controls; residency is always "routing only".
+// names nor region/residency controls; residency reads "enforced" only when
+// the pool read says residency_enforced (D-40).
 
 const listOk: FakeResponse = { status: 200, body: { items: POOLS } }
 const writes = (calls: RecordedCall[]) => calls.filter((c) => c.method !== 'GET')
@@ -16,8 +17,8 @@ function poolDetail(over: Partial<RelayPoolDetail> = {}): RelayPoolDetail {
   return {
     ...POOLS[1],
     relay_list: [
-      { id: '11111111-1111-1111-1111-111111111111', name: 'relay-eu-a', status: 'active', eligible: true },
-      { id: '22222222-2222-2222-2222-222222222222', name: 'relay-eu-b', status: 'inactive', eligible: false },
+      { id: '11111111-1111-1111-1111-111111111111', name: 'relay-eu-a', status: 'active', eligible: true, policy: RELAY_POLICY },
+      { id: '22222222-2222-2222-2222-222222222222', name: 'relay-eu-b', status: 'inactive', eligible: false, policy: RELAY_POLICY },
     ],
     relay_list_truncated: false,
     tenant_list: [{ id: 'aaaaaaaa-1111-2222-3333-444444444444', slug: 'acme', name: 'Acme' }],
@@ -27,7 +28,7 @@ function poolDetail(over: Partial<RelayPoolDetail> = {}): RelayPoolDetail {
 }
 
 describe('Relay pools: list', () => {
-  it('shows each pool with region, routing-only residency, counts and the default marked', async () => {
+  it('shows each pool with region, residency (as enforced by the API), counts and the default marked', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ 'GET /provider/relay-pools': listOk })
     renderApp('/relay-pools')
@@ -38,9 +39,10 @@ describe('Relay pools: list', () => {
 
     const eu = within(screen.getByRole('row', { name: 'eu-1' }))
     expect(eu.getByText('eu-central-1')).toBeInTheDocument()
-    const badge = eu.getByText(/Residency \(routing only\)/)
-    expect(badge).toHaveAttribute('title', expect.stringMatching(/not enforced/))
-    expect(badge).toHaveTextContent(/not enforced/) // screen-reader text
+    const badge = eu.getByText(/Residency \(enforced\)/)
+    expect(badge).toHaveAttribute('data-residency', 'enforced')
+    expect(badge).toHaveAttribute('title', expect.stringMatching(/accept only this pool’s tenants/))
+    expect(badge).toHaveTextContent(/lease \(10 minutes by default\)/) // screen-reader text
     expect(eu.queryByText('Default')).not.toBeInTheDocument()
     expect(document.body.textContent).not.toMatch(/residency enforced|enforces residency/i)
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
@@ -101,7 +103,7 @@ describe('Relay pools: list', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Create pool' })
     const create = within(dialog).getByRole('button', { name: 'Create pool' })
     await user.type(within(dialog).getByLabelText('Name'), 'eu-2')
-    await user.click(within(dialog).getByRole('checkbox', { name: /Residency pool \(routing only\)/ }))
+    await user.click(within(dialog).getByRole('checkbox', { name: /^Residency pool$/ }))
     expect(within(dialog).getByText('Residency needs a region.')).toBeInTheDocument()
     expect(create).toBeDisabled()
     await user.type(within(dialog).getByLabelText('Region'), 'EU_Central')
@@ -109,7 +111,7 @@ describe('Relay pools: list', () => {
     expect(create).toBeDisabled()
     await user.clear(within(dialog).getByLabelText('Region'))
     await user.type(within(dialog).getByLabelText('Region'), 'eu-central-1')
-    expect(within(dialog).getByText(/not enforced/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/once every active relay supports the workspace policy/)).toBeInTheDocument()
     await user.click(create)
     await screen.findByRole('status')
     expect(writes(calls)[0].body).toEqual({ name: 'eu-2', region: 'eu-central-1', residency: true })
@@ -210,7 +212,7 @@ describe('Relay pools: detail', () => {
     await user.click(submit)
     expect(await screen.findByRole('status')).toHaveTextContent('Pool renamed to eu-west.')
     expect(writes(calls)).toEqual([expect.objectContaining({ method: 'PATCH', body: { name: 'eu-west' } })])
-    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2)
+    expect(calls.filter((c) => c.method === 'GET' && c.path === `/provider/relay-pools/${EU_POOL_ID}`)).toHaveLength(2)
   })
 
   it('region/residency: pool_in_use explains to create a new pool and move tenants', async () => {

@@ -37,6 +37,8 @@ type Service struct {
 	// allowPrivateAddrs: development-only — advertise relays seen on a
 	// private (RFC 1918) address so a LAN lab can exercise the relay path.
 	allowPrivateAddrs bool
+	// policyLease is sent with every workspace policy (D-40, PR 3).
+	policyLease time.Duration
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {
@@ -46,7 +48,18 @@ func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration)
 		certTTL:                  certTTL,
 		heartbeatDBWriteInterval: 5 * time.Minute,
 		labelHoldDown:            60 * time.Second,
+		policyLease:              DefaultPolicyLease,
 	}
+}
+
+// WithPolicyLease sets RELAY_POLICY_LEASE (D-40): how long a relay may keep
+// using its workspace policy without a renewed one. main.go refuses values
+// below MinPolicyLease.
+func (s *Service) WithPolicyLease(d time.Duration) *Service {
+	if d > 0 {
+		s.policyLease = d
+	}
+	return s
 }
 
 // WithPrivateRelayAddrs lets relays whose observed address is private

@@ -262,7 +262,7 @@ function ChangePoolDialog({
           {crossRegion && primary && (
             <Alert role="note">
               <AlertDescription>
-                {current.name} is a residency pool (routing only) in {current.region ?? 'no region'}; {primary.name} is in{' '}
+                {current.name} is a residency pool in {current.region ?? 'no region'}; {primary.name} is in{' '}
                 {primary.region ?? 'no region'}. This moves the tenant’s relay traffic to another region.
               </AlertDescription>
             </Alert>

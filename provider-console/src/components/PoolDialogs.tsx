@@ -175,7 +175,7 @@ function PlacementFields({
             onChange={(e) => onResidency(e.target.checked)}
             aria-describedby="pool-residency-note"
           />
-          <span>Residency pool (routing only)</span>
+          <span>Residency pool</span>
         </label>
         <p id="pool-residency-note" className="text-xs text-muted-foreground">
           {RESIDENCY_NOTE}

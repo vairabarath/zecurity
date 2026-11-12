@@ -14,6 +14,7 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod tls;
+mod workspace_policy;
 
 pub mod relay {
     pub mod v1 {
@@ -63,10 +64,20 @@ async fn main() -> Result<()> {
     );
 
     let state = state::RelayState::new();
+    // Relay pools PR 3 (D-40): the persisted workspace policy (none on a
+    // first start: workspace peers are refused until the first heartbeat
+    // applies one). The lease is also checked without heartbeats.
+    let policy = workspace_policy::WorkspacePolicy::load(
+        std::path::Path::new(&cfg.state_dir),
+        workspace_policy::binding_for(&cfg.relay_id, &certs.current().intermediate_ca_pem),
+    );
+    policy
+        .clone()
+        .spawn_lease_watch(workspace_policy::LEASE_CHECK_PERIOD);
     // heartbeat::run returns only when the controller reports this relay
     // revoked (terminal); the listener then closes every connection (F-8).
     let (revoked_tx, revoked_rx) = tokio::sync::oneshot::channel::<()>();
-    let heartbeat = heartbeat::run(cfg.clone(), certs.clone(), state.clone());
+    let heartbeat = heartbeat::run(cfg.clone(), certs.clone(), state.clone(), policy.clone());
     tokio::spawn(async move {
         heartbeat.await;
         let _ = revoked_tx.send(());
@@ -84,6 +95,7 @@ async fn main() -> Result<()> {
         cfg.bind_addr,
         certs,
         state,
+        policy,
         cfg.runtime_limits,
         crl,
         revoked,

@@ -158,7 +158,7 @@ function PoolTable({ pools }: { pools: RelayPoolSummary[] }) {
                   <RegionCode region={p.region} />
                 </TableCell>
                 <TableCell>
-                  <ResidencyBadge residency={p.residency} />
+                  <ResidencyBadge residency={p.residency} enforced={p.residency_enforced} />
                 </TableCell>
                 <TableCell>
                   <PoolStateBadge pool={p} withTime />

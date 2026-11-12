@@ -79,6 +79,12 @@ message HeartbeatRequest {
   // older relay), which is not the same as zero traffic.
   optional uint64 bytes_client_to_connector = 9;
   optional uint64 bytes_connector_to_client = 10;
+  // Relay pools PR 3 (Decision Record D-40): the relay can enforce a
+  // workspace policy, and the policy version it has applied (0 = none yet).
+  // The controller shows a residency pool as enforced only while every relay
+  // in it supports the policy and has applied the current version.
+  bool workspace_policy_supported = 11;
+  uint64 workspace_policy_version_applied = 12;
 }
 
 message HeartbeatResponse {
@@ -88,6 +94,21 @@ message HeartbeatResponse {
   // whose identity is revoked. The relay adds them to a sticky set (D20) and
   // drops those connectors; an empty list never unblocks anything.
   repeated string revoked_connector_spiffe_ids = 3;
+  // Relay pools PR 3 (D-40): the workspace policy of the relay's pool.
+  // workspace_policy_version 0 means "no policy in this response" (the
+  // controller could not read it): the relay keeps its last policy and its
+  // lease is not renewed. Versions only increase, across every pool, so a
+  // relay ignores an older version (including after a move between pools).
+  // workspace_policy_enforced false: the pool is not a residency pool; the
+  // relay accepts every workspace. true: the relay accepts connector and
+  // client peers only of allowed_workspace_ids, ends the sessions of a
+  // workspace as soon as an applied policy drops it, and, once
+  // workspace_policy_lease_seconds pass without a renewed policy, refuses new
+  // workspace sessions and ends existing ones.
+  bool workspace_policy_enforced = 4;
+  repeated string allowed_workspace_ids = 5;
+  uint64 workspace_policy_version = 6;
+  uint32 workspace_policy_lease_seconds = 7;
 }
 
 // Connector -> Relay probe over the QUIC data path (not an RPC).

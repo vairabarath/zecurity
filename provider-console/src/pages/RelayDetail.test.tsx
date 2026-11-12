@@ -5,7 +5,7 @@ import type { RelayDetail } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
 import { RelayDangerZone } from '@/components/RelayDangerZone'
 import { RelayDrainCard } from '@/components/RelayDrainCard'
-import { DEFAULT_POOL } from '@/test/pools'
+import { DEFAULT_POOL, RELAY_POLICY } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 const ID = '11111111-1111-1111-1111-111111111111'
@@ -51,7 +51,7 @@ function detail(over: Partial<RelayDetail> = {}): RelayDetail {
       { connector_id: 'c-1', tenant_id: TENANT, attached_at: '2026-10-03T00:00:00Z', last_confirmed: iso(-5 * 60_000), source: 'heartbeat' },
     ],
     attachments_truncated: false,
-    pool: DEFAULT_POOL,
+    pool: DEFAULT_POOL, policy: RELAY_POLICY,
     ...over,
   }
 }

@@ -174,3 +174,53 @@ func TestRelayPoolReads_FailoverState(t *testing.T) {
 		t.Fatalf("pool states %v", got)
 	}
 }
+
+// D-40 (PR 3): a residency pool reads as enforced only while every active
+// relay in it supports the workspace policy and has applied its current
+// version; relays show their own policy status.
+func TestRelayPoolReads_ResidencyEnforced(t *testing.T) {
+	e := newReadEnv(t)
+	pool := scalar[string](t, e.pool, `INSERT INTO relay_pools (name, region, residency) VALUES ('india', 'in-south-1', true) RETURNING id::text`)
+	exec(t, e.pool, `UPDATE relays SET pool_id = $2, status = 'active' WHERE id = $1`, e.relayID, pool)
+	version := scalar[int64](t, e.pool, `SELECT policy_version FROM relay_pools WHERE id = $1`, pool)
+
+	enforced := func() bool {
+		t.Helper()
+		r := e.get(t, "/provider/relay-pools/"+pool, e.opsTok)
+		var d struct {
+			ResidencyEnforced bool `json:"residency_enforced"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &d); err != nil || r.code != 200 {
+			t.Fatalf("pool detail %d %s: %v", r.code, r.body, err)
+		}
+		return d.ResidencyEnforced
+	}
+	relayCurrent := func() bool {
+		t.Helper()
+		r := e.get(t, "/provider/relays/"+e.relayID, e.opsTok)
+		var d struct {
+			Policy struct {
+				Supported bool `json:"supported"`
+				Current   bool `json:"current"`
+			} `json:"policy"`
+		}
+		_ = json.Unmarshal([]byte(r.body), &d)
+		return d.Policy.Supported && d.Policy.Current
+	}
+	if enforced() || relayCurrent() {
+		t.Fatal("a relay that never reported the policy: not enforced")
+	}
+	exec(t, e.pool, `UPDATE relays SET policy_supported = true, policy_version_acked = $2 WHERE id = $1`, e.relayID, version-1)
+	if enforced() || relayCurrent() {
+		t.Fatal("a relay behind the current version: not enforced")
+	}
+	exec(t, e.pool, `UPDATE relays SET policy_version_acked = $2 WHERE id = $1`, e.relayID, version)
+	if !enforced() || !relayCurrent() {
+		t.Fatal("every active relay current: enforced")
+	}
+	// A new, unaware relay joins the pool: no longer enforced.
+	exec(t, e.pool, `INSERT INTO relays (name, status, pool_id) VALUES ('new-relay', 'active', $1)`, pool)
+	if enforced() {
+		t.Fatal("an active relay without policy support: not enforced")
+	}
+}

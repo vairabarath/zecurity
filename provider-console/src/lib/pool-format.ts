@@ -5,7 +5,7 @@ import type { RelayPoolRef, RelayPoolSummary } from '@/api/types'
 export function poolOptionLabel(p: RelayPoolSummary): string {
   const parts = [p.name]
   if (p.region) parts.push(p.region)
-  if (p.residency) parts.push('residency (routing only)')
+  if (p.residency) parts.push(p.residency_enforced ? 'residency (enforced)' : 'residency (not enforced)')
   parts.push(`${p.eligible_relays} eligible relay${p.eligible_relays === 1 ? '' : 's'}`)
   return parts.join(' · ')
 }

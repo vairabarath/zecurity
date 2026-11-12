@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronRight, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { getCertificates, getHealth, listRelayPools, listRelays, queryAudit } from '@/api/reads'
+import { getCertificates, getHealth, listRelayPools, queryAudit } from '@/api/reads'
 import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelayPoolSummary, RelaySummary } from '@/api/types'
 import { hasRole } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
@@ -16,6 +16,7 @@ import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { bucketFor, formatRelative } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
+import { fetchFleet, MAX_RELAY_PAGES, RELAY_PAGE_LIMIT, type Fleet } from '@/lib/fleet'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
 import { cn } from '@/lib/utils'
 
@@ -31,27 +32,7 @@ import { cn } from '@/lib/utils'
 // relay-ops never requests certificates, audit or health (it would be refused).
 // Nothing here opens a tenant, so this page writes no audit entry.
 
-const RELAY_PAGE_LIMIT = 200
-const MAX_RELAY_PAGES = 10
 const HIGH_USE_PCT = 85
-
-interface Fleet {
-  relays: RelaySummary[]
-  /** More relays exist than were read (MAX_RELAY_PAGES reached). */
-  truncated: boolean
-}
-
-async function fetchFleet(): Promise<Fleet> {
-  const relays: RelaySummary[] = []
-  let cursor: string | undefined
-  for (let i = 0; i < MAX_RELAY_PAGES; i++) {
-    const page: Page<RelaySummary> = await listRelays({ limit: RELAY_PAGE_LIMIT, cursor })
-    relays.push(...page.items)
-    if (!page.next_cursor) return { relays, truncated: false }
-    cursor = page.next_cursor
-  }
-  return { relays, truncated: true }
-}
 
 const fetchSoonCertificates = () => getCertificates({ within: '168h', limit: 6 })
 const fetchRecentAudit = () => queryAudit({ limit: 6 })

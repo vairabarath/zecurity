@@ -277,6 +277,14 @@ func main() {
 			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
 		).WithProvisioningAuth(mustEnv("JWT_SECRET")).
 		WithPrivateRelayAddrs(devAllowPrivateRelayAddrs())
+	// D-40 (relay pools PR 3): how long a relay may keep using its workspace
+	// policy without a renewed one. Below four heartbeats a few missed
+	// heartbeats would stop a residency pool.
+	relayPolicyLease := mustDuration("RELAY_POLICY_LEASE", relay.DefaultPolicyLease)
+	if relayPolicyLease < relay.MinPolicyLease {
+		log.Fatalf("RELAY_POLICY_LEASE=%s is below the minimum %s (four heartbeat intervals)", relayPolicyLease, relay.MinPolicyLease)
+	}
+	relaySvc.WithPolicyLease(relayPolicyLease)
 	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
 		rs, err := relayStore.ListRevokedRelaySerials(ctx)
 		if err != nil {
