@@ -60,11 +60,12 @@ rustls-pemfile = "2"
 quinn              = "0.11"
 quinn-proto        = "0.11"
 smoltcp            = { version = "0.11", features = ["proto-ipv4", "socket-tcp", "socket-udp"] }
-rtnetlink          = "0.14"
-netlink-packet-route = "0.19"
 futures            = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Sprint 9 TUN routing (tun.rs). Linux-only: netlink does not exist on Windows.
+rtnetlink          = "0.14"
+netlink-packet-route = "0.19"
 # PENDING-17: hardware-backed device keys. Linux-only — never attempted on a
 # hypothetical future non-Linux target.
 tss-esapi = "7"
@@ -74,6 +75,16 @@ tss-esapi = "7"
 # resolves to avoid a duplicate second copy in the build.
 picky-asn1 = "0.10"
 picky-asn1-der = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+# Windows client: the daemon runs as a Windows Service (win_service.rs), and
+# the IPC named pipe gets an explicit security descriptor (ipc.rs).
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
 
 [build-dependencies]
 tonic-build = "0.12"

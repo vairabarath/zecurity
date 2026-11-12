@@ -1,3 +1,6 @@
+// The Linux collectors below are compiled, and unit-tested, on every
+// platform; on Windows only `collect` (OS report only) runs.
+#![cfg_attr(windows, allow(dead_code))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -478,8 +481,43 @@ pub(crate) struct PostureReport {
     pub os_version: String,
 }
 
+#[cfg(not(windows))]
 pub(crate) async fn collect() -> PostureReport {
     collect_with(Path::new("/"), Arc::new(RealCommandRunner), DEFAULT_TIMEOUT).await
+}
+
+/// Windows: the `linux.*` collectors don't apply and `windows.*` checks are
+/// not built yet, so only the OS is reported. A posture profile that requires
+/// a check evaluates it as unsupported on the controller (fail closed unless
+/// the profile sets allow_unsupported).
+#[cfg(windows)]
+pub(crate) async fn collect() -> PostureReport {
+    let version = match tokio::time::timeout(
+        DEFAULT_TIMEOUT,
+        RealCommandRunner.run("cmd", &["/C", "ver"]),
+    )
+    .await
+    {
+        Ok(Ok(out)) if out.status.success() => windows_version_from_ver(&String::from_utf8_lossy(&out.stdout)),
+        _ => "unknown".into(),
+    };
+    PostureReport {
+        checks: Vec::new(),
+        os_name: "Windows".into(),
+        os_version: version,
+    }
+}
+
+/// `ver` prints e.g. "Microsoft Windows [Version 10.0.22631.4317]".
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_version_from_ver(output: &str) -> String {
+    output
+        .split("[Version ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 pub(crate) async fn collect_with(
@@ -511,5 +549,19 @@ pub(crate) async fn collect_with(
         checks: vec![os_check, luks_check, fw_check, sb_check],
         os_name,
         os_version,
+    }
+}
+
+#[cfg(test)]
+mod windows_ver_tests {
+    #[test]
+    fn windows_version_is_parsed_from_ver_output() {
+        use crate::posture::windows_version_from_ver;
+        assert_eq!(
+            windows_version_from_ver("\r\nMicrosoft Windows [Version 10.0.22631.4317]\r\n"),
+            "10.0.22631.4317"
+        );
+        assert_eq!(windows_version_from_ver("garbage"), "unknown");
+        assert_eq!(windows_version_from_ver("Microsoft Windows [Version ]"), "unknown");
     }
 }

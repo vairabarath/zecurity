@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::FutureExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -21,7 +22,9 @@ use crate::grpc::{
 };
 use crate::posture;
 use uuid::Uuid;
-use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
+use crate::ipc::{IpcRequest, IpcResource, IpcResponse};
+#[cfg(unix)]
+use crate::ipc::{check_same_user, ipc_socket_path};
 use crate::login::LoginResult;
 use crate::net_stack;
 use crate::relay_pool::RelayPool;
@@ -70,9 +73,7 @@ struct AclSyncResult {
 }
 
 pub async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-        .init();
+    init_tracing();
 
     info!(
         name = env!("CARGO_PKG_NAME"),
@@ -167,6 +168,81 @@ pub async fn run() -> Result<()> {
             run_cert_renewal_scheduler(state_clone, conf_clone, tun_slot_clone).await;
         });
     }
+    #[cfg(unix)]
+    let listener = bind_ipc_listener()?;
+    #[cfg(windows)]
+    let mut pipe = crate::ipc::create_pipe_server(true, &conf.ipc_user_sid)
+        .context("create the IPC named pipe")?;
+    #[cfg(windows)]
+    info!(pipe = %crate::ipc::ipc_pipe_name(), "IPC named pipe ready");
+
+    // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
+    // and restarts the tunnel when the version changes — the timer counterpart
+    // to the action-triggered sync in handle_request. See run_acl_sync_scheduler.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
+        tokio::spawn(async move {
+            run_acl_sync_scheduler(state_clone, conf_clone, tun_slot_clone).await;
+        });
+    }
+    // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
+    // the scheduler's own tick keeps running whether or not this is connected.
+    tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
+    #[cfg(unix)]
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                if !check_same_user(&stream) {
+                    warn!("rejected IPC connection from a different user");
+                    continue;
+                }
+                let state = Arc::clone(&state);
+                let conf = conf.clone();
+                let tun_slot = Arc::clone(&tun_slot);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, state, conf, tun_slot).await {
+                        error!(error = %e, "IPC connection error");
+                    }
+                });
+            }
+            Err(e) => error!(error = %e, "IPC accept error"),
+        }
+    }
+
+    // Windows: the pipe's security descriptor (SYSTEM, Administrators and the
+    // enrolling user only) is the same-user check. Each accepted client gets
+    // this instance; a fresh one is created for the next client first.
+    #[cfg(windows)]
+    loop {
+        if let Err(e) = pipe.connect().await {
+            error!(error = %e, "IPC accept error");
+            continue;
+        }
+        let next = match crate::ipc::create_pipe_server(false, &conf.ipc_user_sid) {
+            Ok(next) => next,
+            Err(e) => {
+                error!(error = %e, "create the next IPC pipe instance");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let stream = std::mem::replace(&mut pipe, next);
+        let state = Arc::clone(&state);
+        let conf = conf.clone();
+        let tun_slot = Arc::clone(&tun_slot);
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, state, conf, tun_slot).await {
+                error!(error = %e, "IPC connection error");
+            }
+        });
+    }
+}
+
+/// Binds the daemon's Unix socket and tells systemd the daemon is ready.
+#[cfg(unix)]
+fn bind_ipc_listener() -> Result<UnixListener> {
     let socket_path = ipc_socket_path();
 
     // Remove stale socket from a previous run.
@@ -193,48 +269,42 @@ pub async fn run() -> Result<()> {
     // pings every half-interval so a transient slow tick never trips the timeout.
     sd_spawn_watchdog();
 
-    // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
-    // and restarts the tunnel when the version changes — the timer counterpart
-    // to the action-triggered sync in handle_request. See run_acl_sync_scheduler.
-    {
-        let state_clone = Arc::clone(&state);
-        let conf_clone = conf.clone();
-        let tun_slot_clone = Arc::clone(&tun_slot);
-        tokio::spawn(async move {
-            run_acl_sync_scheduler(state_clone, conf_clone, tun_slot_clone).await;
-        });
-    }
-    // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
-    // the scheduler's own tick keeps running whether or not this is connected.
-    tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                if !check_same_user(&stream) {
-                    warn!("rejected IPC connection from a different user");
-                    continue;
-                }
-                let state = Arc::clone(&state);
-                let conf = conf.clone();
-                let tun_slot = Arc::clone(&tun_slot);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state, conf, tun_slot).await {
-                        error!(error = %e, "IPC connection error");
-                    }
-                });
-            }
-            Err(e) => error!(error = %e, "IPC accept error"),
-        }
-    }
+    Ok(listener)
 }
 
-async fn handle_connection(
-    stream: tokio::net::UnixStream,
+/// The daemon's log output: stdout (the journal) on Linux and in a Windows
+/// console; a file under %ProgramData%\Zecurity\logs when running as a
+/// Windows service, whose stdout goes nowhere.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::new("info");
+    #[cfg(windows)]
+    if crate::win_service::running_as_service() {
+        let path = crate::win_service::log_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+            return;
+        }
+    }
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+async fn handle_connection<S>(
+    stream: S,
     state: SharedState,
     conf: config::ClientConf,
     tun_slot: TunSlot,
-) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
 
@@ -271,7 +341,7 @@ async fn handle_connection(
 
     if shutdown {
         info!("shutdown requested via IPC — exiting");
-        std::process::exit(0);
+        crate::exit_daemon(0);
     }
 
     Ok(())
@@ -884,7 +954,7 @@ async fn restore_tunnel(state: &SharedState, conf: &config::ClientConf, tun_slot
     .await;
     if state.read().await.device_state == DeviceState::Revoked {
         info!("device revoked — exiting");
-        std::process::exit(0);
+        crate::exit_daemon(0);
     }
 }
 
@@ -3928,6 +3998,7 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     s.tunnel_wanted = stored.tunnel_wanted;
 }
 
+#[cfg(unix)]
 fn sd_notify_ready() {
     let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
         return;
@@ -3936,6 +4007,7 @@ fn sd_notify_ready() {
         std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(b"READY=1\n", &path));
 }
 
+#[cfg(unix)]
 fn sd_spawn_watchdog() {
     let Ok(usec_str) = std::env::var("WATCHDOG_USEC") else {
         return;
@@ -5177,7 +5249,7 @@ async fn sync_and_restart_if_changed(
             // can exit immediately (Sprint 19 Track 2 / PENDING-13).
             if state.read().await.device_state == DeviceState::Revoked {
                 info!("device revoked — exiting");
-                std::process::exit(0);
+                crate::exit_daemon(0);
             }
             false
         }
@@ -5354,7 +5426,7 @@ async fn fetch_and_store_acl(
             // mirrors the shutdown precedent in handle_connection.
             if directive == DeviceDirective::DirectiveRevoked {
                 info!("device revoked — exiting");
-                std::process::exit(0);
+                crate::exit_daemon(0);
             }
         }
         Err(e) => {

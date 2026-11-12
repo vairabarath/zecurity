@@ -103,8 +103,14 @@ pub(crate) fn status_line() -> Option<String> {
 /// re-applies even when the names didn't change (a new TUN link lost its
 /// resolved config). Returns the new state; never fails the caller: a DNS
 /// problem must not take IP resources down.
+#[cfg_attr(windows, allow(unreachable_code, unused_variables))]
 pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> DnsState {
     let names = names_in(cfg);
+    // Windows has no systemd-resolved; its equivalent (NRPT rules for the
+    // names) is not built yet. IP resources are unaffected, exactly as on a
+    // Linux host without resolved.
+    #[cfg(windows)]
+    return unsupported(names);
     let prev = state();
     if !force && prev.configured == names && prev.status.is_some() != names.is_empty() {
         name_map::with(|m| m.set_active(names.clone()));
@@ -149,6 +155,19 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
     if ok && !names.is_empty() {
         tracing::info!(names = names.len(), "DNS name resources active");
     }
+    set_state(s.clone());
+    s
+}
+
+/// Windows: no names are routed; status says why when there are some.
+#[cfg(windows)]
+fn unsupported(names: BTreeSet<String>) -> DnsState {
+    name_map::with(|m| m.set_active(BTreeSet::new()));
+    let s = DnsState {
+        configured: BTreeSet::new(),
+        status: (!names.is_empty())
+            .then(|| Err("DNS name resources are not supported on Windows yet".to_string())),
+    };
     set_state(s.clone());
     s
 }

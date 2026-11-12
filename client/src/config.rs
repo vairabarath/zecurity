@@ -14,6 +14,11 @@ pub struct ClientConf {
     /// Only set in dev. Empty = use compiled-in constant from appmeta.
     #[serde(default)]
     pub http_base_url: String,
+    /// Windows only: the SID of the enrolling user, the one non-admin account
+    /// the daemon's IPC pipe admits (ipc::pipe_sddl). Written by
+    /// client-install.ps1; unused on Linux, where the daemon runs as that user.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ipc_user_sid: String,
 }
 
 impl ClientConf {
@@ -60,12 +65,42 @@ fn controller_host_for_url(controller_address: &str) -> String {
     }
 }
 
+/// The system-wide config file.
+#[cfg(not(windows))]
+fn system_conf_path() -> PathBuf {
+    PathBuf::from("/etc/zecurity/client.conf")
+}
+
+/// `%ProgramData%\Zecurity`: the Windows client's system-wide directory
+/// (config, state, logs). The installer grants the enrolling user write
+/// access, matching Linux, where the daemon runs as that user.
+#[cfg(windows)]
+pub fn program_data_dir() -> PathBuf {
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("Zecurity")
+}
+
+#[cfg(windows)]
+fn system_conf_path() -> PathBuf {
+    program_data_dir().join("client.conf")
+}
+
+#[cfg(not(windows))]
 pub fn conf_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/etc/zecurity/client.conf")];
+    let mut paths = vec![system_conf_path()];
     if let Some(d) = dirs::config_dir() {
         paths.push(d.join("zecurity-client").join("client.conf"));
     }
     paths
+}
+
+/// Windows: the system file only. The daemon runs as LocalSystem and can't
+/// see the user's profile, so a per-user file would be ignored by it.
+#[cfg(windows)]
+pub fn conf_paths() -> Vec<PathBuf> {
+    vec![system_conf_path()]
 }
 
 pub fn load() -> Result<ClientConf> {
@@ -93,6 +128,9 @@ pub fn load() -> Result<ClientConf> {
             if !c.http_base_url.is_empty() {
                 merged.http_base_url = c.http_base_url;
             }
+            if !c.ipc_user_sid.is_empty() {
+                merged.ipc_user_sid = c.ipc_user_sid;
+            }
             found = true;
         }
     }
@@ -104,8 +142,30 @@ pub fn load() -> Result<ClientConf> {
     }
 }
 
+/// Windows: `setup` updates the one system file instead of replacing it, so
+/// the installer's values (controller addresses, `ipc_user_sid`) survive.
+/// Fields left empty in `update` keep their current values.
+#[cfg(windows)]
+pub fn merged_with_existing(update: ClientConf) -> ClientConf {
+    let mut merged: ClientConf = std::fs::read_to_string(system_conf_path())
+        .ok()
+        .and_then(|raw| toml::from_str(&raw).ok())
+        .unwrap_or_default();
+    merged.workspace = update.workspace;
+    if !update.controller_address.is_empty() {
+        merged.controller_address = update.controller_address;
+    }
+    if !update.connector_address.is_empty() {
+        merged.connector_address = update.connector_address;
+    }
+    if !update.http_base_url.is_empty() {
+        merged.http_base_url = update.http_base_url;
+    }
+    merged
+}
+
 pub fn save(conf: &ClientConf) -> Result<PathBuf> {
-    let system_path = PathBuf::from("/etc/zecurity/client.conf");
+    let system_path = system_conf_path();
     let user = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("zecurity-client")

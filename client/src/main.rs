@@ -20,8 +20,19 @@ mod state_store;
 mod stream_watch;
 mod transport;
 mod trust;
+// The TUN data plane: nftables/fwmark/netlink on Linux, Wintun + per-IP
+// routes on Windows. Both expose the same surface (see tun_windows.rs).
+#[cfg_attr(windows, path = "tun_windows.rs")]
 mod tun;
+mod tun_shared;
+// The Windows module's command renderers are tested on Linux too.
+#[cfg(all(test, not(windows)))]
+#[path = "tun_windows.rs"]
+#[allow(dead_code)]
+mod tun_windows_tests;
 mod tunnel_pool;
+#[cfg(windows)]
+mod win_service;
 #[cfg(target_os = "linux")]
 mod tpm;
 
@@ -37,7 +48,8 @@ mod cmd {
 }
 
 mod posture;
-#[cfg(test)]
+// The Linux collectors' tests use Unix process APIs.
+#[cfg(all(test, unix))]
 mod posture_tests;
 
 // Certificate audit bug 1 (client): bootstrap-trust tests and their fixtures.
@@ -59,7 +71,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Write workspace name (and optional dev overrides) to /etc/zecurity/client.conf
+    /// Write workspace name (and optional dev overrides) to the client config
+    /// (/etc/zecurity/client.conf; %ProgramData%\Zecurity\client.conf on Windows)
     Setup {
         #[arg(long)]
         workspace: String,
@@ -87,18 +100,35 @@ enum Commands {
     Up,
     /// Disconnect and remove resource routes
     Down,
-    /// Run as background daemon (launched by systemd — not for direct use)
+    /// Run as background daemon (launched by systemd, or the Windows Service
+    /// Control Manager — not for direct use)
     #[command(hide = true)]
     Daemon,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install default crypto provider");
 
     let cli = Cli::parse();
+
+    // On Windows the daemon is a service: the Service Control Manager's
+    // dispatcher must own this thread, and it starts its own runtime.
+    #[cfg(windows)]
+    if matches!(cli.command, Commands::Daemon) {
+        return win_service::run();
+    }
+
+    // What #[tokio::main] expanded to before the Windows port.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed building the Runtime")
+        .block_on(run_command(cli))
+}
+
+async fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Setup {
             workspace,
@@ -115,4 +145,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Down => cmd::down::run().await,
         Commands::Daemon => daemon::run().await,
     }
+}
+
+/// Ends the daemon process. On Windows it first reports the service as
+/// stopped, so the Service Control Manager does not treat a deliberate exit
+/// (Shutdown request, revoked device) as a crash and restart it; on Linux it
+/// is `std::process::exit`, as before.
+pub(crate) fn exit_daemon(code: i32) -> ! {
+    #[cfg(windows)]
+    win_service::report_stopped(code);
+    std::process::exit(code)
 }

@@ -14,6 +14,8 @@ pub async fn run(
         http_base_url: http_base.unwrap_or_default(),
         ..Default::default()
     };
+    #[cfg(windows)]
+    let conf = crate::config::merged_with_existing(conf);
     let path = save(&conf)?;
     println!("Config written to {}", path.display());
     println!("Run `zecurity-client login` to authenticate.");

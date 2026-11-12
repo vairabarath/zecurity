@@ -1,8 +1,10 @@
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 // ── Wire types ───────────────────────────────────────────────────────────────
@@ -114,6 +116,7 @@ pub struct IpcResponse {
 ///
 /// Matches `RuntimeDirectory=zecurity-client` in the systemd unit.
 /// Override with `ZECURITY_DAEMON_SOCKET` for dev/testing.
+#[cfg(unix)]
 pub fn ipc_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("ZECURITY_DAEMON_SOCKET") {
         return PathBuf::from(p);
@@ -146,21 +149,140 @@ pub fn check_same_user(stream: &UnixStream) -> bool {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn check_same_user(_stream: &UnixStream) -> bool {
     true
+}
+
+// ── Windows named pipe ───────────────────────────────────────────────────────
+
+/// The daemon's named pipe on Windows (the counterpart of the Unix socket).
+/// Override with `ZECURITY_DAEMON_PIPE` for dev/testing.
+#[cfg(windows)]
+pub fn ipc_pipe_name() -> String {
+    std::env::var("ZECURITY_DAEMON_PIPE").unwrap_or_else(|_| r"\\.\pipe\zecurity-client".into())
+}
+
+/// True for a well-formed SID string (`S-1-...`, digits and dashes only).
+/// Anything else is refused, so the configured value can never add an access
+/// rule of its own to the pipe's security descriptor.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_valid_sid(sid: &str) -> bool {
+    let Some(rest) = sid.strip_prefix("S-1-") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.split('-').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The pipe's security descriptor (SDDL): protected DACL, full access for
+/// SYSTEM and Administrators, read/write for the enrolling user. This is the
+/// Windows form of the Linux same-user check: the daemon runs as SYSTEM, the
+/// CLI as the enrolling user. Without a valid user SID it fails closed to
+/// SYSTEM and Administrators only.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn pipe_sddl(user_sid: &str) -> String {
+    let mut sddl = String::from("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    if is_valid_sid(user_sid) {
+        sddl.push_str(&format!("(A;;GRGW;;;{user_sid})"));
+    }
+    sddl
+}
+
+/// Creates one instance of the daemon's named pipe. `first` claims the name
+/// (fails if another process already owns it, so the pipe can't be squatted).
+#[cfg(windows)]
+pub fn create_pipe_server(
+    first: bool,
+    user_sid: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows_sys::Win32::Foundation::{LocalFree, FALSE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+    if !user_sid.is_empty() && !is_valid_sid(user_sid) {
+        tracing::warn!("ipc_user_sid in client.conf is not a valid SID; the IPC pipe allows only SYSTEM and Administrators");
+    }
+    let sddl: Vec<u16> = pipe_sddl(user_sid).encode_utf16().chain(Some(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated UTF-16; on success `descriptor` is a
+    // LocalAlloc'd buffer that is freed below after the pipe is created.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: FALSE,
+    };
+    // SAFETY: `attrs` and the descriptor it points to outlive the call.
+    let result = unsafe {
+        tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                ipc_pipe_name(),
+                &mut attrs as *mut SECURITY_ATTRIBUTES as *mut std::ffi::c_void,
+            )
+    };
+    // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(descriptor as _) };
+    result
 }
 
 // ── CLI-side helpers ─────────────────────────────────────────────────────────
 
 /// Connect to the daemon and send one request. Fails if the socket is not present.
+#[cfg(unix)]
 pub async fn send_ipc(req: &IpcRequest) -> Result<IpcResponse> {
     let path = ipc_socket_path();
     let stream = UnixStream::connect(&path)
         .await
         .with_context(|| format!("connect to daemon socket {}", path.display()))?;
+    exchange(stream, req).await
+}
 
-    let (reader, mut writer) = stream.into_split();
+/// Connect to the daemon's named pipe and send one request. Fails if the
+/// daemon is not running.
+#[cfg(windows)]
+pub async fn send_ipc(req: &IpcRequest) -> Result<IpcResponse> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let name = ipc_pipe_name();
+    let mut attempts = 0;
+    let client = loop {
+        match ClientOptions::new().open(&name) {
+            Ok(client) => break client,
+            // Every instance is serving another client; one frees up shortly.
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("connect to daemon pipe {name}"));
+            }
+        }
+    };
+    exchange(client, req).await
+}
+
+/// One newline-delimited JSON request and its response (ADR-002).
+async fn exchange<S>(stream: S, req: &IpcRequest) -> Result<IpcResponse>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
 
     let mut line = serde_json::to_string(req)?;
     line.push('\n');
@@ -178,14 +300,65 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
         return Ok(resp);
     }
 
+    #[cfg(unix)]
     let _ = tokio::process::Command::new("systemctl")
+        .args(["start", "zecurity-client"])
+        .status()
+        .await;
+    // Starting a service needs rights a standard user may lack; the installer
+    // sets the service to start automatically, so this is the fallback.
+    #[cfg(windows)]
+    let _ = tokio::process::Command::new("sc.exe")
         .args(["start", "zecurity-client"])
         .status()
         .await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    send_ipc(req)
-        .await
-        .context("daemon could not be started — run: systemctl status zecurity-client")
+    send_ipc(req).await.context(if cfg!(windows) {
+        "daemon could not be started — run: Get-Service zecurity-client (start it from an elevated PowerShell with Start-Service zecurity-client)"
+    } else {
+        "daemon could not be started — run: systemctl status zecurity-client"
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_sid, pipe_sddl};
+
+    #[test]
+    fn sid_validation_accepts_only_plain_sid_strings() {
+        assert!(is_valid_sid("S-1-5-21-1004336348-1177238915-682003330-1001"));
+        assert!(is_valid_sid("S-1-5-18"));
+        for bad in [
+            "",
+            "S-1-",
+            "S-1-5-",
+            "S-1-5--18",
+            "s-1-5-18",
+            "S-1-5-18)(A;;GA;;;WD",
+            "S-1-5-18 ",
+            "WD",
+        ] {
+            assert!(!is_valid_sid(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn pipe_sddl_admits_system_admins_and_the_enrolling_user_only() {
+        assert_eq!(
+            pipe_sddl("S-1-5-21-1-2-3-1001"),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;S-1-5-21-1-2-3-1001)"
+        );
+    }
+
+    #[test]
+    fn pipe_sddl_fails_closed_without_a_valid_sid() {
+        assert_eq!(pipe_sddl(""), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+        // An injection attempt adds nothing: Everyone (WD) is never granted.
+        assert_eq!(
+            pipe_sddl("S-1-5-18)(A;;GA;;;WD"),
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        );
+    }
 }
