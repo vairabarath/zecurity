@@ -1,6 +1,6 @@
 ---
 type: adr
-status: approved-pending
+status: implemented
 id: PENDING-09
 domain: zero-trust
 priority: P2
@@ -10,10 +10,12 @@ related:
   - PENDING-08-Device-Posture-Health
   - PENDING-06-MFA-Step-Up-Auth
 updated: 2026-11-12
-tags: [pending, adr, zero-trust, authorization]
+tags: [pending, finished, adr, zero-trust, authorization]
 ---
 
 # Pending ADR 09 — Continuous / Re-evaluated Authorization
+
+> **Implemented (2026-11-12), PR #198** `[schema: reset DB]`. Options A and B are in place (built over earlier sprints and verified here); C-1 … C-5 were decided and C-1 and D-8 built. **Option C (risk scoring, step-up) is deferred to PENDING-06.** What shipped, where it lives and how it was verified: **Implementation summary** at the end. The sections below keep the original discussion and the build history.
 
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 >
@@ -118,7 +120,7 @@ The Context above is out of date: connectors have no 60 s TTL any more, and Opti
 
 **Schema:** `056_client_device_session.sql` `[schema: reset DB]`.
 
-## Build (2026-11-12, local branch `fix/pending09-scim-notify-log`, not pushed)
+## Build (2026-11-12, merged in PR #198 as c1609588)
 
 - **a4528303, C-4:** SCIM's six post-commit `NotifyPolicyChange` calls go through one helper that logs errors. Note: `NotifyPolicyChange` only fails on an empty workspace id. The push is asynchronous and never reports back, so for every caller a failed push is recovered by the 15 s heartbeat compile.
 - **C-1 build** `[schema: reset DB]`: `056_client_device_session.sql`, `internal/devicesession` (manager and 60 s sweep), `auth.SessionObserver` (`Config.Sessions`), `AccessTokenClaims.SessionID`, `auth.Service.SessionDeadlines`; `EnrollDevice` binds the device to its session; client `logout` refreshes an expired token first.
@@ -172,3 +174,36 @@ Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun
   - Unit test: `is_different_user`. The client suite passes (354).
   - Not checked live: the local test login has one identity. The server path it uses (sign-out revokes that session's device) passed live in test C.
 - **`auditexport` timing flake.** `TestExporterRun_CatchesUpWithinOnePoll` asserted the 1200-event backlog drained within one 2 s poll interval, which failed under full-suite load. It now counts `catchUp` calls (one claimed catch-up versus three for one batch per poll), with the 30 s catch-up budget as a backstop. A mutant that delivers one batch per catch-up fails it ("drained in 3 catch-ups, want 1").
+
+---
+
+## Implementation summary (as merged, PR #198)
+
+### What is in place
+
+| Area | What | Where |
+|---|---|---|
+| Push and teardown (Options A/B, earlier sprints) | A policy change pushes a fresh ACL snapshot to every connector within milliseconds; the connector diffs `(spiffe_id, resource_id)` and aborts live sessions (stream reset, FU-15) on direct, QUIC, relay and shield paths. The 15 s connector health report is the fallback; the client drops routes on the FU-8 wake hint (60 s poll as fallback). | `internal/policy/notifier.go`, `internal/connector/acl_push.go`; `connector/src/policy/mod.rs`, `session_registry.rs`; `client/src/daemon.rs` |
+| Session end ends the device (C-1) | Each device is bound to the login session it enrolled under and that session's idle and max deadlines, kept in Postgres. Sign-out revokes that session's devices (even with an expired token); "end all sessions" (IdP connection disabled/deleted, SCIM deprovision) revokes all of the user's devices; a 60 s sweep revokes devices past their idle (168 h) or max (720 h) deadline. Console sign-out touches no device. | `migrations/056_client_device_session.sql`; `internal/devicesession`; `internal/auth/device_sessions.go` (`SessionObserver`, `SessionDeadlines`); `internal/client/service.go` (`EnrollDevice`) |
+| Revocation path | The existing terminal path: `revoked_at` → CRL trigger, ACL drop, connector cut; one `device.revoked` audit row per device with source and reason (`signed_out`, `session_idle`, `session_expired`, `sessions_revoked`; `source: self` for the device's own revoke). | `internal/devicesession`; `RevokeDevice` |
+| Re-login by a different user (D-8) | `zecurity-client login` ends the previous user's session when the saved login belongs to someone else; the same user signing in again is unchanged. | `client/src/cmd/login.rs` |
+| Client logout | Refreshes an expired access token before revoking (insurance; the server covers it). | `client/src/cmd/logout.rs` |
+| SCIM (C-4) | Post-commit policy-notify errors are logged instead of dropped. | `internal/scim` |
+
+### Decided not to build
+
+- **C-2, no CRL-driven live cut:** every client-cert CRL entry already comes from the `revoked_at` trigger, which drops the device from the ACL; a renewed cert keeps its SPIFFE ID, so cutting by ID on a CRL entry would hit the wrong sessions.
+- **C-3:** posture and geofence latency (report every ≤ 300 s, 10 min staleness, ≤ 60 s country check) is acceptable.
+- **C-5 / Option C:** risk scoring and step-up wait for PENDING-06 (`RequireBreakGlassMFA` is still a no-op).
+
+### Verification
+
+- **Gate (2026-11-12):** controller 1799 pass / 0 fail / 2 skip (the known two), all CI `*_TEST_DATABASE_URL` set; client 354 pass; CI 8/8 on PR #198.
+- **Live run, PASS:** console sign-out leaves the tunnel up; idle expiry revoked within one sweep and the connector cut the download 36 ms later; `zecurity-client logout` cut it 0.67 s after typing (details in the Build section).
+- **Reviews:** two races found and fixed before the live run (stale-generation refresh, enrolment race), plus the missing `RevokeDevice` audit row found live; each has a test that fails on the old code.
+
+### Known limits
+
+- Covered by tests but not live: max-lifetime expiry, expired-token logout, IdP disable, the two races, and re-login by a different user (the local test login has one identity).
+- On SCIM deprovision the devices are revoked by the session path first, so the SCIM handler's single summary row with its `correlation_id` is skipped (each device still has its own `device.revoked` row).
+- The 168 h idle and 720 h max lifetimes are not configurable from the environment.
