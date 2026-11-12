@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// DefaultPoolID is the built-in default pool (migration 056): no region, never
+// DefaultPoolID is the built-in default pool (migration 057): no region, never
 // residency, cannot be deleted. Relays and workspaces start in it.
 const DefaultPoolID = "00000000-0000-0000-0000-000000000001"
 

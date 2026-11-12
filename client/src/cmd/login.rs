@@ -24,6 +24,10 @@ pub async fn run() -> Result<()> {
         );
     }
 
+    // PENDING-09: the login this one replaces, if any (clear_revoked_state has
+    // already removed a revoked one).
+    let previous = crate::state_store::load_workspace_state(&conf.workspace).ok();
+
     println!("Authenticating...");
     let result = login::run(&conf, None).await?; /* the values are = 
         workspace: WorkspaceInfo {
@@ -119,6 +123,40 @@ pub async fn run() -> Result<()> {
         anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
 
+    // PENDING-09: a different user signing in on this client ends the
+    // previous user's session, which revokes the device enrolled under it
+    // (the controller does this even if that session's token has expired).
+    // After PostLoginState: the daemon has switched to the new device, so the
+    // old device's revocation cannot shut it down mid-switch.
+    // The same user signing in again keeps today's behaviour: the previous
+    // device ends when its own session does.
+    if let Some(prev) = previous.as_ref() {
+        if is_different_user(&prev.user.email, &email) && !prev.session.access_token.is_empty() {
+            let ended = match crate::trust::embedded_platform_root_pem() {
+                Ok(root) => {
+                    crate::cmd::logout::end_session(
+                        &conf,
+                        &prev.session.access_token,
+                        &prev.device.ca_cert_pem,
+                        root,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            match ended {
+                Ok(()) => println!(
+                    "Signed out the previous user ({}) on this device.",
+                    prev.user.email
+                ),
+                Err(e) => eprintln!(
+                    "warning: could not sign out the previous user ({}): {e:#}",
+                    prev.user.email
+                ),
+            }
+        }
+    }
+
     println!("Logged in as {}", email);
     println!("Workspace: {}", workspace);
     println!("Device ID: {}", device_id);
@@ -127,4 +165,28 @@ pub async fn run() -> Result<()> {
     // "already up" and turn a good login into a non-zero exit.
     println!("Zecurity is up.");
     Ok(())
+}
+
+/// True when the login replacing a saved one belongs to another user. Emails
+/// compare case-insensitively; an empty saved email (no previous login)
+/// counts as the same user, so nothing is ended.
+fn is_different_user(previous_email: &str, new_email: &str) -> bool {
+    let prev = previous_email.trim();
+    !prev.is_empty() && !prev.eq_ignore_ascii_case(new_email.trim())
+}
+
+#[cfg(test)]
+mod different_user_tests {
+    use super::is_different_user;
+
+    #[test]
+    fn only_another_user_counts_as_different() {
+        assert!(is_different_user("alice@example.com", "bob@example.com"));
+        assert!(!is_different_user("alice@example.com", "alice@example.com"));
+        assert!(!is_different_user(
+            "Alice@Example.com",
+            " alice@example.com "
+        ));
+        assert!(!is_different_user("", "bob@example.com"));
+    }
 }

@@ -60,7 +60,11 @@ func (s *serviceImpl) IssueSession(ctx context.Context, userID, tenantID, role, 
 // so a generation bump (identity.Revoker) takes effect immediately. Satisfies
 // identity.SessionInvalidator.
 func (s *serviceImpl) InvalidateUserSessions(ctx context.Context, userID string) error {
-	return s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+	err := s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+	// The user's devices end with their sessions (PENDING-09 C-1), even if
+	// the Valkey delete failed: the intent is that every session is over.
+	s.userSessionsEnded(ctx, userID, "sessions_revoked")
+	return err
 }
 
 // VerifyAccessToken parses and verifies a Zecurity-issued JWT and returns
@@ -76,6 +80,7 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 		Role:       claims.Role,
 		Email:      claims.Email,
 		Generation: claims.IdentityGeneration,
+		SessionID:  claims.SessionID,
 	}
 	if claims.ExpiresAt != nil {
 		out.ExpiresAt = claims.ExpiresAt.Time

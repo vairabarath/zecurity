@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
@@ -221,18 +222,33 @@ func insertClientDevice(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	userID, workspaceID, name, os string,
+	session deviceSession,
 ) (string, error) {
 	var id string
+	// PENDING-09 D-1: the device is bound to the login session it was
+	// enrolled under; it is revoked when that session ends.
+	var maxUntil *time.Time
+	if !session.deadlines.MaxUntil.IsZero() {
+		maxUntil = &session.deadlines.MaxUntil
+	}
 	err := db.QueryRow(ctx,
-		`INSERT INTO client_devices (user_id, workspace_id, name, os)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO client_devices (user_id, workspace_id, name, os,
+		        session_id, session_idle_until, session_max_until)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id`,
 		userID, workspaceID, name, os,
+		session.id, session.deadlines.IdleUntil, maxUntil,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert client_device: %w", err)
 	}
 	return id, nil
+}
+
+// deviceSession is the login session a device is enrolled under.
+type deviceSession struct {
+	id        string
+	deadlines auth.SessionDeadlines
 }
 
 // updateClientDeviceCert records a device's cert after EnrollDevice — and
@@ -304,8 +320,10 @@ func updateClientDeviceCertOnRenewal(
 // cannot revoke a row that doesn't belong to the caller. Idempotent on already-
 // revoked rows: the AND revoked_at IS NULL clause makes repeated calls a no-op
 // and preserves the original revocation timestamp for audit.
-func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID, workspaceID string) error {
-	_, err := db.Exec(ctx,
+// It returns the number of rows revoked (0 if the device was already
+// revoked), so the caller audits only a revocation it actually made.
+func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID, workspaceID string) (int64, error) {
+	tag, err := db.Exec(ctx,
 		`UPDATE client_devices
 		    SET revoked_at = NOW()
 		  WHERE id           = $1
@@ -315,9 +333,9 @@ func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID,
 		deviceID, userID, workspaceID,
 	)
 	if err != nil {
-		return fmt.Errorf("revoke client_device: %w", err)
+		return 0, fmt.Errorf("revoke client_device: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // revokeUserDevices revokes every one of a user's client devices within a

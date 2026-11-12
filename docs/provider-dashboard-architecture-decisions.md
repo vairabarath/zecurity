@@ -985,8 +985,8 @@ Made by the product/architecture owner to complete the provider dashboard Must-h
 ### Consequences
 
 - **Three PRs** (plan in `.zecurity-obs/Planning/Relay-Pools-Implementation-Plan.md`):
-  1. pools, tenant primary pool, per-pool lists, per-pool guard, placement validation for residency tenants, provider API and console (schema `056_`, no proto);
-  2. failover pool, reconciler, hold-down and audit (schema `057_`, no proto);
-  3. relay-side residency enforcement: policy version, lease and acknowledgement; immediate termination on revocation; bounded migration window (additive relay proto fields, relay change, schema `058_`).
+  1. pools, tenant primary pool, per-pool lists, per-pool guard, placement validation for residency tenants, provider API and console (schema `057_`, no proto);
+  2. failover pool, reconciler, hold-down and audit (schema `058_`, no proto);
+  3. relay-side residency enforcement: policy version, lease and acknowledgement; immediate termination on revocation; bounded migration window (additive relay proto fields, relay change, schema `059_`).
 - **Tracker:** F4, F9 and F11 can close after PRs 1–2 and their live checks. **F10 stays partly done until PR 3** is merged and live-checked. F30 (tenant migration between pools) becomes an assignment change.
 - The single global `BroadcastRelayList` and the global drain guard are replaced; ADR-016 connector behaviour is untouched.

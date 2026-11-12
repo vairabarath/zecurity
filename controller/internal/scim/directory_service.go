@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/rbac"
+	"log"
 	"strings"
 	"time"
 
@@ -412,7 +413,7 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 	if s.notifier != nil {
 		// Attribute changes do not alter membership, but the ACL snapshot is
 		// invalidated for parity with any identity mutation (ADR-025 §8).
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	u, uerr := s.loadUser(ctx, sc, userID)
 	if uerr != nil {
@@ -528,7 +529,7 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 		s.revoker.AfterBump(ctx, sc.workspaceID, userID, "scim", bumpGen)
 	}
 	if s.notifier != nil {
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if syncInst != "" {
 		_ = s.touchSyncInstance(ctx, sc, syncInst)
@@ -587,7 +588,7 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 	// invalidation durably (its consumer notifies; certificate audit bugs
 	// 4/5). Only without a sink is there nothing durable, so notify here.
 	if s.sink == nil && s.notifier != nil {
-		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+		s.notifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if syncInst != "" {
 		_ = s.touchSyncInstance(ctx, sc, syncInst)
@@ -946,5 +947,16 @@ func supportedDirectoryAttr(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// notifyPolicyChange invalidates the workspace's ACL after a committed SCIM
+// change. The change is already committed, so a notify error must not fail
+// the request (the SCIM client would retry a change that already happened);
+// it is logged instead of dropped (PENDING-09). Connectors also recover
+// through the 15 s heartbeat compile.
+func (s *DirectoryService) notifyPolicyChange(ctx context.Context, workspaceID string) {
+	if err := s.notifier.NotifyPolicyChange(ctx, workspaceID); err != nil {
+		log.Printf("scim: policy change notify for workspace %s failed: %v", workspaceID, err)
 	}
 }

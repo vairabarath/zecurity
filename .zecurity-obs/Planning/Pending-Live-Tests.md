@@ -19,6 +19,7 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F17 | Append-only audit log, before/after | #192 | ☑ 2026-11-12 |
 | F5 | Relay bandwidth | #193 | ☑ 2026-11-12 |
 | F14 | Daily certificate expiry email | #195 | ☑ 2026-11-12 |
+| F4 / F9 (+ F10 routing) | Relay pools PR 1: tenant pools, per-pool relay lists, per-pool guard (D-37 … D-41) | #200 | ☐ |
 
 Add each Must-have item here as it merges.
 
@@ -89,6 +90,26 @@ Needs SMTP configured on the controller (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` a
    - the Audit page shows one `cert_expiry.alert_sent` row by `system:cert-expiry-alert` with the counts (no email addresses);
    - with nothing in scope, no email is sent.
 4. With `CERT_EXPIRY_ALERTS=false`, the controller log says the alert is disabled and nothing is sent.
+
+## F4 / F9: Relay pools PR 1 (#200, migration `057_relay_pools.sql`)
+Setup:
+- Recreate the local DB (schema reset), rebuild the controller and redo the provider first sign-in.
+- Two relays (e.g. manojinkyank and a local relay), one tenant with a connector, and a second tenant if available.
+- The connector forced onto the relay path (`LAN_ADDR` set to TEST-NET), as in the F5 run.
+
+1. **Default:** with no pools, every relay is in `default` and the connector picks one by latency. Relays and Relay pools pages show pool `default`.
+2. **Create pools:** create pool A (region `in-south-1`) and pool B. Move one relay into each (reason required; audit rows `relay.move`).
+   - Moving or draining the last eligible relay of a pool a tenant uses → refused (`last_eligible_relay`).
+3. **Assign:** assign tenant 1 to pool A (graceful).
+   - Its connector receives only pool A's relay and migrates make-before-break (connector log, `connector_relay_placement`).
+   - Tenant 2's connector receives no new relay list (connector log).
+   - Audit `tenant.relay_pool_assign` with before/after.
+4. **Move again:** reassign tenant 1 to pool B. Traffic continues through the move; tenant detail shows "Migrating from A until …" for 5 minutes.
+5. **Empty pool:** stop pool B's only relay. After eviction (about 1.5–2.5 minutes) tenant 1's relay path is gone (empty list), the direct path still works if reachable, and nothing falls back to another pool.
+6. **Roles:**
+   - relay-ops: can create, rename and delete pools and move relays; cannot set region/residency or assign tenants (console hides it; API 403); sees tenant counts, never names.
+   - super-admin: all of it.
+7. **Residency placement check (optional):** make pool A a residency pool (only while unused), assign the tenant, and report a placement on another pool's relay. It is not recorded, the relay path is removed, and one `relay.placement_rejected` audit row appears.
 
 ## Results log
 | Date | ID | Result | Notes |

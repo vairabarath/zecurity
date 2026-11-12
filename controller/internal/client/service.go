@@ -480,6 +480,19 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		}
 		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
 	}
+	// PENDING-09 D-1: bind the device to the live login session the token
+	// belongs to; the device is revoked when that session ends. A token with
+	// no session, or whose session has ended, cannot enroll a device.
+	if tokenClaims.SessionID == "" {
+		return nil, status.Error(codes.Unauthenticated, "access token has no session; sign in again")
+	}
+	deadlines, err := s.authSvc.SessionDeadlines(ctx, tokenClaims.UserID, tokenClaims.SessionID)
+	if err != nil {
+		if errors.Is(err, auth.ErrSessionNotFound) {
+			return nil, status.Error(codes.Unauthenticated, "session has ended; sign in again")
+		}
+		return nil, status.Errorf(codes.Internal, "look up session: %v", err)
+	}
 
 	block, _ := pem.Decode([]byte(req.GetCsrPem()))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -507,7 +520,8 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}
 	trustDomain := appmeta.WorkspaceTrustDomain(slug)
 
-	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs())
+	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs(),
+		deviceSession{id: tokenClaims.SessionID, deadlines: deadlines})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "insert client device: %v", err)
 	}
@@ -530,6 +544,20 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 			log.Printf("EnrollDevice: remove refused device %s: %v", deviceID, derr)
 		}
 		return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
+	}
+	// PENDING-09: re-check the session now that the device row exists. A
+	// session ended between the first check and the insert ran its device
+	// revoke before this row existed; every session-end path deletes the
+	// session before revoking, so it is seen as gone here. Refuse like the
+	// lifecycle race above: the signed certificate is never returned.
+	if _, err := s.authSvc.SessionDeadlines(ctx, tokenClaims.UserID, tokenClaims.SessionID); err != nil {
+		if _, derr := s.pool.Exec(ctx, `DELETE FROM client_devices WHERE id = $1`, deviceID); derr != nil {
+			log.Printf("EnrollDevice: remove device of ended session %s: %v", deviceID, derr)
+		}
+		if errors.Is(err, auth.ErrSessionNotFound) {
+			return nil, status.Error(codes.Unauthenticated, "session has ended; sign in again")
+		}
+		return nil, status.Errorf(codes.Internal, "re-check session: %v", err)
 	}
 	s.recordAudit(ctx, audit.Entry{
 		TenantID:    tokenClaims.TenantID,
@@ -926,8 +954,22 @@ func (s *Service) RevokeDevice(ctx context.Context, req *clientv1.RevokeDeviceRe
 
 	// Soft revoke: set revoked_at = NOW(). Idempotent — repeated calls on an
 	// already-revoked device are a no-op success.
-	if err := revokeClientDevice(ctx, s.pool, req.GetDeviceId(), claims.UserID, claims.TenantID); err != nil {
+	revoked, err := revokeClientDevice(ctx, s.pool, req.GetDeviceId(), claims.UserID, claims.TenantID)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "revoke device: %v", err)
+	}
+	// PENDING-09 live run: the device's own revoke (zecurity-client logout)
+	// wrote no audit row. Record it once, for a revocation this call made.
+	if revoked > 0 {
+		s.recordAudit(ctx, audit.Entry{
+			TenantID:    claims.TenantID,
+			ActorUserID: claims.UserID,
+			ActorEmail:  claims.Email,
+			Action:      "device.revoked",
+			TargetType:  "client_device",
+			TargetID:    req.GetDeviceId(),
+			Details:     map[string]any{"source": "self", "reason": "signed_out"},
+		})
 	}
 
 	// Bump the workspace policy version so the SPIFFE is dropped from
