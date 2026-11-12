@@ -15,7 +15,6 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::timeout;
-use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
@@ -1187,14 +1186,19 @@ fn transports_for(
     transports.borrow().get(&key).cloned()
 }
 
-pub async fn run(
-    dev: AsyncDevice,
+/// `dev` is the TUN device (`crate::tun::Device`): raw IP packets, one per
+/// read and write.
+pub async fn run<D>(
+    dev: D,
     allowed_entries: Vec<AclEntry>,
     transports: watch::Receiver<Arc<TransportMap>>,
     mut resource_rx: mpsc::Receiver<ResourceCmd>,
     relay_resync: Arc<Notify>,
     blocked: BlockedConnectors,
-) -> Result<()> {
+) -> Result<()>
+where
+    D: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
     let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
 

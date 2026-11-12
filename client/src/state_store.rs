@@ -246,11 +246,11 @@ pub fn state_dir() -> PathBuf {
     // installer restricts it to SYSTEM, Administrators and that user.
     #[cfg(windows)]
     return crate::config::program_data_dir().join("state");
-    // Android: the app's private files directory (shared by the daemon in
-    // the VPN service process and the UI, which run as the same app user).
-    #[cfg(target_os = "android")]
-    return crate::android::files_dir().join("state");
-    #[cfg(not(any(windows, target_os = "android")))]
+    // Mobile: the app's files directory (shared by the daemon in the VPN
+    // service process or tunnel extension and the UI).
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return crate::mobile::files_dir().join("state");
+    #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))

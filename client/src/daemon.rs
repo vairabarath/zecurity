@@ -277,10 +277,10 @@ fn bind_ipc_listener() -> Result<UnixListener> {
 /// Windows service, whose stdout goes nowhere.
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::new("info");
-    // Android: stdout goes nowhere; log to the app's files directory.
-    #[cfg(target_os = "android")]
+    // Mobile: stdout goes nowhere; log to the app's files directory.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        let path = crate::android::files_dir().join("daemon.log");
+        let path = crate::mobile::files_dir().join("daemon.log");
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(filter)
@@ -1160,9 +1160,9 @@ pub(crate) fn classify_applied(applied: &AppliedConfig, candidate: &AppliedConfi
 /// destructured exhaustively, so a field added later won't compile here
 /// until someone classifies it.
 fn resource_delta_allowed(applied: &AppliedConfig, candidate: &AppliedConfig) -> bool {
-    // An Android VPN interface's routes are fixed at creation: any resource
-    // change restarts the tunnel, which creates a new interface (tun_android).
-    if cfg!(target_os = "android") {
+    // A mobile VPN interface is configured as a whole: any resource change
+    // restarts the tunnel, which asks for a new interface (tun_mobile).
+    if cfg!(any(target_os = "android", target_os = "ios")) {
         return false;
     }
     let AppliedConfig {

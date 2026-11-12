@@ -23,9 +23,9 @@ pub async fn run() -> Result<()> {
             "the Zecurity client service is not running — start it from an elevated \
              PowerShell with `Start-Service zecurity-client`, then run `zecurity-client login` again"
         );
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         anyhow::bail!("the Zecurity service is not running — reopen the Zecurity app and try again");
-        #[cfg(not(any(windows, target_os = "android")))]
+        #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
         anyhow::bail!(
             "the Zecurity client service is not running — start it with \
              `sudo systemctl start zecurity-client`, then run `zecurity-client login` again"

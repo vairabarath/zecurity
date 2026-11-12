@@ -1,6 +1,6 @@
 //! zecurity-client as a library: the whole client (CLI commands, daemon, data
-//! plane), used by the `zecurity-client` binary (`main.rs`) and by the Android
-//! app's native library (`client/android`).
+//! plane), used by the `zecurity-client` binary (`main.rs`) and by the mobile
+//! app's native library (`client/ffi`).
 
 mod appmeta;
 mod auth;
@@ -25,12 +25,15 @@ mod stream_watch;
 mod transport;
 mod trust;
 // The TUN data plane: nftables/fwmark/netlink on Linux, Wintun + per-IP
-// routes on Windows, a VpnService interface on Android. All three expose the
-// same surface (see tun_windows.rs, tun_android.rs).
+// routes on Windows, the platform VPN interface on Android and iOS. All
+// expose the same surface (see tun_windows.rs, tun_mobile.rs).
 #[cfg_attr(windows, path = "tun_windows.rs")]
-#[cfg_attr(target_os = "android", path = "tun_android.rs")]
+#[cfg_attr(any(target_os = "android", target_os = "ios"), path = "tun_mobile.rs")]
 mod tun;
 mod tun_shared;
+// iOS utun framing; tested on every platform.
+#[cfg(any(target_os = "ios", test))]
+mod utun;
 // The Windows module's command renderers are tested on Linux too.
 #[cfg(all(test, not(windows)))]
 #[path = "tun_windows.rs"]
@@ -44,8 +47,8 @@ pub mod win_service;
 #[cfg(target_os = "linux")]
 mod tpm;
 
-#[cfg(target_os = "android")]
-pub mod android;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub mod mobile;
 
 pub mod cmd {
     pub mod down;

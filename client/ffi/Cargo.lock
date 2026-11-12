@@ -3782,6 +3782,7 @@ version = "1.0.12"
 dependencies = [
  "anyhow",
  "jni",
+ "libc",
  "rustls",
  "serde",
  "serde_json",

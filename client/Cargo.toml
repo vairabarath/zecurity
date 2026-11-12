@@ -80,8 +80,8 @@ picky-asn1 = "0.10"
 picky-asn1-der = "0.5"
 
 # Opens the login page in the desktop browser; the Android app opens it itself
-# (crate::android::set_url_opener).
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# (crate::mobile::set_url_opener).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 open = "5"
 
 [target.'cfg(windows)'.dependencies]

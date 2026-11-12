@@ -60,15 +60,16 @@ fn controller_host_for_url(controller_address: &str) -> String {
     }
 }
 
-/// Android: the app's private files directory holds the one config file
-/// (the daemon and the UI run as the same app user).
-#[cfg(target_os = "android")]
+/// Android and iOS: the app's files directory holds the one config file
+/// (Android: the app's private directory; iOS: the App Group container the
+/// app shares with its tunnel extension, where the daemon runs).
+#[cfg(any(target_os = "android", target_os = "ios"))]
 fn system_conf_path() -> PathBuf {
-    crate::android::files_dir().join("client.conf")
+    crate::mobile::files_dir().join("client.conf")
 }
 
 /// The system-wide config file.
-#[cfg(not(any(windows, target_os = "android")))]
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 fn system_conf_path() -> PathBuf {
     PathBuf::from("/etc/zecurity/client.conf")
 }

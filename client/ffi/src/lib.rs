@@ -2,11 +2,12 @@
 //!
 //! Two callers, in two processes of the same app:
 //!
-//! - **The VPN service process** (Kotlin, JNI): `ZecurityNative.startDaemon`
-//!   runs the unchanged client daemon in that process, and registers the TUN
-//!   provider through which the daemon asks the service for a VPN interface
-//!   (`ZecurityNative.establish`). Hosting the daemon there keeps its
-//!   deliberate exits (shutdown request, revoked device) away from the UI.
+//! - **The tunnel process** runs the unchanged client daemon and gives it
+//!   the VPN interface. Android: the VpnService process, over JNI
+//!   (`ZecurityNative.startDaemon`; the daemon asks for an interface through
+//!   `ZecurityNative.establish`). iOS: the packet tunnel extension, over C
+//!   (`zc_start_daemon` with Swift callbacks). Hosting the daemon there keeps
+//!   its deliberate exits (shutdown request, revoked device) away from the UI.
 //! - **The UI process** (Flutter, `dart:ffi`): the C functions below play the
 //!   Linux CLI's role. `zc_request` sends one daemon IPC request (the same
 //!   newline-delimited JSON the CLI uses) and returns the JSON response.
@@ -14,8 +15,8 @@
 //! Every function returns a JSON string the caller must free with
 //! `zc_free`. All of them block, so the UI calls them off its main isolate.
 //!
-//! Android only for now (iOS would reuse the C functions).
-#![cfg(target_os = "android")]
+//! Android and iOS only.
+#![cfg(any(target_os = "android", target_os = "ios"))]
 
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use zecurity_core::{android, cmd, config, ipc};
+use zecurity_core::{cmd, config, ipc, mobile};
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -92,8 +93,8 @@ fn login_state() -> &'static Mutex<LoginState> {
 #[no_mangle]
 pub unsafe extern "C" fn zc_init(files_dir: *const c_char) -> *mut c_char {
     install_crypto_provider();
-    android::init(PathBuf::from(from_c(files_dir)));
-    android::set_url_opener(Box::new(|url| {
+    mobile::init(PathBuf::from(from_c(files_dir)));
+    mobile::set_url_opener(Box::new(|url| {
         if let Ok(mut s) = login_state().lock() {
             s.url = Some(url.to_string());
         }
@@ -225,8 +226,9 @@ pub extern "C" fn zc_logout() -> *mut c_char {
     }
 }
 
-// ── JNI: the VPN service process ─────────────────────────────────────────────
+// ── JNI: the Android VPN service process ─────────────────────────────────────
 
+#[cfg(target_os = "android")]
 mod jni_service {
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
@@ -238,7 +240,7 @@ mod jni_service {
     use jni::signature::{Primitive, ReturnType};
     use jni::sys::{jint, JNI_VERSION_1_6};
     use jni::{JNIEnv, JavaVM};
-    use zecurity_core::{android, daemon};
+    use zecurity_core::{daemon, mobile};
 
     static JVM: OnceLock<JavaVM> = OnceLock::new();
     static NATIVE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
@@ -266,7 +268,7 @@ mod jni_service {
             Err(_) => return fail(&mut env),
         };
         super::install_crypto_provider();
-        android::init(PathBuf::from(dir));
+        mobile::init(PathBuf::from(dir));
         if NATIVE_CLASS.get().is_none() {
             match env.new_global_ref(&class) {
                 Ok(g) => {
@@ -283,7 +285,7 @@ mod jni_service {
                 Err(_) => return fail(&mut env),
             }
         }
-        android::set_tun_provider(Box::new(establish_via_service));
+        mobile::set_tun_provider(Box::new(establish_via_service));
 
         if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
             return 0;
@@ -298,7 +300,7 @@ mod jni_service {
                 // Not configured yet, or a startup failure: the daemon log
                 // may not exist, so leave a marker the app can show.
                 let _ = std::fs::write(
-                    android::files_dir().join("daemon.error"),
+                    mobile::files_dir().join("daemon.error"),
                     format!("{e:#}"),
                 );
             }
@@ -348,3 +350,149 @@ mod jni_service {
         value.context("call establish")?.i().context("establish result")
     }
 }
+
+// ── C: the iOS packet tunnel extension ───────────────────────────────────────
+
+#[cfg(target_os = "ios")]
+mod ios_tunnel {
+    use std::ffi::{c_char, CString};
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use anyhow::{bail, Result};
+    use zecurity_core::{daemon, mobile};
+
+    /// Swift: apply network settings routing exactly these IPs ("ip,ip,...",
+    /// one /32 each) to the tunnel; 0 once applied.
+    pub type EstablishFn = extern "C" fn(routes: *const c_char) -> i32;
+    /// Swift: apply network settings with no resource routes.
+    pub type ReleaseFn = extern "C" fn();
+
+    static DAEMON_RUNNING: AtomicBool = AtomicBool::new(false);
+
+    /// Starts the client daemon in the extension (once per process), with
+    /// the App Group container as its files directory.
+    ///
+    /// # Safety
+    /// `files_dir` and `os_version` must be NUL-terminated UTF-8 strings.
+    #[no_mangle]
+    pub unsafe extern "C" fn zc_start_daemon(
+        files_dir: *const c_char,
+        os_version: *const c_char,
+        establish: EstablishFn,
+        release: ReleaseFn,
+    ) -> i32 {
+        super::install_crypto_provider();
+        mobile::init(PathBuf::from(super::from_c(files_dir)));
+        mobile::set_os_version(super::from_c(os_version));
+        mobile::set_tun_provider(Box::new(move |routes| establish_utun(establish, routes)));
+        mobile::set_tun_release(Box::new(move || release()));
+
+        if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
+            return 0;
+        }
+        std::thread::spawn(|| {
+            // Two workers: the extension is killed above ~50 MB.
+            let result = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(daemon::run()));
+            if let Err(e) = result {
+                let _ = std::fs::write(
+                    mobile::files_dir().join("daemon.error"),
+                    format!("{e:#}"),
+                );
+            }
+            DAEMON_RUNNING.store(false, Ordering::SeqCst);
+        });
+        0
+    }
+
+    /// The daemon's TUN provider: Swift applies the routes, then the daemon
+    /// gets its own duplicate of the extension's utun descriptor, so dropping
+    /// it never closes the tunnel.
+    fn establish_utun(establish: EstablishFn, routes: &[Ipv4Addr]) -> Result<i32> {
+        let list = routes
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let list = CString::new(list)?;
+        if establish(list.as_ptr()) != 0 {
+            bail!("the tunnel extension could not apply the routes");
+        }
+        let fd = find_utun_fd()?;
+        // SAFETY: `fd` is an open descriptor of this process.
+        let dup = unsafe { libc::dup(fd) };
+        if dup < 0 {
+            bail!("dup the utun descriptor: {}", std::io::Error::last_os_error());
+        }
+        Ok(dup)
+    }
+
+    // Darwin kernel-control ABI (sys/kern_control.h). libc defines
+    // CTLIOCGINFO for macOS only; the values are the same on iOS.
+    const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
+    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control";
+
+    #[repr(C)]
+    struct CtlInfo {
+        ctl_id: u32,
+        ctl_name: [libc::c_char; 96],
+    }
+
+    #[repr(C)]
+    struct SockaddrCtl {
+        sc_len: u8,
+        sc_family: u8,
+        ss_sysaddr: u16,
+        sc_id: u32,
+        sc_unit: u32,
+        sc_reserved: [u32; 5],
+    }
+
+    /// The extension's utun descriptor: the kernel-control socket connected
+    /// to the utun control. NetworkExtension does not expose it, so it is
+    /// found by scanning this process's descriptors (as WireGuard does).
+    fn find_utun_fd() -> Result<i32> {
+        let mut info = CtlInfo {
+            ctl_id: 0,
+            ctl_name: [0; 96],
+        };
+        for (dst, src) in info.ctl_name.iter_mut().zip(UTUN_CONTROL_NAME) {
+            *dst = *src as libc::c_char;
+        }
+        for fd in 0..1024 {
+            let mut addr = SockaddrCtl {
+                sc_len: 0,
+                sc_family: 0,
+                ss_sysaddr: 0,
+                sc_id: 0,
+                sc_unit: 0,
+                sc_reserved: [0; 5],
+            };
+            let mut len = std::mem::size_of::<SockaddrCtl>() as libc::socklen_t;
+            // SAFETY: `addr` is a writable sockaddr_ctl of `len` bytes.
+            let rc = unsafe {
+                libc::getpeername(fd, &mut addr as *mut SockaddrCtl as *mut libc::sockaddr, &mut len)
+            };
+            if rc != 0 || i32::from(addr.sc_family) != libc::AF_SYSTEM {
+                continue;
+            }
+            if info.ctl_id == 0 {
+                // SAFETY: `info` is a ctl_info with the control's name set.
+                if unsafe { libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo) } != 0 {
+                    continue;
+                }
+            }
+            if addr.sc_id == info.ctl_id {
+                return Ok(fd);
+            }
+        }
+        bail!("no utun descriptor found in the tunnel extension")
+    }
+}
+

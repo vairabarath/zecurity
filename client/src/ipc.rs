@@ -121,11 +121,13 @@ pub fn ipc_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("ZECURITY_DAEMON_SOCKET") {
         return PathBuf::from(p);
     }
-    // Android: in the app's private files directory, reachable only by the
-    // app's own processes (the UI and the VPN service hosting the daemon).
-    #[cfg(target_os = "android")]
-    return crate::android::files_dir().join("daemon.sock");
-    #[cfg(not(target_os = "android"))]
+    // Mobile: in the app's files directory, reachable only by the app's own
+    // processes (Android: the UI and the VPN service hosting the daemon;
+    // iOS: the app and its tunnel extension, through the App Group).
+    // Darwin limits socket paths to 104 bytes; the App Group path fits.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return crate::mobile::files_dir().join("daemon.sock");
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     PathBuf::from("/run/zecurity-client/daemon.sock")
 }
 
@@ -289,7 +291,7 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
         return Ok(resp);
     }
 
-    #[cfg(all(unix, not(target_os = "android")))]
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
     let _ = tokio::process::Command::new("systemctl")
         .args(["start", "zecurity-client"])
         .status()
@@ -304,9 +306,9 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Android: the app starts the daemon with its VPN service; there is
-    // nothing to start from here.
-    send_ipc(req).await.context(if cfg!(target_os = "android") {
+    // Mobile: the app starts the daemon with its VPN service (Android) or
+    // tunnel extension (iOS); there is nothing to start from here.
+    send_ipc(req).await.context(if cfg!(any(target_os = "android", target_os = "ios")) {
         "the Zecurity service is not running — reopen the Zecurity app"
     } else if cfg!(windows) {
         "daemon could not be started — run: Get-Service zecurity-client (start it from an elevated PowerShell with Start-Service zecurity-client)"
