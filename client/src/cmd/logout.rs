@@ -12,7 +12,7 @@ pub async fn run() -> Result<()> {
     // Load stored state ONCE, before we touch the daemon or the state file —
     // the token + device_id live in the state we're about to erase.
     let stored = crate::state_store::load_workspace_state(&conf.workspace).ok();
-    let access_token = stored
+    let mut access_token = stored
         .as_ref()
         .map(|s| s.session.access_token.clone())
         .filter(|t| !t.is_empty());
@@ -27,6 +27,26 @@ pub async fn run() -> Result<()> {
         .as_ref()
         .map(|s| s.device.ca_cert_pem.as_str())
         .unwrap_or_default();
+
+    // PENDING-09 D-6: RevokeDevice needs an unexpired access token. If the
+    // stored one has expired (the daemon was down), refresh it first. This is
+    // insurance only: Logout below ends the session, and the controller then
+    // revokes the device enrolled under it even with an expired token.
+    if let (Some(token), Some(s)) = (access_token.as_ref(), stored.as_ref()) {
+        if token_expired(s.session.expires_at) && !s.session.refresh_token.is_empty() {
+            match crate::auth::refresh_access_token(
+                &conf,
+                saved_ca,
+                token,
+                &s.session.refresh_token,
+            )
+            .await
+            {
+                Ok(fresh) => access_token = Some(fresh.access_token),
+                Err(e) => eprintln!("warning: could not refresh the session before logout: {e}"),
+            }
+        }
+    }
     if let (Some(token), Some(dev)) = (access_token.as_ref(), device_id.as_ref()) {
         let revoked = match crate::trust::embedded_platform_root_pem() {
             Ok(root) => revoke_device(&conf, token, dev, saved_ca, root).await,
@@ -101,4 +121,31 @@ pub(crate) async fn revoke_device(
     })
     .await?;
     Ok(())
+}
+
+/// True when an access token expiring at `expires_at` (unix seconds) is
+/// expired or within 30 s of it. 0 (unknown) counts as expired.
+fn token_expired(expires_at: i64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    expires_at <= now + 30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_expired;
+
+    #[test]
+    fn token_expiry_check() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(token_expired(0));
+        assert!(token_expired(now - 60));
+        assert!(token_expired(now + 10));
+        assert!(!token_expired(now + 600));
+    }
 }

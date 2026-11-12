@@ -159,12 +159,21 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 		// authorization reads users.role live — but a refreshed token should
 		// not keep showing a role the user no longer has.
 		role = dbRole
+		// PENDING-09: only the devices of this token's own session end here.
+		// This check runs before the refresh token is compared and accepts an
+		// expired access token, so a stale token from an older generation (a
+		// console tab left open across an IdP disable/re-enable) must not
+		// revoke the devices of the user's newer sessions. The explicit
+		// generation bump (InvalidateUserSessions) already revoked that
+		// generation's devices.
 		if err := identity.CheckLifecycle(status); err != nil {
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+			s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
 			return "", "", dead("session revoked")
 		}
 		if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+			s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
 			return "", "", dead("session revoked")
 		}
 	}
@@ -202,6 +211,7 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// TTL window.
 	if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
 		s.redisClient.DeleteRefreshSession(ctx, userID, sid)
+		s.sessionEnded(ctx, userID, sid, "session_expired")
 		return "", "", dead("refresh token max lifetime exceeded")
 	}
 
@@ -243,6 +253,7 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	if sid == "" {
 		s.redisClient.DeleteRefreshSession(ctx, userID, "")
 	}
+	s.sessionRefreshed(ctx, userID, newSID)
 	return newAccessToken, newRefreshToken, nil
 }
 

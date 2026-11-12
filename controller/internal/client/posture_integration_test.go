@@ -148,7 +148,19 @@ type postureTestAuth struct {
 }
 
 func (a *postureTestAuth) VerifyAccessToken(string) (*auth.AccessTokenClaims, error) {
-	return a.claims, nil
+	if a.claims == nil || a.claims.SessionID != "" {
+		return a.claims, nil
+	}
+	// Every token belongs to a session (PENDING-09 D-1).
+	c := *a.claims
+	c.SessionID = "test-sid"
+	return &c, nil
+}
+
+// SessionDeadlines reports every session as live, far from its deadlines.
+func (*postureTestAuth) SessionDeadlines(context.Context, string, string) (auth.SessionDeadlines, error) {
+	now := time.Now()
+	return auth.SessionDeadlines{IdleUntil: now.Add(7 * 24 * time.Hour), MaxUntil: now.Add(30 * 24 * time.Hour)}, nil
 }
 
 func (*postureTestAuth) InitiateAuth(context.Context, string, *string, *string) (*model.AuthInitPayload, error) {

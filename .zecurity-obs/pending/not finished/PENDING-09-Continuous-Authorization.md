@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: approved-pending
 id: PENDING-09
 domain: zero-trust
 priority: P2
@@ -9,6 +9,7 @@ related:
   - ADR-001-Sprint8-ACL-Snapshot-Caching
   - PENDING-08-Device-Posture-Health
   - PENDING-06-MFA-Step-Up-Auth
+updated: 2026-11-12
 tags: [pending, adr, zero-trust, authorization]
 ---
 
@@ -68,3 +69,106 @@ PENDING-08 posture exists.
 
 ## Rough Effort / Priority
 **A: S · B: M · C: L**, P2.
+
+---
+
+## Current state (verified against `main` ba97f259, 2026-11-12)
+
+The Context above is out of date: connectors have no 60 s TTL any more, and Option B is built for every trigger that changes the compiled ACL.
+
+- **Push path.** `NotifyPolicyChange` (`internal/policy/notifier.go:65`) bumps the version and fires the push hook, which compiles once per burst and sends `AclSnapshot` to every connected connector (`internal/connector/acl_push.go`). The connector's 15 s health report is the fallback when a push fails (`control_stream.go:1186`). The push is asynchronous: callers never see a push failure.
+- **Teardown.** The connector diffs `(spiffe_id, resource_id)` between snapshots (`connector/src/policy/mod.rs:55`) and aborts live sessions (`session_registry.rs:103`). This covers direct, QUIC, relay and shield paths. FU-15 makes the cut a stream reset rather than a graceful finish.
+- **Client.** The client drops the resource and RSTs its sockets on the FU-8 wake hint. The 60 s poll remains as the fallback (`client/src/daemon.rs:38`).
+- **Measured (Sprint 22):** member removal to connector cancel 44 ms; device revoke refused 85 ms.
+
+| Trigger | Cuts live sessions | Latency |
+|---|---|---|
+| Group member removed (console, SCIM); resource unassigned, deleted or retargeted | yes | ms |
+| User suspended or deprovisioned (SCIM); IdP connection disabled (via outbox) | yes | ms |
+| Device revoked (admin, self, SCIM) | yes | ~85 ms |
+| `zecurity-client logout` | yes: it revokes the device first (`client/src/cmd/logout.rs:30`) | ms. Gap: an expired stored access token makes the revoke fail silently |
+| Posture fails / report goes stale (PENDING-08/16) | yes | report cadence ≤ 300 s; stale after 10 min |
+| Country change (PENDING-20) | yes | ≤ 60 s poll (≤ 300 s via report) |
+| Login session ends on its own (idle 168 h, max 720 h), or all sessions ended (IdP disable, generation bump) | **no**: the device keeps tunnelling on its cert until it expires (≤ 7 days, since `RenewCert` needs a live session) | — |
+| Console sign-out (browser) | no; it is a different session | — |
+| Client cert on the CRL alone | only new tunnels (the CRL is checked at tunnel open) | 60–75 s |
+
+## Decisions (2026-11-12, Sathiya)
+
+| # | Decision |
+|---|---|
+| C-1 | **When a device's login session ends, its live tunnels end.** This covers `zecurity-client logout` (closing its expired-token gap), idle or max-lifetime expiry, and server-side "end all sessions" (IdP disable, generation bump, failed lifecycle check at refresh). It does not cover console sign-out: the browser session is not a device's session. |
+| C-2 | **No CRL-driven live cut.** Every client-cert CRL entry comes from the `client_devices.revoked_at` trigger (`039_certificate_history.sql`), and the same statement drops the device from the compiled ACL, which already cuts its sessions. Cutting by SPIFFE ID on a CRL entry would also wrongly kill a renewed cert's sessions: renewal keeps the SPIFFE ID, and the session registry stores no serial. Revisit only if a path ever revokes a single serial without `revoked_at`. |
+| C-3 | **Posture and geofence latency (≤ 300 s report, 10 min staleness, ≤ 60 s country) is acceptable.** |
+| C-4 | **Log SCIM's ignored `NotifyPolicyChange` errors** (six post-commit sites). The change is already committed, so the request must not fail. |
+| C-5 | **Option C (risk scoring, step-up) waits for PENDING-06.** `RequireBreakGlassMFA` is still a no-op. |
+
+## Design for C-1 (proposed, for approval)
+
+| # | Design |
+|---|---|
+| D-1 | **Device ↔ session link in Postgres**, migration `056_client_device_session.sql`. New columns on `client_devices`: `session_id TEXT`, `session_idle_until TIMESTAMPTZ` and `session_max_until TIMESTAMPTZ`. `EnrollDevice` stores the access token's `sid`, which is required: a token without one is refused. It also stores the session's `max_lifetime_at` (fixed from the first sign-in, ADR-006) and `now + JWTRefreshTTL`. The `sid` stays the same across refresh rotation (`refresh.go`, `newSID := sid`). |
+| D-2 | **Deadlines live in Postgres, not Valkey.** A device is never revoked because a Valkey key is missing: a Valkey flush or restart must not revoke every device. Each successful client-session refresh moves `session_idle_until` forward for the devices with that `sid` (a hook from `auth` into the client store). |
+| D-3 | **Immediate revoke on explicit ends:** - `EndSession` (it already accepts an expired but correctly signed access token) revokes the devices whose `session_id` is the token's `sid`. This closes the logout gap on the server. - "End all of the user's sessions" (`InvalidateUserSessions` and the two refresh-time lifecycle/generation failures) revokes all of that user's devices. - Console sign-out ends only the browser's `sid`, which no device carries. |
+| D-4 | **Expiry sweeper.** An in-controller worker (single instance, D-02) runs every 60 s. It revokes active devices whose `session_idle_until` or `session_max_until` has passed. Latency after the deadline: ≤ 60 s plus the push. |
+| D-5 | **Revoke, not suspend.** The existing terminal `revoked_at` path is used: CRL entry, ACL drop, live cut, audit. One `client.device.revoked` audit row per device, with system actor and `reason: session_ended` (or `signed_out` / `sessions_revoked`). This matches today's lifecycle: a dead session cannot renew the cert anyway, so the device already dies within ≤ 7 days. This change shortens that tail to seconds or minutes. **User-visible effect:** at the 30-day max lifetime the user signs in again, which enrols a new device. Under an approved-only resource policy, that device needs approval again; this already happens today, with up to 7 days of lag. |
+| D-6 | **Client.** `zecurity-client logout` refreshes an expired access token before `RevokeDevice`. This is insurance only: D-3 already covers it on the server. |
+| D-7 | **Tests:** - console sign-out leaves devices untouched; - `EndSession` for device A's `sid` revokes only A, and the same user's device B keeps working (as in the FU-15 two-device check); - idle and max-lifetime expiry each revoke within one sweep, with one audit row; - a Valkey flush revokes nothing; - an IdP disable revokes all of that user's devices; - a live run with a real tunnel cut on logout and on expiry. |
+| D-8 | **Out of scope (follow-up).** A re-login leaves the previous device active until its own session ends (D-4 then revokes it). Revoking it at re-login is a separate change. |
+
+**Schema:** `056_client_device_session.sql` `[schema: reset DB]`.
+
+## Build (2026-11-12, local branch `fix/pending09-scim-notify-log`, not pushed)
+
+- **a4528303, C-4:** SCIM's six post-commit `NotifyPolicyChange` calls go through one helper that logs errors. Note: `NotifyPolicyChange` only fails on an empty workspace id. The push is asynchronous and never reports back, so for every caller a failed push is recovered by the 15 s heartbeat compile.
+- **C-1 build** `[schema: reset DB]`: `056_client_device_session.sql`, `internal/devicesession` (manager and 60 s sweep), `auth.SessionObserver` (`Config.Sessions`), `AccessTokenClaims.SessionID`, `auth.Service.SessionDeadlines`; `EnrollDevice` binds the device to its session; client `logout` refreshes an expired token first.
+
+**What ends a device (as built):**
+
+| Event | Devices revoked | Reason in audit |
+|---|---|---|
+| `zecurity-client logout` (`Logout` RPC; checked: only `cmd/logout.rs` calls it, so `down`, daemon shutdown and re-login don't) | the devices of that session | `signed_out` |
+| Refresh refused at the session's max lifetime | the devices of that session | `session_expired` |
+| Refresh with a token whose user is no longer active, or whose generation is stale | **only the token's own session** (see the review fix below) | `sessions_revoked` |
+| `InvalidateUserSessions`, reached only from a generation bump: IdP connection disabled (`setIdpConnectionStatus`) or deleted (`deleteIdpConnection`), and SCIM deprovision (`AfterBump`) | all of the user's devices | `sessions_revoked` |
+| Sweep, every 60 s: `session_idle_until` or `session_max_until` passed | the devices whose deadline passed | `session_idle` / `session_expired` |
+| Console sign-out | none (the browser's sid is on no device) | — |
+
+**Review fixes before the live run:**
+- **Stale-generation refresh** (advisor). The refresh-time lifecycle and generation checks run before the refresh token is compared, and they accept an expired access token. A user-wide revoke there would let a stale console tab (from before an IdP disable/re-enable) revoke the user's newer devices, on every refresh. They now end only the token's own session. Test `TestSessionObserver_StaleGenerationRefreshEndsOnlyItsOwnSession` fails on the user-wide version.
+- **Enrollment race** (automated security review). A session ending between enrollment's session check and its insert would have left a device bound to a dead session, until the 7-day idle sweep. Two fixes:
+  - every session-end path now deletes the session before revoking (sign-out used to revoke first);
+  - `EnrollDevice` re-checks the session after inserting the device and refuses (row deleted, cert never returned) if it is gone.
+  Either the re-check sees the session gone or the revoke sees the row. Test `TestEnrollDevice_SessionEndingDuringEnrollmentLeavesNoDevice`.
+
+**Accepted:** on SCIM deprovision, `AfterBump` → `InvalidateUserSessions` revokes the devices synchronously, before the `device.trust.revoke.requested` outbox handler. The handler then finds 0 rows and skips its single `source: scim` row with the `correlation_id`. Each device still gets a `device.revoked` row (`source: session`, `reason: sessions_revoked`), and the generation bump is audited with actor `scim`.
+
+**Tests:**
+- `devicesession` 6;
+- auth 6 (observer hooks incl. expired-token sign-out, stale-generation regression, `SessionDeadlines`);
+- client enrollment 3;
+- mutation checks: the session-scoping and stale-generation tests fail on the broken code.
+
+Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun_CatchesUpWithinOnePoll`) failed once under full-suite load and passes alone: follow-up, unrelated. Client: 353 pass.
+
+**Live run (2026-11-12): PASS.**
+
+**Setup:**
+- Shared local DB reset with 056; this branch's controller (as `ztna_app`) and connector, with the connector in its own container; workspace `p09live`.
+- A sandbox client daemon (root, via the Orca terminal) tunnelling a rate-limited 200 MB download from a file server on the connector's Docker network.
+
+| Test | Result |
+|---|---|
+| Enrolment binds the session | device row has `session_id`, idle deadline +168 h, max deadline +720 h |
+| A: console sign-in, then `/auth/logout`, while the tunnel download runs | logout 204, then refresh 401; `auth.sign_out` audited; device **not** revoked; download kept running; connector cancelled nothing |
+| B: idle expiry (deadline moved into the past as the owner role at 07:59:04.98; the 168 h TTL is not configurable) | sweep revoked at 07:59:25.89 (next tick); connector `revoked sessions torn down count=1` at 07:59:25.93; download aborted (curl exit 56 after 15.8 MB); audit `device.revoked`, `source: session`, `reason: session_idle`, system actor |
+| C: `zecurity-client logout` during a tunnel download (after a new login, new device) | typed 07:59:59.30, device revoked 07:59:59.97, connector cut 07:59:59.99, download aborted (exit 56); `Logged out of p09live.` |
+| Audit of C (found live, fixed) | `RevokeDevice` (the device's own revoke, called by `logout` before `Logout`) wrote no audit row, so only `auth.sign_out` showed. It now writes `device.revoked`, `source: self`, `reason: signed_out`, once per revocation. Re-checked live on a third device; test `TestRevokeDevice_AuditsTheDevicesOwnRevokeOnce`. |
+
+**Not run live (covered by tests):** max-lifetime expiry (same sweep, other column), expired-token logout, the IdP-disable user-wide revoke, the stale-generation regression, and the enrolment race.
+
+**Follow-ups, done 2026-11-12:**
+- **D-8, re-login by a different user (decided by Sathiya: same user, leave as is; different user, end the previous session).** `zecurity-client login` compares the saved login's email with the new one, case-insensitively. If it belongs to another user, it ends that session over the pinned channel, and the controller then revokes the device enrolled under it, even with an expired token. This runs after `PostLoginState`, so the old device's revocation cannot shut the daemon down mid-switch. The same user signing in again keeps today's behaviour: the previous device ends when its own session does.
+  - Unit test: `is_different_user`. The client suite passes (354).
+  - Not checked live: the local test login has one identity. The server path it uses (sign-out revokes that session's device) passed live in test C.
+- **`auditexport` timing flake.** `TestExporterRun_CatchesUpWithinOnePoll` asserted the 1200-event backlog drained within one 2 s poll interval, which failed under full-suite load. It now counts `catchUp` calls (one claimed catch-up versus three for one batch per poll), with the 30 s catch-up budget as a backstop. A mutant that delivers one batch per catch-up fails it ("drained in 3 catch-ups, want 1").

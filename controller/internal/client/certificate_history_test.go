@@ -167,7 +167,7 @@ func TestDeviceCertificateHistory_RenewalRacingRevocation(t *testing.T) {
 	deviceID, csrPEM, first := f.enrolled("laptop")
 	issued := []string{first, f.mustRenew(deviceID, csrPEM)}
 	hook := &clientSignHookPKI{Service: f.pki, during: func() {
-		if err := revokeClientDevice(f.ctx, f.pool, deviceID, f.userID, f.wsID); err != nil {
+		if _, err := revokeClientDevice(f.ctx, f.pool, deviceID, f.userID, f.wsID); err != nil {
 			t.Errorf("revoke: %v", err)
 		}
 	}}
@@ -182,7 +182,7 @@ func TestDeviceCertificateHistory_RenewalRacingRevocation(t *testing.T) {
 func TestDeviceCertificateHistory_RefusedRenewalRecordsNothing(t *testing.T) {
 	f := newDeviceHistoryFixture(t)
 	deviceID, csrPEM, first := f.enrolled("laptop")
-	if err := revokeClientDevice(f.ctx, f.pool, deviceID, f.userID, f.wsID); err != nil {
+	if _, err := revokeClientDevice(f.ctx, f.pool, deviceID, f.userID, f.wsID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if _, err := f.renew(f.svc, deviceID, csrPEM); err == nil {
