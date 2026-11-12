@@ -12,6 +12,8 @@ export function relayErrorMessage(err: unknown): string {
       return `A DNS name was rejected${err.detail ? `: ${err.detail}` : '.'}`
     case ErrorCode.invalidIpSan:
       return `An IP address was rejected${err.detail ? `: ${err.detail}` : '.'}`
+    case ErrorCode.poolNotFound:
+      return 'That relay pool no longer exists. Close this dialog and open Add relay again to pick another.'
     case ErrorCode.forbidden:
       return 'Your role can’t do this.'
     case ErrorCode.networkError:
@@ -69,7 +71,7 @@ export function drainActionFailure(err: unknown, action: DrainAction, relayName:
   switch (err.code) {
     case ErrorCode.lastEligibleRelay:
       return {
-        message: `${relayName} is the only relay connectors can use right now, so it can’t be drained. Add or resume another relay first.`,
+        message: `${relayName} is the last eligible relay in its pool, and tenants use that pool, so it can’t be drained. Add, move or resume another relay in the pool first, or move those tenants to another pool.`,
       }
     case ErrorCode.reasonTooLong:
       return { field: 'reason', message: 'Keep the reason to 500 characters or fewer.' }

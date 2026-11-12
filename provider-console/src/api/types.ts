@@ -95,6 +95,16 @@ export const ErrorCode = {
   // relay drain/resume (Sprint 22 Phase D)
   invalidState: 'invalid_state',
   lastEligibleRelay: 'last_eligible_relay',
+  // relay pools (D-37 … D-41)
+  invalidRegion: 'invalid_region',
+  residencyNeedsRegion: 'residency_needs_region',
+  nameTaken: 'name_taken',
+  defaultPool: 'default_pool',
+  poolInUse: 'pool_in_use',
+  poolNotEmpty: 'pool_not_empty',
+  poolNotFound: 'pool_not_found',
+  poolHasNoEligibleRelay: 'pool_has_no_eligible_relay',
+  invalidMigration: 'invalid_migration',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -192,6 +202,8 @@ export interface RelaySummary {
   drain_state: DrainState | null
   /** F5: null when the relay doesn't report byte counters, and for revoked/deleted relays. */
   bandwidth: RelayBandwidth | null
+  /** The relay pool it belongs to (D-37); every relay has exactly one. */
+  pool: RelayPoolRef
 }
 
 /**
@@ -239,10 +251,74 @@ export interface RelayDetail extends RelaySummary {
   certificates_truncated: boolean
   attachments: RelayAttachment[]
   attachments_truncated: boolean
-  /** In the relay list connectors are offered right now (Phase D). */
+  /** In its pool's relay list, which connectors are offered right now (Phase D, D-38). */
   in_relay_list: boolean
-  /** How many relays are in that list. */
+  /** How many relays of the same pool are in that list (the guard is per pool, D-41). */
   eligible_relay_count: number
+}
+
+// ── Relay pools (D-37 … D-41) ───────────────────────────────────────────────
+
+/**
+ * A relay pool and its placement attributes (D-37). `region` is a validated
+ * code or null. `residency` is the pool's setting only: until relay-side
+ * enforcement ships (D-40) it is routing only and never enforced, so the
+ * console must not present it as a residency guarantee.
+ */
+export interface RelayPoolRef {
+  id: string
+  name: string
+  region: string | null
+  residency: boolean
+}
+
+/** GET /provider/relay-pools item (both roles; counts only). Default pool first. */
+export interface RelayPoolSummary extends RelayPoolRef {
+  is_default: boolean
+  /** Relays in the pool that aren't deleted. */
+  relays: number
+  /** Relays in the pool's published relay list. */
+  eligible_relays: number
+  /** Workspaces whose pool this is. */
+  tenants: number
+  created_at: string
+}
+
+export interface RelayPoolRelay {
+  id: string
+  name: string
+  status: string
+  eligible: boolean
+}
+
+export interface RelayPoolTenant {
+  id: string
+  slug: string
+  name: string
+}
+
+/**
+ * GET /provider/relay-pools/{id}. `tenant_list` is null for callers who
+ * can't read tenants (relay-ops see the count only, D-41).
+ */
+export interface RelayPoolDetail extends RelayPoolSummary {
+  relay_list: RelayPoolRelay[]
+  relay_list_truncated: boolean
+  tenant_list: RelayPoolTenant[] | null
+  tenant_list_truncated: boolean
+}
+
+/** POST /provider/relay-pools → 201. */
+export type CreateRelayPoolResponse = RelayPoolRef
+
+/** How a tenant leaves its old pool (D-40): graceful keeps it authorized for a migration window. */
+export type PoolMigration = 'graceful' | 'immediate'
+
+/** The tenant's relay pool in GET /provider/tenants/{id} (D-38). */
+export interface TenantRelayPool extends RelayPoolRef {
+  eligible_relays: number
+  /** Set while a graceful migration keeps the old pool authorized, until `until`. */
+  previous: (RelayPoolRef & { until: string }) | null
 }
 
 export const TENANT_STATUSES = ['provisioning', 'active', 'suspended', 'deleted'] as const
@@ -340,6 +416,7 @@ export interface TenantDetail extends TenantSummary {
   connectors_truncated: boolean
   shields: TenantShield[]
   shields_truncated: boolean
+  relay_pool: TenantRelayPool
 }
 
 /** GET /provider/audit item (provider operator records only). */

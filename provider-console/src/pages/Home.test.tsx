@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry, CertificateExpiryResult, Page, RelaySummary } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type RecordedCall } from '@/test/fetch'
+import { DEFAULT_POOL } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 const iso = (ms: number) => new Date(Date.now() + ms).toISOString()
@@ -29,6 +30,7 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     draining_since: null,
     drain_state: null,
     bandwidth: null,
+    pool: DEFAULT_POOL,
     ...over,
   }
 }

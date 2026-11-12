@@ -65,7 +65,7 @@ func decideHysteresis(current string, pending *string, pendingSince *time.Time, 
 // max == 0 means the relay has not reported its configured ceiling
 // (RELAY_MAX_CONNECTIONS unset). Without a ceiling we cannot reason about
 // capacity, so treat the relay as INELIGIBLE — Low is dropped from the
-// LabelledRelayList (BuildLabelledRelayList selects only high/medium).
+// LabelledRelayList (BuildRelayLists selects only high/medium).
 // Relays must report a ceiling to be eligible.
 func computeCandidateLabel(current string, count, max uint32) string {
 	if max == 0 {

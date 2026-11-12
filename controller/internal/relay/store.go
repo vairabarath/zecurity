@@ -17,6 +17,8 @@ import (
 	connectorpb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/relay/eligible"
+	"github.com/yourorg/ztna/controller/internal/relay/relaylist"
+	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
 )
 
 var ErrRelayNotFound = errors.New("relay not found")
@@ -81,11 +83,13 @@ func (s *Store) CreateRelay(ctx context.Context, name string, dnsAllowlist, ipAl
 // issue with the new id (it mints the token and returns its jti), attach the
 // jti, run audit in the same transaction, commit. Any failure rolls back the
 // row, the jti and the audit together; side effects issue made outside the
-// database are the caller's to undo.
+// database are the caller's to undo. poolID is the relay's pool (D-37); empty
+// means the default pool. An unknown pool is ErrPoolNotFound, before issue.
 func (s *Store) CreateRelayAudited(
 	ctx context.Context,
 	name string,
 	dnsAllowlist, ipAllowlist []string,
+	poolID string,
 	issue func(ctx context.Context, relayID string) (jti string, err error),
 	audit func(ctx context.Context, tx pgx.Tx, relayID string) error,
 ) (string, error) {
@@ -95,13 +99,19 @@ func (s *Store) CreateRelayAudited(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	if poolID == "" {
+		poolID = relaypool.DefaultPoolID
+	}
 	var id string
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO relays (name, dns_allowlist, ip_allowlist)
-		 VALUES ($1, $2, $3)
+		`INSERT INTO relays (name, dns_allowlist, ip_allowlist, pool_id)
+		 VALUES ($1, $2, $3, $4)
 		 RETURNING id`,
-		name, dnsAllowlist, ipAllowlist,
+		name, dnsAllowlist, ipAllowlist, poolID,
 	).Scan(&id); err != nil {
+		if isForeignKeyViolation(err) {
+			return "", ErrPoolNotFound
+		}
 		return "", fmt.Errorf("insert relay: %w", err)
 	}
 	jti, err := issue(ctx, id)
@@ -351,7 +361,7 @@ func (s *Store) ListRevokedRelaySerials(ctx context.Context) ([]RevokedSerial, e
 }
 
 // MarkDeleted soft-deletes a relay (status='deleted') so it stops being served
-// to connectors — BuildLabelledRelayList and RecordHeartbeat both reject
+// to connectors — BuildRelayLists and RecordHeartbeat both reject
 // 'deleted'. It does NOT revoke the relay certificate: CRL revocation is the
 // PENDING-02 seam. Returns ErrRelayNotFound if no matching non-deleted row.
 func (s *Store) MarkDeleted(ctx context.Context, id string) error {
@@ -724,71 +734,131 @@ type CapacityLabelTransition struct {
 // already-resolved relay_addr returned in LabelledRelayInfo.
 const labelledRelayDefaultPort = "9093"
 
-// BuildLabelledRelayList assembles the current ADR-016 eligibility list for
-// connector control-stream push. Includes only the relays eligible.Where
-// accepts: active, published capacity_label high or medium, not draining
-// (Sprint 22 Phase D), and with a routable address (an explicit public_addr or
-// an observed public IP). The drain guard uses the same predicate. The version field is
-// the latest last_label_changed_at observed across those rows, expressed as
-// epoch seconds — monotonic across promotions so the connector can skip a
-// re-probe when nothing has changed.
-func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.LabelledRelayList, error) {
+// Relay lists per pool (D-38). A connector receives only the relays
+// eligible.Where accepts (active, published capacity_label high or medium, not
+// draining, with a routable address) in its workspace's pool. The drain guard
+// uses the same predicate, per pool. Both builders below go through
+// labelledRelayInfo and relayListVersion, so the connect-time push and every
+// broadcast agree on the content and version of a pool's list.
+
+// labelledRelayColumns is the column list labelledRelayInfo scans.
+const labelledRelayColumns = `id::text, COALESCE(public_addr, ''), COALESCE(host(observed_ip), ''),
+       COALESCE(address_scope, ''), capacity_label`
+
+// labelledRelayInfo turns one eligible relay row into a list entry. ok=false
+// skips the row (no address or an unpublishable label; eligible.Where already
+// excludes both, so this is defensive only).
+func labelledRelayInfo(id, publicAddr, observedIP, addrScope, label string) (*connectorpb.LabelledRelayInfo, bool) {
+	addr := publicAddr
+	if addr == "" && addrScope == "public" && observedIP != "" {
+		addr = net.JoinHostPort(observedIP, labelledRelayDefaultPort)
+	}
+	if addr == "" {
+		return nil, false
+	}
+	var lbl connectorpb.RelayCapacityLabel
+	switch label {
+	case CapacityLabelHigh:
+		lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_HIGH
+	case CapacityLabelMedium:
+		lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_MEDIUM
+	default:
+		return nil, false
+	}
+	return &connectorpb.LabelledRelayInfo{
+		RelayId:   id,
+		RelayAddr: addr,
+		SpiffeId:  appmeta.RelaySPIFFEID(id),
+		Label:     lbl,
+	}, true
+}
+
+// newLabelledRelayList stamps the content version on a list (F11: the
+// connector compares versions by equality to decide whether to re-probe, so it
+// must be identical for identical content and change with any membership,
+// address or label change, regardless of row order).
+func newLabelledRelayList(relays []*connectorpb.LabelledRelayInfo) *connectorpb.LabelledRelayList {
+	return &connectorpb.LabelledRelayList{Relays: relays, Version: relayListVersion(relays)}
+}
+
+// BuildRelayLists builds the list of every pool and the pool of every
+// workspace, for a broadcast: each connector is then sent its workspace's list
+// (connector.ConnectorRegistry.BroadcastRelayLists). A pool without eligible
+// relays gets the empty list (D-38: fail closed, no fallback to another pool).
+func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text,
-		       COALESCE(public_addr, ''),
-		       COALESCE(host(observed_ip), ''),
-		       COALESCE(address_scope, ''),
-		       capacity_label
+		SELECT pool_id::text, `+labelledRelayColumns+`
 		  FROM relays
 		 WHERE `+eligible.Where)
 	if err != nil {
 		return nil, fmt.Errorf("list labelled relays: %w", err)
 	}
-	defer rows.Close()
+	byPool := map[string][]*connectorpb.LabelledRelayInfo{}
+	for rows.Next() {
+		var poolID, id, publicAddr, observedIP, addrScope, label string
+		if err := rows.Scan(&poolID, &id, &publicAddr, &observedIP, &addrScope, &label); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan labelled relay row: %w", err)
+		}
+		if info, ok := labelledRelayInfo(id, publicAddr, observedIP, addrScope, label); ok {
+			byPool[poolID] = append(byPool[poolID], info)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list labelled relays: %w", err)
+	}
+	lists := make(map[string]*connectorpb.LabelledRelayList, len(byPool))
+	for poolID, relays := range byPool {
+		lists[poolID] = newLabelledRelayList(relays)
+	}
 
-	list := &connectorpb.LabelledRelayList{}
+	wsRows, err := s.pool.Query(ctx, `SELECT id::text, relay_pool_id::text FROM workspaces`)
+	if err != nil {
+		return nil, fmt.Errorf("list workspace relay pools: %w", err)
+	}
+	defer wsRows.Close()
+	workspacePools := map[string]string{}
+	for wsRows.Next() {
+		var wsID, poolID string
+		if err := wsRows.Scan(&wsID, &poolID); err != nil {
+			return nil, fmt.Errorf("scan workspace relay pool: %w", err)
+		}
+		workspacePools[wsID] = poolID
+	}
+	if err := wsRows.Err(); err != nil {
+		return nil, fmt.Errorf("list workspace relay pools: %w", err)
+	}
+	return relaylist.NewSet(lists, workspacePools, newLabelledRelayList(nil)), nil
+}
+
+// BuildLabelledRelayListForWorkspace builds one workspace's list (the
+// connect-time push): the eligible relays of its pool. An unknown workspace
+// gets the default pool's list, where a new workspace starts.
+func (s *Store) BuildLabelledRelayListForWorkspace(ctx context.Context, workspaceID string) (*connectorpb.LabelledRelayList, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+labelledRelayColumns+`
+		  FROM relays
+		 WHERE pool_id = COALESCE((SELECT relay_pool_id FROM workspaces WHERE id = $1::uuid), '`+relaypool.DefaultPoolID+`'::uuid)
+		   AND `+eligible.Where, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list labelled relays for workspace: %w", err)
+	}
+	defer rows.Close()
+	var relays []*connectorpb.LabelledRelayInfo
 	for rows.Next() {
 		var id, publicAddr, observedIP, addrScope, label string
 		if err := rows.Scan(&id, &publicAddr, &observedIP, &addrScope, &label); err != nil {
 			return nil, fmt.Errorf("scan labelled relay row: %w", err)
 		}
-		addr := publicAddr
-		if addr == "" && addrScope == "public" && observedIP != "" {
-			addr = net.JoinHostPort(observedIP, labelledRelayDefaultPort)
+		if info, ok := labelledRelayInfo(id, publicAddr, observedIP, addrScope, label); ok {
+			relays = append(relays, info)
 		}
-		if addr == "" {
-			// eligible.Where already requires an address; defensive only.
-			continue
-		}
-		var lbl connectorpb.RelayCapacityLabel
-		switch label {
-		case CapacityLabelHigh:
-			lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_HIGH
-		case CapacityLabelMedium:
-			lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_MEDIUM
-		default:
-			// Low / unrecognised — filtered out by the SQL guard, but skip
-			// defensively in case the enum drifts.
-			continue
-		}
-		list.Relays = append(list.Relays, &connectorpb.LabelledRelayInfo{
-			RelayId:   id,
-			RelayAddr: addr,
-			SpiffeId:  appmeta.RelaySPIFFEID(id),
-			Label:     lbl,
-		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list labelled relays for workspace: %w", err)
 	}
-	// F11: the connector compares this version by equality to decide whether to
-	// re-probe (relay_ranking.rs version_matches). It must be identical for
-	// identical content and change whenever the eligible set, an address, or a
-	// label changes — regardless of DB row order. A content fingerprint gives
-	// that; the previous wall-clock stamp did not (it changed on every broadcast
-	// and disagreed with the connect-time push, F11).
-	list.Version = relayListVersion(list.Relays)
-	return list, nil
+	return newLabelledRelayList(relays), nil
 }
 
 // relayListVersion derives a deterministic, content-addressed version for a

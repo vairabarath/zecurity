@@ -3,6 +3,7 @@ import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as authApi from './auth'
 import * as operatorsApi from './operators'
+import * as poolsApi from './pools'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
 
@@ -11,11 +12,15 @@ import * as relaysApi from './relays'
 // (C-b, plus reset-totp) and the relay mutations (Sprint 22 D-30: Phase E
 // adds create, Phase X revoke and delete, Phase D drain and resume). Phase P adds GETs
 // only, and so do the provider quick wins (GET /provider/pki, GET /provider/health;
-// the audit export reuses GET /provider/audit). Every exported API function is called here; a new write must be
+// the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
+// create/rename/region-residency/delete, moving a relay between pools and a
+// tenant's pool assignment, plus the two pool reads. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
+  'DELETE /provider/relay-pools/{id}',
   'DELETE /provider/relays/{id}',
+  'PATCH /provider/relay-pools/{id}',
   'PATCH /provider/users/{id}',
   'POST /provider/auth/login',
   'POST /provider/auth/logout',
@@ -23,8 +28,10 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/totp/enroll',
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
+  'POST /provider/relay-pools',
   'POST /provider/relays',
   'POST /provider/relays/{id}/drain',
+  'POST /provider/relays/{id}/pool',
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
   'POST /provider/users',
@@ -32,6 +39,7 @@ const ALLOWED_WRITES = [
   'POST /provider/users/{id}/enable',
   'POST /provider/users/{id}/reset-password',
   'POST /provider/users/{id}/reset-totp',
+  'PUT /provider/tenants/{id}/relay-pool',
 ]
 
 const ALLOWED_READS = [
@@ -40,6 +48,8 @@ const ALLOWED_READS = [
   'GET /provider/health',
   'GET /provider/me',
   'GET /provider/pki',
+  'GET /provider/relay-pools',
+  'GET /provider/relay-pools/{id}',
   'GET /provider/relays',
   'GET /provider/relays/{id}',
   'GET /provider/tenants',
@@ -50,6 +60,7 @@ const ALLOWED_READS = [
 const API_MODULES: Record<string, Record<string, unknown>> = {
   auth: authApi,
   operators: operatorsApi,
+  pools: poolsApi,
   reads: readsApi,
   relays: relaysApi,
 }
@@ -57,7 +68,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 // Every function is called with ('a', 'b'): an id is always "a" (list
 // wrappers ignore the non-object argument).
 const ID = 'a'
-const normalize = (path: string) => path.replace(new RegExp(`^(/provider/(?:users|relays|tenants))/${ID}(?=/|$)`), '$1/{id}')
+const normalize = (path: string) => path.replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants))/${ID}(?=/|$)`), '$1/{id}')
 
 describe('API surface', () => {
   it('writes are exactly the allowed writes, reads exactly the allowed reads, all under /provider/', async () => {
@@ -89,6 +100,13 @@ describe('API surface', () => {
       [`POST /provider/relays/${ID}/resume`]: { status: 204 },
       [`DELETE /provider/relays/${ID}`]: { status: 204 },
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
+      [`POST /provider/relays/${ID}/pool`]: { status: 204 },
+      'GET /provider/relay-pools': { status: 200, body: { items: [] } },
+      [`GET /provider/relay-pools/${ID}`]: { status: 200, body: {} },
+      'POST /provider/relay-pools': { status: 201, body: { id: ID, name: 'a', region: null, residency: false } },
+      [`PATCH /provider/relay-pools/${ID}`]: { status: 204 },
+      [`DELETE /provider/relay-pools/${ID}`]: { status: 204 },
+      [`PUT /provider/tenants/${ID}/relay-pool`]: { status: 204 },
       'GET /provider/tenants': page,
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
@@ -120,6 +138,8 @@ describe('API surface', () => {
     const { calls } = mockFetch({
       'GET /provider/relays': page,
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
+      'GET /provider/relay-pools': { status: 200, body: { items: [] } },
+      [`GET /provider/relay-pools/${ID}`]: { status: 200, body: {} },
       'GET /provider/tenants': page,
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
@@ -129,7 +149,7 @@ describe('API surface', () => {
     })
     const wrappers = Object.entries(readsApi).filter(([name, fn]) => typeof fn === 'function' && name !== 'buildQuery')
     expect(wrappers.map(([n]) => n).sort()).toEqual(
-      ['getCertificates', 'getHealth', 'getPki', 'getRelay', 'getTenant', 'listRelays', 'listTenants', 'queryAudit'],
+      ['getCertificates', 'getHealth', 'getPki', 'getRelay', 'getRelayPool', 'getTenant', 'listRelayPools', 'listRelays', 'listTenants', 'queryAudit'],
     )
     for (const [, fn] of wrappers) await (fn as (id: string) => Promise<unknown>)(ID)
     expect(calls.every((c) => c.method === 'GET' && c.body === undefined)).toBe(true)

@@ -36,13 +36,29 @@ const (
 	// Control-plane health (quick-win F25): not under relay.*, so
 	// super-admin only.
 	ActionHealthRead = "health.read"
+
+	// Relay pools (D-37 … D-41). relay-ops manage pools and move relays
+	// through the relay.* prefix; changing a pool's region or residency is a
+	// super-admin exception (it changes what tenants were promised), and
+	// assigning a tenant's pool is a tenant.* action, so super-admin only
+	// (D-06).
+	ActionRelayPoolCreate       = "relay.pool.create"
+	ActionRelayPoolUpdate       = "relay.pool.update"
+	ActionRelayPoolSetPlacement = "relay.pool.set_placement"
+	ActionRelayPoolDelete       = "relay.pool.delete"
+	ActionRelayMove             = "relay.move"
+	ActionTenantRelayPoolAssign = "tenant.relay_pool.assign"
+	// ActionRelayPlacementRejected is audited by the system (no operator):
+	// a residency tenant's connector reported a relay outside its pools.
+	ActionRelayPlacementRejected = "relay.placement_rejected"
 )
 
-// superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform
-// (D-31): the destructive ones.
+// superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
+// the destructive ones (D-31), and setting a pool's region or residency (D-41).
 var superAdminOnlyRelayActions = map[string]bool{
-	ActionRelayRevoke: true,
-	ActionRelayDelete: true,
+	ActionRelayRevoke:           true,
+	ActionRelayDelete:           true,
+	ActionRelayPoolSetPlacement: true,
 }
 
 // ErrForbidden is returned by decide() when the actor may not perform the
@@ -102,6 +118,36 @@ func (a *Authz) CanViewProviderAudit(actor Actor) error {
 	return decide(actor, ActionAuditView, Target{Type: "audit"})
 }
 
+// CanCreateRelayPool gates POST /provider/relay-pools (relay-ops, D-41).
+func (a *Authz) CanCreateRelayPool(actor Actor, target Target) error {
+	return decide(actor, ActionRelayPoolCreate, target)
+}
+
+// CanUpdateRelayPool gates PATCH /provider/relay-pools/{id}: renaming is
+// relay-ops; a change of region or residency is super-admin only (D-41).
+func (a *Authz) CanUpdateRelayPool(actor Actor, target Target, touchesPlacement bool) error {
+	if touchesPlacement {
+		return decide(actor, ActionRelayPoolSetPlacement, target)
+	}
+	return decide(actor, ActionRelayPoolUpdate, target)
+}
+
+// CanDeleteRelayPool gates DELETE /provider/relay-pools/{id} (relay-ops).
+func (a *Authz) CanDeleteRelayPool(actor Actor, target Target) error {
+	return decide(actor, ActionRelayPoolDelete, target)
+}
+
+// CanMoveRelay gates POST /provider/relays/{id}/pool (relay-ops, D-41).
+func (a *Authz) CanMoveRelay(actor Actor, target Target) error {
+	return decide(actor, ActionRelayMove, target)
+}
+
+// CanAssignTenantRelayPool gates PUT /provider/tenants/{id}/relay-pool
+// (super-admin only: tenant.*, D-06, D-41).
+func (a *Authz) CanAssignTenantRelayPool(actor Actor, target Target) error {
+	return decide(actor, ActionTenantRelayPoolAssign, target)
+}
+
 // CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
 func (a *Authz) CanReadRelays(actor Actor, target Target) error {
 	return decide(actor, ActionRelayRead, target)
@@ -125,7 +171,8 @@ func (a *Authz) CanReadCertificates(actor Actor) error {
 // decide is the ONE policy function. Matrix:
 //
 //	super-admin → every action
-//	relay-ops   → the "relay.*" namespace, EXCEPT relay.revoke and relay.delete
+//	relay-ops   → the "relay.*" namespace, EXCEPT relay.revoke, relay.delete
+//	              and relay.pool.set_placement
 //
 // The exception is Decision Record D-31 (amends D-05, Sprint 22 Phase A):
 // relay-ops may create relays, issue provisioning tokens, read (and later

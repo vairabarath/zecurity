@@ -381,7 +381,7 @@ func TestRelayBandwidth(t *testing.T) {
 func TestRelayDTOSurface(t *testing.T) {
 	summary := []string{"address_scope", "attached_connectors", "bandwidth", "capacity_label", "cert_not_after", "cert_serial",
 		"connection_count", "created_at", "drain_state", "draining_since", "hostname", "id", "last_heartbeat_at",
-		"max_connections", "name", "public_addr", "status", "version"}
+		"max_connections", "name", "pool", "public_addr", "status", "version"}
 	detail := append(append([]string{}, summary...), "attachments", "attachments_truncated", "certificates",
 		"certificates_truncated", "dns_allowlist", "eligible_relay_count", "in_relay_list", "ip_allowlist")
 	sort.Strings(detail)
@@ -393,6 +393,15 @@ func TestRelayDTOSurface(t *testing.T) {
 		"RelayDetail":      {RelayDetail{}, detail},
 		"RelayCertificate": {RelayCertificate{}, []string{"is_current", "issued_at", "not_after", "revocation_reason", "revoked_at", "serial"}},
 		"RelayAttachment":  {RelayAttachment{}, []string{"attached_at", "connector_id", "last_confirmed", "source", "tenant_id"}},
+		// Relay pools (D-37 … D-41): counts and names only; tenant names only
+		// in tenant_list, which is null unless the caller may read tenants.
+		"RelayPoolRef": {RelayPoolRef{}, []string{"id", "name", "region", "residency"}},
+		"RelayPoolSummary": {RelayPoolSummary{}, []string{"created_at", "eligible_relays", "id", "is_default", "name",
+			"region", "relays", "residency", "tenants"}},
+		"RelayPoolDetail": {RelayPoolDetail{}, []string{"created_at", "eligible_relays", "id", "is_default", "name",
+			"region", "relay_list", "relay_list_truncated", "relays", "residency", "tenant_list", "tenant_list_truncated", "tenants"}},
+		"RelayPoolRelay":  {RelayPoolRelay{}, []string{"eligible", "id", "name", "status"}},
+		"RelayPoolTenant": {RelayPoolTenant{}, []string{"id", "name", "slug"}},
 	} {
 		b, _ := json.Marshal(c.v)
 		var m map[string]any

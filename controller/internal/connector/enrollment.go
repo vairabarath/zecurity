@@ -26,19 +26,25 @@ import (
 // Created in main.go and registered with the gRPC server.
 type EnrollmentHandler struct {
 	pb.UnimplementedConnectorServiceServer
-	Cfg        Config
-	Pool       *pgxpool.Pool
-	Redis      valkeycompat.Cmdable
-	PKIService pki.Service
-	ShieldSvc  shield.Service
-	Registry   *ConnectorRegistry // tracks active Control streams
-	PostureStore *posture.Store
+	Cfg               Config
+	Pool              *pgxpool.Pool
+	Redis             valkeycompat.Cmdable
+	PKIService        pki.Service
+	ShieldSvc         shield.Service
+	Registry          *ConnectorRegistry // tracks active Control streams
+	PostureStore      *posture.Store
 	PolicyStore       *policy.Store
 	PolicyCache       *policy.SnapshotCache
 	PolicyNotifier    PolicyChangeNotifier
 	RelayStore        RelayPlacementStore
 	RelayListSrc      LabelledRelayListSource // ADR-016: source of LabelledRelayList for control-stream push
 	TransportNotifier TransportChangeNotifier // ADR-017 Track B: topology-change notifier for relay-placement changes
+	// OnPlacementRejected, if set, records a refused relay placement (D-40:
+	// a residency tenant's connector reported a relay outside its authorized
+	// pools). Called once per connector and relay transition, not per
+	// heartbeat. Wired in main.go to the provider audit log.
+	OnPlacementRejected func(ctx context.Context, workspaceID, connectorID, relayID string)
+	placementRejects    placementRejectLog
 
 	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
 

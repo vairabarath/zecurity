@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { listRelays } from '@/api/reads'
@@ -14,6 +14,7 @@ import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
+import { PoolLink, RegionCode } from '@/components/PoolBadges'
 import { ProvisioningTokenDialog, type IssuedRelay } from '@/components/ProvisioningTokenDialog'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Badge } from '@/components/ui/badge'
@@ -29,11 +30,15 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // status filter, paging, Refresh and Retry, the only control is Add relay
 // (Sprint 22 Phase E, D-30): super-admin and relay-ops may create relays
 // (D-31). Hiding the button is UX only; the controller decides.
+// Relay pools (D-37): Pool and Region columns, and a pool filter over the
+// page already loaded (the API has no pool filter, so it narrows this page
+// only and sends nothing).
 
 const CAN_CREATE = ['super-admin', 'relay-ops'] as const
 
 const FILTER_KEYS = ['status'] as const
 const ALL = 'all' // chip value for "no status filter" (every status except deleted)
+const ALL_POOLS = '' // pool chip value for "every pool on this page"
 
 const STATUS_OPTIONS = [
   { value: ALL, label: 'All except deleted' },
@@ -63,12 +68,22 @@ export function Relays() {
   const [error, setError] = useState<string>()
   // The one-time token lives here only while its dialog is open.
   const [issued, setIssued] = useState<IssuedRelay | null>(null)
+  const [poolFilter, setPoolFilter] = useState(ALL_POOLS)
+  const loaded = q.state.status === 'ready' ? q.state.data.items : null
+  // The pools on this page, in first-seen order; a filter on a pool that
+  // isn't on the page any more falls back to every pool.
+  const pagePools = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const r of loaded ?? []) if (!seen.has(r.pool.id)) seen.set(r.pool.id, r.pool.name)
+    return [...seen].map(([value, label]) => ({ value, label }))
+  }, [loaded])
+  const activePool = pagePools.some((p) => p.value === poolFilter) ? poolFilter : ALL_POOLS
 
   async function onCreate(relay: NewRelay) {
     setPending(true)
     setError(undefined)
     try {
-      const res = await createRelay(relay.name, relay.dnsAllowlist, relay.ipAllowlist)
+      const res = await createRelay(relay.name, relay.dnsAllowlist, relay.ipAllowlist, relay.poolId)
       setAdding(false)
       setIssued({
         name: relay.name,
@@ -121,6 +136,14 @@ export function Relays() {
       />
 
       <FilterChips label="Status filter" options={STATUS_OPTIONS} value={q.filters.status ?? ALL} onChange={onStatus} />
+      {pagePools.length > 1 && (
+        <FilterChips
+          label="Pool filter (this page)"
+          options={[{ value: ALL_POOLS, label: 'All pools on this page' }, ...pagePools]}
+          value={activePool}
+          onChange={setPoolFilter}
+        />
+      )}
 
       <DataState
         state={q.state}
@@ -137,6 +160,8 @@ export function Relays() {
                 <TableRow className="hover:bg-transparent">
                   <TableHead>Relay</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Pool</TableHead>
+                  <TableHead>Region</TableHead>
                   <TableHead>Version</TableHead>
                   <TableHead>Connections</TableHead>
                   <TableHead>Bandwidth</TableHead>
@@ -147,7 +172,7 @@ export function Relays() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {page.items.map((r) => (
+                {page.items.filter((r) => !activePool || r.pool.id === activePool).map((r) => (
                   <TableRow key={r.id} aria-label={r.name}>
                     <TableCell>
                       <Link to={`/relays/${encodeURIComponent(r.id)}`} className="font-medium text-foreground hover:text-primary">
@@ -169,6 +194,12 @@ export function Relays() {
                       {r.status === 'pending' && (
                         <div className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Waiting for enrolment</div>
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <PoolLink pool={r.pool} className="whitespace-nowrap text-foreground hover:text-primary" />
+                    </TableCell>
+                    <TableCell>
+                      <RegionCode region={r.pool.region} />
                     </TableCell>
                     <TableCell className="font-mono text-[13px] text-subtle-foreground">{r.version ?? '—'}</TableCell>
                     <TableCell className="min-w-36">

@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
 )
 
 // ProvisioningTokenTTL is the lifetime of a relay provisioning token.
@@ -27,7 +28,7 @@ const ProvisioningTokenTTL = 24 * time.Hour
 
 // Relay admin API (Sprint 22 Phase A; Decision Record D-17, D-31, D-14):
 //
-//	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist} → 201 {relay_id, provisioning_token, expires_at, ca_fingerprint, controller_grpc_addr, controller_http_addr}
+//	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist, pool_id?} → 201 {relay_id, provisioning_token, expires_at, ca_fingerprint, controller_grpc_addr, controller_http_addr}
 //	POST   /provider/relays/{id}/revoke   super-admin             {reason, confirm_name} → 204
 //	DELETE /provider/relays/{id}          super-admin             {reason, confirm_name} → 204
 //	POST   /provider/relays/{id}/drain    super-admin, relay-ops  {reason?} → 204 (Phase D, D-32)
@@ -75,12 +76,21 @@ type AdminHandler struct {
 	// that changed state: it sets or clears the heartbeat draining flag and
 	// broadcasts the relay list. Never on a no-op or an error. Wired in main.go.
 	OnRelayDrainChanged func(ctx context.Context, relayID string, draining bool)
+	// OnRelayPoolChanged, if set, runs post-commit after a relay moved to
+	// another pool or a tenant's pool changed: it publishes the relay lists
+	// (D-38). Wired in main.go.
+	OnRelayPoolChanged func(ctx context.Context) error
+	// PoolMigrationWindow is how long a graceful tenant move keeps the old
+	// pool authorized (D-40); zero means DefaultPoolMigrationWindow.
+	PoolMigrationWindow time.Duration
 }
 
 type createRelayRequest struct {
 	Name         string   `json:"name"`
 	DNSAllowlist []string `json:"dns_allowlist"`
 	IPAllowlist  []string `json:"ip_allowlist"`
+	// PoolID is the relay's pool (D-37); omitted means the default pool.
+	PoolID string `json:"pool_id"`
 }
 
 type createRelayResponse struct {
@@ -177,6 +187,13 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	for i, ip := range ipAddresses {
 		ipAllowlist[i] = ip.String()
 	}
+	poolID := strings.TrimSpace(req.PoolID)
+	if poolID != "" {
+		if _, err := uuid.Parse(poolID); err != nil {
+			provider.WriteError(w, http.StatusBadRequest, "pool_not_found")
+			return
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -201,7 +218,7 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Valkey jti for a relay that doesn't exist: provisioning refuses it, and
 	// it expires with the token.)
 	var tokenString, jti string
-	relayID, err := h.Store.CreateRelayAudited(ctx, name, dnsAllowlist, ipAllowlist,
+	relayID, err := h.Store.CreateRelayAudited(ctx, name, dnsAllowlist, ipAllowlist, poolID,
 		func(ctx context.Context, relayID string) (string, error) {
 			tok, j, err := IssueProvisioningToken(h.JWTSecret, relayID, ProvisioningTokenTTL)
 			if err != nil {
@@ -225,10 +242,14 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 					"ttl":  ProvisioningTokenTTL.String(),
 					"dns":  dnsAllowlist,
 					"ip":   ipAllowlist,
-				}, nil, map[string]any{"name": name, "status": "pending"}),
+				}, nil, map[string]any{"name": name, "status": "pending", "pool_id": poolOrDefault(poolID)}),
 				IPAddress: provider.ClientIP(r),
 			})
 		})
+	if errors.Is(err, ErrPoolNotFound) {
+		provider.WriteError(w, http.StatusBadRequest, "pool_not_found")
+		return
+	}
 	if err != nil {
 		if jti != "" {
 			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
@@ -538,4 +559,12 @@ func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		io.Closer
 	}{br, r.Body}
 	return provider.DecodeJSON(w, r, dst)
+}
+
+// poolOrDefault names the pool a relay is created in.
+func poolOrDefault(poolID string) string {
+	if poolID == "" {
+		return relaypool.DefaultPoolID
+	}
+	return poolID
 }

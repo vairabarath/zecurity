@@ -5,6 +5,7 @@ import type { RelayDetail } from '@/api/types'
 import { mockFetch, relayOpsMe, superAdminMe, type FakeResponse, type RecordedCall } from '@/test/fetch'
 import { RelayDangerZone } from '@/components/RelayDangerZone'
 import { RelayDrainCard } from '@/components/RelayDrainCard'
+import { DEFAULT_POOL } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
 const ID = '11111111-1111-1111-1111-111111111111'
@@ -50,6 +51,7 @@ function detail(over: Partial<RelayDetail> = {}): RelayDetail {
       { connector_id: 'c-1', tenant_id: TENANT, attached_at: '2026-10-03T00:00:00Z', last_confirmed: iso(-5 * 60_000), source: 'heartbeat' },
     ],
     attachments_truncated: false,
+    pool: DEFAULT_POOL,
     ...over,
   }
 }
@@ -168,27 +170,28 @@ describe('Relay detail', () => {
   })
 
   // Phase D (D-31): relay-ops may drain and resume, nothing else.
-  it('relay-ops sees only Refresh and Drain relay, no other mutating controls; loading sends GETs only', async () => {
+  it('relay-ops sees only Refresh, Move to pool and Drain relay, no other mutating controls; loading sends GETs only', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Drain relay'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Move to pool', 'Drain relay'])
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
 
-  // Sprint 22 Phase X and D (D-30, D-31): the only mutating controls on this
-  // page are Drain (both roles) and a super-admin's Revoke and Delete;
+  // Sprint 22 Phase X and D (D-30, D-31), relay pools (D-41): the only mutating
+  // controls on this page are Move to pool and Drain (both roles) and a
+  // super-admin's Revoke and Delete;
   // opening the page sends GETs only.
-  it('a super-admin sees exactly Refresh, Drain relay, Revoke relay and Delete relay; loading sends GETs only', async () => {
+  it('a super-admin sees exactly Refresh, Move to pool, Drain relay, Revoke relay and Delete relay; loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Drain relay', 'Revoke relay', 'Delete relay'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Move to pool', 'Drain relay', 'Revoke relay', 'Delete relay'])
     expect(within(main).queryByText(/\b(edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
@@ -532,7 +535,7 @@ describe('Relay detail: drain card', () => {
     await user.click(await screen.findByRole('button', { name: 'Drain relay' }))
     const dialog = await screen.findByRole('dialog', { name: 'Drain relay' })
     await user.click(within(dialog).getByRole('button', { name: 'Drain relay' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/only relay connectors can use right now/)
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/last eligible relay in its pool/)
     expect(gets(calls)).toHaveLength(1)
   })
 

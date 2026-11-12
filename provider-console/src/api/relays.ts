@@ -8,9 +8,10 @@ import type { CreateRelayResponse } from './types'
 // The provisioning token comes back in the response body and is handed
 // straight to the caller; nothing here keeps it.
 
-export function createRelay(name: string, dnsAllowlist: string[], ipAllowlist: string[]): Promise<CreateRelayResponse> {
+/** `poolId` (D-37) is the new relay's pool; omitted, the controller uses the default pool. */
+export function createRelay(name: string, dnsAllowlist: string[], ipAllowlist: string[], poolId?: string): Promise<CreateRelayResponse> {
   return request<CreateRelayResponse>('POST', '/provider/relays', {
-    body: { name, dns_allowlist: dnsAllowlist, ip_allowlist: ipAllowlist },
+    body: { name, dns_allowlist: dnsAllowlist, ip_allowlist: ipAllowlist, ...(poolId ? { pool_id: poolId } : {}) },
   })
 }
 

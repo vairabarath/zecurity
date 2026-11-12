@@ -119,7 +119,7 @@ export function RelayDangerZone({ relay, onDone }: { relay: RelayDetail; onDone:
           }
           warning={
             lastListed
-              ? 'No eligible relays will remain: this is the only relay in the list connectors use. New connections may fail until another relay is eligible.'
+              ? `No eligible relays will remain in its pool (${relay.pool.name}): this is the only relay in the list that pool’s connectors use. Their relay connections may fail until another relay in the pool is eligible.`
               : undefined
           }
           confirmText={relay.name}

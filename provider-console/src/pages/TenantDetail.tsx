@@ -1,9 +1,11 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ArrowLeft, Eye, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { getTenant } from '@/api/reads'
 import type { TenantDetail as TenantDetailDTO } from '@/api/types'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
+import type { RelayActionNotice } from '@/components/RelayDangerZone'
+import { TenantRelayPoolSection } from '@/components/TenantRelayPool'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TenantAvatar } from '@/components/TenantAvatar'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -27,6 +29,9 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 //
 // Infrastructure only (OQ-2): no tenant users or identities exist in this
 // response; users are counts by status.
+//
+// The one write is Change pool (D-41, super-admin): after it succeeds the
+// page reloads once (one more tenant.read audit row), like a Refresh.
 
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
@@ -57,6 +62,8 @@ export function TenantDetail() {
 /** The page-level owner of the single audited fetch. */
 function TenantDetailFetch({ id }: { id: string }) {
   const { state, reload } = useDetailQuery(id, getTenant)
+  // The outcome of a pool change; kept here because the reload replaces the view.
+  const [notice, setNotice] = useState<RelayActionNotice | null>(null)
 
   switch (state.status) {
     case 'loading':
@@ -87,7 +94,20 @@ function TenantDetailFetch({ id }: { id: string }) {
         </div>
       )
     case 'ready':
-      return <TenantView tenant={state.data} onRefresh={reload} />
+      return (
+        <TenantView
+          tenant={state.data}
+          notice={notice}
+          onRefresh={() => {
+            setNotice(null)
+            reload()
+          }}
+          onActionDone={(n) => {
+            setNotice(n)
+            reload()
+          }}
+        />
+      )
   }
 }
 
@@ -120,7 +140,17 @@ function CountTile({ label, value, children }: { label: string; value: ReactNode
   )
 }
 
-function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefresh: () => void }) {
+function TenantView({
+  tenant: t,
+  notice,
+  onRefresh,
+  onActionDone,
+}: {
+  tenant: TenantDetailDTO
+  notice: RelayActionNotice | null
+  onRefresh: () => void
+  onActionDone: (notice: RelayActionNotice) => void
+}) {
   // Names for ids inside the already-fetched response (no extra requests).
   const networkName = new Map(t.remote_networks.map((n) => [n.id, n.name]))
   const connectorName = new Map(t.connectors.map((c) => [c.id, c.name]))
@@ -162,6 +192,12 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
         </Button>
       </header>
 
+      {notice && (
+        <Alert role="status" data-tone={notice.tone}>
+          <AlertDescription>{notice.text}</AlertDescription>
+        </Alert>
+      )}
+
       <section aria-label="Overview" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <CountTile label="Users" value={c.users.active.toLocaleString()}>
           <span aria-label="User counts">
@@ -188,6 +224,8 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
           {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks
         </CountTile>
       </section>
+
+      <TenantRelayPoolSection tenant={t} onDone={onActionDone} />
 
       <Section title="Remote networks">
         {t.remote_networks.length === 0 ? (

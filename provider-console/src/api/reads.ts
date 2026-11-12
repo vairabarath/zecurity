@@ -7,6 +7,8 @@ import type {
   Page,
   PKIHierarchy,
   RelayDetail,
+  RelayPoolDetail,
+  RelayPoolSummary,
   RelayStatus,
   RelaySummary,
   TenantDetail,
@@ -91,6 +93,16 @@ export function listRelays(params?: RelayListParams): Promise<Page<RelaySummary>
 
 export function getRelay(id: string): Promise<RelayDetail> {
   return request<RelayDetail>('GET', `/provider/relays/${encodeURIComponent(id)}`)
+}
+
+/** Relay pools (relay.read: both roles; D-37). Counts only; not paginated. */
+export function listRelayPools(): Promise<{ items: RelayPoolSummary[] }> {
+  return request<{ items: RelayPoolSummary[] }>('GET', '/provider/relay-pools')
+}
+
+/** One pool with its relays; `tenant_list` is null unless the caller may read tenants (D-41). */
+export function getRelayPool(id: string): Promise<RelayPoolDetail> {
+  return request<RelayPoolDetail>('GET', `/provider/relay-pools/${encodeURIComponent(id)}`)
 }
 
 export function listTenants(params?: TenantListParams): Promise<Page<TenantSummary>> {

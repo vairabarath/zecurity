@@ -334,19 +334,19 @@ func main() {
 	}
 	go shieldRevocations.Run(ctx)
 
-	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
-	// connected connectors. Triggered on capacity-tier promotion, address
-	// changes, and eviction. The version is a content fingerprint set by
-	// BuildLabelledRelayList (F11): both this broadcast path and the
-	// connect-time push in control_stream.go agree on it, and it changes iff
-	// the eligible set / an address / a label changes — so a connector
-	// re-probes exactly when the pool actually changed.
+	// ADR-016 C5 with relay pools (D-38): build every pool's list and send
+	// each connected connector its workspace's pool's list. Triggered on
+	// capacity-tier promotion, address changes, eviction, drain/resume,
+	// revoke/delete and relay-pool changes. Lists carry a content fingerprint
+	// (F11) shared with the connect-time push, and a stream is only sent a list
+	// that differs from its last one, so a change to one pool reaches only that
+	// pool's tenants and a connector re-probes exactly when its list changed.
 	publishRelayList := func(ctx context.Context) error {
-		list, err := relayStore.BuildLabelledRelayList(ctx)
+		set, err := relayStore.BuildRelayLists(ctx)
 		if err != nil {
-			return fmt.Errorf("build list: %w", err)
+			return fmt.Errorf("build lists: %w", err)
 		}
-		connectorRegistry.BroadcastRelayList(list)
+		connectorRegistry.BroadcastRelayLists(set)
 		return nil
 	}
 	broadcastRelayList := func(ctx context.Context) {
@@ -608,6 +608,21 @@ func main() {
 	relayAdminHandler.OnRelayDrainChanged = relay.DrainFanout(relaySvc, publishRelayList)
 	mux.Handle("POST /provider/relays/{id}/drain", requireProvider(http.HandlerFunc(relayAdminHandler.Drain)))
 	mux.Handle("POST /provider/relays/{id}/resume", requireProvider(http.HandlerFunc(relayAdminHandler.Resume)))
+
+	// Relay pools (D-37 … D-41). Moves and tenant assignments publish the
+	// relay lists after commit; RELAY_POOL_MIGRATION_WINDOW is how long a
+	// graceful tenant move keeps the old pool authorized (D-40).
+	relayAdminHandler.OnRelayPoolChanged = publishRelayList
+	relayAdminHandler.PoolMigrationWindow = mustDuration("RELAY_POOL_MIGRATION_WINDOW", relay.DefaultPoolMigrationWindow)
+	if relayAdminHandler.PoolMigrationWindow < relay.MinPoolMigrationWindow {
+		log.Fatalf("RELAY_POOL_MIGRATION_WINDOW=%s is shorter than the connector drain timeout (%s): a graceful move would cut in-flight streams",
+			relayAdminHandler.PoolMigrationWindow, relay.MinPoolMigrationWindow)
+	}
+	mux.Handle("POST /provider/relay-pools", requireProvider(http.HandlerFunc(relayAdminHandler.CreatePool)))
+	mux.Handle("PATCH /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.UpdatePool)))
+	mux.Handle("DELETE /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.DeletePool)))
+	mux.Handle("POST /provider/relays/{id}/pool", requireProvider(http.HandlerFunc(relayAdminHandler.MoveRelay)))
+	mux.Handle("PUT /provider/tenants/{id}/relay-pool", requireProvider(http.HandlerFunc(relayAdminHandler.AssignTenantPool)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -645,6 +660,8 @@ func main() {
 	providerReads := provider.NewReadHandlers(db.Pool, providerAuthz, providerStore, relaySvc, controllerRotator)
 	mux.Handle("GET /provider/relays", requireProvider(http.HandlerFunc(providerReads.ListRelays)))
 	mux.Handle("GET /provider/relays/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelay)))
+	mux.Handle("GET /provider/relay-pools", requireProvider(http.HandlerFunc(providerReads.ListRelayPools)))
+	mux.Handle("GET /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelayPool)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
@@ -703,6 +720,23 @@ func main() {
 		RelayStore:        relayStore,
 		RelayListSrc:      relayStore,
 		TransportNotifier: transportNotifier,
+		// D-40: a residency tenant's connector reported a relay outside its
+		// authorized pools. Audited by the system, once per transition.
+		OnPlacementRejected: func(ctx context.Context, workspaceID, connectorID, relayID string) {
+			if err := providerStore.InsertAudit(ctx, provider.AuditEntry{
+				ProviderEmail: "system:relay-placement",
+				Action:        provider.ActionRelayPlacementRejected,
+				TargetType:    "relay",
+				TargetID:      relayID,
+				Details: map[string]any{
+					"tenant_id":    workspaceID,
+					"connector_id": connectorID,
+					"reason":       "relay is outside the tenant's authorized relay pools (D-40)",
+				},
+			}); err != nil {
+				log.Printf("relay placement: audit refused placement connector=%s relay=%s: %v", connectorID, relayID, err)
+			}
+		},
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
