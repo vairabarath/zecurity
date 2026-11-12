@@ -414,7 +414,10 @@ names are first-come. So:
 - **No hijacked data directory:** before reading anything the daemon refuses
   a data directory, or any entry in it, that is a junction/link or not owned
   by SYSTEM/Administrators, then sets protected DACLs with `SetFileSecurityW`
-  (no propagation to existing children).
+  (no propagation to existing children) and resets every file to exactly
+  what its directory grants, so a trusted owner never launders a file whose
+  own access list lets someone else write. `setup` and the installer write
+  `client.conf` fresh and set its owner, never just re-own an old file.
 - **The enrolled user can't restructure it:** the user may list and read
   (and delete files in `state`, which logout and post-revocation login do),
   but never add, rename or replace anything, so they can't swap a folder for

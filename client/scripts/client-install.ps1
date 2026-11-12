@@ -191,10 +191,16 @@ if ($Workspace -or $ControllerAddr -or $ControllerHttpAddr) {
     }
     Assert-NotReparsePoint $DataDir
     Assert-NotReparsePoint $ConfigFile
+    # A fresh file with the directory's access only: an old file's access
+    # list is never carried over (the daemon resets it on start too).
+    if (Test-Path -LiteralPath $ConfigFile) { Remove-Item -LiteralPath $ConfigFile -Force }
     Set-Content -LiteralPath $ConfigFile -Value $lines -Encoding ascii
+    & icacls.exe $ConfigFile /reset /L | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "could not reset access to $ConfigFile" }
     # The daemon accepts only SYSTEM/Administrators-owned files; a file an
     # elevated admin creates may be owned by that admin's own account.
     & icacls.exe $ConfigFile /setowner '*S-1-5-32-544' /L | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "could not set the owner of $ConfigFile" }
     Log "wrote $ConfigFile"
 }
 

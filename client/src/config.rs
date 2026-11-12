@@ -161,25 +161,46 @@ pub fn merged_with_existing(update: ClientConf) -> ClientConf {
 /// daemon would never see it.
 #[cfg(windows)]
 pub fn save(conf: &ClientConf) -> Result<PathBuf> {
+    use anyhow::Context;
+
     let path = system_conf_path();
-    match std::fs::write(&path, toml::to_string_pretty(conf)?) {
-        Ok(()) => {
-            // The daemon accepts only SYSTEM/Administrators-owned files
-            // (win_security); a file an elevated admin creates may be owned
-            // by that admin's own account.
-            let _ = std::process::Command::new("icacls")
-                .arg(&path)
-                .args(["/setowner", "*S-1-5-32-544", "/L"])
-                .output();
-            Ok(path)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(anyhow::anyhow!(
-            "writing {} needs administrator rights: run `zecurity-client setup` from an \
-             elevated terminal",
-            path.display()
-        )),
-        Err(e) => Err(e.into()),
+    let dir = path.parent().context("config path has no directory")?;
+    // A fresh file, renamed over the old one: it carries only what the
+    // directory grants (SYSTEM and Administrators full control, the enrolled
+    // user read), never an existing file's access list.
+    let tmp = dir.join(format!("client.conf.tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, toml::to_string_pretty(conf)?) {
+        return Err(if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!(
+                "writing {} needs administrator rights: run `zecurity-client setup` from an \
+                 elevated terminal",
+                path.display()
+            )
+        } else {
+            e.into()
+        });
     }
+    let result = (|| -> Result<()> {
+        // The daemon accepts only SYSTEM/Administrators-owned files
+        // (win_security); a file an elevated admin creates may be owned by
+        // that admin's own account. icacls by full path, never a PATH lookup.
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let status = std::process::Command::new(system_root.join("System32").join("icacls.exe"))
+            .arg(&tmp)
+            .args(["/setowner", "*S-1-5-32-544", "/L"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .context("run icacls")?;
+        anyhow::ensure!(status.success(), "icacls /setowner failed with {status}");
+        std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map(|()| path)
 }
 
 #[cfg(not(windows))]

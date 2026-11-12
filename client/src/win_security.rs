@@ -108,12 +108,14 @@ mod imp {
     use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
+        GetNamedSecurityInfoW, GetSecurityInfo, SetNamedSecurityInfoW, SDDL_REVISION_1,
+        SE_FILE_OBJECT, SE_KERNEL_OBJECT,
     };
     use windows_sys::Win32::Security::{
-        IsWellKnownSid, SetFileSecurityW, WinBuiltinAdministratorsSid, WinLocalSystemSid,
-        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID,
+        GetSecurityDescriptorDacl, IsWellKnownSid, SetFileSecurityW, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -259,11 +261,52 @@ mod imp {
         Ok(())
     }
 
+    /// Replaces a file's DACL with an empty, unprotected one, so the file has
+    /// exactly what its directory grants (SYSTEM and Administrators full
+    /// control, the enrolled user read). Whatever explicit access the file
+    /// carried before, such as write access for some other account, is
+    /// gone: a trusted owner alone never makes a file trusted. Files have no
+    /// children, so nothing propagates beyond `path`.
+    fn reset_file_dacl(path: &Path) -> Result<()> {
+        let sd = descriptor_from_sddl("D:AI").context("build an empty DACL")?;
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `sd.0` is a valid descriptor; `dacl` points into it.
+        if unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) } == 0
+            || present == 0
+        {
+            bail!("empty security descriptor has no DACL");
+        }
+        let wide = wide_path(path);
+        // SAFETY: `wide` is NUL-terminated; `dacl` stays valid while `sd` lives.
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            bail!(
+                "reset access to {}: {}",
+                path.display(),
+                std::io::Error::from_raw_os_error(rc as i32)
+            );
+        }
+        Ok(())
+    }
+
     /// Run by the daemon (LocalSystem) before it reads config or state:
     /// creates `%ProgramData%\Zecurity` and its `state` and `logs`
     /// directories if missing; refuses any of them, or any entry in them,
-    /// that is a reparse point or not owned by SYSTEM/Administrators; and
-    /// sets each directory's protected DACL.
+    /// that is a reparse point or not owned by SYSTEM/Administrators; sets
+    /// each directory's protected DACL; and resets every file to the access
+    /// its directory grants.
     pub fn secure_data_dir(user_sid: Option<&str>) -> Result<()> {
         let root = crate::config::program_data_dir();
         let dirs = [
@@ -281,9 +324,13 @@ mod imp {
             for entry in
                 std::fs::read_dir(path).with_context(|| format!("list {}", path.display()))?
             {
-                let entry = entry?.path();
-                reject_reparse_point(&entry)?;
-                check_path_owner(&entry)?;
+                let entry = entry?;
+                let path = entry.path();
+                reject_reparse_point(&path)?;
+                check_path_owner(&path)?;
+                if entry.file_type()?.is_file() {
+                    reset_file_dacl(&path)?;
+                }
             }
         }
         Ok(())
