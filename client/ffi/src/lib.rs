@@ -313,6 +313,8 @@ mod jni_service {
         if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
             return 0;
         }
+        // A failure from an earlier start would be shown as current.
+        let _ = std::fs::remove_file(mobile::files_dir().join("daemon.error"));
         std::thread::spawn(|| {
             let result = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -415,6 +417,7 @@ mod ios_tunnel {
         if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
             return 0;
         }
+        let _ = std::fs::remove_file(mobile::files_dir().join("daemon.error"));
         std::thread::spawn(|| {
             // Two workers: the extension is killed above ~50 MB.
             let result = tokio::runtime::Builder::new_multi_thread()

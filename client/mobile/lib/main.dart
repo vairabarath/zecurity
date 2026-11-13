@@ -4,9 +4,11 @@
 // core (native.dart), the way the CLI does on Linux.
 
 import 'dart:async';
+import 'dart:io' show File;
 
 import 'package:material_ui/material_ui.dart';
 
+import 'errors.dart';
 import 'host.dart';
 import 'native.dart';
 
@@ -49,7 +51,17 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   bool _ready = false;
   bool _busy = false;
-  String? _message;
+  Note? _note;
+  bool _showDetails = false;
+  String _filesDir = '';
+
+  // Service recovery: the app starts its service again when it can't reach
+  // it (stopped by sign-out, killed by the system), a few times at most.
+  static const _maxServiceStarts = 3;
+  static const _serviceStartSpacing = Duration(seconds: 8);
+  int _serviceStarts = 0;
+  DateTime? _lastServiceStart;
+  String? _serviceStartError;
 
   // Config
   String _workspace = '';
@@ -84,8 +96,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _start() async {
     final dir = await Host.filesDir();
+    _filesDir = dir;
     await Core.init(dir);
-    await Host.startService();
+    await _startService();
     await _loadConfig();
     setState(() => _ready = true);
     await _refresh();
@@ -99,11 +112,61 @@ class _HomePageState extends State<HomePage> {
     _httpBase = c.str('http_base') ?? '';
   }
 
+  /// Starts the service, remembering when (the recovery spacing).
+  Future<void> _startService() async {
+    _lastServiceStart = DateTime.now();
+    _serviceStarts++;
+    try {
+      await Host.startService();
+    } catch (_) {
+      // Reported through the next status check.
+    }
+  }
+
+  /// The reason the service last failed to start, if it left one.
+  Future<String?> _readServiceError() async {
+    if (_filesDir.isEmpty) return null;
+    try {
+      final f = File('$_filesDir/daemon.error');
+      if (!await f.exists()) return null;
+      final text = (await f.readAsString()).trim();
+      return text.isEmpty ? null : text;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The service isn't answering: start it again (spaced out, a few times),
+  /// then give up and explain why, with a manual retry.
+  Future<void> _recoverService() async {
+    if (_workspace.isEmpty) return;
+    final last = _lastServiceStart;
+    final due = last == null || DateTime.now().difference(last) >= _serviceStartSpacing;
+    if (due && _serviceStarts < _maxServiceStarts) {
+      await _startService();
+    } else if (_serviceStarts >= _maxServiceStarts) {
+      final reason = await _readServiceError();
+      if (mounted) setState(() => _serviceStartError = reason ?? _daemonError);
+    }
+  }
+
+  /// Waits until the service answers (true) or `timeout` passes.
+  Future<bool> _waitForService({required bool up, Duration timeout = const Duration(seconds: 10)}) async {
+    final end = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(end)) {
+      final s = await Core.request('Status');
+      if (s.ok == up) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+    return false;
+  }
+
   Future<void> _refresh() async {
     if (_busy) return;
     final s = await Core.request('Status');
     if (!mounted) return;
     if (!s.ok) {
+      if (isServiceDown(s.error)) unawaited(_recoverService());
       // Nothing about the device is known while the daemon is down: don't
       // keep showing the last signed-in state.
       setState(() {
@@ -139,6 +202,8 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _daemonUp = true;
       _daemonError = null;
+      _serviceStarts = 0;
+      _serviceStartError = null;
       _email = s.str('email');
       _deviceId = s.str('device_id');
       _deviceState = s.str('device_state');
@@ -150,50 +215,57 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _run(String label, Future<String?> Function() action) async {
+  Future<void> _run(String label, Future<Note?> Function() action) async {
     setState(() {
       _busy = true;
-      _message = label;
+      _note = Note.info(label);
+      _showDetails = false;
     });
-    String? result;
+    Note? result;
     try {
       result = await action();
     } catch (e) {
-      result = '$e';
+      result = Note.error('$e');
     }
     if (!mounted) return;
     setState(() {
       _busy = false;
-      _message = result;
+      _note = result;
     });
     await _refresh();
   }
 
+  static const _vpnDenied = Note(
+    'Android didn\'t allow the VPN. Tap again and accept the VPN request; '
+    'turn off any other VPN app first.',
+    isError: true,
+  );
+
   Future<void> _connect() => _run('Connecting…', () async {
-        if (!await Host.prepareVpn()) return 'VPN permission was not granted.';
+        if (!await Host.prepareVpn()) return _vpnDenied;
         final r = await Core.request('Up');
-        if (!r.ok) return r.error ?? 'Could not connect.';
-        return r.integer('synced_resources') == 0
+        if (!r.ok) return Note.error(r.error);
+        return Note.info(r.integer('synced_resources') == 0
             ? 'Connected. No resources are assigned to this device yet.'
-            : 'Connected.';
+            : 'Connected.');
       });
 
   Future<void> _disconnect() => _run('Disconnecting…', () async {
         final r = await Core.request('Down');
-        return r.ok ? 'Disconnected.' : (r.error ?? 'Could not disconnect.');
+        return r.ok ? const Note.info('Disconnected.') : Note.error(r.error);
       });
 
   Future<void> _sync() => _run('Syncing…', () async {
         final r = await Core.request('Sync');
-        return r.ok ? 'Resources are up to date.' : (r.error ?? 'Sync failed.');
+        return r.ok ? const Note.info('Resources are up to date.') : Note.error(r.error);
       });
 
   Future<void> _login() => _run('Signing in…', () async {
         // Signing in brings the tunnel up (as `zecurity-client login` does),
         // which needs Android's VPN permission first.
-        if (!await Host.prepareVpn()) return 'VPN permission was not granted.';
+        if (!await Host.prepareVpn()) return _vpnDenied;
         final start = await Core.loginStart();
-        if (!start.ok) return start.error ?? 'Could not start sign-in.';
+        if (!start.ok) return Note.error(start.error);
         String? opened;
         for (var i = 0; i < 400; i++) {
           final p = await Core.loginPoll();
@@ -205,23 +277,30 @@ class _HomePageState extends State<HomePage> {
           switch (p.str('state')) {
             case 'done':
               await Host.closeBrowser();
-              return 'Signed in.';
+              return const Note.info('Signed in.');
             case 'error':
               await Host.closeBrowser();
-              return p.error ?? 'Sign-in failed.';
+              return Note.error(p.error);
           }
           await Future<void>.delayed(const Duration(milliseconds: 750));
         }
-        return 'Sign-in timed out.';
+        return const Note(
+          'Sign-in wasn\'t completed in time. Try again.',
+          isError: true,
+        );
       });
 
   Future<void> _logout() => _run('Signing out…', () async {
         final r = await Core.logout();
         // Sign-out stops the daemon (as `zecurity-client logout` does), which
-        // ends the VPN service process: start it again, signed out.
-        await Host.startService();
-        await Future<void>.delayed(const Duration(seconds: 2));
-        return r.ok ? 'Signed out.' : (r.error ?? 'Sign-out failed.');
+        // ends the VPN service process. Start it again only once that process
+        // is gone: a start sent to the exiting process is lost with it.
+        await _waitForService(up: false, timeout: const Duration(seconds: 5));
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+        _serviceStarts = 0;
+        await _startService();
+        await _waitForService(up: true);
+        return r.ok ? const Note.info('Signed out.') : Note.error(r.error);
       });
 
   Future<void> _editSettings() async {
@@ -280,12 +359,14 @@ class _HomePageState extends State<HomePage> {
         controller: controller.text,
         httpBase: httpBase.text,
       );
-      if (!r.ok) return r.error ?? 'Could not save settings.';
+      if (!r.ok) return Note.error(r.error);
       await _loadConfig();
       // The daemon reads its config when it starts.
+      _serviceStarts = 0;
+      _lastServiceStart = DateTime.now();
       await Host.restartService();
-      await Future<void>.delayed(const Duration(seconds: 2));
-      return 'Settings saved.';
+      await _waitForService(up: true);
+      return const Note.info('Settings saved.');
     });
   }
 
@@ -320,9 +401,9 @@ class _HomePageState extends State<HomePage> {
                 padding: const EdgeInsets.all(16),
                 children: [
                   _statusCard(theme, signedIn),
-                  if (_message != null) ...[
+                  if (_note != null) ...[
                     const SizedBox(height: 12),
-                    Text(_message!, style: theme.textTheme.bodyMedium),
+                    _noteView(theme, _note!),
                   ],
                   const SizedBox(height: 16),
                   if (signedIn) ..._resourceList(theme),
@@ -339,9 +420,12 @@ class _HomePageState extends State<HomePage> {
     if (_workspace.isEmpty) {
       title = 'Not set up';
       subtitle = 'Enter your workspace in Settings.';
+    } else if (!_daemonUp && _serviceStartError != null) {
+      title = 'Zecurity couldn\'t start';
+      subtitle = explainError(_serviceStartError);
     } else if (!_daemonUp) {
-      title = 'Service not running';
-      subtitle = _daemonError ?? 'Starting…';
+      title = 'Starting Zecurity…';
+      subtitle = 'Getting the secure connection service ready.';
     } else if (_deviceState == 'revoked') {
       title = 'Device revoked';
       subtitle = 'An administrator revoked this device. Sign in again.';
@@ -413,14 +497,22 @@ class _HomePageState extends State<HomePage> {
     if (_workspace.isEmpty) {
       return FilledButton(onPressed: _busy ? null : _editSettings, child: const Text('Set up'));
     }
+    if (!_daemonUp && _serviceStartError == null) {
+      return const OutlinedButton(onPressed: null, child: Text('Starting…'));
+    }
     if (!_daemonUp) {
       return OutlinedButton(
-        onPressed: _busy ? null : () => _run('Starting…', () async {
-          await Host.restartService();
-          await Future<void>.delayed(const Duration(seconds: 2));
-          return null;
-        }),
-        child: const Text('Start service'),
+        onPressed: _busy
+            ? null
+            : () => _run('Starting Zecurity…', () async {
+                  setState(() => _serviceStartError = null);
+                  _serviceStarts = 0;
+                  _lastServiceStart = DateTime.now();
+                  await Host.restartService();
+                  final up = await _waitForService(up: true);
+                  return up ? null : Note.error(await _readServiceError() ?? _daemonError);
+                }),
+        child: const Text('Try again'),
       );
     }
     if (!signedIn || _deviceState == 'revoked') {
@@ -429,6 +521,52 @@ class _HomePageState extends State<HomePage> {
     return _tunnelUp
         ? OutlinedButton(onPressed: _busy ? null : _disconnect, child: const Text('Disconnect'))
         : FilledButton(onPressed: _busy ? null : _connect, child: const Text('Connect'));
+  }
+
+  /// The result of the last action; errors explained, with the raw text
+  /// behind a Details toggle.
+  Widget _noteView(ThemeData theme, Note note) {
+    final scheme = theme.colorScheme;
+    if (!note.isError) return Text(note.text, style: theme.textTheme.bodyMedium);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: .start,
+        children: [
+          Row(
+            crossAxisAlignment: .start,
+            children: [
+              Icon(Icons.error_outline, color: scheme.onErrorContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  note.text,
+                  style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onErrorContainer),
+                ),
+              ),
+            ],
+          ),
+          if (note.details != null && note.details!.isNotEmpty) ...[
+            Align(
+              alignment: .centerRight,
+              child: TextButton(
+                onPressed: () => setState(() => _showDetails = !_showDetails),
+                child: Text(_showDetails ? 'Hide details' : 'Details'),
+              ),
+            ),
+            if (_showDetails)
+              SelectableText(
+                note.details!,
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer),
+              ),
+          ],
+        ],
+      ),
+    );
   }
 
   List<Widget> _resourceList(ThemeData theme) {
