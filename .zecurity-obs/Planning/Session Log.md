@@ -3796,3 +3796,24 @@ serves on `127.0.0.1:9102`.
   - plain-language errors;
   - cold start 8.1 s → ~0.8 s (release build).
 - Docs: §12 live-run table.
+
+## 2026-11-13 — M1: per-platform device profiles + Android posture (ADR-031)
+- User asked for posture cards like a reference mock-up ("Android" switch; HD Encryption / Screen Lock / Biometric "not required"). Decided:
+  - the switch allows or denies the platform;
+  - those three Android checks;
+  - Linux + Android cards first.
+- Branch `feat/android-posture` (on `feat/client-ios`), local commits:
+  - ADR-031;
+  - controller: `057_device_profile_platforms.sql`, per-platform evaluation, `setProfilePlatforms`;
+  - client: Kotlin collector over JNI;
+  - admin: platform cards.
+- Gates:
+  - controller full suite against a throwaway Postgres + Valkey: 1812 pass, 0 fail;
+  - client Linux 374/374, Windows build;
+  - Android APK;
+  - admin 298/298, tsc, eslint, build.
+- gqlgen needed Go 1.25 (installed in the build container); Go 1.27 breaks its loader.
+- Live, on the phone: all three checks PASS. Android off cuts the profiled resource in 131 ms with the control resource unaffected; back on restores it in 1.4 s.
+  - Fixed: missing `USE_BIOMETRIC` permission.
+  - `057_` applied in place on the lab DB (user's choice); the PR needs `[schema: reset DB]`.
+- Security review: self-declared platform. Accepted in ADR-031; the interim mitigation is the admin-approval requirement, and attestation is deferred.

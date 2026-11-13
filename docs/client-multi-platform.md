@@ -572,6 +572,27 @@ tunnel-down (Linux too); empty posture reports rejected every cycle; the
 sign-in dying when ColorOS froze the app; the service not restarting after
 sign-out; raw `os error 111` text on screen.
 
+### Android posture and per-platform profiles (ADR-031, 2026-11-13)
+
+Device profiles now have a card per platform. A switch allows or denies
+the platform, and its checks are marked required or not required. Android
+reports three checks from the VPN service: storage encryption, screen
+lock, and a strong biometric enrolled.
+
+| Live check on the phone | Result |
+|---|---|
+| Android checks reported to the controller | all three PASS (encryption, screen lock, biometric) |
+| Profile "Android on, Screen Lock required" on `files-seechan` | the phone keeps access |
+| Android switched off | `files-seechan` blocked in **131 ms**; `files-omarchy` (no profile) unaffected |
+| Android switched back on | access back in **1.4 s** |
+| Audit | `device_profile.platforms.set` recorded for each switch |
+
+- **Change on the phone is slower.** A change *on the phone*, for example
+  removing the screen lock, is seen at the next posture report, which comes
+  every 5 minutes. Profile changes by an admin take effect at once.
+- **Found during the run:** the biometric check needs the `USE_BIOMETRIC`
+  permission (a normal permission, granted at install, no prompt).
+
 ### Not built yet
 
 - Reboot persistence and certificate renewal on a device.
