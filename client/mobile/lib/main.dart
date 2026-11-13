@@ -104,10 +104,17 @@ class _HomePageState extends State<HomePage> {
     final s = await Core.request('Status');
     if (!mounted) return;
     if (!s.ok) {
+      // Nothing about the device is known while the daemon is down: don't
+      // keep showing the last signed-in state.
       setState(() {
         _daemonUp = false;
         _daemonError = s.error;
         _tunnelUp = false;
+        _email = null;
+        _deviceId = null;
+        _deviceState = null;
+        _certExpiresAt = null;
+        _resources = [];
       });
       return;
     }
@@ -210,6 +217,10 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _logout() => _run('Signing out…', () async {
         final r = await Core.logout();
+        // Sign-out stops the daemon (as `zecurity-client logout` does), which
+        // ends the VPN service process: start it again, signed out.
+        await Host.startService();
+        await Future<void>.delayed(const Duration(seconds: 2));
         return r.ok ? 'Signed out.' : (r.error ?? 'Sign-out failed.');
       });
 
