@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/yourorg/ztna/controller/graph"
@@ -313,6 +314,48 @@ func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string, c
 		RemovedFrom:  toResourcePolicyRefs(result.RemovedFrom),
 		NowAnyDevice: toResourcePolicyRefs(result.NowAnyDevice),
 	}, nil
+}
+
+// SetProfilePlatforms is the resolver for the setProfilePlatforms field.
+func (r *mutationResolver) SetProfilePlatforms(ctx context.Context, profileID string, platforms []string) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	profile, err := r.PostureStore.SetAllowedPlatforms(ctx, workspaceID, profileUUID, platforms)
+	if err != nil {
+		switch {
+		case errors.Is(err, posture.ErrUnknownPlatform):
+			return nil, apperr.UserErrorf("setProfilePlatforms: %v (allowed: %s)", err,
+				strings.Join(posture.KnownPlatforms, ", "))
+		case errors.Is(err, posture.ErrNotFound):
+			return nil, apperr.UserErrorf("setProfilePlatforms: profile not found")
+		default:
+			return nil, fmt.Errorf("setProfilePlatforms: %w", err)
+		}
+	}
+
+	// ADR-031 D-6: the same path as a requirement change: audit, notify,
+	// re-evaluate every device now (a platform switched off is cut at once).
+	r.auditAdmin(ctx, "device_profile.platforms.set", "device_profile", profileID,
+		map[string]any{"platforms": profile.AllowedPlatforms})
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("setProfilePlatforms notify: %w", err)
+	}
+	if r.PostureEvaluator == nil {
+		return nil, fmt.Errorf("setProfilePlatforms: posture evaluator is not configured")
+	}
+	if err := r.PostureEvaluator.ReevaluateWorkspace(ctx, workspaceID); err != nil {
+		return nil, fmt.Errorf("setProfilePlatforms re-evaluate: %w", err)
+	}
+	return postureProfileToGQL(profile), nil
 }
 
 // RemoveProfileRequirement is the resolver for the removeProfileRequirement field.

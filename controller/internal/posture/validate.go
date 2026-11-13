@@ -24,6 +24,12 @@ const (
 	CheckLUKS       = "linux.disk_encryption.luks"
 	CheckFirewall   = "linux.firewall.active"
 	CheckSecureBoot = "linux.secure_boot.enabled"
+
+	// ADR-031 D-4: Android checks, collected by the app's VPN service.
+	// Identical in client/src/posture.rs.
+	CheckAndroidEncryption = "android.disk_encryption.enabled"
+	CheckAndroidScreenLock = "android.screen_lock.enabled"
+	CheckAndroidBiometric  = "android.biometric.enrolled"
 )
 
 // CheckDeviceApproved is a server-side check (ADR-030): PASS when an admin
@@ -79,6 +85,73 @@ var supportedCheckDescriptors = []CheckDescriptor{
 		Platform:                   "linux",
 		AllowUnsupportedMeaningful: true,
 	},
+	{
+		ID:       CheckAndroidEncryption,
+		Label:    "HD Encryption",
+		Platform: "android",
+	},
+	{
+		ID:       CheckAndroidScreenLock,
+		Label:    "Screen Lock",
+		Platform: "android",
+	},
+	{
+		// UNSUPPORTED below Android 11 (no BIOMETRIC_STRONG query).
+		ID:                         CheckAndroidBiometric,
+		Label:                      "Biometric",
+		Platform:                   "android",
+		AllowUnsupportedMeaningful: true,
+	},
+}
+
+// KnownPlatforms are the device platforms (client_devices.os) a profile can
+// allow (ADR-031 D-1). Mirrors the 060_ CHECK constraint.
+var KnownPlatforms = []string{"linux", "android", "windows", "ios"}
+
+// ErrUnknownPlatform rejects a platform outside KnownPlatforms.
+var ErrUnknownPlatform = errors.New("unknown device platform")
+
+// NormalizePlatforms lower-cases, de-duplicates and orders platforms as in
+// KnownPlatforms, rejecting unknown ones.
+func NormalizePlatforms(platforms []string) ([]string, error) {
+	want := make(map[string]struct{}, len(platforms))
+	for _, p := range platforms {
+		p = strings.ToLower(strings.TrimSpace(p))
+		known := false
+		for _, k := range KnownPlatforms {
+			if p == k {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownPlatform, p)
+		}
+		want[p] = struct{}{}
+	}
+	out := make([]string, 0, len(want))
+	for _, k := range KnownPlatforms {
+		if _, ok := want[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+// checkPlatform is the platform a check belongs to ("linux", "android",
+// "any" for server-observed checks), or "" for a check with no descriptor.
+func checkPlatform(checkID string) string {
+	for _, d := range supportedCheckDescriptors {
+		if d.ID == checkID {
+			return d.Platform
+		}
+	}
+	for _, d := range serverCheckDescriptors {
+		if d.ID == checkID {
+			return d.Platform
+		}
+	}
+	return ""
 }
 
 // serverCheckDescriptors are checks a profile may require but only the

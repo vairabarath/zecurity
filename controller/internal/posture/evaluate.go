@@ -177,6 +177,12 @@ func (e *Evaluator) evaluateDevice(
 		e.afterApprovalRead()
 	}
 
+	// ADR-031 D-1: the platform the device enrolled as.
+	platform, err := e.store.DevicePlatform(ctx, workspaceID, deviceID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, false, fmt.Errorf("load device platform for evaluation: %w", err)
+	}
+
 	// PENDING-20 G1: the country the controller last saw the device in.
 	var netObs *NetworkObservation
 	if o, err := e.store.LatestNetworkObservation(ctx, workspaceID, deviceID); err == nil {
@@ -213,6 +219,7 @@ func (e *Evaluator) evaluateDevice(
 			now,
 			report.ReceivedAt,
 			profile,
+			platform,
 			requirements,
 			observationByCheck,
 		)
@@ -262,10 +269,29 @@ func (e *Evaluator) evaluateDevice(
 	return results, policyChanged, nil
 }
 
+// AllowsPlatform reports whether the profile allows devices of platform
+// (ADR-031 D-1).
+func (p Profile) AllowsPlatform(platform string) bool {
+	for _, allowed := range p.AllowedPlatforms {
+		if allowed == platform {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateProfile decides whether a device of devicePlatform satisfies the
+// profile (ADR-031):
+//   - its platform must be allowed (an unknown platform never is);
+//   - the report must be fresh;
+//   - every requirement of its platform, and every server-observed or
+//     unrecognized one (fail closed), must pass. Other platforms'
+//     requirements don't apply to it.
 func EvaluateProfile(
 	now time.Time,
 	reportReceivedAt time.Time,
 	profile Profile,
+	devicePlatform string,
 	requirements []Requirement,
 	observations map[string]Observation,
 ) ProfileResult {
@@ -275,8 +301,13 @@ func EvaluateProfile(
 		ExpiresAt: reportReceivedAt.Add(MaxReportAge),
 	}
 
-	if len(requirements) == 0 {
-		result.Reason = "profile has no requirements"
+	platform := strings.ToLower(strings.TrimSpace(devicePlatform))
+	if platform == "" {
+		result.Reason = "device platform unknown"
+		return result
+	}
+	if !profile.AllowsPlatform(platform) {
+		result.Reason = fmt.Sprintf("platform %s is not allowed by this profile", platform)
 		return result
 	}
 
@@ -286,6 +317,9 @@ func EvaluateProfile(
 	}
 
 	for _, requirement := range requirements {
+		if p := checkPlatform(requirement.CheckID); p != "" && p != "any" && p != platform {
+			continue // another platform's check
+		}
 		observation, found := observations[requirement.CheckID]
 		if !found {
 			result.Reason = fmt.Sprintf(

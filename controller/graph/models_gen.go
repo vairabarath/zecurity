@@ -186,11 +186,12 @@ type DevicePostureVisibility struct {
 }
 
 type DeviceProfile struct {
-	ID           string                      `json:"id"`
-	Name         string                      `json:"name"`
-	ManualTrust  bool                        `json:"manualTrust"`
-	Requirements []*DeviceProfileRequirement `json:"requirements"`
-	Policies     []*ResourcePolicy           `json:"policies"`
+	ID               string                      `json:"id"`
+	Name             string                      `json:"name"`
+	ManualTrust      bool                        `json:"manualTrust"`
+	Requirements     []*DeviceProfileRequirement `json:"requirements"`
+	AllowedPlatforms []string                    `json:"allowedPlatforms"`
+	Policies         []*ResourcePolicy           `json:"policies"`
 }
 
 type DeviceProfileDeletion struct {

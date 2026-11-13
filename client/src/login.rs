@@ -179,6 +179,9 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         "If the browser doesn't open, visit:\n{}",
         initiated.auth_url
     );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    crate::mobile::open_url(&initiated.auth_url);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     open::that(&initiated.auth_url).ok();
 
     // Wait for ctrl_code delivered by the controller's callback redirect

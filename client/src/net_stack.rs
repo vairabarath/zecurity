@@ -15,7 +15,6 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::timeout;
-use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
@@ -1187,22 +1186,34 @@ fn transports_for(
     transports.borrow().get(&key).cloned()
 }
 
-pub async fn run(
-    dev: AsyncDevice,
-    allowed_entries: Vec<AclEntry>,
-    transports: watch::Receiver<Arc<TransportMap>>,
-    mut resource_rx: mpsc::Receiver<ResourceCmd>,
-    relay_resync: Arc<Notify>,
-    blocked: BlockedConnectors,
-) -> Result<()> {
-    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
-    let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
+/// The two tasks that move packets between the TUN device and smoltcp.
+/// Dropping this aborts both, which drops the device and closes its
+/// descriptor. Without it the reader, blocked on a read, outlived every
+/// tunnel-down and kept the device open: on Android the old VPN interface
+/// (and its routes) then stayed up after Disconnect.
+struct TunPumps(Vec<tokio::task::JoinHandle<()>>);
 
+impl Drop for TunPumps {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+fn spawn_tun_pumps<D>(
+    dev: D,
+    rx_sync_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    mut tx_async_rx: mpsc::Receiver<Vec<u8>>,
+) -> TunPumps
+where
+    D: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (mut tun_read, mut tun_write) = tokio::io::split(dev);
 
     // TUN → smoltcp: read raw IP packets from the kernel and forward to the
     // sync channel that TunDevice::receive() drains each poll cycle.
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
         loop {
             match tun_read.read(&mut buf).await {
@@ -1215,13 +1226,82 @@ pub async fn run(
     });
 
     // smoltcp → TUN: write IP packets that smoltcp emits back to the kernel.
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         while let Some(pkt) = tx_async_rx.recv().await {
             if tun_write.write_all(&pkt).await.is_err() {
                 break;
             }
         }
     });
+    TunPumps(vec![reader, writer])
+}
+
+#[cfg(test)]
+mod tun_pump_tests {
+    use super::*;
+
+    /// Tunnel-down drops the pumps: the device must be released even while
+    /// the reader is blocked waiting for a packet, so the far end sees EOF.
+    #[tokio::test]
+    async fn dropping_the_pumps_releases_the_device() {
+        let (device, mut far_end) = tokio::io::duplex(4096);
+        let (rx_sync_tx, _rx_sync_rx) = std::sync::mpsc::sync_channel(8);
+        let (_tx_async_tx, tx_async_rx) = mpsc::channel(8);
+        let pumps = spawn_tun_pumps(device, rx_sync_tx, tx_async_rx);
+        tokio::task::yield_now().await; // the reader is now blocked on read
+
+        drop(pumps);
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), far_end.read(&mut buf))
+            .await
+            .expect("the device must be closed when the pumps are dropped")
+            .unwrap();
+        assert_eq!(n, 0, "EOF: the device was released");
+    }
+
+    /// Packets still flow both ways while the pumps live.
+    #[tokio::test]
+    async fn the_pumps_move_packets_both_ways() {
+        let (device, mut far_end) = tokio::io::duplex(4096);
+        let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel(8);
+        let (tx_async_tx, tx_async_rx) = mpsc::channel(8);
+        let _pumps = spawn_tun_pumps(device, rx_sync_tx, tx_async_rx);
+
+        far_end.write_all(&[0x45, 1, 2]).await.unwrap();
+        let got = tokio::task::spawn_blocking(move || {
+            rx_sync_rx.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(got, vec![0x45, 1, 2]);
+
+        tx_async_tx.send(vec![0x45, 9]).await.unwrap();
+        let mut buf = [0u8; 2];
+        far_end.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf, [0x45, 9]);
+    }
+}
+
+/// `dev` is the TUN device (`crate::tun::Device`): raw IP packets, one per
+/// read and write.
+pub async fn run<D>(
+    dev: D,
+    allowed_entries: Vec<AclEntry>,
+    transports: watch::Receiver<Arc<TransportMap>>,
+    mut resource_rx: mpsc::Receiver<ResourceCmd>,
+    relay_resync: Arc<Notify>,
+    blocked: BlockedConnectors,
+) -> Result<()>
+where
+    D: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
+    let (tx_async_tx, tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
+
+    // The pumps own the device; dropping `_pumps` (this function returning
+    // or its task being aborted on tunnel-down) closes it.
+    let _pumps = spawn_tun_pumps(dev, rx_sync_tx, tx_async_rx);
 
     let mut tun_dev = TunDevice {
         rx: rx_sync_rx,

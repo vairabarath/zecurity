@@ -1,8 +1,10 @@
+#[cfg(unix)]
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 // ── Wire types ───────────────────────────────────────────────────────────────
@@ -114,10 +116,18 @@ pub struct IpcResponse {
 ///
 /// Matches `RuntimeDirectory=zecurity-client` in the systemd unit.
 /// Override with `ZECURITY_DAEMON_SOCKET` for dev/testing.
+#[cfg(unix)]
 pub fn ipc_socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("ZECURITY_DAEMON_SOCKET") {
         return PathBuf::from(p);
     }
+    // Mobile: in the app's files directory, reachable only by the app's own
+    // processes (Android: the UI and the VPN service hosting the daemon;
+    // iOS: the app and its tunnel extension, through the App Group).
+    // Darwin limits socket paths to 104 bytes; the App Group path fits.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return crate::mobile::files_dir().join("daemon.sock");
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     PathBuf::from("/run/zecurity-client/daemon.sock")
 }
 
@@ -146,21 +156,124 @@ pub fn check_same_user(stream: &UnixStream) -> bool {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn check_same_user(_stream: &UnixStream) -> bool {
     true
+}
+
+// ── Windows named pipe ───────────────────────────────────────────────────────
+
+/// The daemon's named pipe on Windows (the counterpart of the Unix socket).
+/// Override with `ZECURITY_DAEMON_PIPE` for dev/testing.
+#[cfg(windows)]
+pub fn ipc_pipe_name() -> String {
+    std::env::var("ZECURITY_DAEMON_PIPE").unwrap_or_else(|_| r"\\.\pipe\zecurity-client".into())
+}
+
+/// The enrolling user's SID, from the service command line
+/// (`zecurity-client daemon --ipc-user-sid`), set once at daemon start.
+#[cfg(windows)]
+static PIPE_USER_SID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+pub fn set_pipe_user_sid(sid: Option<String>) {
+    let _ = PIPE_USER_SID.set(sid);
+}
+
+#[cfg(windows)]
+pub fn pipe_user_sid() -> Option<&'static str> {
+    PIPE_USER_SID.get().and_then(|s| s.as_deref())
+}
+
+/// Creates one instance of the daemon's named pipe. `first` claims the name
+/// (fails if another process already owns it, so the pipe can't be squatted).
+#[cfg(windows)]
+pub fn create_pipe_server(
+    first: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    // Owned by SYSTEM when running as the service: that is what the CLI
+    // verifies before it sends anything (crate::win_security).
+    let owner_system = crate::win_service::running_as_service();
+    create_pipe_server_with_sddl(
+        first,
+        &crate::win_security::pipe_sddl(pipe_user_sid(), owner_system),
+    )
+}
+
+#[cfg(windows)]
+fn create_pipe_server_with_sddl(
+    first: bool,
+    sddl: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows_sys::Win32::Foundation::FALSE;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    let sd = crate::win_security::descriptor_from_sddl(sddl)?;
+    let mut attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: crate::win_security::as_ptr(&sd),
+        bInheritHandle: FALSE,
+    };
+    // SAFETY: `attrs` and the descriptor it points to (`sd`) outlive the call.
+    unsafe {
+        tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(
+                ipc_pipe_name(),
+                &mut attrs as *mut SECURITY_ATTRIBUTES as *mut std::ffi::c_void,
+            )
+    }
 }
 
 // ── CLI-side helpers ─────────────────────────────────────────────────────────
 
 /// Connect to the daemon and send one request. Fails if the socket is not present.
+#[cfg(unix)]
 pub async fn send_ipc(req: &IpcRequest) -> Result<IpcResponse> {
     let path = ipc_socket_path();
     let stream = UnixStream::connect(&path)
         .await
         .with_context(|| format!("connect to daemon socket {}", path.display()))?;
+    exchange(stream, req).await
+}
 
-    let (reader, mut writer) = stream.into_split();
+/// Connect to the daemon's named pipe and send one request. Fails if the
+/// daemon is not running.
+#[cfg(windows)]
+pub async fn send_ipc(req: &IpcRequest) -> Result<IpcResponse> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let name = ipc_pipe_name();
+    let mut attempts = 0;
+    let client = loop {
+        match ClientOptions::new().open(&name) {
+            Ok(client) => break client,
+            // Every instance is serving another client; one frees up shortly.
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("connect to daemon pipe {name}"));
+            }
+        }
+    };
+    // Never send tokens or keys to a pipe someone else created.
+    {
+        use std::os::windows::io::AsRawHandle;
+        crate::win_security::verify_pipe_server(client.as_raw_handle())?;
+    }
+    exchange(client, req).await
+}
+
+/// One newline-delimited JSON request and its response (ADR-002).
+async fn exchange<S>(stream: S, req: &IpcRequest) -> Result<IpcResponse>
+where
+    S: AsyncRead + AsyncWrite,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
 
     let mut line = serde_json::to_string(req)?;
     line.push('\n');
@@ -178,14 +291,109 @@ pub async fn ensure_daemon_and_send(req: &IpcRequest) -> Result<IpcResponse> {
         return Ok(resp);
     }
 
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
     let _ = tokio::process::Command::new("systemctl")
+        .args(["start", "zecurity-client"])
+        .status()
+        .await;
+    // Starting a service needs rights a standard user may lack; the installer
+    // sets the service to start automatically, so this is the fallback.
+    #[cfg(windows)]
+    let _ = tokio::process::Command::new("sc.exe")
         .args(["start", "zecurity-client"])
         .status()
         .await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    send_ipc(req)
-        .await
-        .context("daemon could not be started — run: systemctl status zecurity-client")
+    // Mobile: the app starts the daemon with its VPN service (Android) or
+    // tunnel extension (iOS); there is nothing to start from here.
+    send_ipc(req).await.context(if cfg!(any(target_os = "android", target_os = "ios")) {
+        "the Zecurity service is not running — reopen the Zecurity app"
+    } else if cfg!(windows) {
+        "daemon could not be started — run: Get-Service zecurity-client (start it from an elevated PowerShell with Start-Service zecurity-client)"
+    } else {
+        "daemon could not be started — run: systemctl status zecurity-client"
+    })
+}
+
+/// Runs on Windows only: the secured pipe really carries a request and its
+/// response, and its name can't be claimed twice.
+#[cfg(all(test, windows))]
+mod windows_pipe_tests {
+    use super::*;
+
+    /// The tests share the ZECURITY_DAEMON_PIPE variable.
+    static PIPE_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn use_test_pipe(suffix: &str) {
+        let name = format!(r"\\.\pipe\zecurity-client-test-{}-{suffix}", std::process::id());
+        std::env::set_var("ZECURITY_DAEMON_PIPE", name);
+        // Admit the account running the tests, elevated or not.
+        let me = crate::win_security::current_user_sid().expect("current user SID");
+        set_pipe_user_sid(Some(me));
+    }
+
+    /// A second "first" instance of the same name must fail: no squatting.
+    /// (Wine 8 does not enforce FILE_FLAG_FIRST_PIPE_INSTANCE; real Windows does.)
+    #[tokio::test]
+    async fn pipe_name_cannot_be_claimed_twice() {
+        let _env = PIPE_ENV.lock().await;
+        use_test_pipe("first");
+        let _server = create_pipe_server(true).expect("create secured pipe");
+        assert!(create_pipe_server(true).is_err());
+    }
+
+    /// Answers one Status request on `server`.
+    async fn serve_one(server: tokio::net::windows::named_pipe::NamedPipeServer) {
+        server.connect().await.expect("accept client");
+        let (reader, mut writer) = tokio::io::split(server);
+        let mut line = String::new();
+        BufReader::new(reader).read_line(&mut line).await.unwrap();
+        let req: IpcRequest = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(req, IpcRequest::Status));
+        let resp = IpcResponse {
+            ok: true,
+            kind: "Status".into(),
+            ..Default::default()
+        };
+        let mut out = serde_json::to_string(&resp).unwrap();
+        out.push('\n');
+        writer.write_all(out.as_bytes()).await.unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    /// The SDDL-secured pipe the daemon creates carries a request and its
+    /// response (the transport itself, without the owner check).
+    #[tokio::test]
+    async fn secured_pipe_carries_a_request_and_response() {
+        let _env = PIPE_ENV.lock().await;
+        use_test_pipe("rt");
+        let server = create_pipe_server(true).expect("create secured pipe");
+        let serve = tokio::spawn(serve_one(server));
+        let client = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(ipc_pipe_name())
+            .expect("open pipe");
+        let resp = exchange(client, &IpcRequest::Status).await.expect("IPC round trip");
+        assert!(resp.ok);
+        assert_eq!(resp.kind, "Status");
+        serve.await.unwrap();
+    }
+
+    /// An impostor's pipe (owned by an ordinary account, as any pipe made
+    /// while the service is stopped would be) is refused before anything is
+    /// sent to it.
+    #[tokio::test]
+    async fn client_refuses_a_pipe_not_owned_by_system() {
+        let _env = PIPE_ENV.lock().await;
+        use_test_pipe("impostor");
+        let me = crate::win_security::current_user_sid().expect("current user SID");
+        let sddl = format!("O:{me}D:P(A;;GA;;;WD)");
+        let _impostor = create_pipe_server_with_sddl(true, &sddl).expect("create impostor pipe");
+        let err = send_ipc(&IpcRequest::Status).await.expect_err("must refuse");
+        assert!(
+            format!("{err:#}").contains("not SYSTEM"),
+            "unexpected error: {err:#}"
+        );
+    }
 }

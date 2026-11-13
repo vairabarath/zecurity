@@ -72,8 +72,10 @@ type Profile struct {
 	Name               string
 	Revision           int64
 	ManualTrustEnabled bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// ADR-031: the platforms (client_devices.os values) this profile allows.
+	AllowedPlatforms []string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Requirement struct {
@@ -349,6 +351,7 @@ func (s *Store) CreateProfile(
 		           name,
 		           revision,
 		           manual_trust_enabled,
+		           allowed_platforms,
 		           created_at,
 		           updated_at`,
 		workspaceID,
@@ -360,6 +363,7 @@ func (s *Store) CreateProfile(
 		&profile.Name,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
+		&profile.AllowedPlatforms,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -415,6 +419,7 @@ func (s *Store) GetProfile(
 	        name,
 	        revision,
 	        manual_trust_enabled,
+	        allowed_platforms,
 	        created_at,
 	        updated_at
 	   FROM device_profiles
@@ -428,6 +433,7 @@ func (s *Store) GetProfile(
 		&profile.Name,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
+		&profile.AllowedPlatforms,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -453,6 +459,7 @@ func (s *Store) ListProfiles(
 		        name,
 		        revision,
 		        manual_trust_enabled,
+		        allowed_platforms,
 		        created_at,
 		        updated_at
 		   FROM device_profiles
@@ -476,6 +483,7 @@ func (s *Store) ListProfiles(
 			&profile.Name,
 			&profile.Revision,
 			&profile.ManualTrustEnabled,
+			&profile.AllowedPlatforms,
 			&profile.CreatedAt,
 			&profile.UpdatedAt,
 		); err != nil {
@@ -520,6 +528,7 @@ func (s *Store) UpdateProfileManualTrust(
 		          name,
 		          revision,
 		          manual_trust_enabled,
+		          allowed_platforms,
 		          created_at,
 		          updated_at`,
 		workspaceID,
@@ -531,6 +540,7 @@ func (s *Store) UpdateProfileManualTrust(
 		&profile.Name,
 		&profile.Revision,
 		&profile.ManualTrustEnabled,
+		&profile.AllowedPlatforms,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -1189,4 +1199,81 @@ func (s *Store) DeleteExpiredReports(
 		return 0, fmt.Errorf("delete expired posture reports: %w", err)
 	}
 	return cmdTag.RowsAffected(), nil
+}
+
+// SetAllowedPlatforms replaces the platforms a profile allows (ADR-031 D-1)
+// and bumps its revision, like a requirement change.
+func (s *Store) SetAllowedPlatforms(
+	ctx context.Context,
+	workspaceID,
+	profileID uuid.UUID,
+	platforms []string,
+) (*Profile, error) {
+	normalized, err := NormalizePlatforms(platforms)
+	if err != nil {
+		return nil, err
+	}
+	profile := &Profile{}
+	err = s.pool.QueryRow(
+		ctx,
+		`UPDATE device_profiles
+		    SET allowed_platforms = $3,
+		        revision = revision + 1,
+		        updated_at = NOW()
+		  WHERE workspace_id = $1
+		    AND id = $2
+		RETURNING id,
+		          workspace_id,
+		          name,
+		          revision,
+		          manual_trust_enabled,
+		          allowed_platforms,
+		          created_at,
+		          updated_at`,
+		workspaceID,
+		profileID,
+		normalized,
+	).Scan(
+		&profile.ID,
+		&profile.WorkspaceID,
+		&profile.Name,
+		&profile.Revision,
+		&profile.ManualTrustEnabled,
+		&profile.AllowedPlatforms,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set device profile platforms: %w", err)
+	}
+	return profile, nil
+}
+
+// DevicePlatform is the device's platform as enrolled (client_devices.os),
+// lower-case; "" when unknown. ADR-031 D-1: never taken from a report.
+func (s *Store) DevicePlatform(
+	ctx context.Context,
+	workspaceID,
+	deviceID uuid.UUID,
+) (string, error) {
+	var os *string
+	err := s.pool.QueryRow(
+		ctx,
+		`SELECT os FROM client_devices WHERE workspace_id = $1 AND id = $2`,
+		workspaceID,
+		deviceID,
+	).Scan(&os)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("load device platform: %w", err)
+	}
+	if os == nil {
+		return "", nil
+	}
+	return strings.ToLower(strings.TrimSpace(*os)), nil
 }

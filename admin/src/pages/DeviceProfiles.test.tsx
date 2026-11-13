@@ -36,6 +36,7 @@ const PROFILES = [
     id: "profile-1",
     name: "Managed Linux",
     manualTrust: true,
+    allowedPlatforms: ["linux"],
     requirements: [
       {
         __typename: "DeviceProfileRequirement" as const,
@@ -215,7 +216,7 @@ describe("DeviceProfiles", () => {
     await userEvent.click(screen.getByText("Edit"));
 
     expect(
-      await screen.findByText("Edit Trusted Linux Profile"),
+      await screen.findByText("Edit Device Profile"),
     ).toBeInTheDocument();
   });
 });

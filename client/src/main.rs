@@ -1,52 +1,6 @@
-mod appmeta;
-mod auth;
-mod change_watch;
-mod config;
-mod crl;
-mod daemon;
-mod dns;
-mod dns_link;
-#[cfg(test)]
-mod daemon_tests;
-mod error;
-mod grpc;
-mod ipc;
-mod login;
-mod name_map;
-mod net_stack;
-mod relay_pool;
-mod runtime;
-mod state_store;
-mod stream_watch;
-mod transport;
-mod trust;
-mod tun;
-mod tunnel_pool;
-#[cfg(target_os = "linux")]
-mod tpm;
-
-mod cmd {
-    pub mod down;
-    pub mod login;
-    pub mod logout;
-    pub mod resources;
-    pub mod setup;
-    pub mod status;
-    pub mod sync;
-    pub mod up;
-}
-
-mod posture;
-#[cfg(test)]
-mod posture_tests;
-
-// Certificate audit bug 1 (client): bootstrap-trust tests and their fixtures.
-#[cfg(test)]
-mod bootstrap_tests;
-#[cfg(test)]
-mod test_controller;
-#[cfg(test)]
-mod test_pki;
+use zecurity_core::{cmd, daemon};
+#[cfg(windows)]
+use zecurity_core::win_service;
 
 use clap::{Parser, Subcommand};
 
@@ -59,7 +13,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Write workspace name (and optional dev overrides) to /etc/zecurity/client.conf
+    /// Write workspace name (and optional dev overrides) to the client config
+    /// (/etc/zecurity/client.conf; %ProgramData%\Zecurity\client.conf on Windows)
     Setup {
         #[arg(long)]
         workspace: String,
@@ -87,18 +42,41 @@ enum Commands {
     Up,
     /// Disconnect and remove resource routes
     Down,
-    /// Run as background daemon (launched by systemd — not for direct use)
+    /// Run as background daemon (launched by systemd, or the Windows Service
+    /// Control Manager — not for direct use)
     #[command(hide = true)]
-    Daemon,
+    Daemon {
+        /// Windows: SID of the enrolling user, the one non-admin account the
+        /// IPC pipe and data directory admit. Set in the service command line
+        /// by client-install.ps1 (admin-only); ignored on Linux.
+        #[arg(long)]
+        ipc_user_sid: Option<String>,
+    },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install default crypto provider");
 
     let cli = Cli::parse();
+
+    // On Windows the daemon is a service: the Service Control Manager's
+    // dispatcher must own this thread, and it starts its own runtime.
+    #[cfg(windows)]
+    if let Commands::Daemon { ipc_user_sid } = cli.command {
+        return win_service::run(ipc_user_sid);
+    }
+
+    // What #[tokio::main] expanded to before the Windows port.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed building the Runtime")
+        .block_on(run_command(cli))
+}
+
+async fn run_command(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Setup {
             workspace,
@@ -113,6 +91,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logout => cmd::logout::run().await,
         Commands::Up => cmd::up::run().await,
         Commands::Down => cmd::down::run().await,
-        Commands::Daemon => daemon::run().await,
+        Commands::Daemon { .. } => daemon::run().await,
     }
 }

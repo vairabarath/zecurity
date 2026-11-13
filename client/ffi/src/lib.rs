@@ -1,0 +1,568 @@
+//! The Zecurity mobile app's native library (`libzecurity_ffi.so`).
+//!
+//! Two callers, in two processes of the same app:
+//!
+//! - **The tunnel process** runs the unchanged client daemon and gives it
+//!   the VPN interface. Android: the VpnService process, over JNI
+//!   (`ZecurityNative.startDaemon`; the daemon asks for an interface through
+//!   `ZecurityNative.establish`). iOS: the packet tunnel extension, over C
+//!   (`zc_start_daemon` with Swift callbacks). Hosting the daemon there keeps
+//!   its deliberate exits (shutdown request, revoked device) away from the UI.
+//! - **The UI process** (Flutter, `dart:ffi`): the C functions below play the
+//!   Linux CLI's role. `zc_request` sends one daemon IPC request (the same
+//!   newline-delimited JSON the CLI uses) and returns the JSON response.
+//!
+//! Every function returns a JSON string the caller must free with
+//! `zc_free`. All of them block, so the UI calls them off its main isolate.
+//!
+//! Android and iOS only.
+#![cfg(any(target_os = "android", target_os = "ios"))]
+
+use std::ffi::{c_char, CStr, CString};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+use zecurity_core::{cmd, config, ipc, mobile};
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime")
+    })
+}
+
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+fn to_c(value: Value) -> *mut c_char {
+    CString::new(value.to_string())
+        .unwrap_or_else(|_| CString::new("{}").expect("static"))
+        .into_raw()
+}
+
+/// # Safety
+/// `p` must be NULL or a NUL-terminated string valid for the call.
+unsafe fn from_c(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    CStr::from_ptr(p).to_string_lossy().into_owned()
+}
+
+fn error(e: impl std::fmt::Display) -> *mut c_char {
+    to_c(json!({ "ok": false, "type": "Error", "error": e.to_string() }))
+}
+
+/// Appends a line to `ui.log` in the app's files directory: the UI process
+/// has no other log, and the login's progress is otherwise invisible.
+fn ui_log(line: &str) {
+    use std::io::Write;
+    let path = mobile::files_dir().join("ui.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{now} {line}");
+    }
+}
+
+/// Frees a string returned by any `zc_*` function.
+///
+/// # Safety
+/// `p` must come from a `zc_*` function and not be freed twice.
+#[no_mangle]
+pub unsafe extern "C" fn zc_free(p: *mut c_char) {
+    if !p.is_null() {
+        drop(CString::from_raw(p));
+    }
+}
+
+// ── Login state shared with the UI's polling ─────────────────────────────────
+
+#[derive(Default)]
+struct LoginState {
+    running: bool,
+    url: Option<String>,
+    result: Option<Result<(), String>>,
+}
+
+fn login_state() -> &'static Mutex<LoginState> {
+    static STATE: OnceLock<Mutex<LoginState>> = OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+/// UI process start-up: the app's files directory (config, state, the
+/// daemon socket), and the login URL hand-off to the UI.
+///
+/// # Safety
+/// `files_dir` must be a NUL-terminated UTF-8 path.
+#[no_mangle]
+pub unsafe extern "C" fn zc_init(files_dir: *const c_char) -> *mut c_char {
+    install_crypto_provider();
+    mobile::init(PathBuf::from(from_c(files_dir)));
+    mobile::set_url_opener(Box::new(|url| {
+        ui_log("login: URL ready, waiting for the browser callback");
+        if let Ok(mut s) = login_state().lock() {
+            s.url = Some(url.to_string());
+        }
+    }));
+    to_c(json!({ "ok": true }))
+}
+
+/// The current config, for the settings form.
+#[no_mangle]
+pub extern "C" fn zc_config() -> *mut c_char {
+    match config::load() {
+        Ok(c) => to_c(json!({
+            "ok": true,
+            "workspace": c.workspace,
+            "controller": c.controller_address,
+            "http_base": c.http_base_url,
+        })),
+        Err(_) => to_c(json!({ "ok": true, "workspace": "", "controller": "", "http_base": "" })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetupArgs {
+    workspace: String,
+    #[serde(default)]
+    controller: String,
+    #[serde(default)]
+    http_base: String,
+}
+
+/// Writes the config (what `zecurity-client setup` does). The daemon reads
+/// it at start, so the app restarts the VPN service afterwards.
+///
+/// # Safety
+/// `args` must be a NUL-terminated JSON object
+/// `{"workspace", "controller"?, "http_base"?}`.
+#[no_mangle]
+pub unsafe extern "C" fn zc_setup(args: *const c_char) -> *mut c_char {
+    let args: SetupArgs = match serde_json::from_str(&from_c(args)) {
+        Ok(a) => a,
+        Err(e) => return error(format!("bad setup arguments: {e}")),
+    };
+    if args.workspace.trim().is_empty() {
+        return error("workspace is required");
+    }
+    let conf = config::ClientConf {
+        workspace: args.workspace.trim().to_string(),
+        controller_address: args.controller.trim().to_string(),
+        connector_address: String::new(),
+        http_base_url: args.http_base.trim().to_string(),
+    };
+    match config::save(&conf) {
+        Ok(path) => to_c(json!({ "ok": true, "path": path.display().to_string() })),
+        Err(e) => error(e),
+    }
+}
+
+/// Sends one daemon IPC request, e.g. `{"type":"Status"}`, `{"type":"Up"}`,
+/// and returns its JSON response.
+///
+/// # Safety
+/// `request` must be a NUL-terminated JSON IPC request.
+#[no_mangle]
+pub unsafe extern "C" fn zc_request(request: *const c_char) -> *mut c_char {
+    let req: ipc::IpcRequest = match serde_json::from_str(&from_c(request)) {
+        Ok(r) => r,
+        Err(e) => return error(format!("bad request: {e}")),
+    };
+    match runtime().block_on(ipc::send_ipc(&req)) {
+        Ok(resp) => match serde_json::to_value(&resp) {
+            Ok(v) => to_c(v),
+            Err(e) => error(e),
+        },
+        Err(e) => error(format!("{e:#}")),
+    }
+}
+
+/// Starts `zecurity-client login` in the background. Poll with
+/// `zc_login_poll` for the URL to open and the result.
+#[no_mangle]
+pub extern "C" fn zc_login_start() -> *mut c_char {
+    {
+        let mut s = match login_state().lock() {
+            Ok(s) => s,
+            Err(e) => return error(e),
+        };
+        if s.running {
+            // The screen that started it may be gone (Android recreates the
+            // activity): the new one attaches to the running login and polls.
+            return to_c(json!({ "ok": true, "attached": true }));
+        }
+        *s = LoginState {
+            running: true,
+            ..Default::default()
+        };
+    }
+    ui_log("login: started");
+    runtime().spawn(async {
+        let result = cmd::login::run().await.map_err(|e| format!("{e:#}"));
+        match &result {
+            Ok(()) => ui_log("login: done"),
+            Err(e) => ui_log(&format!("login: failed: {e}")),
+        }
+        if let Ok(mut s) = login_state().lock() {
+            s.running = false;
+            s.result = Some(result);
+        }
+    });
+    to_c(json!({ "ok": true }))
+}
+
+/// `{"state": "idle" | "running" | "done" | "error", "url"?, "error"?}`.
+/// The URL stays available while the login runs, so a screen that replaced
+/// the one that started it can still open it; the UI opens each URL once.
+#[no_mangle]
+pub extern "C" fn zc_login_poll() -> *mut c_char {
+    let s = match login_state().lock() {
+        Ok(s) => s,
+        Err(e) => return error(e),
+    };
+    let url = s.url.clone();
+    let value = match (&s.result, s.running) {
+        (_, true) => json!({ "ok": true, "state": "running", "url": url }),
+        (Some(Ok(())), false) => json!({ "ok": true, "state": "done" }),
+        (Some(Err(e)), false) => json!({ "ok": true, "state": "error", "error": e }),
+        (None, false) => json!({ "ok": true, "state": "idle" }),
+    };
+    to_c(value)
+}
+
+/// Signs out (what `zecurity-client logout` does).
+#[no_mangle]
+pub extern "C" fn zc_logout() -> *mut c_char {
+    match runtime().block_on(cmd::logout::run()) {
+        Ok(()) => to_c(json!({ "ok": true })),
+        Err(e) => error(format!("{e:#}")),
+    }
+}
+
+// ── JNI: the Android VPN service process ─────────────────────────────────────
+
+#[cfg(target_os = "android")]
+mod jni_service {
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::OnceLock;
+
+    use anyhow::{anyhow, Context, Result};
+    use jni::objects::{GlobalRef, JClass, JStaticMethodID, JString, JValue};
+    use jni::signature::{Primitive, ReturnType};
+    use jni::sys::{jint, JNI_VERSION_1_6};
+    use jni::{JNIEnv, JavaVM};
+    use zecurity_core::{daemon, mobile};
+
+    static JVM: OnceLock<JavaVM> = OnceLock::new();
+    static NATIVE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
+    static ESTABLISH: OnceLock<JStaticMethodID> = OnceLock::new();
+    static POSTURE: OnceLock<JStaticMethodID> = OnceLock::new();
+    static DAEMON_RUNNING: AtomicBool = AtomicBool::new(false);
+
+    /// Runs on `System.loadLibrary` in the service process.
+    #[no_mangle]
+    pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
+        let _ = JVM.set(vm);
+        JNI_VERSION_1_6
+    }
+
+    /// `ZecurityNative.startDaemon(filesDir)`: starts the daemon once per
+    /// process. Called on a Java thread, so the class and method can be
+    /// looked up here and cached for the daemon's threads.
+    #[no_mangle]
+    pub extern "system" fn Java_io_zecurity_client_ZecurityNative_startDaemon(
+        mut env: JNIEnv,
+        class: JClass,
+        files_dir: JString,
+    ) -> jint {
+        let dir: String = match env.get_string(&files_dir) {
+            Ok(s) => s.into(),
+            Err(_) => return fail(&mut env),
+        };
+        super::install_crypto_provider();
+        mobile::init(PathBuf::from(dir));
+        if NATIVE_CLASS.get().is_none() {
+            match env.new_global_ref(&class) {
+                Ok(g) => {
+                    let _ = NATIVE_CLASS.set(g);
+                }
+                Err(_) => return fail(&mut env),
+            }
+        }
+        if ESTABLISH.get().is_none() {
+            match env.get_static_method_id(&class, "establish", "(Ljava/lang/String;)I") {
+                Ok(m) => {
+                    let _ = ESTABLISH.set(m);
+                }
+                Err(_) => return fail(&mut env),
+            }
+        }
+        if POSTURE.get().is_none() {
+            match env.get_static_method_id(&class, "posture", "()Ljava/lang/String;") {
+                Ok(m) => {
+                    let _ = POSTURE.set(m);
+                }
+                Err(_) => return fail(&mut env),
+            }
+        }
+        mobile::set_tun_provider(Box::new(establish_via_service));
+        mobile::set_posture_provider(Box::new(|| posture_via_service().unwrap_or_default()));
+
+        if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
+            return 0;
+        }
+        // A failure from an earlier start would be shown as current.
+        let _ = std::fs::remove_file(mobile::files_dir().join("daemon.error"));
+        std::thread::spawn(|| {
+            let result = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(daemon::run()));
+            if let Err(e) = result {
+                // Not configured yet, or a startup failure: the daemon log
+                // may not exist, so leave a marker the app can show.
+                let _ = std::fs::write(
+                    mobile::files_dir().join("daemon.error"),
+                    format!("{e:#}"),
+                );
+            }
+            DAEMON_RUNNING.store(false, Ordering::SeqCst);
+        });
+        0
+    }
+
+    /// A JNI error leaves a Java exception pending, which would be thrown into
+    /// the service on return and crash its process: clear it and report -1.
+    fn fail(env: &mut JNIEnv) -> jint {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        -1
+    }
+
+    /// ADR-031: the posture checks the VPN service reads
+    /// (`ZecurityNative.posture()`, a JSON array of {id, status, detail}).
+    fn posture_via_service() -> Result<Vec<mobile::PlatformCheck>> {
+        #[derive(serde::Deserialize)]
+        struct Check {
+            id: String,
+            status: String,
+            #[serde(default)]
+            detail: String,
+        }
+        let vm = JVM.get().ok_or_else(|| anyhow!("JNI not initialised"))?;
+        let class = NATIVE_CLASS.get().ok_or_else(|| anyhow!("JNI class not cached"))?;
+        let method = *POSTURE.get().ok_or_else(|| anyhow!("JNI method not cached"))?;
+        let mut env = vm.attach_current_thread().context("attach to the JVM")?;
+        let class: &JClass = class.as_obj().into();
+        // SAFETY: `method` was looked up on this class with signature
+        // ()Ljava/lang/String; and takes no arguments.
+        let value = unsafe { env.call_static_method_unchecked(class, method, ReturnType::Object, &[]) };
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+            return Err(anyhow!("the VPN service threw while reading posture"));
+        }
+        let obj = value.context("call posture")?.l().context("posture result")?;
+        if obj.is_null() {
+            return Ok(Vec::new());
+        }
+        let text: String = env
+            .get_string(&JString::from(obj))
+            .context("posture string")?
+            .into();
+        let checks: Vec<Check> = serde_json::from_str(&text).context("posture JSON")?;
+        Ok(checks.into_iter().map(|c| (c.id, c.status, c.detail)).collect())
+    }
+
+    /// The daemon's TUN provider: `ZecurityNative.establish("ip,ip,...")`
+    /// returns the VPN interface's file descriptor, or a negative value.
+    fn establish_via_service(routes: &[Ipv4Addr]) -> Result<i32> {
+        let vm = JVM.get().ok_or_else(|| anyhow!("JNI not initialised"))?;
+        let class = NATIVE_CLASS.get().ok_or_else(|| anyhow!("JNI class not cached"))?;
+        let method = *ESTABLISH.get().ok_or_else(|| anyhow!("JNI method not cached"))?;
+        let mut env = vm.attach_current_thread().context("attach to the JVM")?;
+        let list = routes
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let jlist = env.new_string(list).context("routes string")?;
+        let class: &JClass = class.as_obj().into();
+        // SAFETY: `method` was looked up on this class with signature
+        // (Ljava/lang/String;)I, and the one argument is a String.
+        let value = unsafe {
+            env.call_static_method_unchecked(
+                class,
+                method,
+                ReturnType::Primitive(Primitive::Int),
+                &[JValue::Object(&jlist).as_jni()],
+            )
+        };
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+            return Err(anyhow!("the VPN service threw while creating the interface"));
+        }
+        value.context("call establish")?.i().context("establish result")
+    }
+}
+
+// ── C: the iOS packet tunnel extension ───────────────────────────────────────
+
+#[cfg(target_os = "ios")]
+mod ios_tunnel {
+    use std::ffi::{c_char, CString};
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use anyhow::{bail, Result};
+    use zecurity_core::{daemon, mobile};
+
+    /// Swift: apply network settings routing exactly these IPs ("ip,ip,...",
+    /// one /32 each) to the tunnel; 0 once applied.
+    pub type EstablishFn = extern "C" fn(routes: *const c_char) -> i32;
+    /// Swift: apply network settings with no resource routes.
+    pub type ReleaseFn = extern "C" fn();
+
+    static DAEMON_RUNNING: AtomicBool = AtomicBool::new(false);
+
+    /// Starts the client daemon in the extension (once per process), with
+    /// the App Group container as its files directory.
+    ///
+    /// # Safety
+    /// `files_dir` and `os_version` must be NUL-terminated UTF-8 strings.
+    #[no_mangle]
+    pub unsafe extern "C" fn zc_start_daemon(
+        files_dir: *const c_char,
+        os_version: *const c_char,
+        establish: EstablishFn,
+        release: ReleaseFn,
+    ) -> i32 {
+        super::install_crypto_provider();
+        mobile::init(PathBuf::from(super::from_c(files_dir)));
+        mobile::set_os_version(super::from_c(os_version));
+        mobile::set_tun_provider(Box::new(move |routes| establish_utun(establish, routes)));
+        mobile::set_tun_release(Box::new(move || release()));
+
+        if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
+            return 0;
+        }
+        let _ = std::fs::remove_file(mobile::files_dir().join("daemon.error"));
+        std::thread::spawn(|| {
+            // Two workers: the extension is killed above ~50 MB.
+            let result = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(daemon::run()));
+            if let Err(e) = result {
+                let _ = std::fs::write(
+                    mobile::files_dir().join("daemon.error"),
+                    format!("{e:#}"),
+                );
+            }
+            DAEMON_RUNNING.store(false, Ordering::SeqCst);
+        });
+        0
+    }
+
+    /// The daemon's TUN provider: Swift applies the routes, then the daemon
+    /// gets its own duplicate of the extension's utun descriptor, so dropping
+    /// it never closes the tunnel.
+    fn establish_utun(establish: EstablishFn, routes: &[Ipv4Addr]) -> Result<i32> {
+        let list = routes
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let list = CString::new(list)?;
+        if establish(list.as_ptr()) != 0 {
+            bail!("the tunnel extension could not apply the routes");
+        }
+        let fd = find_utun_fd()?;
+        // SAFETY: `fd` is an open descriptor of this process.
+        let dup = unsafe { libc::dup(fd) };
+        if dup < 0 {
+            bail!("dup the utun descriptor: {}", std::io::Error::last_os_error());
+        }
+        Ok(dup)
+    }
+
+    // Darwin kernel-control ABI (sys/kern_control.h). libc defines
+    // CTLIOCGINFO for macOS only; the values are the same on iOS.
+    const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
+    const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control";
+
+    #[repr(C)]
+    struct CtlInfo {
+        ctl_id: u32,
+        ctl_name: [libc::c_char; 96],
+    }
+
+    #[repr(C)]
+    struct SockaddrCtl {
+        sc_len: u8,
+        sc_family: u8,
+        ss_sysaddr: u16,
+        sc_id: u32,
+        sc_unit: u32,
+        sc_reserved: [u32; 5],
+    }
+
+    /// The extension's utun descriptor: the kernel-control socket connected
+    /// to the utun control. NetworkExtension does not expose it, so it is
+    /// found by scanning this process's descriptors (as WireGuard does).
+    fn find_utun_fd() -> Result<i32> {
+        let mut info = CtlInfo {
+            ctl_id: 0,
+            ctl_name: [0; 96],
+        };
+        for (dst, src) in info.ctl_name.iter_mut().zip(UTUN_CONTROL_NAME) {
+            *dst = *src as libc::c_char;
+        }
+        for fd in 0..1024 {
+            let mut addr = SockaddrCtl {
+                sc_len: 0,
+                sc_family: 0,
+                ss_sysaddr: 0,
+                sc_id: 0,
+                sc_unit: 0,
+                sc_reserved: [0; 5],
+            };
+            let mut len = std::mem::size_of::<SockaddrCtl>() as libc::socklen_t;
+            // SAFETY: `addr` is a writable sockaddr_ctl of `len` bytes.
+            let rc = unsafe {
+                libc::getpeername(fd, &mut addr as *mut SockaddrCtl as *mut libc::sockaddr, &mut len)
+            };
+            if rc != 0 || i32::from(addr.sc_family) != libc::AF_SYSTEM {
+                continue;
+            }
+            if info.ctl_id == 0 {
+                // SAFETY: `info` is a ctl_info with the control's name set.
+                if unsafe { libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut CtlInfo) } != 0 {
+                    continue;
+                }
+            }
+            if addr.sc_id == info.ctl_id {
+                return Ok(fd);
+            }
+        }
+        bail!("no utun descriptor found in the tunnel extension")
+    }
+}
+

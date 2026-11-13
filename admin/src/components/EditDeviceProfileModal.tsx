@@ -5,8 +5,11 @@ import {
   RemoveProfileRequirementDocument,
   GetDeviceProfilesDocument,
   GetSupportedPostureChecksDocument,
+  SetProfilePlatformsDocument,
   UpdateProfileRequirementCountriesDocument,
 } from "@/generated/graphql";
+import { PlatformPostureCard } from "@/components/PlatformPostureCard";
+import { PROFILE_PLATFORMS } from "@/lib/profilePlatforms";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -28,6 +31,8 @@ interface EditDeviceProfileModalProps {
     id: string;
     name: string;
     manualTrust: boolean;
+    // ADR-031: the platforms this profile allows (absent on old data: none).
+    allowedPlatforms?: string[];
     requirements: {
       checkId: string;
       countries?: { allow: string[]; deny: string[] } | null;
@@ -56,11 +61,15 @@ export function EditDeviceProfileModal({
   const [countryRule, setCountryRule] = useState<CountryRuleValue>(() =>
     profile ? originalCountryRule(profile) : EMPTY_COUNTRY_RULE,
   );
+  const [platforms, setPlatforms] = useState<Set<string>>(
+    () => new Set(profile?.allowedPlatforms ?? []),
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (profile) {
+      setPlatforms(new Set(profile.allowedPlatforms ?? []));
       setCheckedIds(
         new Set(profile.requirements.map((r) => r.checkId).filter((id) => id !== COUNTRY_CHECK_ID)),
       );
@@ -72,9 +81,8 @@ export function EditDeviceProfileModal({
   const { data: checksData } = useQuery(GetSupportedPostureChecksDocument, {
     skip: !open,
   });
-  const linuxChecks = (checksData?.supportedPostureChecks ?? []).filter(
-    (check) => check.platform === "linux",
-  );
+  const checksFor = (platform: string) =>
+    (checksData?.supportedPostureChecks ?? []).filter((check) => check.platform === platform);
   // Server-side checks (ADR-030), e.g. "Approved by an admin". The country
   // check (PENDING-20) is server-side too but has its own editor.
   const serverChecks = (checksData?.supportedPostureChecks ?? []).filter(
@@ -87,6 +95,7 @@ export function EditDeviceProfileModal({
 
   const [addProfileRequirement] = useMutation(AddProfileRequirementDocument);
   const [updateCountries] = useMutation(UpdateProfileRequirementCountriesDocument);
+  const [setProfilePlatforms] = useMutation(SetProfilePlatformsDocument);
   const [removeProfileRequirement] = useMutation(RemoveProfileRequirementDocument, {
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
   });
@@ -105,6 +114,15 @@ export function EditDeviceProfileModal({
       const next = new Set(prev);
       if (next.has(checkId)) next.delete(checkId);
       else next.add(checkId);
+      return next;
+    });
+  }
+
+  function setPlatformEnabled(platform: string, enabled: boolean) {
+    setPlatforms((prev) => {
+      const next = new Set(prev);
+      if (enabled) next.add(platform);
+      else next.delete(platform);
       return next;
     });
   }
@@ -138,8 +156,20 @@ export function EditDeviceProfileModal({
     const originalCountry = originalCountryRule(profile);
     const countries = { allow: countryRule.allow, deny: countryRule.deny };
 
+    // ADR-031: platforms switched off go first and platforms switched on go
+    // last, so no step lets a platform in without its requirements.
+    const originalPlatforms = new Set(profile.allowedPlatforms ?? []);
+    const samePlatforms = (a: Set<string>, b: Set<string>) =>
+      a.size === b.size && [...a].every((p) => b.has(p));
+    const keptPlatforms = new Set([...originalPlatforms].filter((p) => platforms.has(p)));
+
     setSaving(true);
     try {
+      if (!samePlatforms(keptPlatforms, originalPlatforms)) {
+        await setProfilePlatforms({
+          variables: { profileId: profile.id, platforms: [...keptPlatforms] },
+        });
+      }
       // Adds first and removes last, so an enforce profile never passes
       // through "no requirements" (the server refuses that).
       for (const checkId of toAdd) {
@@ -163,6 +193,12 @@ export function EditDeviceProfileModal({
       if (!countryRule.enabled && originalCountry.enabled) {
         await removeProfileRequirement({
           variables: { profileId: profile.id, checkId: COUNTRY_CHECK_ID },
+        });
+      }
+
+      if (!samePlatforms(platforms, keptPlatforms)) {
+        await setProfilePlatforms({
+          variables: { profileId: profile.id, platforms: [...platforms] },
         });
       }
 
@@ -191,9 +227,9 @@ export function EditDeviceProfileModal({
               <ShieldCheck className="h-5 w-5" />
             </div>
             <div className="flex-1">
-              <h2 className="text-lg font-semibold">Edit Trusted Linux Profile</h2>
+              <h2 className="text-lg font-semibold">Edit Device Profile</h2>
               <p className="text-sm text-muted-foreground">
-                Update verification and posture requirements for Linux devices.
+                Choose which platforms may connect and what each must meet.
               </p>
             </div>
             <button
@@ -290,23 +326,26 @@ export function EditDeviceProfileModal({
                 </button>
               </div>
 
-              {linuxChecks.length === 0 ? (
+              {!checksData ? (
                 <p className="text-sm text-muted-foreground">Loading posture checks…</p>
               ) : (
-                linuxChecks.map((check) => (
-                  <div
-                    key={check.id}
-                    className="flex items-center justify-between rounded-2xl border border-border p-4"
-                  >
-                    <span className="text-sm font-semibold">{check.label}</span>
-                    <Switch
-                      checked={checkedIds.has(check.id)}
-                      onCheckedChange={() => toggleCheck(check.id)}
-                      disabled={inUse && totalActiveRequirements <= 1 && checkedIds.has(check.id)}
-                      aria-label={check.label}
+                PROFILE_PLATFORMS.map((platform) => {
+                  const checks = checksFor(platform.id);
+                  const lastLocked =
+                    inUse && totalActiveRequirements <= 1 ? new Set(checks.map((c) => c.id)) : undefined;
+                  return (
+                    <PlatformPostureCard
+                      key={platform.id}
+                      platform={platform}
+                      enabled={platforms.has(platform.id)}
+                      onEnabledChange={(on) => setPlatformEnabled(platform.id, on)}
+                      checks={checks}
+                      required={checkedIds}
+                      onToggleRequired={toggleCheck}
+                      locked={lastLocked}
                     />
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 

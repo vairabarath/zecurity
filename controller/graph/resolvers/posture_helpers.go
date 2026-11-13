@@ -22,6 +22,8 @@ func postureProfileToGQL(profile *posture.Profile) *graph.DeviceProfile {
 		ID:          profile.ID.String(),
 		Name:        profile.Name,
 		ManualTrust: profile.ManualTrustEnabled,
+		// Never null in the API: an unset column reads as no platform.
+		AllowedPlatforms: append([]string{}, profile.AllowedPlatforms...),
 	}
 }
 

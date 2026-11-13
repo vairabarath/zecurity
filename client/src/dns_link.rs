@@ -103,8 +103,14 @@ pub(crate) fn status_line() -> Option<String> {
 /// re-applies even when the names didn't change (a new TUN link lost its
 /// resolved config). Returns the new state; never fails the caller: a DNS
 /// problem must not take IP resources down.
+#[cfg_attr(any(windows, target_os = "android", target_os = "ios"), allow(unreachable_code, unused_variables))]
 pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> DnsState {
     let names = names_in(cfg);
+    // Windows has no systemd-resolved; its equivalent (NRPT rules for the
+    // names) is not built yet. IP resources are unaffected, exactly as on a
+    // Linux host without resolved.
+    #[cfg(any(windows, target_os = "android", target_os = "ios"))]
+    return unsupported(names);
     let prev = state();
     if !force && prev.configured == names && prev.status.is_some() != names.is_empty() {
         name_map::with(|m| m.set_active(names.clone()));
@@ -153,6 +159,31 @@ pub(crate) fn sync(runner: &dyn CmdRunner, cfg: &AppliedConfig, force: bool) -> 
     s
 }
 
+/// Windows and mobile: no names are routed; status says why when there
+/// are some.
+#[cfg(any(windows, target_os = "android", target_os = "ios"))]
+fn unsupported(names: BTreeSet<String>) -> DnsState {
+    name_map::with(|m| m.set_active(BTreeSet::new()));
+    let s = DnsState {
+        configured: BTreeSet::new(),
+        status: (!names.is_empty())
+            .then(|| {
+                Err(format!(
+                    "DNS name resources are not supported on {} yet",
+                    if cfg!(windows) {
+                        "Windows"
+                    } else if cfg!(target_os = "ios") {
+                        "iOS"
+                    } else {
+                        "Android"
+                    }
+                ))
+            }),
+    };
+    set_state(s.clone());
+    s
+}
+
 /// The tunnel went down: the link (and its resolved config) is gone.
 pub(crate) fn clear() {
     name_map::with(|m| {
@@ -169,6 +200,7 @@ mod tests {
     use crate::runtime::AppliedEntry;
     use std::cell::RefCell;
 
+    #[cfg_attr(any(windows, target_os = "android", target_os = "ios"), allow(dead_code))]
     struct Rec {
         calls: RefCell<Vec<String>>,
         fail_on: Option<&'static str>,
@@ -249,6 +281,8 @@ mod tests {
 
     // One test drives the process-wide state in sequence, so parallel tests
     // can't interleave on it.
+    // The systemd-resolved path; Windows and mobile report names as unsupported.
+    #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
     #[test]
     fn sync_tracks_names_and_reports_failures() {
         let ok = Rec {

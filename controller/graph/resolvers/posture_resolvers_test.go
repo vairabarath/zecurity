@@ -340,6 +340,10 @@ func TestDevicePostureVisibilityResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	// ADR-031: profiles start with no platform; this device is Linux.
+	if _, err := f.mr.PostureStore.SetAllowedPlatforms(f.ctx, workspaceID, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 
 	t.Cleanup(func() {
 		_, _ = f.mr.PostureStore.DeleteProfile(

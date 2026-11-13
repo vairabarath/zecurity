@@ -90,6 +90,10 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(ctx, workspaceA, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 	if !profile.ManualTrustEnabled {
 		t.Fatalf("profile.ManualTrustEnabled = false, want true")
 	}
@@ -126,8 +130,9 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload profile: %v", err)
 	}
-	if profile.Revision != 2 {
-		t.Fatalf("profile revision = %d, want 2", profile.Revision)
+	// Created (1), Linux allowed (2, ADR-031), one requirement (3).
+	if profile.Revision != 3 {
+		t.Fatalf("profile revision = %d, want 3", profile.Revision)
 	}
 	notifier := &postureTestNotifier{}
 	if err := NewEvaluator(store, notifier).ReevaluateWorkspace(ctx, workspaceA); err != nil {

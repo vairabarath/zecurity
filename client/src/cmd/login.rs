@@ -18,6 +18,14 @@ pub async fn run() -> Result<()> {
     // Reach the daemon before enrolling: enrolling first left an active
     // device on the server, never saved here, on every failed attempt.
     if ensure_daemon_and_send(&IpcRequest::Status).await.is_err() {
+        #[cfg(windows)]
+        anyhow::bail!(
+            "the Zecurity client service is not running — start it from an elevated \
+             PowerShell with `Start-Service zecurity-client`, then run `zecurity-client login` again"
+        );
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        anyhow::bail!("the Zecurity service is not running — reopen the Zecurity app and try again");
+        #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
         anyhow::bail!(
             "the Zecurity client service is not running — start it with \
              `sudo systemctl start zecurity-client`, then run `zecurity-client login` again"

@@ -30,6 +30,10 @@ func TestResourcePolicy_CompileAndPreview(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create profile %s: %v", name, err)
 		}
+		// ADR-031: profiles start with no platform; these devices are Linux.
+		if _, err := pstore.SetAllowedPlatforms(ctx, ws, p.ID, []string{"linux"}); err != nil {
+			t.Fatalf("allow linux: %v", err)
+		}
 		if err := pstore.AddRequirement(ctx, ws, p.ID, posture.Requirement{CheckID: check}); err != nil {
 			t.Fatalf("add requirement: %v", err)
 		}

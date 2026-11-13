@@ -38,7 +38,8 @@ func TestEvaluateProfileStatusMatrix(t *testing.T) {
 			result := EvaluateProfile(
 				now,
 				now,
-				Profile{ID: uuid.New(), Revision: 4},
+				Profile{ID: uuid.New(), Revision: 4, AllowedPlatforms: []string{"linux"}},
+				"linux",
 				[]Requirement{{CheckID: CheckLUKS, AllowUnsupported: tt.allowUnsupported}},
 				map[string]Observation{CheckLUKS: {CheckID: CheckLUKS, Status: tt.status}},
 			)
@@ -54,7 +55,7 @@ func TestEvaluateProfileStatusMatrix(t *testing.T) {
 
 func TestEvaluateProfileFailsClosed(t *testing.T) {
 	now := time.Now().UTC()
-	profile := Profile{ID: uuid.New(), Revision: 1}
+	profile := Profile{ID: uuid.New(), Revision: 1, AllowedPlatforms: []string{"linux"}}
 
 	tests := []struct {
 		name         string
@@ -63,13 +64,6 @@ func TestEvaluateProfileFailsClosed(t *testing.T) {
 		observations map[string]Observation
 		reason       string
 	}{
-		{
-			name:         "empty profile",
-			receivedAt:   now,
-			requirements: nil,
-			observations: map[string]Observation{},
-			reason:       "no requirements",
-		},
 		{
 			name:         "stale pass",
 			receivedAt:   now.Add(-MaxReportAge - time.Second),
@@ -101,7 +95,7 @@ func TestEvaluateProfileFailsClosed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := EvaluateProfile(now, tt.receivedAt, profile, tt.requirements, tt.observations)
+			result := EvaluateProfile(now, tt.receivedAt, profile, "linux", tt.requirements, tt.observations)
 			if result.Satisfied {
 				t.Fatalf("Satisfied = true, reason=%q", result.Reason)
 			}

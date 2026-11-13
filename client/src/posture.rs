@@ -1,3 +1,6 @@
+// The Linux collectors below are compiled, and unit-tested, on every
+// platform; on Windows only `collect` (OS report only) runs.
+#![cfg_attr(any(windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -8,6 +11,41 @@ pub(crate) const CHECK_ID_OS_VERSION: &str = "linux.os.version";
 pub(crate) const CHECK_ID_LUKS: &str = "linux.disk_encryption.luks";
 pub(crate) const CHECK_ID_FIREWALL: &str = "linux.firewall.active";
 pub(crate) const CHECK_ID_SECURE_BOOT: &str = "linux.secure_boot.enabled";
+
+// ADR-031 D-4: Android checks, read by the app's VPN service (Kotlin).
+// Identical in controller/internal/posture/validate.go.
+pub(crate) const CHECK_ID_ANDROID_ENCRYPTION: &str = "android.disk_encryption.enabled";
+pub(crate) const CHECK_ID_ANDROID_SCREEN_LOCK: &str = "android.screen_lock.enabled";
+pub(crate) const CHECK_ID_ANDROID_BIOMETRIC: &str = "android.biometric.enrolled";
+const ANDROID_CHECK_IDS: [&str; 3] = [
+    CHECK_ID_ANDROID_ENCRYPTION,
+    CHECK_ID_ANDROID_SCREEN_LOCK,
+    CHECK_ID_ANDROID_BIOMETRIC,
+];
+
+/// Converts the checks a mobile platform read into report checks. Only the
+/// known IDs, once each, are kept; an unknown status is reported as ERROR
+/// (never as PASS); details are capped.
+pub(crate) fn checks_from_platform(
+    known: &[&str],
+    raw: Vec<(String, String, String)>,
+) -> Vec<PostureCheck> {
+    let mut out: Vec<PostureCheck> = Vec::new();
+    for (id, status, detail) in raw {
+        if !known.contains(&id.as_str()) || out.iter().any(|c| c.check_id == id) {
+            continue;
+        }
+        let status = match status.as_str() {
+            "PASS" => CheckStatus::Pass,
+            "FAIL" => CheckStatus::Fail,
+            "UNSUPPORTED" => CheckStatus::Unsupported,
+            _ => CheckStatus::Error,
+        };
+        let detail: String = detail.chars().take(200).collect();
+        out.push(check(&id, status, detail));
+    }
+    out
+}
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const SECURE_BOOT_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -478,8 +516,83 @@ pub(crate) struct PostureReport {
     pub os_version: String,
 }
 
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 pub(crate) async fn collect() -> PostureReport {
     collect_with(Path::new("/"), Arc::new(RealCommandRunner), DEFAULT_TIMEOUT).await
+}
+
+/// Windows: the `linux.*` collectors don't apply and `windows.*` checks are
+/// not built yet, so only the OS is reported. A posture profile that requires
+/// a check evaluates it as unsupported on the controller (fail closed unless
+/// the profile sets allow_unsupported).
+#[cfg(windows)]
+pub(crate) async fn collect() -> PostureReport {
+    let version = match tokio::time::timeout(
+        DEFAULT_TIMEOUT,
+        RealCommandRunner.run("cmd", &["/C", "ver"]),
+    )
+    .await
+    {
+        Ok(Ok(out)) if out.status.success() => windows_version_from_ver(&String::from_utf8_lossy(&out.stdout)),
+        _ => "unknown".into(),
+    };
+    PostureReport {
+        checks: Vec::new(),
+        os_name: "Windows".into(),
+        os_version: version,
+    }
+}
+
+/// Mobile: the OS, plus (Android, ADR-031) the checks the app's VPN service
+/// reads: storage encryption, screen lock, strong biometric enrolled. iOS
+/// has no checks yet. Android reads its version with `getprop`; on iOS the
+/// app supplies it (`UIDevice.systemVersion`).
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) async fn collect() -> PostureReport {
+    #[cfg(target_os = "android")]
+    let (os_name, version) = (
+        "Android",
+        match tokio::time::timeout(
+            DEFAULT_TIMEOUT,
+            RealCommandRunner.run("getprop", &["ro.build.version.release"]),
+        )
+        .await
+        {
+            Ok(Ok(out)) if out.status.success() => {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            _ => None,
+        },
+    );
+    #[cfg(target_os = "ios")]
+    let (os_name, version) = ("iOS", crate::mobile::os_version());
+    // The provider calls into the JVM: off the async workers.
+    let raw = tokio::task::spawn_blocking(crate::mobile::platform_posture)
+        .await
+        .unwrap_or_default();
+    #[cfg(target_os = "android")]
+    let checks = checks_from_platform(&ANDROID_CHECK_IDS, raw);
+    #[cfg(target_os = "ios")]
+    let checks = checks_from_platform(&[], raw);
+    PostureReport {
+        checks,
+        os_name: os_name.into(),
+        os_version: version
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "unknown".into()),
+    }
+}
+
+/// `ver` prints e.g. "Microsoft Windows [Version 10.0.22631.4317]".
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_version_from_ver(output: &str) -> String {
+    output
+        .split("[Version ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 pub(crate) async fn collect_with(
@@ -513,3 +626,69 @@ pub(crate) async fn collect_with(
         os_version,
     }
 }
+
+#[cfg(test)]
+mod windows_ver_tests {
+    #[test]
+    fn windows_version_is_parsed_from_ver_output() {
+        use crate::posture::windows_version_from_ver;
+        assert_eq!(
+            windows_version_from_ver("\r\nMicrosoft Windows [Version 10.0.22631.4317]\r\n"),
+            "10.0.22631.4317"
+        );
+        assert_eq!(windows_version_from_ver("garbage"), "unknown");
+        assert_eq!(windows_version_from_ver("Microsoft Windows [Version ]"), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod platform_check_tests {
+    use super::*;
+
+    fn raw(id: &str, status: &str, detail: &str) -> (String, String, String) {
+        (id.into(), status.into(), detail.into())
+    }
+
+    #[test]
+    fn android_checks_are_converted_and_filtered() {
+        let got = checks_from_platform(
+            &ANDROID_CHECK_IDS,
+            vec![
+                raw(CHECK_ID_ANDROID_ENCRYPTION, "PASS", "file-based encryption active"),
+                raw(CHECK_ID_ANDROID_SCREEN_LOCK, "FAIL", "no screen lock"),
+                raw(CHECK_ID_ANDROID_BIOMETRIC, "UNSUPPORTED", "needs Android 11"),
+                raw("linux.firewall.active", "PASS", "not an Android check"),
+                raw(CHECK_ID_ANDROID_SCREEN_LOCK, "PASS", "duplicate is ignored"),
+            ],
+        );
+        let summary: Vec<(String, i32)> =
+            got.iter().map(|c| (c.check_id.clone(), c.status)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (CHECK_ID_ANDROID_ENCRYPTION.to_string(), CheckStatus::Pass as i32),
+                (CHECK_ID_ANDROID_SCREEN_LOCK.to_string(), CheckStatus::Fail as i32),
+                (CHECK_ID_ANDROID_BIOMETRIC.to_string(), CheckStatus::Unsupported as i32),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_status_is_an_error_never_a_pass() {
+        let got = checks_from_platform(
+            &ANDROID_CHECK_IDS,
+            vec![raw(CHECK_ID_ANDROID_SCREEN_LOCK, "pass", "lower-case is not PASS")],
+        );
+        assert_eq!(got[0].status, CheckStatus::Error as i32);
+    }
+
+    #[test]
+    fn details_are_capped() {
+        let got = checks_from_platform(
+            &ANDROID_CHECK_IDS,
+            vec![raw(CHECK_ID_ANDROID_ENCRYPTION, "PASS", &"x".repeat(1000))],
+        );
+        assert_eq!(got[0].detail.len(), 200);
+    }
+}
+

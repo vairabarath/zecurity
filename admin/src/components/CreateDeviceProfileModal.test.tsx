@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MockedProvider } from "@apollo/client/testing/react";
 import { CreateDeviceProfileModal } from "./CreateDeviceProfileModal";
-import { GetSupportedPostureChecksDocument } from "@/generated/graphql";
+import {
+  AddProfileRequirementDocument,
+  CreateDeviceProfileDocument,
+  GetSupportedPostureChecksDocument,
+  SetProfilePlatformsDocument,
+} from "@/generated/graphql";
+
+vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }));
 
 const CHECKS = [
   {
@@ -103,5 +110,51 @@ describe("CreateDeviceProfileModal", () => {
     expect(screen.queryByText("Manual Trust")).not.toBeInTheDocument();
     // Server checks are not listed again among the Linux posture checks.
     expect(screen.getAllByText("Approved by an admin")).toHaveLength(1);
+  });
+
+  it("turns the chosen platform on after its requirements (ADR-031)", async () => {
+    const calls: string[] = [];
+    const record = (label: string, data: Record<string, unknown>) => () => {
+      calls.push(label);
+      return { data };
+    };
+    const onSuccess = vi.fn();
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetSupportedPostureChecksDocument },
+            result: { data: { supportedPostureChecks: CHECKS } },
+          },
+          {
+            request: { query: CreateDeviceProfileDocument, variables: { name: "Laptops", manualTrust: true } },
+            result: record("create", {
+              createDeviceProfile: { __typename: "DeviceProfile", id: "new-1", name: "Laptops", manualTrust: true },
+            }),
+          },
+          {
+            request: {
+              query: AddProfileRequirementDocument,
+              variables: { profileId: "new-1", checkId: "linux.firewall.active", allowUnsupported: false },
+            },
+            result: record("add firewall", { addProfileRequirement: { __typename: "DeviceProfile", id: "new-1" } }),
+          },
+          {
+            request: { query: SetProfilePlatformsDocument, variables: { profileId: "new-1", platforms: ["linux"] } },
+            result: record("platforms linux", {
+              setProfilePlatforms: { __typename: "DeviceProfile", id: "new-1", allowedPlatforms: ["linux"] },
+            }),
+          },
+        ]}
+      >
+        <CreateDeviceProfileModal open onOpenChange={vi.fn()} onSuccess={onSuccess} />
+      </MockedProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
+    await userEvent.type(screen.getByPlaceholderText("Profile Name"), "Laptops");
+    await userEvent.click(await screen.findByRole("switch", { name: "Firewall active" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Create/ }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(calls).toEqual(["create", "add firewall", "platforms linux"]);
   });
 });

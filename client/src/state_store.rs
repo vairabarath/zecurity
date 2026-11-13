@@ -241,6 +241,16 @@ pub fn state_dir() -> PathBuf {
     if let Ok(p) = std::env::var("ZECURITY_STATE_DIR") {
         return PathBuf::from(p);
     }
+    // Windows: one directory shared by the daemon (LocalSystem) and the
+    // enrolling user's CLI, as both share the user's directory on Linux. The
+    // installer restricts it to SYSTEM, Administrators and that user.
+    #[cfg(windows)]
+    return crate::config::program_data_dir().join("state");
+    // Mobile: the app's files directory (shared by the daemon in the VPN
+    // service process or tunnel extension and the UI).
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return crate::mobile::files_dir().join("state");
+    #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -603,6 +613,14 @@ fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
+/// Windows can't open a directory as a file to sync it; NTFS journals the
+/// rename itself, so there is nothing to do there.
+#[cfg(windows)]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn sync_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         let dir = fs::File::open(parent)

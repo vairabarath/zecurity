@@ -3741,3 +3741,84 @@ serves on `127.0.0.1:9102`.
   - **Gates:** 350/350 client tests; 3 mutants killed; clippy clean in the changed files.
   - Record: `Sprint22/FU16-Revocation-Tail-2026-11-05.md`.
 - Not committed. Lab still up (`fu16-*` units, `fu16_live` DB, Valkey db 4, ufw rule, inkyank connector and servers): cleanup awaits OK.
+
+## 2026-11-12 — M1: Windows client (W1 core, provisional; not run on real Windows)
+- Plan: `docs/client-multi-platform.md` (Windows → Android → iOS); its docs branch `docs/client-multi-platform` is pushed.
+- Branch `feat/client-windows` (local commits, not pushed), base `main` `1809a849`:
+  - the CLI and daemon build for Windows behind `cfg` gates: Wintun adapter `zecurity0`, one `/32` route per allowed IP, a LocalSystem Windows Service, a named-pipe IPC, and `%ProgramData%\Zecurity`;
+  - `client/scripts/client-install.ps1` is the installer;
+  - DNS-name resources and posture checks report as unsupported on Windows.
+- Security (three automated reviews, all addressed):
+  - pipe DACL plus SYSTEM ownership, verified by the CLI;
+  - the enrolled user's SID comes from the service command line;
+  - the data directory refuses junctions and untrusted owners, and the user may read but not change it (`setup` needs an elevated prompt).
+- Gates:
+  - Linux: 364/364 tests.
+  - Windows: debug and release cross builds (MinGW).
+  - Windows tests under Wine 8: 297 pass, 23 fail on Wine limits (QUIC UDP bind error 10045, CRLF test fixture, first-pipe-instance flag).
+  - Clippy adds no new warnings.
+- Provisional: D-W1 (IP-level capture) and D-W2 (per-machine daemon) await the decision record.
+- Next: a first run on a real Windows host (the W1 gate in the note, §3).
+
+## 2026-11-12 — M1: Android app (Flutter, A1 provisional)
+- Branch `feat/client-android`, on top of `feat/client-windows`; local commits, not pushed.
+  - The client crate is now a library (`zecurity_core`) plus a thin CLI binary.
+  - `client/ffi` builds `libzecurity_ffi.so` (C ABI for Dart, JNI for the VPN service).
+  - `client/mobile` is the Flutter app.
+- Design: the unchanged daemon runs in the VpnService `:vpn` process; the UI uses the same IPC as the CLI; the VPN interface has one `/32` per resource IP; any resource change restarts the tunnel; the app is excluded from its own VPN. Docs: `docs/client-multi-platform.md` §12.
+- Gates:
+  - Linux 364/364; Windows build unchanged.
+  - Android native library and release APK build; `flutter analyze` clean.
+  - Android 16 emulator: app start, daemon in `:vpn`, settings save, and status reach the UI. This found and fixed an R8 stripping of the JNI callback.
+- Not run: sign-in, connect, resource access (no controller or connector was running).
+- Builds on the dev disk: the ext4 build image grew to 60 GB; it holds the SDK, NDK, Flutter, emulator and Gradle.
+
+## 2026-11-12 — M1: iOS app source (I1 provisional; not built)
+- Branch `feat/client-ios` (on `feat/client-android`), local commits, not pushed.
+- Shared mobile layer (`crate::mobile`, `tun_mobile.rs`), utun framing (`utun.rs`, Linux-tested), iOS entry `zc_start_daemon` in `client/ffi`, Flutter iOS Runner + `ZecurityTunnel` packet tunnel extension, `build-ios-native.sh` (XCFramework), Xcode setup in `client/mobile/ios/README.md`. Docs §13.
+- Gates: Linux 369/369; Windows build; Android library + APK + emulator start unchanged; `flutter analyze` clean. iOS Rust type-check not possible on Linux (`ring` needs SDK headers); Swift/Xcode not built; nothing run on iOS.
+- Disk: all build caches and the Rust toolchain for cross builds moved to the dev-disk build image; `client/target` cache and the added rustup targets removed from /home (22 GB free).
+
+## 2026-11-13 — M1: Android app live on a phone
+- OPPO CPH2269 (Android 12) on the lab Wi-Fi. Local controller; connector on .75; shield and test page on .53 and .46. All built from the current code and installed with the normal scripts, pointed at a local mirror.
+- PASS:
+  - sign-in;
+  - both shield-protected resources from the phone;
+  - revoke while connected blocks the resource in ~3 s, with the other resource unaffected;
+  - re-grant restores it in under 4 s;
+  - disconnect, connect and restore;
+  - sign-out revokes the device.
+- Fixes, all on `feat/client-ios`:
+  - TUN pump leak;
+  - empty posture reports;
+  - sign-in survives ColorOS freezing the app;
+  - service restart after sign-out;
+  - plain-language errors;
+  - cold start 8.1 s → ~0.8 s (release build).
+- Docs: §12 live-run table.
+
+## 2026-11-13 — M1: per-platform device profiles + Android posture (ADR-031)
+- User asked for posture cards like a reference mock-up ("Android" switch; HD Encryption / Screen Lock / Biometric "not required"). Decided:
+  - the switch allows or denies the platform;
+  - those three Android checks;
+  - Linux + Android cards first.
+- Branch `feat/android-posture` (on `feat/client-ios`), local commits:
+  - ADR-031;
+  - controller: `057_device_profile_platforms.sql`, per-platform evaluation, `setProfilePlatforms`;
+  - client: Kotlin collector over JNI;
+  - admin: platform cards.
+- Gates:
+  - controller full suite against a throwaway Postgres + Valkey: 1812 pass, 0 fail;
+  - client Linux 374/374, Windows build;
+  - Android APK;
+  - admin 298/298, tsc, eslint, build.
+- gqlgen needed Go 1.25 (installed in the build container); Go 1.27 breaks its loader.
+- Live, on the phone: all three checks PASS. Android off cuts the profiled resource in 131 ms with the control resource unaffected; back on restores it in 1.4 s.
+  - Fixed: missing `USE_BIOMETRIC` permission.
+  - `057_` applied in place on the lab DB (user's choice); the PR needs `[schema: reset DB]`.
+- Security review: self-declared platform. Accepted in ADR-031; the interim mitigation is the admin-approval requirement, and attestation is deferred.
+- Requirement switching, live:
+  - biometric required on → access stays;
+  - "Approved by an admin" on → blocked in 143 ms; off → back in 1.2 s;
+  - the control resource is unaffected.
+- The user decided the 5-minute on-phone posture interval is enough (no faster sampling). Pushed `feat/android-posture`.

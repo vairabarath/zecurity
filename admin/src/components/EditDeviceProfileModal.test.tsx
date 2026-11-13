@@ -32,6 +32,7 @@ const PROFILE = {
   id: "profile-1",
   name: "Managed Linux",
   manualTrust: true,
+  allowedPlatforms: ["linux"],
   requirements: [{ checkId: "linux.firewall.active" }],
 };
 
@@ -60,15 +61,16 @@ describe("EditDeviceProfileModal", () => {
   it("pre-checks only the posture checks already in the profile's requirements", async () => {
     renderModal();
 
-    const firewallToggle = await screen.findByRole("switch", {
-      name: "Firewall active",
+    // ADR-031: the Linux card marks each check required or not required.
+    const firewall = await screen.findByRole("button", {
+      name: "Firewall active required",
     });
-    const luksToggle = screen.getByRole("switch", {
-      name: "Disk encryption (LUKS)",
+    const luks = screen.getByRole("button", {
+      name: "Disk encryption (LUKS) not required",
     });
 
-    expect(firewallToggle).toHaveAttribute("aria-checked", "true");
-    expect(luksToggle).toHaveAttribute("aria-checked", "false");
+    expect(firewall).toHaveAttribute("aria-pressed", "true");
+    expect(luks).toHaveAttribute("aria-pressed", "false");
   });
 
   it("pre-checks Approved by an admin when the profile requires it", async () => {
@@ -96,8 +98,8 @@ describe("EditDeviceProfileModal", () => {
       await screen.findByRole("switch", { name: "Approved by an admin" }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
-      screen.getByRole("switch", { name: "Firewall active" }),
-    ).toHaveAttribute("aria-checked", "false");
+      screen.getByRole("button", { name: "Firewall active not required" }),
+    ).toHaveAttribute("aria-pressed", "false");
   });
 
   it("blocks removing the last requirement when the profile is in use by a policy", async () => {
@@ -124,11 +126,11 @@ describe("EditDeviceProfileModal", () => {
       await screen.findByText(/This profile is in use by 1 policy/),
     ).toBeInTheDocument();
 
-    const firewallToggle = await screen.findByRole("switch", {
-      name: "Firewall active",
+    const firewall = await screen.findByRole("button", {
+      name: "Firewall active required",
     });
-    expect(firewallToggle).toHaveAttribute("aria-checked", "true");
-    expect(firewallToggle).toBeDisabled();
+    expect(firewall).toHaveAttribute("aria-pressed", "true");
+    expect(firewall).toBeDisabled();
   });
 
   it("renders nothing when closed", () => {

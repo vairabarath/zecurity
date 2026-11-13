@@ -1,0 +1,679 @@
+# Client multi-platform conversion note
+
+> Status: planning note, 2026-11-12. Not a decision record. The items under
+> "Decisions needed" must go into a decision record before any phase starts.
+> Update 2026-11-12: a first Windows client (W1 core, **provisional**) is built
+> on branch `feat/client-windows`; see section 11. It assumes D-W1 and D-W2 as
+> recommended, pending the decision record.
+
+Goal: take `zecurity-client` (Rust, Linux only today) to **Windows first, then
+Android, then iOS**, without forking the protocol or the controller contract.
+
+## 1. Where the client stands today
+
+What the Linux client is (from `client/src`):
+
+| Layer | Modules | Portable? |
+|---|---|---|
+| Data plane: userspace TCP/IP, flow proxying, DNS answerer | `net_stack.rs` (smoltcp), `dns.rs`, `name_map.rs` | Yes, except the `tun::AsyncDevice` coupling in `net_stack::TunDevice` |
+| Outer transport: QUIC + mTLS to connectors and relays | `tunnel_pool.rs`, `relay_pool.rs`, `transport.rs`, `stream_watch.rs` | Yes (quinn, rustls with `ring`) |
+| Trust, revocation, cert renewal | `trust.rs`, `crl.rs`, `build.rs` (embedded root), renewal in `daemon.rs` | Yes |
+| Control plane: gRPC, ACL/transport snapshots, change watch | `grpc.rs`, `change_watch.rs`, most of `daemon.rs` | Yes |
+| Login: OAuth/PKCE, loopback callback, enrolment CSR | `login.rs`, `auth.rs` | Desktop yes; mobile no (loopback HTTP server, `open::that`) |
+| Durable state: AES-GCM envelope, per-workspace key file | `state_store.rs` | Yes, except `from_mode(0o600)` and the key-file location/protection |
+| Kernel wiring: TUN, routes, split tunnelling | `tun.rs` (tun crate, rtnetlink, `nft`, `ip rule`, `ip route`, table 105, fwmark 0x5a) | **Linux only** (ADR-003, ADR-009) |
+| DNS-name resources wiring | `dns_link.rs` (`resolvectl`, polkit rule) | **Linux only** |
+| Daemon hosting and IPC | `ipc.rs` (Unix socket `/run/zecurity-client/daemon.sock`, `SO_PEERCRED`, `systemctl start`), `sd_notify`/watchdog in `daemon.rs`, `systemd/` | **Linux only** |
+| Posture collectors | `posture.rs` (`linux.*` check IDs, `/etc/os-release`, `/etc/crypttab`, EFI vars, `nft`/`iptables`/`ufw`/`systemctl`) | **Linux only** by design |
+| Hardware key | `tpm.rs` (tss-esapi, `/dev/tpmrm0`) | Linux only, already `cfg`-gated |
+| Config | `config.rs` (`/etc/zecurity/client.conf` + XDG user config) | Paths Linux-shaped |
+| Packaging | `scripts/client-install.sh`, `Cross.toml`, `.github/workflows/client-release.yml` (musl x86_64/aarch64) | Linux only |
+
+Roughly two thirds of the crate is platform-neutral. The platform-bound part
+is concentrated in six seams: packet I/O, routing/DNS wiring, IPC, service
+hosting, posture, and key storage. That is the whole job: put a trait in front
+of each seam, keep Linux byte-for-byte identical behind it, then add Windows,
+Android and iOS implementations.
+
+Controller-side facts that matter:
+
+- Posture check IDs are a fixed set in `controller/internal/posture/validate.go`
+  (`linux.os.version`, `linux.disk_encryption.luks`, `linux.firewall.active`,
+  `linux.secure_boot.enabled`). Unknown IDs are dropped silently. A profile
+  requirement whose check the device did not report evaluates as
+  `unsupported`, which fails unless `allow_unsupported` is set.
+- `EnrollDevice` carries `os` (the client sends the literal `"linux"`) and
+  posture reports carry `os_name`/`os_version`.
+- Nothing else on the controller, connector, relay or proto is OS-specific.
+  Proto changes stay additive.
+
+## 2. Phase C0: split the crate before touching any new OS
+
+Do this once, on Linux, with no behaviour change. It is the prerequisite for
+every platform and should ship as its own PR with the existing test suite and
+a live run as the gate.
+
+1. **Workspace layout**
+   - `client/core/` → crate `zecurity-core` (lib): everything portable from
+     the table above plus the platform traits.
+   - `client/cli/` → crate `zecurity-client` (bin): Linux and Windows daemon +
+     CLI, platform implementations under `src/platform/{linux,windows}/`.
+   - `client/mobile/` (Phase M0) → crate `zecurity-mobile` (cdylib/staticlib)
+     with UniFFI bindings for Android/iOS.
+2. **Traits in `zecurity-core`** (names are suggestions):
+   - `PacketIo`: `async fn read(&mut self, buf) -> usize` / `async fn write(&mut self, pkt)`.
+     `net_stack::TunDevice` takes `Box<dyn PacketIo>` instead of
+     `tun::AsyncDevice`. Linux impl wraps the existing device.
+   - `NetConfig`: `bring_up(addr)`, `apply_desired(flows: &BTreeSet<AllowedFlow>)`,
+     `add_routes`/`del_routes`, `configure_dns(names, server)`, `tear_down()`.
+     The existing `ResourceKernel` trait and `dns_link::DnsLinkState` fold into
+     this. Linux impl is the current `tun.rs` + `dns_link.rs` code unchanged.
+   - `KeyBackend`: `generate() -> (SigningKey, StoredKeyMaterial)` and
+     `load(material) -> SigningKey`. The `rcgen::RemoteKeyPair` and
+     `rustls::sign::SigningKey` seam already used by `tpm.rs` is the contract.
+     Software keys and the Linux TPM are the two existing impls.
+   - `PostureCollector`: `async fn collect() -> PostureReport`. The
+     `CommandRunner` and `root: &Path` seams already exist; the Linux
+     collectors move behind it as-is.
+   - `StateProtection`: how the per-workspace state key is protected at rest
+     (Linux: 0600 file, unchanged). Windows/mobile plug in DPAPI/Keystore/Keychain.
+   - `Ipc` (desktop only): `listen()`, `connect()`, `peer_is_same_user()`, and
+     `ServiceHost`: `notify_ready()`, `watchdog()`, `start_service()`.
+3. **Login split**: `login::run` becomes `begin(conf) -> (auth_url, pending)`
+   and `complete(pending, code, state) -> LoginResult`. The loopback `axum`
+   callback becomes one caller of `complete`; mobile deep links become another.
+   The enrolment CSR path is untouched.
+4. **Constants**: `"linux"` in `login.rs` and the `os` field become a
+   `platform::os_id()` (`linux`, `windows`, `android`, `ios`). Check-ID
+   prefixes follow the same string.
+5. **CI**: `cargo build -p zecurity-core --target x86_64-pc-windows-msvc` and
+   `--target aarch64-linux-android` (lib only, no bin) are added as build-only
+   jobs now, so the core cannot regrow Linux dependencies.
+
+Gate: Linux `cargo test`, the existing live journeys, identical `nft`/`ip`
+command sequences in the `tun.rs` unit tests.
+
+## 3. Windows (phases W1 to W3)
+
+### W1: service, Wintun, IPC, routes
+
+- **Packet I/O**: Wintun (`wintun.dll`, redistributable, signed by WireGuard
+  LLC). Either the `tun` crate's Windows backend (check the pinned version
+  supports it) or the `wintun` crate directly. Adapter name `zecurity0`,
+  address `100.64.0.1/32` set through IP Helper
+  (`CreateUnicastIpAddressEntry`) via the `windows` crate.
+- **Daemon hosting**: a Windows Service (`windows-service` crate) running as
+  `LocalSystem`. Creating a Wintun adapter and routes needs administrator
+  rights, and there is no `CAP_NET_ADMIN` equivalent to delegate them to the
+  user. `sd_notify`/watchdog map to SCM `Running` status and a service
+  heartbeat; `Restart=on-failure` maps to the service recovery actions.
+- **IPC**: named pipe `\\.\pipe\zecurity-client` via
+  `tokio::net::windows::named_pipe`. Same newline-delimited JSON protocol
+  (ADR-002), so the CLI commands do not change. The same-user check becomes:
+  get the client PID (`GetNamedPipeClientProcessId`), open its token, and
+  compare its user SID with the interactive session that enrolled, or restrict
+  the pipe's security descriptor to the enrolling user's SID plus SYSTEM.
+  `ensure_daemon_and_send` calls `StartService` instead of `systemctl`.
+- **Routes**: one `/32` route per resource IP on the Wintun adapter via
+  `CreateIpForwardEntry2`, with a low metric. This is ADR-003 behaviour, not
+  ADR-009: Windows has no cheap equivalent of the nftables fwmark + table 105
+  port filter. Port-level split tunnelling on Windows needs a WFP (Windows
+  Filtering Platform) callout driver, which is a signed kernel driver. See
+  Decisions needed, D-W1.
+- **Config and state**: `C:\ProgramData\Zecurity\client.conf` (system) and the
+  state directory `C:\ProgramData\Zecurity\state\` owned by SYSTEM, since the
+  service, not the user, holds the device identity. `dirs::data_local_dir`
+  stays for the CLI-only user config. Replace `from_mode(0o600)` with an ACL
+  (SYSTEM + Administrators) and wrap the state key with DPAPI machine scope
+  (`CryptProtectData` with `CRYPTPROTECT_LOCAL_MACHINE`).
+- **Login**: unchanged. The loopback callback and `open::that` work on
+  Windows. The CLI runs the browser flow in the user session and hands
+  `PostLoginState` to the service over the pipe, exactly as on Linux.
+- **Trust**: the embedded platform root works unchanged. `build.rs` runs on
+  the Windows runner as-is.
+
+Gate: `zecurity-client login`, `up`, reach an IP resource, `down`, reboot
+restore (FU-10), cert renewal, revocation reaction (D-8). Run on Windows 10
+22H2 and Windows 11.
+
+### W2: DNS-name resources and posture
+
+- **DNS**: the Linux equivalent of `resolvectl domain zecurity0 ~name` is an
+  NRPT rule (Name Resolution Policy Table): for each resource name, a rule
+  sending that exact name to `198.19.255.53`, plus a `/32` route to that
+  address on the adapter. Write rules under
+  `HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`
+  (or `Add-DnsClientNrptRule`), and remove them on `down` and on service
+  start (stale-rule cleanup, same idea as `cleanup_stale_interface`). The
+  smoltcp DNS answerer (`dns.rs`) is reused unchanged.
+- **Posture** (`windows.*` IDs, added to `recognizedChecks` in the controller):
+  - `windows.os.version`: `RtlGetVersion` or the `CurrentVersion` registry key.
+  - `windows.disk_encryption.bitlocker`: WMI `Win32_EncryptableVolume`
+    (`ProtectionStatus` of the system drive); `manage-bde -status` as the
+    command fallback through the existing `CommandRunner` seam.
+  - `windows.firewall.active`: `INetFwPolicy2.FirewallEnabled` for the
+    current profile via COM, or `netsh advfirewall show currentprofile`.
+  - `windows.secure_boot.enabled`: registry
+    `HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\State\UEFISecureBootEnabled`.
+- **Admin UI**: the "Trusted Linux profile" page (Sprint 15) becomes
+  per-OS. A profile can hold requirements for several OS prefixes; a device
+  only reports its own prefix, so the other prefixes need `allow_unsupported`
+  or the evaluator needs an "only requirements for the reporting OS" rule.
+  See D-W3.
+
+### W3: hardware key and packaging
+
+- **Key backend**: CNG Platform Crypto Provider
+  (`NCryptOpenStorageProvider(MS_PLATFORM_CRYPTO_PROVIDER)`), ECDSA P-256,
+  non-exportable, `NCryptSignHash` behind the `KeyBackend` seam. The
+  `ZECURITY_TPM_KEYS=1` fail-closed rule applies unchanged. Key material
+  stored is the CNG key name, not a blob.
+- **Packaging**: MSI via WiX (installs binary + `wintun.dll` next to it,
+  registers the service, writes `client.conf` from MSI properties
+  `CONTROLLER_ADDR`/`CONTROLLER_HTTP_ADDR`). Authenticode signing is
+  mandatory: unsigned services and `wintun.dll` loading from an unsigned
+  location trip SmartScreen and some EDRs. CI: `windows-latest` runner,
+  target `x86_64-pc-windows-msvc` (add `aarch64-pc-windows-msvc` later),
+  `protoc` via `arduino/setup-protoc`, asset name `client-windows-amd64.msi`
+  in the same release workflow and `checksums.txt`.
+- **Install docs**: a Windows section next to `client-install.sh` with the
+  `msiexec` one-liner and the `zecurity-client setup --workspace` step.
+
+## 4. Mobile prerequisites (phase M0)
+
+Mobile cannot reuse the daemon/CLI shape at all. There is no daemon, no CLI,
+no external commands, and the OS owns the TUN device. What survives is
+`zecurity-core` plus the traits from C0. M0 is done once for both platforms:
+
+- `zecurity-mobile` crate: `cdylib` (Android) and `staticlib` (iOS), exposing
+  through **UniFFI**:
+  - `Client::new(config, callbacks)`; `begin_login() -> url`;
+    `complete_login(code, state)`; `status()`; `resources()`; `sync()`;
+    `logout()`.
+  - `start_tunnel(packet_io: Box<dyn PacketIo>) -> TunnelHandle` and
+    `stop_tunnel()`. The host supplies packet I/O; the core supplies the
+    desired route/DNS set through a callback (`on_network_config(routes,
+    dns_names, dns_server)`), since the host, not the core, programs routes
+    on mobile.
+  - Callbacks for `KeyBackend` (sign-with-platform-key), `StateProtection`
+    (seal/unseal the state key) and posture facts the host must gather.
+- **Login completion** uses a deep link (`https://<controller>/client/callback`
+  app link or a custom scheme) handled by the host app, which calls
+  `complete_login`. The controller's allowed `redirect_uri` set gains that
+  value; nothing else changes server-side.
+- **Scheduling**: the refresh, ACL sync, posture and renewal schedulers from
+  `daemon.rs` run inside the tunnel process while the tunnel is up. Mobile
+  OSes stop background work otherwise, so "daemon always up" is not a
+  guarantee on mobile; `tunnel_wanted` maps to the OS's always-on VPN setting.
+- **Memory budget**: `net_stack.rs` sizes buffers for a desktop (64 KiB TCP
+  buffers per socket, 1 MiB per-flow write buffer, SYN defer 1024). These
+  need to be constructor parameters so the iOS extension (hard 50 MB limit)
+  and Android can run with smaller values.
+- **Connector/relay sockets**: QUIC endpoints must never be routed into the
+  tunnel. With `/32` resource routes only this cannot loop, but Android's
+  `VpnService.protect(fd)` is still applied to every UDP socket quinn opens
+  (a socket-creation hook on the endpoint) as defence in depth.
+
+## 5. Android (phases A1 and A2)
+
+### A1: VpnService + tunnel
+
+- Kotlin app with a foreground `VpnService`. `Builder.establish()` returns the
+  TUN fd; `ParcelFileDescriptor.detachFd()` is passed to Rust and wrapped in
+  `tokio::io::unix::AsyncFd` as the `PacketIo` impl.
+- Routes: `Builder.addAddress("100.64.0.1", 32)` and one `addRoute(ip, 32)`
+  per resource IP. A route set change requires re-establishing the interface,
+  so the hot-apply path (Phase 5-C resource delta) becomes "re-establish with
+  the new set, keep flows alive where the kernel allows". Session hand-over
+  is the main engineering risk here.
+- Port-level split is not available; IP-level, as on Windows (D-W1 covers
+  both).
+- DNS-name resources: `VpnService` has no per-domain DNS routing. Options are
+  in D-A1. Recommended default for A1: IP resources only; names in A2.
+- Login: Chrome Custom Tabs + app link; the activity calls `complete_login`.
+- State: app-private storage; the state key is wrapped by an Android Keystore
+  AES key (`StateProtection`). Device identity is per-app-install, which is
+  the mobile norm.
+- Build: `cargo-ndk`, targets `aarch64-linux-android` and
+  `x86_64-linux-android` (emulator), NDK r26+. `ring`, `quinn`, `tonic`,
+  `smoltcp` build for Android; `tun`, `rtnetlink`, `tss-esapi`, `axum` must be
+  absent from `zecurity-core`'s default features (C0 guarantees this).
+- Distribution: Play Store (VPN apps need the VpnService declaration and a
+  policy justification) or MDM/managed Play for enterprise.
+
+### A2: hardware key, posture, DNS names
+
+- Key backend: Android Keystore EC P-256, `setIsStrongBoxBacked(true)` where
+  available, signing via callback. Same fail-closed rule as TPM mode.
+- Posture (`android.*`): `android.os.version` (`Build.VERSION.RELEASE`,
+  security patch level), `android.screen_lock.enabled`
+  (`KeyguardManager.isDeviceSecure`), `android.disk_encryption` (file-based
+  encryption is mandatory since Android 10; report pass with the API level
+  as detail), `android.play_integrity` (optional, needs a server-side
+  verifier and is a separate decision).
+- DNS names per D-A1.
+
+## 6. iOS (phases I1 and I2)
+
+### I1: Packet Tunnel extension
+
+- Entitlement first: `com.apple.developer.networking.networkextension` with
+  `packet-tunnel-provider` must be requested from Apple for the app ID.
+  Allow weeks for this; it blocks everything else.
+- Structure: host app (Swift) + `NEPacketTunnelProvider` app extension.
+  Rust ships as an XCFramework built from `aarch64-apple-ios` and
+  `aarch64-apple-ios-sim` with UniFFI Swift bindings.
+- Packet I/O: `packetFlow.readPackets` / `writePackets` are callback-based,
+  not an fd. The Swift side pumps packets into/out of channels; the Rust
+  `PacketIo` impl reads from those channels.
+- Routes and DNS: `NEPacketTunnelNetworkSettings` with
+  `IPv4Settings.includedRoutes` = one `/32` per resource IP, and
+  `NEDNSSettings(servers: ["198.19.255.53"])` with `matchDomains` = the
+  resource names. `matchDomains` is the exact equivalent of
+  `resolvectl domain ~name`, so DNS-name resources map cleanly on iOS, unlike
+  Android. Changing the set means calling `setTunnelNetworkSettings` again,
+  which drops the data path briefly; the same hand-over concern as Android.
+- Login: `ASWebAuthenticationSession` in the host app with a custom scheme
+  or universal link; `complete_login` runs in the host app, and the result is
+  handed to the extension through an App Group container plus a shared
+  Keychain access group (`StateProtection` = Keychain item wrapping the
+  state key).
+- Memory: the extension's 50 MB limit is the binding constraint. Set the
+  smoltcp buffer parameters from M0 small (for example 16 KiB TCP buffers,
+  64 KiB flow buffer) and cap concurrent flows.
+- Testing: packet tunnel providers do not run reliably in the simulator;
+  plan for physical devices and TestFlight from the first build.
+
+### I2: Secure Enclave and posture
+
+- Key backend: Secure Enclave via `SecKeyCreateRandomKey` with
+  `kSecAttrTokenIDSecureEnclave` (P-256 only, which matches the TPM
+  decision). Signing via callback from the extension process; the key must
+  be created with an access group both targets share.
+- Posture (`ios.*`): `ios.os.version`, `ios.passcode.enabled`
+  (`LAContext.canEvaluatePolicy(.deviceOwnerAuthentication)`),
+  `ios.disk_encryption` (always on; report pass), `ios.jailbreak` (heuristic,
+  optional).
+- Distribution: App Store review needs the VPN usage justification, or
+  Apple Business Manager / MDM for enterprise.
+
+## 7. Controller and admin changes (shared by all platforms)
+
+- `recognizedChecks` gains the `windows.*`, `android.*`, `ios.*` IDs; the
+  posture proto is unchanged (IDs are strings).
+- Posture profiles: per-OS requirement sets, and an evaluation rule that
+  requirements for another OS prefix are not applied to a device. Admin UI
+  follows (D-W3).
+- Device list shows `os` as a platform (the client already sends it; only
+  the literal changes).
+- OAuth redirect URIs: add the mobile app-link/scheme values to the allowed
+  set for the client flow.
+- Release workflow: Windows MSI asset; mobile builds publish to the stores,
+  not GitHub releases.
+- No connector, relay, shield or proto change is needed.
+
+## 8. Order and rough sizing
+
+| Phase | Content | Depends on | Size |
+|---|---|---|---|
+| C0 | core/platform split, traits, login split, CI build-only targets | – | 1 to 2 weeks |
+| W1 | Windows service, Wintun, named pipe, /32 routes, DPAPI state | C0 | 2 to 3 weeks |
+| W2 | NRPT DNS, `windows.*` posture, per-OS profiles (controller + admin) | W1 | 2 weeks |
+| W3 | CNG hardware key, MSI, signing, CI | W1 | 1 to 2 weeks |
+| M0 | `zecurity-mobile` + UniFFI, deep-link login, buffer parameters, socket protect hook | C0 | 2 weeks |
+| A1 | Android VpnService app, IP resources, Keystore-wrapped state | M0 | 3 weeks |
+| A2 | Keystore device key, `android.*` posture, DNS names per D-A1 | A1 | 2 weeks |
+| I1 | iOS extension, routes + matchDomains, ASWebAuthenticationSession, App Group | M0, entitlement | 3 to 4 weeks |
+| I2 | Secure Enclave key, `ios.*` posture | I1 | 1 to 2 weeks |
+
+Request the iOS entitlement during C0; it is on the critical path for I1.
+W2's controller/admin work (per-OS profiles) is shared by every later phase
+and should be done once, in W2.
+
+## 9. Decisions needed (for the decision record, before C0 ends)
+
+- **D-W1 Split tunnelling granularity off Linux.** Windows, Android and iOS
+  get IP-level capture (one `/32` per resource IP, ADR-003 shape), not
+  port-level (ADR-009). Non-ACL ports on a resource IP will be reset by
+  smoltcp instead of reaching the LAN. Alternative on Windows is a signed WFP
+  callout driver. Recommendation: accept IP-level on all three; revisit WFP
+  only if a customer needs it.
+- **D-W2 Identity scope on Windows.** The service holds the device identity
+  as a per-machine identity (SYSTEM-owned state), while Linux is per enrolling
+  user. Recommendation: per-machine on Windows and mobile; document that a
+  Windows machine is one device regardless of who logs in.
+- **D-W3 Per-OS posture profiles.** How a profile expresses requirements for
+  several OSes and how the evaluator skips foreign prefixes. Recommendation:
+  requirements carry an OS prefix implicitly (from the check ID) and only
+  requirements matching the reporting device's `os_name` prefix are
+  evaluated; `allow_unsupported` keeps its current meaning within an OS.
+- **D-M1 Mobile login completion.** Deep link / app link replaces the
+  loopback callback; the controller's redirect URI allow-list gains the
+  mobile values. Recommendation: `https` universal/app links, custom scheme
+  only as a fallback.
+- **D-A1 DNS-name resources on Android.** Options: (a) none in A1; (b) make
+  `198.19.255.53` the only DNS server of the VPN and have `dns.rs` forward
+  every non-resource query to the device's real resolvers (new forwarder
+  code, more moving parts); (c) per-app VPN with
+  `addAllowedApplication`. Recommendation: (a) for A1, (b) for A2.
+- **D-M2 Hardware keys on mobile.** Secure Enclave and Keystore are P-256
+  only, consistent with the TPM choice; software keys stay P-384.
+  Recommendation: accept; the fail-closed "requested means required" rule
+  applies per platform setting.
+- **D-M3 Memory and flow caps on mobile.** Buffer sizes and flow limits
+  become configuration; iOS gets the smallest defaults. Needs a measured
+  number from I1 before it is fixed.
+
+## 10. Things that stay the same everywhere
+
+- The protocol and the controller contract: enrolment, ACL/transport
+  snapshots, change watch, posture report shape, renewal, revocation.
+- The trust model: embedded platform root, intermediate pinning, CRL logic.
+- The data-plane design: smoltcp in userspace, one QUIC connection per
+  connector, relay fallback, 198.19.255.53 as the DNS answerer address.
+- The state envelope format and the "no plaintext key on disk" rule; only
+  the mechanism that protects the state key changes per platform.
+- The security invariants in `CLAUDE.md`: fail closed, never log or return
+  secrets, device identity never downgrades from hardware to software.
+
+## 11. Windows client: what is built (W1, provisional)
+
+Branch `feat/client-windows`. The existing CLI and daemon run on Windows
+behind `cfg` gates; the crate split of phase C0 was **not** done (in-crate
+platform modules instead, lower risk for `daemon.rs`). Linux behaviour and
+command sequences are unchanged.
+
+### What it does
+
+| Piece | Windows implementation | File |
+|---|---|---|
+| TUN | Wintun adapter `zecurity0` through the `tun` crate's Windows backend, `100.64.0.1/32` | `client/src/tun_windows.rs` |
+| Capture | one active-store `/32` route per allowed resource IP (`netsh`); stale `/32` routes on a reopened adapter removed at start | `tun_windows.rs` |
+| Daemon hosting | Windows Service `zecurity-client`, LocalSystem; Stop and deliberate exits report Stopped first; console mode when not started by the SCM | `client/src/win_service.rs` |
+| IPC | named pipe `\\.\pipe\zecurity-client`, same newline-delimited JSON; DACL SYSTEM + Administrators + enrolled user; owned by SYSTEM | `client/src/ipc.rs`, `win_security.rs` |
+| Config, state, logs | `%ProgramData%\Zecurity\{client.conf,state,logs}`; logs in `logs\daemon.log` | `config.rs`, `state_store.rs` |
+| DNS-name resources | reported as "not supported on Windows yet" (IP resources unaffected) | `dns_link.rs` |
+| Posture | OS name and version only; no `linux.*` checks | `posture.rs` |
+| Installer | `client/scripts/client-install.ps1` | |
+
+### Security model (the Linux guarantees, made explicit)
+
+On Linux the daemon runs as the enrolled user, so the user's 0700 home and a
+0700 runtime directory give same-user isolation for free. On Windows the
+daemon is SYSTEM, `C:\ProgramData` lets any user create folders, and pipe
+names are first-come. So:
+
+- **Who may talk to the daemon:** the pipe admits SYSTEM, Administrators and
+  the enrolled user's SID. The SID comes from the service command line
+  (`daemon --ipc-user-sid`), which only administrators can change; it is
+  validated (`S-1-` and digits only), and without it the pipe is admin-only.
+- **No impostor daemon:** the service creates the pipe owned by SYSTEM, and
+  the CLI refuses a pipe owned by anyone but SYSTEM/Administrators before it
+  sends tokens or keys. A second process can't claim the pipe name
+  (`FILE_FLAG_FIRST_PIPE_INSTANCE`).
+- **No hijacked data directory:** before reading anything the daemon refuses
+  a data directory, or any entry in it, that is a junction/link or not owned
+  by SYSTEM/Administrators, then sets protected DACLs with `SetFileSecurityW`
+  (no propagation to existing children) and resets every file to exactly
+  what its directory grants, so a trusted owner never launders a file whose
+  own access list lets someone else write. `setup` and the installer write
+  `client.conf` fresh and set its owner, never just re-own an old file.
+- **The enrolled user can't restructure it:** the user may list and read
+  (and delete files in `state`, which logout and post-revocation login do),
+  but never add, rename or replace anything, so they can't swap a folder for
+  a junction and steer the SYSTEM daemon. Consequence: `zecurity-client
+  setup` needs an elevated prompt on Windows; the installer takes
+  `-Workspace` so most users never run it.
+- The state at rest is protected by these ACLs, as the Linux state is by
+  file modes. DPAPI wrapping of the state key is not done yet.
+
+### Build
+
+Cross-compile from Linux with MinGW (`gcc-mingw-w64-x86-64`, `protobuf-compiler`,
+`rustup target add x86_64-pc-windows-gnu`), embedding the controller's root:
+
+```bash
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+  client/scripts/dev-build.sh --release --target x86_64-pc-windows-gnu
+# → client/target/x86_64-pc-windows-gnu/release/zecurity-client.exe
+```
+
+On Windows itself, `cargo build --release` with the MSVC toolchain and
+`protoc` on `PATH` (plus `ZECURITY_PLATFORM_ROOT_PEM_FILE`) should work the
+same way; it has not been tried.
+
+`wintun.dll` is not built: take `wintun\bin\amd64\wintun.dll` from the
+official release at https://www.wintun.net and install it next to the exe.
+
+### Install and use
+
+From an elevated PowerShell:
+
+```powershell
+.\client-install.ps1 -Binary .\zecurity-client.exe -Wintun .\wintun.dll `
+  -Workspace acme -ControllerAddr 192.168.1.10:9090 -ControllerHttpAddr 192.168.1.10:8080
+```
+
+Then, as the enrolled user in a normal terminal: `zecurity-client login`,
+`zecurity-client up`, `zecurity-client status`. Uninstall with
+`.\client-install.ps1 -Uninstall` (device state in `%ProgramData%\Zecurity`
+is kept).
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux build + full test suite | 364/364 pass (354 before + 10 new) |
+| Windows cross build (`x86_64-pc-windows-gnu`), debug and release | links, no new warnings |
+| Windows test suite under Wine 8 (Debian bookworm) | 297 pass, 23 fail; the failures are Wine, see below |
+| Windows-only tests under Wine | every security descriptor parses; secured pipe round trip passes; impostor pipe refused |
+| On a real Windows host | **not run**: no adapter, route, service, installer or end-to-end test yet |
+
+The 23 Wine failures: 21 QUIC tests fail to bind a UDP socket (Wine lacks
+socket options `quinn-udp` sets, error 10045); one certificate test compares
+PEM text whose test fixtures get CRLF line endings on Windows; and Wine 8
+does not enforce `FILE_FLAG_FIRST_PIPE_INSTANCE`. All need a real Windows
+run to settle. The installer script has not been executed.
+
+### Not built yet (rest of W1 to W3)
+
+- First real Windows run: install, login, up, reach a resource, down, reboot
+  restore, renewal, revocation (the W1 gate in section 3).
+- DNS-name resources (NRPT rules), `windows.*` posture checks and per-OS
+  posture profiles (W2, needs controller and admin UI work).
+- CNG hardware key, DPAPI-wrapped state key, MSI, code signing, release
+  workflow assets (W3).
+- A daemon that reloads `client.conf` without a service restart.
+
+### Decisions assumed (to confirm in the decision record)
+
+- **D-W1:** IP-level capture. A non-ACL port on a resource IP is reset by
+  smoltcp instead of reaching the LAN.
+- **D-W2:** per-machine daemon (LocalSystem) with one enrolled user admitted
+  to it.
+- Posture: a profile that requires a `linux.*` check marks a Windows device
+  unsupported (controller unchanged; fails closed unless
+  `allow_unsupported`).
+
+## 12. Android client: what is built (A1, provisional)
+
+Branch `feat/client-android` (on top of `feat/client-windows`). The user
+chose a **Flutter** app, instead of the Kotlin + UniFFI plan in section 5.
+
+### Shape
+
+- **The daemon runs unchanged inside the app's `VpnService` process**
+  (`android:process=":vpn"`), started over JNI. Its deliberate exits
+  (shutdown request, revoked device) end that process only, never the UI.
+- **The Flutter UI plays the Linux CLI's role.** It calls the client core
+  through `dart:ffi` (`libzecurity_ffi.so`, crate `client/ffi`) and sends
+  the same newline-delimited JSON IPC over a socket in the app's private
+  files directory.
+- **The VPN interface comes from the service.** When the daemon brings the
+  tunnel up, it asks over JNI for an interface with one `/32` route per
+  allowed resource IP (`ZecurityNative.establish`). It gets back the file
+  descriptor and wraps it with the `tun` crate (`client/src/tun_android.rs`).
+  Routes are fixed at creation, so every resource change restarts the tunnel.
+  The app excludes itself from its own VPN, so the daemon's QUIC and gRPC
+  traffic never enters the tunnel.
+- **Login keeps the loopback callback.** The core hands the authorization URL
+  to the UI, which opens it in the browser. No controller change was made.
+- **Same limits as Windows:** capture is per IP, not per port (D-W1); DNS-name
+  resources report "not supported on Android yet"; posture reports only the
+  OS name and version.
+- **The crate is now a library** (`zecurity_core`, `src/lib.rs`) plus a thin
+  CLI binary.
+
+### Build
+
+```bash
+ROOT_PEM=/path/to/controller-root.pem client/mobile/scripts/build-native.sh
+BUILD_DIR=/somewhere/with/space client/mobile/scripts/build-apk.sh   # → client/mobile/dist/zecurity-client.apk
+```
+
+Needs Flutter stable (built with 3.50), the Android SDK with NDK
+28.2.13676358, JDK 17, `cargo-ndk`, and the Rust targets
+`aarch64-linux-android` and `x86_64-linux-android`.
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux build and tests after the library split | 364/364 |
+| Windows build | unchanged, clean |
+| Android native library (arm64-v8a, x86_64) and release APK | build; `flutter analyze` clean |
+| Emulator, Android 16 x86_64 | app starts; the daemon runs in `:vpn`; settings save; the daemon's status reaches the UI |
+| Sign-in, Connect (VPN interface), reaching a resource | **not run**: no controller or connector was running |
+
+The emulator run found one real bug, now fixed. R8 had stripped the JNI
+callback, and the VPN service crashed at start.
+
+### Live run on a phone (2026-11-13)
+
+OPPO CPH2269, Android 12, on the lab Wi-Fi. The controller ran on the dev
+host; a connector ran on 192.168.1.75, and a shield plus a test web page
+ran on each of 192.168.1.53 and 192.168.1.46. All three were built from
+the current code and installed with the normal scripts, pointed at a local
+mirror instead of the July GitHub releases.
+
+| Check | Result |
+|---|---|
+| Sign-in in the browser, device enrolled | pass |
+| Both shield-protected resources from the phone | pass: the connector logged `access allowed` and `tunnel_opened ok` per shield |
+| Direct access from a non-connector host | blocked by both shields |
+| Access revoked while connected | the resource is blocked and its route removed within ~3 s; the other resource keeps working after a brief tunnel restart |
+| Access granted back | restored in under 4 s |
+| Disconnect, Connect, tunnel restore after a restart | pass |
+| Sign-out | device revoked; the connector tore the session down in ~30 ms |
+| Cold start, release build | 0.7–1.1 s to the first frame (debug build: 8.1 s) |
+
+Fixed during the run: a TUN pump task that kept the device open after
+tunnel-down (Linux too); empty posture reports rejected every cycle; the
+sign-in dying when ColorOS froze the app; the service not restarting after
+sign-out; raw `os error 111` text on screen.
+
+### Android posture and per-platform profiles (ADR-031, 2026-11-13)
+
+Device profiles now have a card per platform. A switch allows or denies
+the platform, and its checks are marked required or not required. Android
+reports three checks from the VPN service: storage encryption, screen
+lock, and a strong biometric enrolled.
+
+| Live check on the phone | Result |
+|---|---|
+| Android checks reported to the controller | all three PASS (encryption, screen lock, biometric) |
+| Profile "Android on, Screen Lock required" on `files-seechan` | the phone keeps access |
+| Android switched off | `files-seechan` blocked in **131 ms**; `files-omarchy` (no profile) unaffected |
+| Android switched back on | access back in **1.4 s** |
+| Audit | `device_profile.platforms.set` recorded for each switch |
+
+Requirement switching, live on the same phone, with the same profile on
+`files-seechan`; `files-omarchy` (no profile) stayed reachable throughout:
+
+| Requirements change | `files-seechan` |
+|---|---|
+| Biometric required on (enrolled) | stays reachable |
+| "Approved by an admin" on (phone not approved) | blocked in **143 ms** |
+| "Approved by an admin" off | back in **1.2 s** |
+| Biometric required off | stays reachable |
+
+- **Change on the phone is slower.** A change *on the phone*, for example
+  removing the screen lock, is seen at the next posture report, which comes
+  every 5 minutes. Profile changes by an admin take effect at once.
+  - The user decided on 2026-11-13 that 5 minutes is enough: no faster
+    on-phone sampling.
+- **Found during the run:** the biometric check needs the `USE_BIOMETRIC`
+  permission (a normal permission, granted at install, no prompt).
+
+### Not built yet
+
+- Reboot persistence and certificate renewal on a device.
+- `android.*` posture checks and Keystore-backed device keys (A2).
+- DNS-name resources (D-A1).
+- Release signing and store packaging.
+- A foreground-service type review for Play policy. The app currently uses
+  `specialUse`.
+- The behaviour when the user revokes the VPN in system settings: the service
+  stops, and the daemon is not told first.
+
+
+## 13. iOS app: what is built (I1, provisional; source only)
+
+Branch `feat/client-ios`, on top of `feat/client-android`. The same Flutter
+app, plus a packet tunnel extension. **Written on Linux: nothing iOS-specific
+has been compiled, signed or run.** Building needs a Mac with Xcode; running
+needs an Apple developer team with the Network Extension entitlement and a
+real iPhone. The steps are in `client/mobile/ios/README.md`.
+
+### Shape
+
+- **The daemon runs unchanged in the packet tunnel extension**
+  (`ios/ZecurityTunnel/PacketTunnelProvider.swift`), started with
+  `zc_start_daemon`. iOS runs an extension only while its VPN is on, so the
+  app starts the tunnel with no resource routes just to run the daemon.
+  Consequence: the VPN icon shows from setup onwards, even while signed out.
+- **The Flutter UI plays the CLI's role**, as on Android: the same `zc_*`
+  calls (through `DynamicLibrary.process()`, since the core is linked
+  statically) and the same IPC socket, here in the App Group container
+  `group.io.zecurity.client`.
+- **The VPN interface:** Swift applies the network settings with one `/32`
+  per resource IP. The daemon finds the extension's utun descriptor (a
+  kernel-control socket scan, as WireGuard does) and `dup()`s it, so dropping
+  it never closes the tunnel. Tunnel-down calls a release hook that removes
+  the routes. Each interface is numbered, so a stale release after a restart
+  is ignored.
+- **utun framing** (4-byte Darwin address family header) is
+  `client/src/utun.rs`, unit-tested on Linux.
+- **The shared mobile layer:** `crate::android` became `crate::mobile` and
+  `tun_android.rs` became `tun_mobile.rs`, both built for Android and iOS.
+- **Login** opens the identity provider in `SFSafariViewController` inside
+  the app, because leaving the app would suspend it before the loopback
+  callback arrives.
+- **Same limits as Android:** per-IP capture (D-W1), DNS-name resources
+  unsupported, posture reports the OS only (version supplied by Swift).
+
+### Verified, and not
+
+| Check | Result |
+|---|---|
+| Linux tests, with the 5 utun framing tests | 369/369 |
+| Windows build; Android library, APK and emulator start | unchanged, pass |
+| `flutter analyze` (shared Dart, incl. iOS branches) | clean |
+| Rust type-check for `aarch64-apple-ios` | **not possible here**: `ring` needs the iOS SDK headers |
+| Swift, Xcode project, linking, signing | **not built** |
+| Anything on an iPhone | **not run** |
+
+### To check on the first device run
+
+- The app-to-extension Unix socket in the App Group container (fallback:
+  `NETunnelProviderSession.sendProviderMessage`).
+- Extension memory under iOS's ~50 MB limit (two tokio workers; data-plane
+  buffers are still the desktop sizes).
+- The utun descriptor lookup and the in-app login callback.
+
+### Not built yet
+
+- The extension target in `project.pbxproj` (added by hand in Xcode once,
+  per the README, then committed).
+- `ios.*` posture checks, Keychain/Secure Enclave keys, DNS names, App Store
+  packaging.

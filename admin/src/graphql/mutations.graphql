@@ -626,3 +626,11 @@ mutation TestAuditExportSink($id: ID!) {
     error
   }
 }
+
+# ADR-031: the platforms a device profile allows.
+mutation SetProfilePlatforms($profileId: ID!, $platforms: [String!]!) {
+  setProfilePlatforms(profileId: $profileId, platforms: $platforms) {
+    id
+    allowedPlatforms
+  }
+}

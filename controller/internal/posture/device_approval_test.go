@@ -64,12 +64,20 @@ func TestEvaluatorDeviceApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(ctx, ws, company.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 	if err := store.AddRequirement(ctx, ws, company.ID, Requirement{CheckID: CheckDeviceApproved}); err != nil {
 		t.Fatalf("add approval requirement: %v", err)
 	}
 	byod, err := store.CreateProfile(ctx, ws, "BYOD", true)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
+	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(ctx, ws, byod.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
 	}
 	if err := store.AddRequirement(ctx, ws, byod.ID, Requirement{CheckID: CheckFirewall}); err != nil {
 		t.Fatalf("add firewall requirement: %v", err)
