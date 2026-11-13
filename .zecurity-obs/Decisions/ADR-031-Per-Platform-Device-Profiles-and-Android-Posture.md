@@ -90,6 +90,9 @@ This epic changes `admin/` (the device profile editor). CLAUDE.md's "don't modif
 - **The device declares its own platform and checks.**
   - A modified client could enroll a Linux machine as `android` to avoid Linux checks, or report false `PASS` values.
   - **Android Key Attestation** (hardware-signed boot state, patch level, app identity) closes this. It is deferred; the user may choose it later.
+  - **Until then, for sensitive resources:** require **"Approved by an admin"** (`zecurity.device.approved`, ADR-030) in the profile. It applies to every platform, so an admin vouches for the device, including the platform it enrolled as, before it gets access. The enrolled platform is shown with the device.
+  - An unknown platform value never passes: only `linux`, `android`, `windows` and `ios` can be allowed (constraint in `057_`).
+  - The automated security review of 2026-11-13 raised this; it is accepted here for the reasons above.
 - Security patch age and "developer options off" were offered and **not chosen** for now.
 
 ## Consequences
