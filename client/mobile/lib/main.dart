@@ -98,10 +98,17 @@ class _HomePageState extends State<HomePage> {
     final dir = await Host.filesDir();
     _filesDir = dir;
     await Core.init(dir);
-    await _startService();
     await _loadConfig();
-    setState(() => _ready = true);
+    // Show the screen now. The service starts in the background (its own
+    // process); until it answers, the card reads "Starting Zecurity…".
+    if (mounted) setState(() => _ready = true);
     await _refresh();
+    if (!_daemonUp) {
+      // Show the real state the moment the service answers, rather than at
+      // the next 3 s poll.
+      await _startService();
+      if (await _waitForService(up: true)) await _refresh();
+    }
     _poll = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
   }
 
