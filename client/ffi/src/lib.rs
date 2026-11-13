@@ -268,6 +268,7 @@ mod jni_service {
     static JVM: OnceLock<JavaVM> = OnceLock::new();
     static NATIVE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
     static ESTABLISH: OnceLock<JStaticMethodID> = OnceLock::new();
+    static POSTURE: OnceLock<JStaticMethodID> = OnceLock::new();
     static DAEMON_RUNNING: AtomicBool = AtomicBool::new(false);
 
     /// Runs on `System.loadLibrary` in the service process.
@@ -308,7 +309,16 @@ mod jni_service {
                 Err(_) => return fail(&mut env),
             }
         }
+        if POSTURE.get().is_none() {
+            match env.get_static_method_id(&class, "posture", "()Ljava/lang/String;") {
+                Ok(m) => {
+                    let _ = POSTURE.set(m);
+                }
+                Err(_) => return fail(&mut env),
+            }
+        }
         mobile::set_tun_provider(Box::new(establish_via_service));
+        mobile::set_posture_provider(Box::new(|| posture_via_service().unwrap_or_default()));
 
         if DAEMON_RUNNING.swap(true, Ordering::SeqCst) {
             return 0;
@@ -342,6 +352,40 @@ mod jni_service {
             let _ = env.exception_clear();
         }
         -1
+    }
+
+    /// ADR-031: the posture checks the VPN service reads
+    /// (`ZecurityNative.posture()`, a JSON array of {id, status, detail}).
+    fn posture_via_service() -> Result<Vec<mobile::PlatformCheck>> {
+        #[derive(serde::Deserialize)]
+        struct Check {
+            id: String,
+            status: String,
+            #[serde(default)]
+            detail: String,
+        }
+        let vm = JVM.get().ok_or_else(|| anyhow!("JNI not initialised"))?;
+        let class = NATIVE_CLASS.get().ok_or_else(|| anyhow!("JNI class not cached"))?;
+        let method = *POSTURE.get().ok_or_else(|| anyhow!("JNI method not cached"))?;
+        let mut env = vm.attach_current_thread().context("attach to the JVM")?;
+        let class: &JClass = class.as_obj().into();
+        // SAFETY: `method` was looked up on this class with signature
+        // ()Ljava/lang/String; and takes no arguments.
+        let value = unsafe { env.call_static_method_unchecked(class, method, ReturnType::Object, &[]) };
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+            return Err(anyhow!("the VPN service threw while reading posture"));
+        }
+        let obj = value.context("call posture")?.l().context("posture result")?;
+        if obj.is_null() {
+            return Ok(Vec::new());
+        }
+        let text: String = env
+            .get_string(&JString::from(obj))
+            .context("posture string")?
+            .into();
+        let checks: Vec<Check> = serde_json::from_str(&text).context("posture JSON")?;
+        Ok(checks.into_iter().map(|c| (c.id, c.status, c.detail)).collect())
     }
 
     /// The daemon's TUN provider: `ZecurityNative.establish("ip,ip,...")`

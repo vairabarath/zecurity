@@ -37,11 +37,19 @@ pub type TunRelease = Box<dyn Fn() + Send + Sync>;
 /// Opens a URL in a browser.
 pub type UrlOpener = Box<dyn Fn(&str) + Send + Sync>;
 
+/// One posture check read by the platform (ADR-031 D-4): check id, status
+/// (`PASS`, `FAIL`, `UNSUPPORTED`, `ERROR`) and a short detail.
+pub type PlatformCheck = (String, String, String);
+
+/// Reads the platform's posture checks (Android: the VPN service, Kotlin).
+pub type PostureProvider = Box<dyn Fn() -> Vec<PlatformCheck> + Send + Sync>;
+
 static FILES_DIR: OnceLock<PathBuf> = OnceLock::new();
 static TUN_PROVIDER: OnceLock<TunProvider> = OnceLock::new();
 static TUN_RELEASE: OnceLock<TunRelease> = OnceLock::new();
 static URL_OPENER: OnceLock<UrlOpener> = OnceLock::new();
 static OS_VERSION: OnceLock<String> = OnceLock::new();
+static POSTURE_PROVIDER: OnceLock<PostureProvider> = OnceLock::new();
 /// Number of the latest VPN interface handed out; 0 = none yet.
 static TUN_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -72,6 +80,16 @@ pub fn set_tun_release(release: TunRelease) {
 /// Registers the function that opens the login URL (UI process).
 pub fn set_url_opener(opener: UrlOpener) {
     let _ = URL_OPENER.set(opener);
+}
+
+/// Registers the function that reads the platform's posture checks.
+pub fn set_posture_provider(provider: PostureProvider) {
+    let _ = POSTURE_PROVIDER.set(provider);
+}
+
+/// The platform's posture checks; none before a provider is registered.
+pub(crate) fn platform_posture() -> Vec<PlatformCheck> {
+    POSTURE_PROVIDER.get().map(|p| p()).unwrap_or_default()
 }
 
 /// Sets the OS version reported in posture (iOS; Android reads it itself).

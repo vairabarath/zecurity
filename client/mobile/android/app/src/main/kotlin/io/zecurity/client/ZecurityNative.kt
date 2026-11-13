@@ -16,4 +16,13 @@ object ZecurityNative {
     @JvmStatic
     fun establish(routes: String): Int =
         ZecurityVpnService.instance?.establishTunnel(routes) ?: -1
+
+    /**
+     * Called by the daemon for each posture report (ADR-031): the Android
+     * checks as a JSON array of {id, status, detail}; "[]" before the
+     * service is up.
+     */
+    @JvmStatic
+    fun posture(): String =
+        ZecurityVpnService.instance?.let { AndroidPosture.collect(it) } ?: "[]"
 }
