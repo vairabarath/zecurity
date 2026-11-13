@@ -60,6 +60,20 @@ fn error(e: impl std::fmt::Display) -> *mut c_char {
     to_c(json!({ "ok": false, "type": "Error", "error": e.to_string() }))
 }
 
+/// Appends a line to `ui.log` in the app's files directory: the UI process
+/// has no other log, and the login's progress is otherwise invisible.
+fn ui_log(line: &str) {
+    use std::io::Write;
+    let path = mobile::files_dir().join("ui.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{now} {line}");
+    }
+}
+
 /// Frees a string returned by any `zc_*` function.
 ///
 /// # Safety
@@ -95,6 +109,7 @@ pub unsafe extern "C" fn zc_init(files_dir: *const c_char) -> *mut c_char {
     install_crypto_provider();
     mobile::init(PathBuf::from(from_c(files_dir)));
     mobile::set_url_opener(Box::new(|url| {
+        ui_log("login: URL ready, waiting for the browser callback");
         if let Ok(mut s) = login_state().lock() {
             s.url = Some(url.to_string());
         }
@@ -182,15 +197,22 @@ pub extern "C" fn zc_login_start() -> *mut c_char {
             Err(e) => return error(e),
         };
         if s.running {
-            return error("a login is already in progress");
+            // The screen that started it may be gone (Android recreates the
+            // activity): the new one attaches to the running login and polls.
+            return to_c(json!({ "ok": true, "attached": true }));
         }
         *s = LoginState {
             running: true,
             ..Default::default()
         };
     }
+    ui_log("login: started");
     runtime().spawn(async {
         let result = cmd::login::run().await.map_err(|e| format!("{e:#}"));
+        match &result {
+            Ok(()) => ui_log("login: done"),
+            Err(e) => ui_log(&format!("login: failed: {e}")),
+        }
         if let Ok(mut s) = login_state().lock() {
             s.running = false;
             s.result = Some(result);
@@ -200,14 +222,15 @@ pub extern "C" fn zc_login_start() -> *mut c_char {
 }
 
 /// `{"state": "idle" | "running" | "done" | "error", "url"?, "error"?}`.
-/// The URL is handed out once, for the UI to open in the browser.
+/// The URL stays available while the login runs, so a screen that replaced
+/// the one that started it can still open it; the UI opens each URL once.
 #[no_mangle]
 pub extern "C" fn zc_login_poll() -> *mut c_char {
-    let mut s = match login_state().lock() {
+    let s = match login_state().lock() {
         Ok(s) => s,
         Err(e) => return error(e),
     };
-    let url = s.url.take();
+    let url = s.url.clone();
     let value = match (&s.result, s.running) {
         (_, true) => json!({ "ok": true, "state": "running", "url": url }),
         (Some(Ok(())), false) => json!({ "ok": true, "state": "done" }),

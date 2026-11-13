@@ -182,12 +182,19 @@ class _HomePageState extends State<HomePage> {
       });
 
   Future<void> _login() => _run('Signing in…', () async {
+        // Signing in brings the tunnel up (as `zecurity-client login` does),
+        // which needs Android's VPN permission first.
+        if (!await Host.prepareVpn()) return 'VPN permission was not granted.';
         final start = await Core.loginStart();
         if (!start.ok) return start.error ?? 'Could not start sign-in.';
+        String? opened;
         for (var i = 0; i < 400; i++) {
           final p = await Core.loginPoll();
           final url = p.str('url');
-          if (url != null) await Host.openUrl(url);
+          if (url != null && url != opened) {
+            opened = url;
+            await Host.openUrl(url);
+          }
           switch (p.str('state')) {
             case 'done':
               await Host.closeBrowser();

@@ -5005,6 +5005,15 @@ async fn collect_and_submit_posture(state: &SharedState, conf: &config::ClientCo
     };
 
     let collected = posture::collect().await;
+    // Windows and mobile collect no checks yet (only the OS name and
+    // version), and the controller rejects a report without a recognized
+    // check: skip it rather than fail every cycle. With no posture report,
+    // a device profile that requires checks evaluates the device as
+    // unsupported, as before.
+    if collected.checks.is_empty() {
+        tracing::debug!("posture: no checks on this platform; nothing to submit");
+        return;
+    }
     let submitter = GrpcPostureSubmitter {
         state,
         conf,
