@@ -105,7 +105,7 @@ var supportedCheckDescriptors = []CheckDescriptor{
 }
 
 // KnownPlatforms are the device platforms (client_devices.os) a profile can
-// allow (ADR-031 D-1). Mirrors the 057_ CHECK constraint.
+// allow (ADR-031 D-1). Mirrors the 060_ CHECK constraint.
 var KnownPlatforms = []string{"linux", "android", "windows", "ios"}
 
 // ErrUnknownPlatform rejects a platform outside KnownPlatforms.

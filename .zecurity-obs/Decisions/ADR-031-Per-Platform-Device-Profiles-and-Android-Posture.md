@@ -32,7 +32,7 @@ tags:
 
 ### D-1 The platform switch allows or denies the platform
 
-- Each profile stores **allowed platforms** (`device_profiles.allowed_platforms`, migration `057_`).
+- Each profile stores **allowed platforms** (`device_profiles.allowed_platforms`, migration `060_`).
 - A device whose platform is not allowed **fails** the profile, with a reason naming the platform.
 - A device's platform is `client_devices.os`, fixed at enrollment (`linux`, `android`, `windows`, `ios`). The posture report's OS name is never used, so a device cannot change platform from report to report.
 - An unknown or empty platform fails closed.
@@ -47,7 +47,7 @@ Further rules:
 - A requirement whose check has no known descriptor applies to every device, so it **fails closed**.
 - A platform that is allowed but has no applicable requirements **passes**: "Android on, nothing required" means any Android device. The stale-report rule still applies, so the device must report.
 
-### D-3 Existing profiles keep their behaviour (migration `057_`)
+### D-3 Existing profiles keep their behaviour (migration `060_`)
 
 - A profile with **at least one requirement** gets `{linux}`. That is what it allowed in practice: other platforms failed their unsupported Linux checks.
   - Verified 2026-11-13: only Linux devices have stored posture reports.
@@ -91,7 +91,7 @@ This epic changes `admin/` (the device profile editor). CLAUDE.md's "don't modif
   - A modified client could enroll a Linux machine as `android` to avoid Linux checks, or report false `PASS` values.
   - **Android Key Attestation** (hardware-signed boot state, patch level, app identity) closes this. It is deferred; the user may choose it later.
   - **Until then, for sensitive resources:** require **"Approved by an admin"** (`zecurity.device.approved`, ADR-030) in the profile. It applies to every platform, so an admin vouches for the device, including the platform it enrolled as, before it gets access. The enrolled platform is shown with the device.
-  - An unknown platform value never passes: only `linux`, `android`, `windows` and `ios` can be allowed (constraint in `057_`).
+  - An unknown platform value never passes: only `linux`, `android`, `windows` and `ios` can be allowed (constraint in `060_`).
   - The automated security review of 2026-11-13 raised this; it is accepted here for the reasons above.
 - Security patch age and "developer options off" were offered and **not chosen** for now.
 

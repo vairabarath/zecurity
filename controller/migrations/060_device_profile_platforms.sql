@@ -1,4 +1,4 @@
--- 057_device_profile_platforms.sql — ADR-031 per-platform device profiles.
+-- 060_device_profile_platforms.sql — ADR-031 per-platform device profiles.
 --
 -- A device profile now lists the platforms it allows. A device whose
 -- platform (client_devices.os, fixed at enrollment) is not listed fails the
