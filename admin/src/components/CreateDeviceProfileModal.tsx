@@ -5,6 +5,7 @@ import {
   AddProfileRequirementDocument,
   GetDeviceProfilesDocument,
   GetSupportedPostureChecksDocument,
+  SetProfilePlatformsDocument,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -66,6 +67,7 @@ export function CreateDeviceProfileModal({
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
   })
   const [addProfileRequirement] = useMutation(AddProfileRequirementDocument)
+  const [setProfilePlatforms] = useMutation(SetProfilePlatformsDocument)
 
   function reset() {
     setOs(null)
@@ -128,6 +130,13 @@ export function CreateDeviceProfileModal({
             countries: { allow: countryRule.allow, deny: countryRule.deny },
           },
         })
+      }
+
+      // ADR-031: a new profile allows no platform until one is turned on;
+      // this dialog creates a profile for the chosen OS, after its
+      // requirements are in place.
+      if (os) {
+        await setProfilePlatforms({ variables: { profileId, platforms: [os] } })
       }
 
       toast.success(`Device profile "${name.trim()}" created`)

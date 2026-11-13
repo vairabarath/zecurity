@@ -362,6 +362,7 @@ query GetDeviceProfiles {
     id
     name
     manualTrust
+    allowedPlatforms
     requirements {
       id
       checkId

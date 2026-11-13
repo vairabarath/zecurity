@@ -12,6 +12,7 @@ import {
   GetDeviceProfilesDocument,
   GetSupportedPostureChecksDocument,
   RemoveProfileRequirementDocument,
+  SetProfilePlatformsDocument,
   UpdateProfileRequirementCountriesDocument,
 } from '@/generated/graphql'
 import { searchCountries, countryLabel } from '@/lib/countries'
@@ -80,6 +81,11 @@ describe('CreateDeviceProfileModal: country check', () => {
           added()
           return { data: { addProfileRequirement: reqResult('p-new', [{ checkId: 'zecurity.network.country' }]) } }
         },
+      },
+      {
+        // ADR-031: the new profile allows its OS once its requirements exist.
+        request: { query: SetProfilePlatformsDocument, variables: { profileId: 'p-new', platforms: ['linux'] } },
+        result: { data: { setProfilePlatforms: { __typename: 'DeviceProfile', id: 'p-new', allowedPlatforms: ['linux'] } } },
       },
       profilesRefetch,
     ]
