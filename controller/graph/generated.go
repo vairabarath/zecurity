@@ -181,11 +181,12 @@ type ComplexityRoot struct {
 	}
 
 	DeviceProfile struct {
-		ID           func(childComplexity int) int
-		ManualTrust  func(childComplexity int) int
-		Name         func(childComplexity int) int
-		Policies     func(childComplexity int) int
-		Requirements func(childComplexity int) int
+		AllowedPlatforms func(childComplexity int) int
+		ID               func(childComplexity int) int
+		ManualTrust      func(childComplexity int) int
+		Name             func(childComplexity int) int
+		Policies         func(childComplexity int) int
+		Requirements     func(childComplexity int) int
 	}
 
 	DeviceProfileDeletion struct {
@@ -285,6 +286,7 @@ type ComplexityRoot struct {
 		SetIdpConnectionStatus            func(childComplexity int, id string, status string) int
 		SetMemberRole                     func(childComplexity int, userID string, role Role, reason string) int
 		SetPlatformLoginEnabled           func(childComplexity int, enabled bool) int
+		SetProfilePlatforms               func(childComplexity int, profileID string, platforms []string) int
 		SetResourcePolicy                 func(childComplexity int, resourceID string, policyID string) int
 		SetResourcePolicyProfiles         func(childComplexity int, id string, profileIds []string) int
 		TestAuditExportSink               func(childComplexity int, id string) int
@@ -542,6 +544,7 @@ type ComplexityRoot struct {
 
 type DeviceProfileResolver interface {
 	Requirements(ctx context.Context, obj *DeviceProfile) ([]*DeviceProfileRequirement, error)
+
 	Policies(ctx context.Context, obj *DeviceProfile) ([]*ResourcePolicy, error)
 }
 type MutationResolver interface {
@@ -579,6 +582,7 @@ type MutationResolver interface {
 	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) (*DeviceProfile, error)
 	UpdateProfileRequirementCountries(ctx context.Context, profileID string, countries CountryRuleInput) (*DeviceProfile, error)
 	DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (*DeviceProfileDeletion, error)
+	SetProfilePlatforms(ctx context.Context, profileID string, platforms []string) (*DeviceProfile, error)
 	RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*DeviceProfile, error)
 	CreateResourcePolicy(ctx context.Context, name string, description *string) (*ResourcePolicy, error)
 	UpdateResourcePolicy(ctx context.Context, id string, name *string, description *string) (*ResourcePolicy, error)
@@ -1248,6 +1252,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.DevicePostureVisibility.Stale(childComplexity), true
 
+	case "DeviceProfile.allowedPlatforms":
+		if e.ComplexityRoot.DeviceProfile.AllowedPlatforms == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfile.AllowedPlatforms(childComplexity), true
 	case "DeviceProfile.id":
 		if e.ComplexityRoot.DeviceProfile.ID == nil {
 			break
@@ -1973,6 +1983,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.SetPlatformLoginEnabled(childComplexity, args["enabled"].(bool)), true
+	case "Mutation.setProfilePlatforms":
+		if e.ComplexityRoot.Mutation.SetProfilePlatforms == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setProfilePlatforms_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetProfilePlatforms(childComplexity, args["profileId"].(string), args["platforms"].([]string)), true
 	case "Mutation.setResourcePolicy":
 		if e.ComplexityRoot.Mutation.SetResourcePolicy == nil {
 			break
@@ -3697,6 +3718,8 @@ func (ec *executionContext) childFields_DeviceProfile(ctx context.Context, field
 		return ec.fieldContext_DeviceProfile_manualTrust(ctx, field)
 	case "requirements":
 		return ec.fieldContext_DeviceProfile_requirements(ctx, field)
+	case "allowedPlatforms":
+		return ec.fieldContext_DeviceProfile_allowedPlatforms(ctx, field)
 	case "policies":
 		return ec.fieldContext_DeviceProfile_policies(ctx, field)
 	}
@@ -5242,6 +5265,28 @@ func (ec *executionContext) field_Mutation_setPlatformLoginEnabled_args(ctx cont
 		return nil, err
 	}
 	args["enabled"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_setProfilePlatforms_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "platforms",
+		func(ctx context.Context, v any) ([]string, error) {
+			return ec.unmarshalNString2ᚕstringᚄ(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["platforms"] = arg1
 	return args, nil
 }
 
@@ -8247,6 +8292,29 @@ func (ec *executionContext) fieldContext_DeviceProfile_requirements(_ context.Co
 	return fc, nil
 }
 
+func (ec *executionContext) _DeviceProfile_allowedPlatforms(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfile_allowedPlatforms(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.AllowedPlatforms, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []string) graphql.Marshaler {
+			return ec.marshalNString2ᚕstringᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfile_allowedPlatforms(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _DeviceProfile_policies(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11190,6 +11258,68 @@ func (ec *executionContext) fieldContext_Mutation_deleteDeviceProfile(ctx contex
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_deleteDeviceProfile_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_setProfilePlatforms(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setProfilePlatforms(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetProfilePlatforms(ctx, fc.Args["profileId"].(string), fc.Args["platforms"].([]string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setProfilePlatforms(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setProfilePlatforms_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -20592,6 +20722,11 @@ func (ec *executionContext) _DeviceProfile(ctx context.Context, sel ast.Selectio
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "allowedPlatforms":
+			out.Values[i] = ec._DeviceProfile_allowedPlatforms(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		case "policies":
 			field := field
 
@@ -21257,6 +21392,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "deleteDeviceProfile":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_deleteDeviceProfile(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "setProfilePlatforms":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setProfilePlatforms(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++

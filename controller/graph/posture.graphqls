@@ -38,6 +38,10 @@ type DeviceProfile {
   name: String!
   manualTrust: Boolean! @deprecated(reason: "Not enforced. Require the zecurity.device.approved check instead (ADR-030).")
   requirements: [DeviceProfileRequirement!]! @goField(forceResolver: true)
+  # ADR-031: the device platforms (linux, android, windows, ios) this profile
+  # allows; a device of another platform fails it. Each device is checked
+  # only against its own platform's requirements (plus zecurity.* ones).
+  allowedPlatforms: [String!]!
   # PENDING-16: the resource policies that require this profile.
   policies: [ResourcePolicy!]! @goField(forceResolver: true)
 }
@@ -123,6 +127,12 @@ extend type Mutation {
     confirmInUse: Boolean = false
   ): DeviceProfileDeletion! @requires(capability: POSTURE_WRITE)
 
+  # ADR-031 D-6: replace the platforms a profile allows. Re-evaluates every
+  # device at once (turning a platform off cuts its devices).
+  setProfilePlatforms(
+    profileId: ID!
+    platforms: [String!]!
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
   removeProfileRequirement(
     profileId: ID!
     checkId: String!

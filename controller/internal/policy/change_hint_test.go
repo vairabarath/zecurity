@@ -89,6 +89,10 @@ func TestDeviceApproval_WakesHintStreamAndAuthorizesThroughSnapshot(t *testing.T
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := pstore.SetAllowedPlatforms(ctx, ws, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 	if err := pstore.AddRequirement(ctx, ws, profile.ID, posture.Requirement{CheckID: posture.CheckDeviceApproved}); err != nil {
 		t.Fatalf("add requirement: %v", err)
 	}

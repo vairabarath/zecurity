@@ -34,6 +34,10 @@ func TestApproveDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(f.ctx, ws, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 	if err := store.AddRequirement(f.ctx, ws, profile.ID, posture.Requirement{CheckID: posture.CheckDeviceApproved}); err != nil {
 		t.Fatalf("add requirement: %v", err)
 	}

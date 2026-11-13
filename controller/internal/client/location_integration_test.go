@@ -55,6 +55,10 @@ func TestLocationObservedAndMoveReevaluates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(ctx, ws, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
+	}
 	rule, _ := posture.NormalizeCountryRule(posture.CountryRule{Allow: []string{"IN"}})
 	if err := store.AddRequirement(ctx, ws, profile.ID, posture.Requirement{CheckID: posture.CheckNetworkCountry, Countries: &rule}); err != nil {
 		t.Fatal(err)

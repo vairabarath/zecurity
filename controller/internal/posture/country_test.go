@@ -72,7 +72,7 @@ func TestCountryRuleAllows(t *testing.T) {
 func TestEvaluateProfileCountry(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	report := uuid.New()
-	profile := Profile{ID: uuid.New(), Revision: 1}
+	profile := Profile{ID: uuid.New(), Revision: 1, AllowedPlatforms: []string{"linux"}}
 	rule := &CountryRule{Allow: []string{"IN"}, Deny: []string{"CN"}}
 	req := []Requirement{{CheckID: CheckNetworkCountry, Countries: rule}}
 	seen := func(country string, ago time.Duration) *NetworkObservation {
@@ -94,7 +94,7 @@ func TestEvaluateProfileCountry(t *testing.T) {
 		{"no rule", seen("IN", time.Minute), []Requirement{{CheckID: CheckNetworkCountry}}, false, "check zecurity.network.country has no country rule"},
 	} {
 		obs := map[string]Observation{CheckNetworkCountry: countryObservation(report, tc.obs, now)}
-		got := EvaluateProfile(now, now.Add(-time.Minute), profile, tc.req, obs)
+		got := EvaluateProfile(now, now.Add(-time.Minute), profile, "linux", tc.req, obs)
 		if got.Satisfied != tc.ok || got.Reason != tc.reason {
 			t.Errorf("%s: satisfied=%v reason=%q, want %v %q", tc.name, got.Satisfied, got.Reason, tc.ok, tc.reason)
 		}
@@ -167,6 +167,10 @@ func TestCountryGeofenceIntegration(t *testing.T) {
 	profile, err := store.CreateProfile(ctx, ws, "India only", true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// ADR-031: profiles start with no platform; these devices are Linux.
+	if _, err := store.SetAllowedPlatforms(ctx, ws, profile.ID, []string{"linux"}); err != nil {
+		t.Fatalf("allow linux: %v", err)
 	}
 	rule, _ := NormalizeCountryRule(CountryRule{Allow: []string{"IN"}, Deny: []string{"CN"}})
 	if err := store.AddRequirement(ctx, ws, profile.ID, Requirement{CheckID: CheckNetworkCountry, Countries: &rule}); err != nil {

@@ -61,7 +61,7 @@ var expectedCapability = func() map[string]rbac.Capability {
 		assignResourceToGroup unassignResourceFromGroup`)
 	put(rbac.PostureWrite, `createDeviceProfile
 		updateDeviceProfileManualTrust addProfileRequirement removeProfileRequirement
-		deleteDeviceProfile updateProfileRequirementCountries
+		deleteDeviceProfile updateProfileRequirementCountries setProfilePlatforms
 		createResourcePolicy updateResourcePolicy setResourcePolicyProfiles
 		deleteResourcePolicy setResourcePolicy`)
 	put(rbac.DeviceWrite, `approveDevice unapproveDevice`)
@@ -183,7 +183,7 @@ func TestAllFieldsAuthorized(t *testing.T) {
 	// 73 console operations + setMemberRole (PENDING-19 §4.1)
 	// + updateProfileRequirementCountries (PENDING-20 G-10). A drop below
 	// means schema collection broke and a pass would be meaningless.
-	const wantGated = 87 // PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
+	const wantGated = 88 // ADR-031: +1 (setProfilePlatforms); PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
 	if gated != wantGated {
 		t.Fatalf("authz check found %d gated operations, want %d — schema collection broken or "+
 			"an operation was added/removed without updating expectedCapability", gated, wantGated)
