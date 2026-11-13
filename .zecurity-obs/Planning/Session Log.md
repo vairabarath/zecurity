@@ -3817,3 +3817,8 @@ serves on `127.0.0.1:9102`.
   - Fixed: missing `USE_BIOMETRIC` permission.
   - `057_` applied in place on the lab DB (user's choice); the PR needs `[schema: reset DB]`.
 - Security review: self-declared platform. Accepted in ADR-031; the interim mitigation is the admin-approval requirement, and attestation is deferred.
+- Requirement switching, live:
+  - biometric required on → access stays;
+  - "Approved by an admin" on → blocked in 143 ms; off → back in 1.2 s;
+  - the control resource is unaffected.
+- The user decided the 5-minute on-phone posture interval is enough (no faster sampling). Pushed `feat/android-posture`.

@@ -587,9 +587,21 @@ lock, and a strong biometric enrolled.
 | Android switched back on | access back in **1.4 s** |
 | Audit | `device_profile.platforms.set` recorded for each switch |
 
+Requirement switching, live on the same phone, with the same profile on
+`files-seechan`; `files-omarchy` (no profile) stayed reachable throughout:
+
+| Requirements change | `files-seechan` |
+|---|---|
+| Biometric required on (enrolled) | stays reachable |
+| "Approved by an admin" on (phone not approved) | blocked in **143 ms** |
+| "Approved by an admin" off | back in **1.2 s** |
+| Biometric required off | stays reachable |
+
 - **Change on the phone is slower.** A change *on the phone*, for example
   removing the screen lock, is seen at the next posture report, which comes
   every 5 minutes. Profile changes by an admin take effect at once.
+  - The user decided on 2026-11-13 that 5 minutes is enough: no faster
+    on-phone sampling.
 - **Found during the run:** the biometric check needs the `USE_BIOMETRIC`
   permission (a normal permission, granted at install, no prompt).
 
