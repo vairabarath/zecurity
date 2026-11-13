@@ -11,6 +11,7 @@ import 'package:material_ui/material_ui.dart';
 import 'errors.dart';
 import 'host.dart';
 import 'native.dart';
+import 'resources.dart';
 
 void main() {
   runApp(const ZecurityApp());
@@ -30,15 +31,6 @@ class ZecurityApp extends StatelessWidget {
       home: const HomePage(),
     );
   }
-}
-
-class Resource {
-  Resource(this.name, this.address, this.port, this.protocol);
-
-  final String name;
-  final String address;
-  final int port;
-  final String protocol;
 }
 
 class HomePage extends StatefulWidget {
@@ -583,13 +575,7 @@ class _HomePageState extends State<HomePage> {
       if (_resources.isEmpty)
         const Text('No resources are assigned to this device.')
       else
-        for (final r in _resources)
-          ListTile(
-            contentPadding: .zero,
-            leading: const Icon(Icons.dns_outlined),
-            title: Text(r.name.isEmpty ? r.address : r.name),
-            subtitle: Text('${r.address}:${r.port} ${r.protocol.toUpperCase()}'),
-          ),
+        for (final r in _resources) ResourceTile(resource: r),
     ];
   }
 }
