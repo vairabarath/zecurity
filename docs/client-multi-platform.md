@@ -548,10 +548,33 @@ Needs Flutter stable (built with 3.50), the Android SDK with NDK
 The emulator run found one real bug, now fixed. R8 had stripped the JNI
 callback, and the VPN service crashed at start.
 
+### Live run on a phone (2026-11-13)
+
+OPPO CPH2269, Android 12, on the lab Wi-Fi. The controller ran on the dev
+host; a connector ran on 192.168.1.75, and a shield plus a test web page
+ran on each of 192.168.1.53 and 192.168.1.46. All three were built from
+the current code and installed with the normal scripts, pointed at a local
+mirror instead of the July GitHub releases.
+
+| Check | Result |
+|---|---|
+| Sign-in in the browser, device enrolled | pass |
+| Both shield-protected resources from the phone | pass: the connector logged `access allowed` and `tunnel_opened ok` per shield |
+| Direct access from a non-connector host | blocked by both shields |
+| Access revoked while connected | the resource is blocked and its route removed within ~3 s; the other resource keeps working after a brief tunnel restart |
+| Access granted back | restored in under 4 s |
+| Disconnect, Connect, tunnel restore after a restart | pass |
+| Sign-out | device revoked; the connector tore the session down in ~30 ms |
+| Cold start, release build | 0.7–1.1 s to the first frame (debug build: 8.1 s) |
+
+Fixed during the run: a TUN pump task that kept the device open after
+tunnel-down (Linux too); empty posture reports rejected every cycle; the
+sign-in dying when ColorOS froze the app; the service not restarting after
+sign-out; raw `os error 111` text on screen.
+
 ### Not built yet
 
-- The sign-in, connect, resource access, revocation and reboot journeys on a
-  device.
+- Reboot persistence and certificate renewal on a device.
 - `android.*` posture checks and Keystore-backed device keys (A2).
 - DNS-name resources (D-A1).
 - Release signing and store packaging.

@@ -3778,3 +3778,21 @@ serves on `127.0.0.1:9102`.
 - Shared mobile layer (`crate::mobile`, `tun_mobile.rs`), utun framing (`utun.rs`, Linux-tested), iOS entry `zc_start_daemon` in `client/ffi`, Flutter iOS Runner + `ZecurityTunnel` packet tunnel extension, `build-ios-native.sh` (XCFramework), Xcode setup in `client/mobile/ios/README.md`. Docs §13.
 - Gates: Linux 369/369; Windows build; Android library + APK + emulator start unchanged; `flutter analyze` clean. iOS Rust type-check not possible on Linux (`ring` needs SDK headers); Swift/Xcode not built; nothing run on iOS.
 - Disk: all build caches and the Rust toolchain for cross builds moved to the dev-disk build image; `client/target` cache and the added rustup targets removed from /home (22 GB free).
+
+## 2026-11-13 — M1: Android app live on a phone
+- OPPO CPH2269 (Android 12) on the lab Wi-Fi. Local controller; connector on .75; shield and test page on .53 and .46. All built from the current code and installed with the normal scripts, pointed at a local mirror.
+- PASS:
+  - sign-in;
+  - both shield-protected resources from the phone;
+  - revoke while connected blocks the resource in ~3 s, with the other resource unaffected;
+  - re-grant restores it in under 4 s;
+  - disconnect, connect and restore;
+  - sign-out revokes the device.
+- Fixes, all on `feat/client-ios`:
+  - TUN pump leak;
+  - empty posture reports;
+  - sign-in survives ColorOS freezing the app;
+  - service restart after sign-out;
+  - plain-language errors;
+  - cold start 8.1 s → ~0.8 s (release build).
+- Docs: §12 live-run table.
