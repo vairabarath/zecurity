@@ -24,7 +24,15 @@ discussion — the "Options" and "Open Questions" are the point; the
 > product/ops items (04–14) are from a presence/absence scan and should be
 > confirmed before committing scope.
 
-> **Re-verified against the code 2026-09-01** (branch `feat/sprint17-scim`). Each row's status was
+> **Re-verified against the code 2026-11-14** (`main` 25a0cfb5, after PR #204). Every doc was checked
+> against source and git history. Each one now has a dated "Status (verified …)" block at the top, and its
+> frontmatter `status:` matches. Moves: **07b** (console built, D-18) and **21** (FU-9, PR #178) went to
+> `finished/`. Scorecard: **17 finished docs** (03, 04, 05 ×2, 07b, 08, 09, 10, 11, 13, 14, 15, 16, 17, 19, 20, 21) ·
+> **4 not finished** (06 not started for workspace users; 07 vision, partly built; 12 not started; 18 not
+> started, prerequisites partly there). Open follow-ups that came out of finished items are listed under
+> **Open follow-ups** below.
+>
+> *Earlier check — re-verified against the code 2026-09-01* (branch `feat/sprint17-scim`). Each row's status was
 > checked against source, not against this file's own history — several items had shipped while
 > their `status:` frontmatter still said `pending` (04, 05, 13). Per-item evidence is in a dated
 > "Correction" / "Verification note" callout at the top of each file. Scorecard: **7 done**
@@ -40,23 +48,42 @@ discussion — the "Options" and "Open Questions" are the point; the
 | ✅ [PENDING-03](finished/PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) — implemented in Sprint 13 | relay | P1 | ADR-015/016/017/018 |
 | ✅ [PENDING-04](finished/PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO — implemented (OIDC per-workspace IdPs; **SAML not built**) | identity | P1 | ADR-023/024/026 |
 | ✅ [PENDING-05](finished/PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) — implemented in Sprint 17 | identity | P2 | ADR-025 |
-| [PENDING-06](not%20finished/PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication — *unbuilt; only the `RequireBreakGlassMFA` no-op stub exists* | identity | P2 | PENDING-04 |
-| [PENDING-07](not%20finished/PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** (functionality + phased roadmap) | operator | P1 | 07a, 07b |
+| [PENDING-06](not%20finished/PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication — *unbuilt for workspace users; `RequireBreakGlassMFA` is still a no-op. (Provider operators have TOTP, PR #138, a separate tier.)* | identity | P2 | PENDING-04 |
+| [PENDING-07](not%20finished/PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** — *partly built: console, relay lifecycle, relay pools (PRs #108, #200–#202); tenant lifecycle, billing, partner scoping and GA items open* | operator | P1 | 07a, 07b |
 | PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
-| [PENDING-07b](not%20finished/PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging (separate app vs shared; alpha = CLI) | operator | P1 | 07a |
-| ✅ [PENDING-08](finished/PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15 | zero-trust | P2 | — |
+| ✅ [PENDING-07b](finished/PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging — **decided (D-18, separate app) and built (`provider-console/`, PR #108)** | operator | P1 | 07a |
+| ✅ [PENDING-08](finished/PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15; since extended to per-platform profiles with Android and Windows checks and Minimum OS Version (ADR-031, PRs #203/#204) | zero-trust | P2 | — |
 | ✅ [PENDING-09](finished/PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — **implemented (PR #198)**: live-session cut on ACL change, device revoked when its login session ends; risk-scored step-up (C) deferred to PENDING-06 | zero-trust | P2 | ADR-001, PENDING-06 |
-| ✅ [PENDING-10](finished/PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — **all 4 phases complete** (Health/Readiness, Fleet Prometheus metrics, OTel distributed tracing, Alerts & Dashboards) | operations | P1 | — |
+| ✅ [PENDING-10](finished/PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — **all 4 phases complete for the controller** (relay/connector/shield have no metrics or tracing yet) | operations | P1 | — |
 | ✅ [PENDING-11](finished/PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — **implemented (PR #187)**: hash-chained audit streams, append-only `ztna_app`, webhook / Splunk HEC / Amazon S3 export, connector access lines | operations | P2 | PENDING-10, PENDING-19 |
-| [PENDING-12](not%20finished/PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt* | operations | P2 | ADR-013 |
+| [PENDING-12](not%20finished/PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt; the controller is single-instance by decision (D-02)* | operations | P2 | ADR-013 |
 | ✅ [PENDING-13](finished/PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **all 3 tracks done (Sprint 19)** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
 | ✅ [PENDING-14](finished/PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access — **F0–F4 built and merged (PR #174, #176)** | data-plane | P2 | ADR-009 |
 | ✅ [PENDING-15](finished/PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | ✅ [PENDING-16](finished/PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — **R1–R3 complete (PR #177)** | policy | P1 | PENDING-08, PENDING-09 |
 | ✅ [PENDING-17](finished/PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (Linux TPM 2.0) — **core implementation complete and verified end-to-end** | identity/client | P2 | ADR-002, ADR-028 |
-| [PENDING-18](not%20finished/PENDING-18-Established-Connection-Recovery-Connector-Failover.md) | **Future Implementation: Established Connection Recovery and Connector Failover**. *DEFERRED / NOT IMPLEMENTED* (deferred from Sprint 20 Q3, 2026-10-10) | data-plane/client | unassigned | Fix 01, Phase 2 umbrella, Q3 |
+| [PENDING-18](not%20finished/PENDING-18-Established-Connection-Recovery-Connector-Failover.md) | **Future Implementation: Established Connection Recovery and Connector Failover**. *DEFERRED / NOT IMPLEMENTED* (deferred from Sprint 20 Q3, 2026-10-10); per-flow `connector_id` now exists (PR #133) | data-plane/client | unassigned | Fix 01, Phase 2 umbrella, Q3 |
 | ✅ [PENDING-19](finished/PENDING-19-Workspace-RBAC.md) | Workspace admin-console roles (RBAC) — **built and merged (PR #168)** | rbac | P1 | — |
-| ✅ [PENDING-20](finished/PENDING-20-Geofencing.md) | Geofencing for resource access — **built and merged (PR #171)** | zero-trust | P2 | ADR-030 |
+| ✅ [PENDING-20](finished/PENDING-20-Geofencing.md) | Geofencing for resource access — **G1 built and merged (PR #171)**; G2 (device OS location) not started | zero-trust | P2 | ADR-030 |
+| ✅ [PENDING-21](finished/PENDING-21-Per-Tunnel-Flow-Control.md) | Per-tunnel flow control, Connector ↔ Shield (FU-9) — **merged (PR #178, tests #182)** | data-plane | P1 | Sprint 22 FU-9 |
+
+### Open follow-ups from finished items (verified 2026-11-14)
+
+None of these has its own pending doc yet. Each is recorded in the finished doc named here.
+
+| From | Open item |
+|---|---|
+| 04 | SAML is not built (OIDC only; `saml` is reserved in the schema). |
+| 05 | No SCIM conformance suite; live Okta/Entra interop is still waiting on tenant access. |
+| 08 | No MDM/EDR posture feeds; no hardware-attested posture; no iOS/macOS posture checks. |
+| 10 | Relay, connector and shield have no Prometheus metrics or OTel tracing; the blackbox exporter is not shipped. |
+| 13 | ADR-028 still says `status: proposed` although it is built. |
+| 14 | DNS-name resources are Linux-client only (Windows NRPT and mobile DNS are not built). |
+| 17 | TPM keys are Linux-only. Windows, Android and iOS use software keys. The systemd `tss` group and the `linux.tpm.present` check are open. |
+| 19 | The SCIM last-Admin case (R-11) is tested against the database only. |
+| 20 | G2: the device's own OS location is not started. |
+| 21 | Proto comment on `TunnelClose` (`shield.proto`) wrongly says it is unused. ADR-016 is still Proposed (relates to 03). |
+| 11 | Access events are lost while a connector is disconnected (S-10): there is no connector-side buffer. |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.

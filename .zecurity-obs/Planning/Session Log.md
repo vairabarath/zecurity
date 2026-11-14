@@ -3822,3 +3822,18 @@ serves on `127.0.0.1:9102`.
   - "Approved by an admin" on → blocked in 143 ms; off → back in 1.2 s;
   - the control resource is unaffected.
 - The user decided the 5-minute on-phone posture interval is enough (no faster sampling). Pushed `feat/android-posture`.
+
+## 2026-11-14 — Windows live run, Windows posture, Minimum OS Version; pending-docs audit
+
+- First real Windows run of the client (Windows 11, luffy): install, login, tunnel, revoke, down/up, service restart and sign-out all pass.
+  - Fixed: harmless Wintun/tun ERROR log lines.
+  - Fixed: ~2 s of refused connections after `up` (duplicate address detection turned off on the adapter).
+- Windows posture (BitLocker, screen lock, biometric, firewall, antivirus) and the Windows card: ADR-031 D-8…D-10.
+- Minimum OS Version server checks and the Twingate-style card grid: D-11, D-12.
+  - Fixed: the profile editor didn't receive `allowedPlatforms`.
+- All of the above merged as **PR #204** (`25a0cfb5`). Lab torn down (luffy, shields .53/.46, connector .75, local controller).
+- Pending-docs audit against `main` 25a0cfb5 (branch `docs/pending-audit`):
+  - every doc carries a dated "verified" status block, and its frontmatter matches;
+  - 07b and 21 moved to `finished/`;
+  - the README has a new scorecard and an "Open follow-ups" table;
+  - the moved PENDING-21's links were updated.

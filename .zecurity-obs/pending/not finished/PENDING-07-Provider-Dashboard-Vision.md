@@ -16,6 +16,28 @@ tags: [pending, vision, operator, provider, multi-tenant, roadmap]
 
 # Provider Dashboard — Production Vision
 
+> **Progress (verified against `main` 25a0cfb5, 2026-11-14): PARTLY BUILT.** The vision stays open.
+>
+> **Built (Sprints 21–22 and the relay-pool PRs):**
+> - The provider console is a separate React app (`provider-console/`, D-18; PR #108) with Relays, Relay pools,
+>   Tenants, Audit, Certificates, MFA and Operators pages.
+> - Relay lifecycle: create, token, revoke, delete, drain and resume.
+> - An append-only provider audit (migration `051`), PKI/CRL and health views, and relay bandwidth (`052`).
+> - Two roles: `super-admin` and `relay-ops`.
+> - Tenant relay pools, failover and residency: PRs #200–#202, migrations `057`–`059`, D-37…D-41.
+>
+> **Open:**
+> - Tenant create, suspend and delete (D-34 is a separate epic).
+> - Billing, quotas and metering; partner/reseller scoping; break-glass impersonation.
+> - More roles, and step-up for destructive actions.
+>
+> **Superseded below:**
+> - Operators sign in with **local Argon2id accounts**, not a corporate Google/SSO allowlist (D-24). External IdPs are
+>   deferred (D-29).
+> - MFA is **mandatory for super-admins only**; it is optional for `relay-ops`.
+> - The alpha is the React console, not a CLI. The only CLI is `recover-admin`.
+> - "BYO-relay / tenant relay grouping" is answered by D-37…D-41.
+>
 > **Status: PENDING — vision doc for team alignment.** This is the north-star for the
 > provider/operator plane. The two concrete decisions under it are
 > [[ADR-021-Provider-Identity-and-Authorization]] (backend identity + authz tier) and

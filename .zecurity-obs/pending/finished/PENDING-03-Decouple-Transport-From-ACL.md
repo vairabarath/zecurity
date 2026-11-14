@@ -17,9 +17,9 @@ tags: [pending, adr, relay, transport, acl]
 
 > **Status: IMPLEMENTED (Option A — ADR-018 Phases 1 & 3).** The sequencing decision was made —
 > Option A ("finish Track B") — and executed in Sprint 13, with follow-up hardening completed on the
-> `fixed-pendings` branch (see **Resolution** below). What remains is doc close-out (flip
-> ADR-015/017/018 to Accepted, mark ✅ in `pending/README.md`, Session Log) and the deliberately
-> deferred **ADR-018 Phase 4** — retiring the transitional `ACLConnector` relay fields (a breaking
+> `fixed-pendings` branch (see **Resolution** below). The doc close-out is done: ADR-015, ADR-017 and ADR-018 are Accepted and the README
+> marks this ✅ (verified 2026-11-14). ADR-016 (controller-labelled, connector-probed relay) is still
+> Proposed. What remains is the deliberately deferred **ADR-018 Phase 4** — retiring the transitional `ACLConnector` relay fields (a breaking
 > change). The Options / Recommendation / Open Questions below are retained as the original decision
 > record.
 
@@ -40,7 +40,8 @@ tags: [pending, adr, relay, transport, acl]
 
 **Follow-up hardening (`fixed-pendings`):**
 - `transport_sync_lock` — serialize the client's transport fetch/store (no stale-version overwrite).
-- `tunnel_restart_lock` — serialize tunnel down→up across recovery / 60s tick / IPC.
+- `tunnel_restart_lock` — serialize tunnel down→up across recovery / 60s tick / IPC. *(Since replaced by
+  `TunnelRestartCoordinator`, `client/src/runtime.rs`, commit `fc5cc758`.)*
 - recovery cooldown measured from *completion* (no runaway polling against a dead relay).
 - typed `FramedJsonError` handshake classification — only transport I/O triggers a resync, not
   malformed/oversized replies.

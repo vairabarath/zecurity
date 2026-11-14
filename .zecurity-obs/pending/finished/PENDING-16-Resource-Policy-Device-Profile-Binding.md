@@ -1,6 +1,7 @@
 ---
 type: adr
-status: pending
+status: implemented
+verified: 2026-11-14
 id: PENDING-16
 domain: policy
 priority: P1
@@ -16,7 +17,7 @@ tags: [pending, adr, policy, resource-policy, device-profile, posture]
 
 # PENDING-16: Resource policies (Resource → Resource Policy → Device Profiles)
 
-**Status:** design note, **decisions taken 2026-11-03** (O-1…O-4, §5; rewritten against `main` `07152f51`). The 2026-08-10 version predated device approval (ADR-030), geofencing (PENDING-20) and workspace roles (PENDING-19). Nothing is built.
+**Status:** design note, **decisions taken 2026-11-03** (O-1…O-4, §5; rewritten against `main` `07152f51`). The 2026-08-10 version predated device approval (ADR-030), geofencing (PENDING-20) and workspace roles (PENDING-19). **Built and merged as PR #177 (`b208a5b3`, 2026-11-05)**; see §8 (verified 2026-11-14: `049_resource_policies.sql`, `controller/internal/posture/resource_policy.go`, `admin/src/pages/ResourcePolicies.tsx`).
 **Base:** `main`.
 **Scope:** its own epic. It needs a schema change (`[schema: reset DB]`).
 

@@ -1,6 +1,7 @@
 ---
 type: design-note
-status: merged
+status: implemented
+verified: 2026-11-14
 created: 2026-11-03
 updated: 2026-11-05
 tags:
@@ -12,7 +13,15 @@ tags:
 
 # PENDING-21: Per-tunnel flow control between Connector and Shield (FU-9)
 
-**Status:**
+**Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED.**
+- **Merged:** PR #178 (`e07fe524`), with the gate-4 follow-up tests in PR #182 (`d73141fa`).
+- **Correction:** §8.1 says `TunnelClose` is no longer sent or handled. That is wrong; only `TunnelData` is gone.
+  `TunnelClose` still carries aborts through the connector's abort mailbox (`connector/src/agent_tunnel.rs`) and the
+  shield handles it (`shield/src/control_stream.rs`), as §8.4 says.
+- **Same error in code:** the proto comment at `proto/shield/v1/shield.proto` ("Neither side sends or handles these any
+  more") repeats it. That comment needs a follow-up correction, since it is generated into the stubs.
+
+**History:**
 - Proposed 2026-11-03. The spike passed and Barath approved the final decisions (§7) on 2026-11-03.
 - **Implemented and validated**, on branch `feat/fu9-per-tunnel-flow-control`, fast-forwarded and transplanted onto `origin/main` `07152f51` (2026-11-04).
 - **Method (not a conventional rebase):**
@@ -176,7 +185,7 @@ A stalled stream keeps its full stream window charged to the connection window u
   - `TunnelStart { string connection_id = 1; }`;
   - `TunnelEnd { string error = 1; }`.
 - `TunnelOpen` and `TunnelOpened` keep their fields and stay on Control. `TunnelOpened` now means only "this tunnel could not be opened" (`ok = false`).
-- `TunnelData` (Control oneof field 10) and `TunnelClose` (field 11) are **no longer sent or handled**. Their definitions stay, marked deprecated, because Sprint 22's proto rule is additive only. Deleting them (as `reserved`) is a follow-up decision.
+- `TunnelData` (Control oneof field 10) is **no longer sent or handled**. *(Correction 2026-11-14: `TunnelClose` (field 11) **is** still sent for aborts and handled by the Shield, see §8.4.)* Their definitions stay, marked deprecated, because Sprint 22's proto rule is additive only. Deleting them (as `reserved`) is a follow-up decision.
 
 ### 8.2 Opening a tunnel
 1. **Connector admission:** `AgentTunnelHub::open_relay_session` checks, under the hub lock:

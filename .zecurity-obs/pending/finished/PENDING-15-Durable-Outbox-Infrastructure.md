@@ -516,7 +516,8 @@ Requirements:
   message with event details. The event remains in `failed` status — never
   silently dropped. An operator can inspect `outbox_events` for stuck events.
 
-Future: PENDING-10 (Observability) will add Prometheus metrics; this PENDING
+PENDING-10 (Observability) has since added the Prometheus metrics (`outbox_events_pending`,
+`outbox_dead_letter_total`, …, `controller/internal/metrics/metrics.go`); this PENDING
 provides the data model and logging foundation.
 
 ---
@@ -699,11 +700,11 @@ identity-lifecycle-triggered device-trust revocation events durably and reliably
 
 PENDING-13 (Client Device Lifecycle & Cert Renewal) owns:
 - Device enrollment and certificate issuance (already implemented in Sprint 7).
-- Certificate renewal (not yet implemented).
+- Certificate renewal (since implemented, `a5f6a3ca`).
 - Device trust revocation implementation (`revokeClientDevice`, `RevokeUserDevices`).
 - Device management UI.
 
-PENDING-13 will register handlers for the outbox events this PENDING defines the
+PENDING-13 registers handlers (`controller/internal/client/device_trust_handler.go`) for the outbox events this PENDING defines the
 delivery mechanism for:
 - `device.trust.revoke.requested` → `client.RevokeUserDevices(workspaceID, userID, reason)`
 - `device.trust.re_enrollment_required` → invalidate/revoke device trust state

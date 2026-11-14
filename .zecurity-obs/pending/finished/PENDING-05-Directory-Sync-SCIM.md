@@ -1,6 +1,7 @@
 ---
 type: adr
-status: in-progress
+status: implemented
+verified: 2026-11-14
 id: PENDING-05
 domain: identity
 priority: P2
@@ -13,19 +14,25 @@ tags: [pending, adr, identity, scim, provisioning]
 
 # Pending ADR 05 — Directory Sync (SCIM)
 
-> **Status: PENDING — proposed design captured in [[ADR-025-SCIM-Directory-Synchronization]] (PROPOSED, 2026-08-06).**
-> Awaiting team ratification. **Implementation does not begin until ADR-025 is ACCEPTED** — at which
-> point ADR-025 becomes the authoritative SCIM design (exactly as ADR-024 is authoritative for identity
-> federation). The options/recommendation below are the original framing; the resolved decisions live in ADR-025.
-
-> **Correction (2026-09-01, verified against source):** ADR-025 was ACCEPTED and the work is **largely
-> built** as Sprint 17 — the frontmatter said `pending` throughout. The SCIM engine is
-> `controller/internal/scim/*` with migration `034` (which now includes the former 036 idempotent index guard); all 13 backend phases in
-> `.zecurity-obs/Sprint17/path.md` are checked. **Still open:** FE Phase 7 (`status: in-progress`) —
-> per-connection sign-in buttons on `Login.tsx` (F7-5) and disable/delete connection actions on
-> `IdpConnectionDetail.tsx` (F7-8); FE Phases 0–6 are `implemented-unverified`; and **no SCIM
-> conformance suite exists** — live Okta/Entra interop is still gated on tenant access. Hence
-> `in-progress`, not `implemented`.
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED.** [[ADR-025-SCIM-Directory-Synchronization]]
+> is accepted and is the authoritative SCIM design; the options below are the original framing.
+>
+> **Built:**
+> - The SCIM engine `controller/internal/scim/*`, with migrations `034_scim_directory_sync.sql` and
+>   `035_groups_sync_instance.sql`.
+> - The durable outbox sink: `scim.NewDurableOutboxSink(outboxStore)` in the controller's `main.go` (plan step P10;
+>   no interim sink is left).
+> - The SCIM conflicts page (`admin/src/pages/ScimConflicts.tsx`).
+> - Sprint 17 FE Phase 7: per-connection sign-in buttons on `Login.tsx` (F7-5, 2026-09-02), and disable/delete on
+>   `IdpConnectionDetail.tsx` (F7-8, 2026-09-05, `dangerzone.test.tsx`).
+>
+> **Known gaps:**
+> - No SCIM conformance suite exists (`Sprint17/path.md`: "NOT RUN").
+> - Live Okta/Entra interop is still waiting on tenant access.
+> - Break-glass MFA is a stub that allows everything (`RequireBreakGlassMFA`, `graph/resolvers/permission_helpers.go`) until
+>   PENDING-06.
+>
+> The 2026-09-01 correction (FE Phase 7 still open) is superseded: F7-5 and F7-8 are done.
 
 ## Context / Current State
 

@@ -17,7 +17,7 @@ tags: [pending, finished, adr, zero-trust, authorization]
 
 > **Implemented (2026-11-12), PR #198** `[schema: reset DB]`. Options A and B are in place (built over earlier sprints and verified here); C-1 … C-5 were decided and C-1 and D-8 built. **Option C (risk scoring, step-up) is deferred to PENDING-06.** What shipped, where it lives and how it was verified: **Implementation summary** at the end. The sections below keep the original discussion and the build history.
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **History — original framing, superseded by the implementation note above (PR #198):**
 >
 > **Partial implementation note (Sprint 15):** a bounded variant of **Option B only** shipped as a
 > side effect of PENDING-08's connector session-registry work — no new revocation RPC; the connector

@@ -1,6 +1,7 @@
 ---
 type: adr
 status: implemented
+verified: 2026-11-14
 id: PENDING-08
 domain: zero-trust
 priority: P2
@@ -12,7 +13,26 @@ tags: [pending, adr, zero-trust, posture, device]
 
 # Pending ADR 08 — Device Posture & Health Checks
 
-> **Status: IMPLEMENTED (Sprint 15).** Linux posture collection (OS/version, LUKS, firewall, Secure
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED, and wider than first scoped.**
+> Since Sprint 15:
+> - **Admin approval** check `zecurity.device.approved` ([[ADR-030-Admin-Device-Approval]]).
+> - **Country** check `zecurity.network.country` (PENDING-20).
+> - **Resource policies** replaced resource↔profile bindings and the enforce/audit modes (PENDING-16, PR #177).
+> - **Per-platform profiles** ([[ADR-031-Per-Platform-Device-Profiles-and-Android-Posture]]): `allowed_platforms`
+>   (migration `060`). The Android checks (encryption, screen lock, biometric) are PR #203. The Windows checks
+>   (BitLocker, screen lock, biometric, firewall, antivirus; `client/src/posture_windows.rs`) and the
+>   server-side Minimum OS Version checks (`windows/android/ios.os.minimum`, `controller/internal/posture/osversion.go`)
+>   are PR #204.
+>
+> **Not built:**
+> - Option B: MDM/EDR feeds (no Intune, Jamf or CrowdStrike code).
+> - Option C: hardware-attested posture. `client/src/tpm.rs` is device-key storage (PENDING-17), not posture.
+> - iOS and macOS checks.
+>
+> Superseded wording below: "ADR promotion deliberately deferred" (ADR-030 and ADR-031 are accepted), and
+> resource↔profile "bindings" and "audit/enforce mode" (now resource policies).
+>
+> **Original status (Sprint 15):** Linux posture collection (OS/version, LUKS, firewall, Secure
 > Boot), Device Profiles with requirements and audit/enforce mode, resource↔profile bindings,
 > posture-aware ACL compilation (AND within a profile, OR across enforce-mode profiles bound to a
 > resource, revision-gated fail-closed evaluation), retention worker, and admin UI (list/create/edit,

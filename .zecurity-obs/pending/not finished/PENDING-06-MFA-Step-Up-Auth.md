@@ -13,10 +13,18 @@ tags: [pending, adr, identity, mfa]
 
 # Pending ADR 06 — MFA & Step-Up Authentication
 
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): NOT STARTED for workspace users.**
+> - **Provider operators** have TOTP. It is mandatory for super-admins: migration `042_provider_totp.sql`,
+>   `controller/internal/provider/totp.go`, PR #138. That is a separate identity tier and does not count here.
+> - **Workspace users** have no TOTP, WebAuthn or step-up:
+>   - `RequireBreakGlassMFA` is still a no-op (`controller/graph/resolvers/permission_helpers.go`).
+>   - OIDC `amr`/`acr` are parsed but not enforced on the workspace path.
+> - **Owner:** this doc also owns the risk-scored step-up that PENDING-09 (PR #198) deferred.
+>
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 
 > **Verification note (2026-09-01):** still **PENDING** — confirmed unbuilt. No TOTP, WebAuthn or step-up
-> code exists in `controller/`. The one hook is `RequireBreakGlassMFA`
+> code existed in `controller/` *(2026-11-14: provider-operator TOTP now exists, see above; still none for workspace users)*. The one hook is `RequireBreakGlassMFA`
 > (`controller/graph/resolvers/permission_helpers.go:14-22`), a deliberate no-op stub left by
 > Sprint 17 Phase 3 so that the SCIM break-glass path has a call site to enforce once this lands.
 

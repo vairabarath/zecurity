@@ -1,6 +1,7 @@
 ---
 type: adr
-status: pending
+status: implemented
+verified: 2026-11-14
 id: PENDING-14
 domain: data-plane
 priority: P2
@@ -12,7 +13,12 @@ tags: [pending, adr, data-plane, dns, resources]
 
 # PENDING-14: DNS name (FQDN) resource access
 
-**Status:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). **F4 live run PASS 2026-11-03** (§13), with three fixes from the run. Ready for one PR. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
+**Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED.**
+- **Merged:** F0 is PR #173 (`39d5df14`), F1–F4 is PR #174 (`2271540d`), and F-9 (restart-stable fake addresses) is PR #176.
+- **Still Linux-only:** the Windows, Android and iOS clients (PR #203/#204) reject DNS-name resources
+  ("not supported on … yet", `client/src/dns_link.rs`). Windows NRPT and mobile DNS are not built.
+
+**History:** **approved 2026-11-03** (Sathiya: "start the work", after F0 was approved). **F0 built** (PR #173). **F1 built** on `feat/pending14-f1-names` (§10). **F2 built** (§11). **F3 built** (§12). **F4 live run PASS 2026-11-03** (§13), with three fixes from the run. Ready for one PR. F1–F3 ship together as one PR at F4: F1 alone would let a name save that no client can reach yet.
 **Date:** 2026-11-03
 **Base:** `main` (`f5bd339f`, which now contains all of `fixed-pendings`).
 **Scope:** its own epic.
