@@ -145,3 +145,54 @@ cd admin && npm run codegen
 ```
 
 Suggested order: admin UI (item 1) → live run (item 2) → missing tests (item 3) → docs (item 4).
+
+---
+
+## Update 2026-11-14 (session 2): admin UI built, live run partly done
+
+### Done
+- **Admin UI (item 1), commit `46dc4333`:**
+  - one MFA prompt (`components/auth/MfaPrompt.tsx`, `store/mfaPrompt.ts`, `lib/mfa.ts`);
+  - the Apollo error link answers `MFA_REQUIRED` (console 403 and break-glass GraphQL error) by prompting, then replays the operation once; this also works after a token refresh;
+  - Settings → Security card (your authenticator, console MFA toggle);
+  - policy editor Authentication section and a list chip;
+  - Users: MFA column and Reset MFA (not on your own row);
+  - Devices: Sign-in column and risk.
+  - Tests: 324 pass; lint and build are clean.
+- **Dev proxy fix, commit `e2822e8a`:** `admin/vite.config.ts` proxies `/auth/mfa`.
+- **New admin dependency:** `qrcode.react` 4.2.0 (exact), the same version provider-console uses.
+- **Live run (item 2), PASS so far.** Setup: a copy of the local DB with `061_` applied (`ztna_p06`); the shared DB was left untouched.
+  - Console:
+    - enrol, wrong code, replay refused, right code;
+    - the toggle refuses without MFA, then works;
+    - with the toggle on, a session without MFA gets 403;
+    - a refreshed token keeps the MFA mark;
+    - the UI prompt replays the `me` probe;
+    - the policy edit saves, and the audit rows are correct.
+  - Client: a fresh login with a policy that requires MFA shows "2 resources need you to authenticate again". `zecurity-client auth` → IdP → TOTP page → code → "Authenticated", and the resources are listed. The device gets `session_auth_at` and `session_mfa_at`. The audit has `auth.step_up {mfa: totp}`.
+  - Expiry: after `session_auth_at` was aged by 2 days and the controller restarted, the resources are withheld and the count is 2. Final check pending: the `resources` output was being read when work stopped.
+
+### Findings
+- **Not a product bug:** the `open` crate ignores `BROWSER` and calls `xdg-open`. Test instances must stub `xdg-open`, or the desktop browser takes the single-use step-up session.
+- **Orca `tab create --url` loads the URL twice.** Use `goto` on an existing tab for step-up URLs.
+- **A direct DB edit of `session_auth_at` does not invalidate the cached snapshot.** Expected: real expiry goes through `ValidUntil`. To test it, restart the controller or trigger `NotifyPolicyChange`.
+
+## Next steps (in order)
+1. Finish the live run:
+   - expiry after `auth` again (resources come back);
+   - "Skip for now" (non-MFA resources only);
+   - Reset MFA from the UI (needs a second user);
+   - break-glass in the UI (prompt opens over the dialog, replay works);
+   - a member at `/install` with console MFA on;
+   - console sign-out from the prompt.
+2. IdP `amr` skip (M-3): configure the local test IdP to send `amr: ["mfa"]` and check that no TOTP page appears.
+3. Missing tests (item 3): the `mfa` REST handlers, the resolvers `setConsoleRequireMfa` / `resetUserMfa` / `setResourcePolicyAuthentication`, `StartReauth` success with an IdP fake, and the risk hooks end to end.
+4. Security review of commit 1, the fix commit and the admin UI commit. Dependency review of `go-qrcode` and `qrcode.react`.
+5. Docs (item 4): PENDING-06 doc (M-1 … M-10), `pending/README.md`, the PENDING-09 C-5 note, `docs/database-development.md`, the Session Log. Then move the doc out of `not finished/`.
+6. Scope question for the user: console MFA covers every `/graphql` call, so Members opening `/install` are asked too. Keep that, or exempt Members?
+7. Clean up the lab:
+   - stop the test controller (`~/.cache/zecurity-p06/controller`, :8080/:9090), the Vite dev server (:5173) and the test client daemon (`~/.cache/zecurity-p06/zc daemon`), each by PID;
+   - drop DB `ztna_p06`;
+   - flush Valkey DB 1;
+   - stop the `zwin` build container.
+   The system `zecurity-client` service was not touched.
