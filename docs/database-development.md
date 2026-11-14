@@ -49,7 +49,7 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
 
 ## 4. Adding a schema change
 
-1. **Add a new file.** Use the next free number (check with `ls controller/migrations | tail -3`). The latest is `038_shield_revocations.sql`, so the next is **`039_`**. Name it for what it does: `039_<short_description>.sql`.
+1. **Add a new file.** Use the next free number (check with `ls controller/migrations | tail -3`). The latest is `061_mfa_step_up.sql`, so the next is **`062_`**. Name it for what it does: `062_<short_description>.sql`.
 2. **Never edit an existing schema file.** Other developers' databases and every test database are built from those files. Changing one means everyone's history silently diverges. Always add a new file, even to fix a mistake in an old one.
 3. **Keep it plain SQL** that runs correctly on a fresh database, after all the earlier files, in one pass. Comment the Sprint/phase and the reason at the top.
 4. **Label the PR `[schema: reset DB]`** (title or description), and put the reset command in the PR description, so reviewers and the other developer know to recreate their database after merging.

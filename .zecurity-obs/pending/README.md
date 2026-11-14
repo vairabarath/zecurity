@@ -27,8 +27,8 @@ discussion — the "Options" and "Open Questions" are the point; the
 > **Re-verified against the code 2026-11-14** (`main` 25a0cfb5, after PR #204). Every doc was checked
 > against source and git history. Each one now has a dated "Status (verified …)" block at the top, and its
 > frontmatter `status:` matches. Moves: **07b** (console built, D-18) and **21** (FU-9, PR #178) went to
-> `finished/`. Scorecard: **17 finished docs** (03, 04, 05 ×2, 07b, 08, 09, 10, 11, 13, 14, 15, 16, 17, 19, 20, 21) ·
-> **4 not finished** (06 not started for workspace users; 07 vision, partly built; 12 not started; 18 not
+> `finished/`. Scorecard: **18 finished docs** (03, 04, 05 ×2, 06, 07b, 08, 09, 10, 11, 13, 14, 15, 16, 17, 19, 20, 21) ·
+> **3 not finished** (07 vision, partly built; 12 not started; 18 not
 > started, prerequisites partly there). Open follow-ups that came out of finished items are listed under
 > **Open follow-ups** below.
 >
@@ -48,7 +48,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | ✅ [PENDING-03](finished/PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) — implemented in Sprint 13 | relay | P1 | ADR-015/016/017/018 |
 | ✅ [PENDING-04](finished/PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO — implemented (OIDC per-workspace IdPs; **SAML not built**) | identity | P1 | ADR-023/024/026 |
 | ✅ [PENDING-05](finished/PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) — implemented in Sprint 17 | identity | P2 | ADR-025 |
-| [PENDING-06](not%20finished/PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication — *unbuilt for workspace users; `RequireBreakGlassMFA` is still a no-op. (Provider operators have TOTP, PR #138, a separate tier.)* | identity | P2 | PENDING-04 |
+| ✅ [PENDING-06](finished/PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication — **implemented (2026-11-14)**: native TOTP, policy authentication frequency & MFA, IdP `amr` skip, client step-up, console MFA, `RequireBreakGlassMFA` | identity | P2 | PENDING-04, PENDING-09 |
 | [PENDING-07](not%20finished/PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** — *partly built: console, relay lifecycle, relay pools (PRs #108, #200–#202); tenant lifecycle, billing, partner scoping and GA items open* | operator | P1 | 07a, 07b |
 | PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
 | ✅ [PENDING-07b](finished/PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging — **decided (D-18, separate app) and built (`provider-console/`, PR #108)** | operator | P1 | 07a |
