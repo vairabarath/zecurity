@@ -14,6 +14,9 @@ mod dns_link;
 mod daemon_tests;
 mod error;
 mod grpc;
+// Windows daemon log: drops known-harmless Wintun/tun errors.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod log_noise;
 pub mod ipc;
 pub mod login;
 mod name_map;

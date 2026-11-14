@@ -276,6 +276,8 @@ fn bind_ipc_listener() -> Result<UnixListener> {
 /// console; a file under %ProgramData%\Zecurity\logs when running as a
 /// Windows service, whose stdout goes nowhere.
 fn init_tracing() {
+    #[cfg(windows)]
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     let filter = tracing_subscriber::EnvFilter::new("info");
     // Mobile: stdout goes nowhere; log to the app's files directory.
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -301,10 +303,19 @@ fn init_tracing() {
                 .with_env_filter(filter)
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(file))
+                .finish()
+                .with(crate::log_noise::DropBenignNoise)
                 .init();
             return;
         }
     }
+    #[cfg(windows)]
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .finish()
+        .with(crate::log_noise::DropBenignNoise)
+        .init();
+    #[cfg(not(windows))]
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
