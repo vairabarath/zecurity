@@ -3775,6 +3775,7 @@ dependencies = [
  "uuid",
  "windows-service",
  "windows-sys 0.59.0",
+ "wintun",
  "x509-parser",
 ]
 

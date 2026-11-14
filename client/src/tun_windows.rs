@@ -55,6 +55,26 @@ pub(crate) fn delete_route_args(ip: Ipv4Addr) -> Vec<String> {
     ]
 }
 
+/// `netsh` arguments that turn off duplicate address detection (and router
+/// discovery) on the adapter. With Windows' default of 3 probes, a new
+/// adapter's address stays "tentative" for about 2 s, and every connection
+/// to a resource in that window fails at once ("could not connect"). A
+/// point-to-point tunnel address can't collide, so WireGuard for Windows
+/// turns it off too. It must be set before the address is assigned: the
+/// probes already running for an address are not cut short.
+pub(crate) fn no_dad_args() -> Vec<String> {
+    vec![
+        "interface".into(),
+        "ipv4".into(),
+        "set".into(),
+        "interface".into(),
+        format!("interface={ADAPTER_NAME}"),
+        "dadtransmits=0".into(),
+        "routerdiscovery=disabled".into(),
+        "store=active".into(),
+    ]
+}
+
 fn route_args(verb: &str, ip: Ipv4Addr) -> Vec<String> {
     vec![
         "interface".into(),
@@ -118,8 +138,54 @@ fn cleanup_stale_routes_with(runner: &dyn CmdRunner) {
     );
 }
 
+/// The adapter handle the daemon itself holds (Windows): it creates the
+/// adapter, so dropping it removes the adapter.
+#[cfg(windows)]
+type OwnAdapter = std::sync::Arc<wintun::Adapter>;
+#[cfg(not(windows))]
+type OwnAdapter = ();
+
+/// Opens or creates `zecurity0` and turns off duplicate address detection
+/// while it has no address yet (`no_dad_args`). The `tun` crate then opens
+/// this adapter by name and assigns the address. Failures are logged and
+/// never fatal: `tun` creates the adapter itself, with the 2 s delay.
+#[cfg(windows)]
+fn prepare_adapter() -> Option<OwnAdapter> {
+    // SAFETY: loads wintun.dll from the executable's directory, as the
+    // `tun` crate does for the same adapter.
+    let wintun = match unsafe { wintun::load() } {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load wintun.dll to prepare the adapter");
+            return None;
+        }
+    };
+    let adapter = match wintun::Adapter::open(&wintun, ADAPTER_NAME) {
+        Ok(a) => a,
+        Err(_) => match wintun::Adapter::create(&wintun, ADAPTER_NAME, ADAPTER_NAME, None) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not create the Wintun adapter ahead of the tunnel");
+                return None;
+            }
+        },
+    };
+    if let Err(e) = SystemRunner.run("netsh", &as_strs(&no_dad_args()), None) {
+        tracing::warn!(error = %e, "could not turn off duplicate address detection on zecurity0; \
+             resources may refuse connections for about 2 s after up");
+    }
+    Some(adapter)
+}
+
+#[cfg(not(windows))]
+fn prepare_adapter() -> Option<OwnAdapter> {
+    None
+}
+
 pub struct TunManager {
     dev: Option<tun::AsyncDevice>,
+    /// Dropped after `dev` (field order), which removes the adapter.
+    adapter: Option<OwnAdapter>,
     policy_ips: Vec<Ipv4Addr>,
 }
 
@@ -128,14 +194,15 @@ impl TunManager {
         // Adapter creation blocks (driver install, address setup). The
         // configuration is built on that thread: on Windows it holds a raw
         // pointer and is not Send.
-        let dev = tokio::task::spawn_blocking(|| {
+        let (dev, adapter) = tokio::task::spawn_blocking(|| {
+            let adapter = prepare_adapter();
             let mut config = tun::Configuration::default();
             config
                 .name(ADAPTER_NAME)
                 .address(ADAPTER_ADDR)
                 .netmask("255.255.255.255")
                 .up();
-            tun::create_as_async(&config)
+            tun::create_as_async(&config).map(|dev| (dev, adapter))
         })
         .await
         .context("create Wintun adapter task")?
@@ -152,6 +219,7 @@ impl TunManager {
 
         Ok(Self {
             dev: Some(dev),
+            adapter,
             policy_ips: Vec::new(),
         })
     }
@@ -180,6 +248,7 @@ impl TunManager {
         let ips: BTreeSet<Ipv4Addr> = self.policy_ips.drain(..).collect();
         let _ = del_routes_with(&SystemRunner, &ips);
         drop(self.dev.take());
+        drop(self.adapter.take());
         Ok(())
     }
 }
@@ -252,6 +321,15 @@ mod tests {
 
     fn ips(list: &[[u8; 4]]) -> BTreeSet<Ipv4Addr> {
         list.iter().map(|o| Ipv4Addr::from(*o)).collect()
+    }
+
+    #[test]
+    fn dad_is_turned_off_on_the_adapter_only_until_reboot() {
+        assert_eq!(
+            no_dad_args().join(" "),
+            "interface ipv4 set interface interface=zecurity0 dadtransmits=0 \
+             routerdiscovery=disabled store=active"
+        );
     }
 
     #[test]
