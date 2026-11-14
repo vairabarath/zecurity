@@ -65,6 +65,9 @@ pub mod cmd {
 }
 
 mod posture;
+// Windows posture checks (script, parser); tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod posture_windows;
 // The Linux collectors' tests use Unix process APIs.
 #[cfg(all(test, unix))]
 mod posture_tests;

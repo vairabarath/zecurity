@@ -29,7 +29,8 @@ export function PlatformPostureCard({
 }: PlatformPostureCardProps) {
   const { Icon, label } = platform;
   return (
-    <div className="rounded-2xl border border-border">
+    // A group per card: Android and Windows both have "Screen Lock" etc.
+    <div role="group" aria-label={`${label} posture`} className="rounded-2xl border border-border">
       <div className="flex items-center justify-between p-4">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <Icon className="h-4 w-4 text-muted-foreground" />

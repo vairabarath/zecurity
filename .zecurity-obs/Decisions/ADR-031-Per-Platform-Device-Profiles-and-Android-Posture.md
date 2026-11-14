@@ -100,3 +100,52 @@ This epic changes `admin/` (the device profile editor). CLAUDE.md's "don't modif
 - Admins can build one profile that covers Linux laptops and Android phones, each with its own requirements.
 - Turning a platform off is an immediate, audited access change.
 - Every new platform needs only check descriptors, a collector and a card. The evaluation rules don't change again.
+
+## Amendment 2026-11-14 — Windows checks and card
+
+Decided by Sathiya (M1) on 2026-11-14: a Windows card like the Android one, with all five offered checks.
+
+### D-8 The Windows checks (all `PASS` / `FAIL` / `UNSUPPORTED` / `ERROR`)
+
+The client daemon (LocalSystem) reads them with one PowerShell script (`client/src/posture_windows.rs`), every 5 minutes and right after sign-in. The per-user checks use the enrolling user's SID from the service command line. The check IDs are identical in Go and Rust.
+
+| Check ID | Label | PASS when |
+|---|---|---|
+| `windows.disk_encryption.bitlocker` | HD Encryption | BitLocker `ProtectionStatus = 1` on the system drive. Protection off or unknown: **FAIL**. No BitLocker on the edition (Home): **UNSUPPORTED**. |
+| `windows.screen_lock.enabled` | Screen Lock | Automatic sign-in (`AutoAdminLogon`) is off **and** the enrolled user has a Windows Hello PIN. |
+| `windows.biometric.enrolled` | Biometric | The enrolled user has a Windows Hello face or fingerprint (`WinBio\AccountInfo\<SID>\EnrolledFactors` ≠ 0). No biometric sensor: **UNSUPPORTED** (`allowUnsupported` meaningful, as for Android). |
+| `windows.firewall.enabled` | Firewall | Windows Firewall is on for the Domain, Private and Public profiles, or a third-party firewall registered with Security Center is on. |
+| `windows.antivirus.enabled` | Antivirus | An antivirus registered with Security Center is on with up-to-date definitions (Defender's status as a fallback). None registered: **FAIL**. |
+
+- A check the script does not report is sent as **ERROR**, never left out, so a broken script is visible and never passes.
+- No credential, biometric data or key is read: only "is it on" or "is it enrolled".
+
+### D-9 Screen Lock requires a Windows Hello PIN
+
+- Whether a local account has a non-blank password can't be read without a sign-in attempt. That attempt would count towards account lockout and fill the security log every 5 minutes, so the check doesn't do it.
+- A device that signs in with a password only therefore **FAILs** Screen Lock. Windows 11 asks every user to set up a PIN, so this matches the default.
+
+### D-10 The admin console
+
+- The device profile editor shows a **Windows** card next to Linux and Android, with the five checks.
+- Each card is a labelled group, because Android and Windows share check labels.
+- "Create profile" still offers Linux only; Windows is set up in the editor, as Android is.
+
+### Live run (2026-11-14, Windows 11 Pro build 26300, LocalSystem service)
+
+| Check | Reported |
+|---|---|
+| HD Encryption | FAIL: BitLocker protection off (C:) |
+| Screen Lock | PASS: Windows Hello PIN set; automatic sign-in off |
+| Biometric | UNSUPPORTED: no biometric sensor |
+| Firewall | PASS: on (Domain, Private, Public) |
+| Antivirus | PASS: Windows Defender on, definitions up to date |
+
+Profile on a resource, with a client loop on that Windows host:
+
+| Change | Effect |
+|---|---|
+| Require Firewall and turn Windows on | reachable in 0.52 s |
+| Also require HD Encryption | blocked within ≤1.2 s |
+| Remove HD Encryption | reachable again in 1.18 s |
+| Turn Windows off | blocked within ≤1.3 s |

@@ -1,5 +1,6 @@
 // The Linux collectors below are compiled, and unit-tested, on every
-// platform; on Windows only `collect` (OS report only) runs.
+// platform; on Windows `collect` runs the windows.* checks instead
+// (posture_windows.rs).
 #![cfg_attr(any(windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 use std::collections::HashMap;
 use std::path::Path;
@@ -521,27 +522,63 @@ pub(crate) async fn collect() -> PostureReport {
     collect_with(Path::new("/"), Arc::new(RealCommandRunner), DEFAULT_TIMEOUT).await
 }
 
-/// Windows: the `linux.*` collectors don't apply and `windows.*` checks are
-/// not built yet, so only the OS is reported. A posture profile that requires
-/// a check evaluates it as unsupported on the controller (fail closed unless
-/// the profile sets allow_unsupported).
+/// Windows (ADR-031 amendment 2026-11-14): the OS version, plus the five
+/// `windows.*` checks one PowerShell script reads (`posture_windows.rs`):
+/// BitLocker, Screen Lock, Biometric, Firewall, Antivirus.
 #[cfg(windows)]
 pub(crate) async fn collect() -> PostureReport {
-    let version = match tokio::time::timeout(
-        DEFAULT_TIMEOUT,
-        RealCommandRunner.run("cmd", &["/C", "ver"]),
-    )
-    .await
-    {
+    use crate::posture_windows;
+    // Full path: the service runs as LocalSystem; never resolve it via PATH.
+    let powershell = format!(
+        "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+    );
+    let encoded = posture_windows::encode_command(&posture_windows::script(crate::ipc::pipe_user_sid()));
+    let runner = RealCommandRunner;
+    let ps_args = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded.as_str(),
+    ];
+    let (ver, ps) = tokio::join!(
+        tokio::time::timeout(DEFAULT_TIMEOUT, runner.run("cmd", &["/C", "ver"])),
+        tokio::time::timeout(
+            WINDOWS_SCRIPT_TIMEOUT,
+            runner.run(
+                &powershell,
+                &ps_args,
+            ),
+        ),
+    );
+    let version = match ver {
         Ok(Ok(out)) if out.status.success() => windows_version_from_ver(&String::from_utf8_lossy(&out.stdout)),
         _ => "unknown".into(),
     };
+    let stdout = match ps {
+        Ok(Ok(out)) => Some(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "posture: could not run PowerShell");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("posture: the Windows posture script timed out");
+            None
+        }
+    };
     PostureReport {
-        checks: Vec::new(),
+        checks: posture_windows::checks_from_output(stdout.as_deref()),
         os_name: "Windows".into(),
         os_version: version,
     }
 }
+
+/// PowerShell start-up plus the CIM queries take a few seconds on a cold
+/// machine.
+#[cfg(windows)]
+const WINDOWS_SCRIPT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Mobile: the OS, plus (Android, ADR-031) the checks the app's VPN service
 /// reads: storage encryption, screen lock, strong biometric enrolled. iOS

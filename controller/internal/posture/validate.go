@@ -30,6 +30,14 @@ const (
 	CheckAndroidEncryption = "android.disk_encryption.enabled"
 	CheckAndroidScreenLock = "android.screen_lock.enabled"
 	CheckAndroidBiometric  = "android.biometric.enrolled"
+
+	// ADR-031 amendment 2026-11-14: Windows checks, read by the client
+	// daemon (LocalSystem). Identical in client/src/posture_windows.rs.
+	CheckWindowsEncryption = "windows.disk_encryption.bitlocker"
+	CheckWindowsScreenLock = "windows.screen_lock.enabled"
+	CheckWindowsBiometric  = "windows.biometric.enrolled"
+	CheckWindowsFirewall   = "windows.firewall.enabled"
+	CheckWindowsAntivirus  = "windows.antivirus.enabled"
 )
 
 // CheckDeviceApproved is a server-side check (ADR-030): PASS when an admin
@@ -101,6 +109,34 @@ var supportedCheckDescriptors = []CheckDescriptor{
 		Label:                      "Biometric",
 		Platform:                   "android",
 		AllowUnsupportedMeaningful: true,
+	},
+	{
+		// UNSUPPORTED on editions without BitLocker (Windows Home).
+		ID:       CheckWindowsEncryption,
+		Label:    "HD Encryption",
+		Platform: "windows",
+	},
+	{
+		ID:       CheckWindowsScreenLock,
+		Label:    "Screen Lock",
+		Platform: "windows",
+	},
+	{
+		// UNSUPPORTED without a biometric sensor.
+		ID:                         CheckWindowsBiometric,
+		Label:                      "Biometric",
+		Platform:                   "windows",
+		AllowUnsupportedMeaningful: true,
+	},
+	{
+		ID:       CheckWindowsFirewall,
+		Label:    "Firewall",
+		Platform: "windows",
+	},
+	{
+		ID:       CheckWindowsAntivirus,
+		Label:    "Antivirus",
+		Platform: "windows",
 	},
 }
 
