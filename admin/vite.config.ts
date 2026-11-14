@@ -24,6 +24,9 @@ export default defineConfig({
     proxy: {
       '/graphql':      'http://localhost:8080',
       '/auth/refresh': 'http://localhost:8080',
+      // PENDING-06 console MFA (status / enroll / verify). Not all of /auth:
+      // /auth/callback is a console page.
+      '/auth/mfa':     'http://localhost:8080',
       '/api':          'http://localhost:8080',
       '/ca.crt':       'http://localhost:8080',
     },
