@@ -204,6 +204,11 @@ var serverCheckDescriptors = []CheckDescriptor{
 		Label:    "Device country (public IP)",
 		Platform: "any",
 	},
+	// ADR-031 D-11: need a minimum version (params.min_version); judged
+	// against the OS version of the device's latest report.
+	{ID: CheckWindowsMinOS, Label: "Minimum OS Version", Platform: "windows"},
+	{ID: CheckAndroidMinOS, Label: "Minimum OS Version", Platform: "android"},
+	{ID: CheckIOSMinOS, Label: "Minimum OS Version", Platform: "ios"},
 }
 
 // recognizedChecks are the checks a client may report.

@@ -7,9 +7,10 @@ import {
   GetSupportedPostureChecksDocument,
   SetProfilePlatformsDocument,
   UpdateProfileRequirementCountriesDocument,
+  UpdateProfileRequirementMinVersionDocument,
 } from "@/generated/graphql";
 import { PlatformPostureCard } from "@/components/PlatformPostureCard";
-import { PROFILE_PLATFORMS } from "@/lib/profilePlatforms";
+import { PROFILE_PLATFORMS, isMinOSCheck, validMinVersion } from "@/lib/profilePlatforms";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -36,6 +37,8 @@ interface EditDeviceProfileModalProps {
     requirements: {
       checkId: string;
       countries?: { allow: string[]; deny: string[] } | null;
+      // ADR-031 D-11: set on the Minimum OS Version checks.
+      minVersion?: string | null;
     }[];
     policies?: { id: string; name: string }[];
   } | null;
@@ -64,6 +67,10 @@ export function EditDeviceProfileModal({
   const [platforms, setPlatforms] = useState<Set<string>>(
     () => new Set(profile?.allowedPlatforms ?? []),
   );
+  // ADR-031 D-11: the minimum of each Minimum OS Version check, by check id.
+  const [minVersions, setMinVersions] = useState<Record<string, string>>(() =>
+    profile ? originalMinVersions(profile) : {},
+  );
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -74,6 +81,7 @@ export function EditDeviceProfileModal({
         new Set(profile.requirements.map((r) => r.checkId).filter((id) => id !== COUNTRY_CHECK_ID)),
       );
       setCountryRule(originalCountryRule(profile));
+      setMinVersions(originalMinVersions(profile));
       setError(null);
     }
   }, [profile]);
@@ -95,6 +103,7 @@ export function EditDeviceProfileModal({
 
   const [addProfileRequirement] = useMutation(AddProfileRequirementDocument);
   const [updateCountries] = useMutation(UpdateProfileRequirementCountriesDocument);
+  const [updateMinVersion] = useMutation(UpdateProfileRequirementMinVersionDocument);
   const [setProfilePlatforms] = useMutation(SetProfilePlatformsDocument);
   const [removeProfileRequirement] = useMutation(RemoveProfileRequirementDocument, {
     refetchQueries: [{ query: GetDeviceProfilesDocument }],
@@ -148,6 +157,18 @@ export function EditDeviceProfileModal({
       return;
     }
 
+    const badMinimum = [...checkedIds].find(
+      (id) => isMinOSCheck(id) && !validMinVersion(minVersions[id] ?? ""),
+    );
+    if (badMinimum) {
+      const platform = PROFILE_PLATFORMS.find((p) => badMinimum.startsWith(`${p.id}.`))?.label ?? "";
+      setError(
+        `Enter the minimum ${platform} version: numbers separated by dots, for example 10.0.22631 or 14.`,
+      );
+      return;
+    }
+    const originalMinimums = originalMinVersions(profile);
+
     const originalIds = new Set(
       profile.requirements.map((r) => r.checkId).filter((id) => id !== COUNTRY_CHECK_ID),
     );
@@ -174,8 +195,20 @@ export function EditDeviceProfileModal({
       // through "no requirements" (the server refuses that).
       for (const checkId of toAdd) {
         await addProfileRequirement({
-          variables: { profileId: profile.id, checkId, allowUnsupported: false },
+          variables: {
+            profileId: profile.id,
+            checkId,
+            allowUnsupported: false,
+            ...(isMinOSCheck(checkId) ? { minVersion: minVersions[checkId].trim() } : {}),
+          },
         });
+      }
+      // A kept Minimum OS Version check with a new minimum: replaced in place.
+      for (const checkId of [...checkedIds].filter((id) => originalIds.has(id) && isMinOSCheck(id))) {
+        const minVersion = minVersions[checkId].trim();
+        if (minVersion !== originalMinimums[checkId]) {
+          await updateMinVersion({ variables: { profileId: profile.id, checkId, minVersion } });
+        }
       }
       if (countryRule.enabled && !originalCountry.enabled) {
         await addProfileRequirement({
@@ -220,7 +253,7 @@ export function EditDeviceProfileModal({
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={() => onOpenChange(false)}
       />
-      <div className="absolute right-0 top-0 h-full w-full max-w-md app-panel animate-slide-in">
+      <div className="absolute right-0 top-0 h-full w-full max-w-3xl app-panel animate-slide-in">
         <form onSubmit={handleSubmit} className="flex h-full flex-col">
           <div className="flex items-center gap-4 border-b border-border p-5">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[oklch(0.78_0.10_235/0.16)] text-[oklch(0.78_0.10_235)]">
@@ -316,7 +349,7 @@ export function EditDeviceProfileModal({
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label className="text-sm font-semibold">Device Posture Checks</Label>
+                <Label className="text-sm font-semibold">Approved Operating Systems</Label>
                 <button
                   type="button"
                   onClick={comingSoon}
@@ -329,23 +362,29 @@ export function EditDeviceProfileModal({
               {!checksData ? (
                 <p className="text-sm text-muted-foreground">Loading posture checks…</p>
               ) : (
-                PROFILE_PLATFORMS.map((platform) => {
-                  const checks = checksFor(platform.id);
-                  const lastLocked =
-                    inUse && totalActiveRequirements <= 1 ? new Set(checks.map((c) => c.id)) : undefined;
-                  return (
-                    <PlatformPostureCard
-                      key={platform.id}
-                      platform={platform}
-                      enabled={platforms.has(platform.id)}
-                      onEnabledChange={(on) => setPlatformEnabled(platform.id, on)}
-                      checks={checks}
-                      required={checkedIds}
-                      onToggleRequired={toggleCheck}
-                      locked={lastLocked}
-                    />
-                  );
-                })
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {PROFILE_PLATFORMS.map((platform) => {
+                    const checks = checksFor(platform.id);
+                    const lastLocked =
+                      inUse && totalActiveRequirements <= 1 ? new Set(checks.map((c) => c.id)) : undefined;
+                    return (
+                      <PlatformPostureCard
+                        key={platform.id}
+                        platform={platform}
+                        enabled={platforms.has(platform.id)}
+                        onEnabledChange={(on) => setPlatformEnabled(platform.id, on)}
+                        checks={checks}
+                        required={checkedIds}
+                        onToggleRequired={toggleCheck}
+                        locked={lastLocked}
+                        minVersions={minVersions}
+                        onMinVersionChange={(checkId, version) =>
+                          setMinVersions((prev) => ({ ...prev, [checkId]: version }))
+                        }
+                      />
+                    );
+                  })}
+                </div>
               )}
             </div>
 
@@ -387,4 +426,12 @@ function originalCountryRule(profile: EditableProfile): CountryRuleValue {
     allow: [...(req.countries?.allow ?? [])],
     deny: [...(req.countries?.deny ?? [])],
   };
+}
+
+function originalMinVersions(profile: EditableProfile): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of profile.requirements) {
+    if (isMinOSCheck(r.checkId) && r.minVersion) out[r.checkId] = r.minVersion;
+  }
+  return out;
 }

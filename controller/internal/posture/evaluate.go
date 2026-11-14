@@ -203,6 +203,11 @@ func (e *Evaluator) evaluateDevice(
 	now := e.now()
 	// Server-side check (PENDING-20): judged per requirement in EvaluateProfile.
 	observationByCheck[CheckNetworkCountry] = countryObservation(report.ID, netObs, now)
+	// ADR-031 D-11: the reported OS version, judged per requirement.
+	osVersion := reportedOSVersion(report.OSInfo)
+	for _, id := range []string{CheckWindowsMinOS, CheckAndroidMinOS, CheckIOSMinOS} {
+		observationByCheck[id] = osVersionObservation(report.ID, osVersion)
+	}
 
 	for _, profile := range profiles {
 		requirements, err := e.store.ListRequirements(ctx, workspaceID,
@@ -326,6 +331,15 @@ func EvaluateProfile(
 				"missing required check %s",
 				requirement.CheckID,
 			)
+			return result
+		}
+
+		if IsMinOSCheck(requirement.CheckID) {
+			ok, reason := minOSRequirementSatisfied(requirement, observation)
+			if ok {
+				continue
+			}
+			result.Reason = reason
 			return result
 		}
 

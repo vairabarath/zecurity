@@ -199,6 +199,7 @@ type ComplexityRoot struct {
 		CheckID          func(childComplexity int) int
 		Countries        func(childComplexity int) int
 		ID               func(childComplexity int) int
+		MinVersion       func(childComplexity int) int
 	}
 
 	DiscoveredService struct {
@@ -242,67 +243,68 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		AcceptScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		AddGroupMember                    func(childComplexity int, groupID string, userID string) int
-		AddProfileRequirement             func(childComplexity int, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) int
-		ApproveDevice                     func(childComplexity int, deviceID string) int
-		AssignResourceToGroup             func(childComplexity int, resourceID string, groupID string) int
-		CreateAuditExportSink             func(childComplexity int, input CreateAuditExportSinkInput) int
-		CreateDeviceProfile               func(childComplexity int, name string, manualTrust *bool) int
-		CreateGroup                       func(childComplexity int, name string, description *string) int
-		CreateIdpConnection               func(childComplexity int, input CreateIdpConnectionInput) int
-		CreateInvitation                  func(childComplexity int, email string) int
-		CreateRemoteNetwork               func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource                    func(childComplexity int, input CreateResourceInput) int
-		CreateResourcePolicy              func(childComplexity int, name string, description *string) int
-		DeleteAuditExportSink             func(childComplexity int, id string) int
-		DeleteConnector                   func(childComplexity int, id string) int
-		DeleteDeviceProfile               func(childComplexity int, id string, confirmInUse *bool) int
-		DeleteGroup                       func(childComplexity int, id string) int
-		DeleteIdpConnection               func(childComplexity int, id string, force bool) int
-		DeleteRemoteNetwork               func(childComplexity int, id string) int
-		DeleteResource                    func(childComplexity int, id string) int
-		DeleteResourcePolicy              func(childComplexity int, id string) int
-		DeleteShield                      func(childComplexity int, id string) int
-		EnableScimBreakGlass              func(childComplexity int, connectionID string, reason string) int
-		ForceDeleteResource               func(childComplexity int, id string) int
-		GenerateConnectorToken            func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken               func(childComplexity int, remoteNetworkID string, shieldName string) int
-		GrantPermission                   func(childComplexity int, userID string, permission string) int
-		InitiateAuth                      func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
-		MintScimToken                     func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		PromoteDiscoveredService          func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource                   func(childComplexity int, id string, shieldID *string) int
-		RejectScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RemoveGroupMember                 func(childComplexity int, groupID string, userID string) int
-		RemoveProfileRequirement          func(childComplexity int, profileID string, checkID string) int
-		ReopenScimConflict                func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RevokeConnector                   func(childComplexity int, id string, alsoRevokeShields *bool) int
-		RevokeDevice                      func(childComplexity int, deviceID string) int
-		RevokeScimToken                   func(childComplexity int, connectionID string, tokenID string) int
-		RevokeShield                      func(childComplexity int, id string) int
-		RotateAuditExportSinkSecret       func(childComplexity int, id string) int
-		RotateScimToken                   func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		SetIdpConnectionStatus            func(childComplexity int, id string, status string) int
-		SetMemberRole                     func(childComplexity int, userID string, role Role, reason string) int
-		SetPlatformLoginEnabled           func(childComplexity int, enabled bool) int
-		SetProfilePlatforms               func(childComplexity int, profileID string, platforms []string) int
-		SetResourcePolicy                 func(childComplexity int, resourceID string, policyID string) int
-		SetResourcePolicyProfiles         func(childComplexity int, id string, profileIds []string) int
-		TestAuditExportSink               func(childComplexity int, id string) int
-		TestIdpConnection                 func(childComplexity int, id string) int
-		TriggerScan                       func(childComplexity int, connectorID string, targets []string, ports []int) int
-		UnapproveDevice                   func(childComplexity int, deviceID string) int
-		UnassignResourceFromGroup         func(childComplexity int, resourceID string, groupID string) int
-		UnprotectResource                 func(childComplexity int, id string) int
-		UpdateAuditExportSink             func(childComplexity int, id string, input UpdateAuditExportSinkInput) int
-		UpdateDeviceProfileManualTrust    func(childComplexity int, id string, enabled bool) int
-		UpdateGroup                       func(childComplexity int, id string, name *string, description *string) int
-		UpdateIdpConnection               func(childComplexity int, id string, input UpdateIdpConnectionInput) int
-		UpdateProfileRequirementCountries func(childComplexity int, profileID string, countries CountryRuleInput) int
-		UpdateResource                    func(childComplexity int, id string, input UpdateResourceInput) int
-		UpdateResourcePolicy              func(childComplexity int, id string, name *string, description *string) int
-		UpdateScimConfig                  func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
+		AcceptScimConflict                 func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		AddGroupMember                     func(childComplexity int, groupID string, userID string) int
+		AddProfileRequirement              func(childComplexity int, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput, minVersion *string) int
+		ApproveDevice                      func(childComplexity int, deviceID string) int
+		AssignResourceToGroup              func(childComplexity int, resourceID string, groupID string) int
+		CreateAuditExportSink              func(childComplexity int, input CreateAuditExportSinkInput) int
+		CreateDeviceProfile                func(childComplexity int, name string, manualTrust *bool) int
+		CreateGroup                        func(childComplexity int, name string, description *string) int
+		CreateIdpConnection                func(childComplexity int, input CreateIdpConnectionInput) int
+		CreateInvitation                   func(childComplexity int, email string) int
+		CreateRemoteNetwork                func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource                     func(childComplexity int, input CreateResourceInput) int
+		CreateResourcePolicy               func(childComplexity int, name string, description *string) int
+		DeleteAuditExportSink              func(childComplexity int, id string) int
+		DeleteConnector                    func(childComplexity int, id string) int
+		DeleteDeviceProfile                func(childComplexity int, id string, confirmInUse *bool) int
+		DeleteGroup                        func(childComplexity int, id string) int
+		DeleteIdpConnection                func(childComplexity int, id string, force bool) int
+		DeleteRemoteNetwork                func(childComplexity int, id string) int
+		DeleteResource                     func(childComplexity int, id string) int
+		DeleteResourcePolicy               func(childComplexity int, id string) int
+		DeleteShield                       func(childComplexity int, id string) int
+		EnableScimBreakGlass               func(childComplexity int, connectionID string, reason string) int
+		ForceDeleteResource                func(childComplexity int, id string) int
+		GenerateConnectorToken             func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken                func(childComplexity int, remoteNetworkID string, shieldName string) int
+		GrantPermission                    func(childComplexity int, userID string, permission string) int
+		InitiateAuth                       func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
+		MintScimToken                      func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		PromoteDiscoveredService           func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource                    func(childComplexity int, id string, shieldID *string) int
+		RejectScimConflict                 func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RemoveGroupMember                  func(childComplexity int, groupID string, userID string) int
+		RemoveProfileRequirement           func(childComplexity int, profileID string, checkID string) int
+		ReopenScimConflict                 func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RevokeConnector                    func(childComplexity int, id string, alsoRevokeShields *bool) int
+		RevokeDevice                       func(childComplexity int, deviceID string) int
+		RevokeScimToken                    func(childComplexity int, connectionID string, tokenID string) int
+		RevokeShield                       func(childComplexity int, id string) int
+		RotateAuditExportSinkSecret        func(childComplexity int, id string) int
+		RotateScimToken                    func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		SetIdpConnectionStatus             func(childComplexity int, id string, status string) int
+		SetMemberRole                      func(childComplexity int, userID string, role Role, reason string) int
+		SetPlatformLoginEnabled            func(childComplexity int, enabled bool) int
+		SetProfilePlatforms                func(childComplexity int, profileID string, platforms []string) int
+		SetResourcePolicy                  func(childComplexity int, resourceID string, policyID string) int
+		SetResourcePolicyProfiles          func(childComplexity int, id string, profileIds []string) int
+		TestAuditExportSink                func(childComplexity int, id string) int
+		TestIdpConnection                  func(childComplexity int, id string) int
+		TriggerScan                        func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnapproveDevice                    func(childComplexity int, deviceID string) int
+		UnassignResourceFromGroup          func(childComplexity int, resourceID string, groupID string) int
+		UnprotectResource                  func(childComplexity int, id string) int
+		UpdateAuditExportSink              func(childComplexity int, id string, input UpdateAuditExportSinkInput) int
+		UpdateDeviceProfileManualTrust     func(childComplexity int, id string, enabled bool) int
+		UpdateGroup                        func(childComplexity int, id string, name *string, description *string) int
+		UpdateIdpConnection                func(childComplexity int, id string, input UpdateIdpConnectionInput) int
+		UpdateProfileRequirementCountries  func(childComplexity int, profileID string, countries CountryRuleInput) int
+		UpdateProfileRequirementMinVersion func(childComplexity int, profileID string, checkID string, minVersion string) int
+		UpdateResource                     func(childComplexity int, id string, input UpdateResourceInput) int
+		UpdateResourcePolicy               func(childComplexity int, id string, name *string, description *string) int
+		UpdateScimConfig                   func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
 	}
 
 	PostureCheckDescriptor struct {
@@ -579,7 +581,8 @@ type MutationResolver interface {
 	UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
 	CreateDeviceProfile(ctx context.Context, name string, manualTrust *bool) (*DeviceProfile, error)
 	UpdateDeviceProfileManualTrust(ctx context.Context, id string, enabled bool) (*DeviceProfile, error)
-	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput) (*DeviceProfile, error)
+	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *CountryRuleInput, minVersion *string) (*DeviceProfile, error)
+	UpdateProfileRequirementMinVersion(ctx context.Context, profileID string, checkID string, minVersion string) (*DeviceProfile, error)
 	UpdateProfileRequirementCountries(ctx context.Context, profileID string, countries CountryRuleInput) (*DeviceProfile, error)
 	DeleteDeviceProfile(ctx context.Context, id string, confirmInUse *bool) (*DeviceProfileDeletion, error)
 	SetProfilePlatforms(ctx context.Context, profileID string, platforms []string) (*DeviceProfile, error)
@@ -1326,6 +1329,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.DeviceProfileRequirement.ID(childComplexity), true
+	case "DeviceProfileRequirement.minVersion":
+		if e.ComplexityRoot.DeviceProfileRequirement.MinVersion == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfileRequirement.MinVersion(childComplexity), true
 
 	case "DiscoveredService.boundIp":
 		if e.ComplexityRoot.DiscoveredService.BoundIP == nil {
@@ -1531,7 +1540,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool), args["countries"].(*CountryRuleInput)), true
+		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool), args["countries"].(*CountryRuleInput), args["minVersion"].(*string)), true
 	case "Mutation.approveDevice":
 		if e.ComplexityRoot.Mutation.ApproveDevice == nil {
 			break
@@ -2137,6 +2146,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateProfileRequirementCountries(childComplexity, args["profileId"].(string), args["countries"].(CountryRuleInput)), true
+	case "Mutation.updateProfileRequirementMinVersion":
+		if e.ComplexityRoot.Mutation.UpdateProfileRequirementMinVersion == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateProfileRequirementMinVersion_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateProfileRequirementMinVersion(childComplexity, args["profileId"].(string), args["checkId"].(string), args["minVersion"].(string)), true
 	case "Mutation.updateResource":
 		if e.ComplexityRoot.Mutation.UpdateResource == nil {
 			break
@@ -3746,6 +3766,8 @@ func (ec *executionContext) childFields_DeviceProfileRequirement(ctx context.Con
 		return ec.fieldContext_DeviceProfileRequirement_allowUnsupported(ctx, field)
 	case "countries":
 		return ec.fieldContext_DeviceProfileRequirement_countries(ctx, field)
+	case "minVersion":
+		return ec.fieldContext_DeviceProfileRequirement_minVersion(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type DeviceProfileRequirement", field.Name)
 }
@@ -4443,6 +4465,14 @@ func (ec *executionContext) field_Mutation_addProfileRequirement_args(ctx contex
 		return nil, err
 	}
 	args["countries"] = arg3
+	arg4, err := graphql.ProcessArgField(ctx, rawArgs, "minVersion",
+		func(ctx context.Context, v any) (*string, error) {
+			return ec.unmarshalOString2ᚖstring(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["minVersion"] = arg4
 	return args, nil
 }
 
@@ -5557,6 +5587,36 @@ func (ec *executionContext) field_Mutation_updateProfileRequirementCountries_arg
 		return nil, err
 	}
 	args["countries"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateProfileRequirementMinVersion_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "checkId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["checkId"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "minVersion",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["minVersion"] = arg2
 	return args, nil
 }
 
@@ -8512,6 +8572,29 @@ func (ec *executionContext) fieldContext_DeviceProfileRequirement_countries(_ co
 	return fc, nil
 }
 
+func (ec *executionContext) _DeviceProfileRequirement_minVersion(ctx context.Context, field graphql.CollectedField, obj *DeviceProfileRequirement) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfileRequirement_minVersion(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.MinVersion, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfileRequirement_minVersion(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfileRequirement", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _DiscoveredService_shieldId(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11088,7 +11171,7 @@ func (ec *executionContext) _Mutation_addProfileRequirement(ctx context.Context,
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().AddProfileRequirement(ctx, fc.Args["profileId"].(string), fc.Args["checkId"].(string), fc.Args["allowUnsupported"].(bool), fc.Args["countries"].(*CountryRuleInput))
+			return ec.Resolvers.Mutation().AddProfileRequirement(ctx, fc.Args["profileId"].(string), fc.Args["checkId"].(string), fc.Args["allowUnsupported"].(bool), fc.Args["countries"].(*CountryRuleInput), fc.Args["minVersion"].(*string))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -11134,6 +11217,68 @@ func (ec *executionContext) fieldContext_Mutation_addProfileRequirement(ctx cont
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_addProfileRequirement_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateProfileRequirementMinVersion(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateProfileRequirementMinVersion(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateProfileRequirementMinVersion(ctx, fc.Args["profileId"].(string), fc.Args["checkId"].(string), fc.Args["minVersion"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateProfileRequirementMinVersion(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateProfileRequirementMinVersion_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -20858,6 +21003,8 @@ func (ec *executionContext) _DeviceProfileRequirement(ctx context.Context, sel a
 			}
 		case "countries":
 			out.Values[i] = ec._DeviceProfileRequirement_countries(ctx, field, obj)
+		case "minVersion":
+			out.Values[i] = ec._DeviceProfileRequirement_minVersion(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -21378,6 +21525,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "addProfileRequirement":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_addProfileRequirement(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateProfileRequirementMinVersion":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateProfileRequirementMinVersion(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++

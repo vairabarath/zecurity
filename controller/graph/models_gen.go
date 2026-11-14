@@ -204,6 +204,7 @@ type DeviceProfileRequirement struct {
 	CheckID          string       `json:"checkId"`
 	AllowUnsupported bool         `json:"allowUnsupported"`
 	Countries        *CountryRule `json:"countries,omitempty"`
+	MinVersion       *string      `json:"minVersion,omitempty"`
 }
 
 type DiscoveredService struct {
