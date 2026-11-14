@@ -668,6 +668,11 @@ func (r *mutationResolver) EnableScimBreakGlass(ctx context.Context, connectionI
 	if !held {
 		return false, apperr.UserErrorf("enableScimBreakGlass: requires the %q permission (ADMIN role alone is insufficient)", permission.BreakGlassMapping)
 	}
+	// PENDING-06 M-7: break-glass needs a second factor verified in the last
+	// 15 minutes on this console session.
+	if err := RequireBreakGlassMFA(ctx, &tc); err != nil {
+		return false, err
+	}
 
 	// Enable SCIM despite the unproven mapping (the override does NOT retroactively
 	// make the mapping "proven" — it only permits enabling).
@@ -705,6 +710,14 @@ func (r *mutationResolver) AcceptScimConflict(ctx context.Context, connectionID 
 	ds := r.ScimStore.DirectoryService()
 	if ds == nil {
 		return false, fmt.Errorf("acceptScimConflict: directory service unavailable")
+	}
+	// PENDING-06 M-7: break-glass needs a fresh second factor. Only a caller
+	// who holds the permission is asked for one; AcceptLink still makes the
+	// authoritative permission check inside its transaction.
+	if held, perr := r.PermissionStore.HasPermission(ctx, tc.TenantID, tc.UserID, permission.BreakGlassMapping); perr == nil && held {
+		if err := RequireBreakGlassMFA(ctx, &tc); err != nil {
+			return false, err
+		}
 	}
 	serr := ds.AcceptLink(ctx, tc.TenantID, connectionID, tc.UserID, tc.Email, canonicalKey, reason)
 	if serr != nil {

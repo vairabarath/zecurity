@@ -214,6 +214,23 @@ func TestUpdateScimConfig_BreakGlassFallbackUnchanged(t *testing.T) {
 	if err := harness.permissionStore.Grant(context.Background(), ws, uid, permission.BreakGlassMapping, ""); err != nil {
 		t.Fatalf("grant break-glass: %v", err)
 	}
+	// PENDING-06 M-7: the permission alone is not enough; the console session
+	// needs a second factor verified in the last 15 minutes.
+	if _, err := mr.EnableScimBreakGlass(actor, connID, "permission but no MFA"); err == nil {
+		t.Fatalf("expected break-glass without MFA to be refused")
+	}
+	if harness.readScimEnabled(connID) {
+		t.Fatalf("DB scim_enabled must stay false when break-glass lacks MFA")
+	}
+	withMFA := func(at time.Time) context.Context {
+		tc := tenant.MustGet(actor)
+		tc.MFAAt = at
+		return tenant.Set(actor, tc)
+	}
+	if _, err := mr.EnableScimBreakGlass(withMFA(time.Now().Add(-16*time.Minute)), connID, "stale MFA"); err == nil {
+		t.Fatalf("expected break-glass with a 16-minute-old MFA to be refused")
+	}
+	actor = withMFA(time.Now().Add(-time.Minute))
 	ok, err := mr.EnableScimBreakGlass(actor, connID, "testing fallback with permission")
 	if err != nil {
 		t.Fatalf("expected break-glass WITH permission to enable despite unproven mapping: %v", err)

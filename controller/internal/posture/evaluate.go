@@ -24,6 +24,9 @@ type Evaluator struct {
 	// so an evaluation that read the device's approval can't store its result
 	// after a later evaluation that saw the approval change (ADR-030).
 	deviceLocks sync.Map // uuid.UUID -> *sync.Mutex
+	// onRegression (PENDING-06 M-9) is told when a device stops satisfying a
+	// profile some resource policy requires. Optional; set once at startup.
+	onRegression func(ctx context.Context, workspaceID, deviceID uuid.UUID)
 	// afterApprovalRead is a test hook.
 	afterApprovalRead func()
 }
@@ -42,6 +45,13 @@ type ProfileResult struct {
 	Reason    string
 	Revision  int64
 	ExpiresAt time.Time
+}
+
+// SetRegressionHook registers the M-9 risk hook: fn runs when a device goes
+// from satisfying to failing a profile that a resource policy requires. Call
+// once, before the evaluator is used.
+func (e *Evaluator) SetRegressionHook(fn func(ctx context.Context, workspaceID, deviceID uuid.UUID)) {
+	e.onRegression = fn
 }
 
 func (e *Evaluator) EvaluateDevice(
@@ -200,6 +210,7 @@ func (e *Evaluator) evaluateDevice(
 
 	results := make([]ProfileResult, 0, len(profiles))
 	policyChanged := false
+	regressed := false
 	now := e.now()
 	// Server-side check (PENDING-20): judged per requirement in EvaluateProfile.
 	observationByCheck[CheckNetworkCountry] = countryObservation(report.ID, netObs, now)
@@ -268,7 +279,18 @@ func (e *Evaluator) evaluateDevice(
 			policyChanged = true
 		}
 
+		// M-9: passing → failing on a profile that a policy requires.
+		if previousErr == nil && previous.Satisfied && !result.Satisfied && e.onRegression != nil && !regressed {
+			if used, err := profileInUse(ctx, e.store.pool, profile.ID); err == nil && used {
+				regressed = true
+			}
+		}
+
 		results = append(results, result)
+	}
+
+	if regressed {
+		e.onRegression(ctx, workspaceID, deviceID)
 	}
 
 	return results, policyChanged, nil

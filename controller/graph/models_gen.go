@@ -79,21 +79,26 @@ type AuditLogPage struct {
 }
 
 type ClientDevice struct {
-	ID              string  `json:"id"`
-	UserID          string  `json:"userId"`
-	Name            string  `json:"name"`
-	CommonName      string  `json:"commonName"`
-	Os              string  `json:"os"`
-	SpiffeID        *string `json:"spiffeId,omitempty"`
-	CertNotAfter    *string `json:"certNotAfter,omitempty"`
-	LastSeenAt      *string `json:"lastSeenAt,omitempty"`
-	CreatedAt       string  `json:"createdAt"`
-	RevokedAt       *string `json:"revokedAt,omitempty"`
-	ApprovedAt      *string `json:"approvedAt,omitempty"`
-	ApprovedByEmail *string `json:"approvedByEmail,omitempty"`
-	ObservedCountry *string `json:"observedCountry,omitempty"`
-	ObservedNetwork *string `json:"observedNetwork,omitempty"`
-	ObservedAt      *string `json:"observedAt,omitempty"`
+	ID                  string   `json:"id"`
+	UserID              string   `json:"userId"`
+	Name                string   `json:"name"`
+	CommonName          string   `json:"commonName"`
+	Os                  string   `json:"os"`
+	SpiffeID            *string  `json:"spiffeId,omitempty"`
+	CertNotAfter        *string  `json:"certNotAfter,omitempty"`
+	LastSeenAt          *string  `json:"lastSeenAt,omitempty"`
+	CreatedAt           string   `json:"createdAt"`
+	RevokedAt           *string  `json:"revokedAt,omitempty"`
+	ApprovedAt          *string  `json:"approvedAt,omitempty"`
+	ApprovedByEmail     *string  `json:"approvedByEmail,omitempty"`
+	ObservedCountry     *string  `json:"observedCountry,omitempty"`
+	ObservedNetwork     *string  `json:"observedNetwork,omitempty"`
+	ObservedAt          *string  `json:"observedAt,omitempty"`
+	LastAuthenticatedAt *string  `json:"lastAuthenticatedAt,omitempty"`
+	LastMfaAt           *string  `json:"lastMfaAt,omitempty"`
+	RiskScore           int      `json:"riskScore"`
+	RiskReasons         []string `json:"riskReasons"`
+	ReauthRequired      bool     `json:"reauthRequired"`
 }
 
 type Connector struct {
@@ -120,6 +125,10 @@ type ConnectorLog struct {
 
 type ConnectorToken struct {
 	ConnectorID string `json:"connectorId"`
+}
+
+type ConsoleSecurity struct {
+	RequireMfa bool `json:"requireMfa"`
 }
 
 type CountryRule struct {
@@ -298,13 +307,15 @@ type Resource struct {
 }
 
 type ResourcePolicy struct {
-	ID            string           `json:"id"`
-	Name          string           `json:"name"`
-	Description   *string          `json:"description,omitempty"`
-	IsDefault     bool             `json:"isDefault"`
-	Profiles      []*DeviceProfile `json:"profiles"`
-	Resources     []*Resource      `json:"resources"`
-	ResourceCount int              `json:"resourceCount"`
+	ID                   string           `json:"id"`
+	Name                 string           `json:"name"`
+	Description          *string          `json:"description,omitempty"`
+	IsDefault            bool             `json:"isDefault"`
+	Profiles             []*DeviceProfile `json:"profiles"`
+	Resources            []*Resource      `json:"resources"`
+	ResourceCount        int              `json:"resourceCount"`
+	AuthFrequencyMinutes *int             `json:"authFrequencyMinutes,omitempty"`
+	RequireMfa           bool             `json:"requireMfa"`
 }
 
 type ResourcePolicyPreview struct {

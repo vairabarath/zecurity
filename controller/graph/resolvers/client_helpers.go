@@ -32,7 +32,8 @@ func invitationToGQL(inv *invitation.Invitation) *graph.Invitation {
 // LEFT JOIN device_network_observations n (PENDING-20) on device and workspace.
 const clientDeviceColumns = `d.id, d.user_id, d.name, d.os, d.spiffe_id, d.cert_not_after,
 		        d.last_seen_at, d.created_at, d.revoked_at, d.approved_at, u.email,
-		        NULLIF(n.country, ''), host(n.network_prefix) || '/' || masklen(n.network_prefix), n.observed_at`
+		        NULLIF(n.country, ''), host(n.network_prefix) || '/' || masklen(n.network_prefix), n.observed_at,
+		        d.session_auth_at, d.session_mfa_at, d.risk_score, d.risk_reasons, d.reauth_required_at`
 
 func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 	var (
@@ -47,9 +48,14 @@ func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 		observedCountry      *string
 		observedNetwork      *string
 		observedAt           *time.Time
+		authAt, mfaAt        *time.Time
+		riskScore            int
+		riskReasons          []string
+		reauthRequiredAt     *time.Time
 	)
 	if err := row.Scan(&id, &userID, &name, &os, &spiffeID, &certNotAfter, &lastSeenAt, &createdAt, &revokedAt,
-		&approvedAt, &approvedByEmail, &observedCountry, &observedNetwork, &observedAt); err != nil {
+		&approvedAt, &approvedByEmail, &observedCountry, &observedNetwork, &observedAt,
+		&authAt, &mfaAt, &riskScore, &riskReasons, &reauthRequiredAt); err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
 	}
 
@@ -64,6 +70,21 @@ func scanClientDevice(row scanner) (*graph.ClientDevice, error) {
 		// PENDING-20 G1: last sighting (country + /24 or /48 network only).
 		ObservedCountry: observedCountry,
 		ObservedNetwork: observedNetwork,
+		// PENDING-06: risk state (M-9).
+		RiskScore:      riskScore,
+		RiskReasons:    riskReasons,
+		ReauthRequired: reauthRequiredAt != nil,
+	}
+	if d.RiskReasons == nil {
+		d.RiskReasons = []string{}
+	}
+	if authAt != nil {
+		s := authAt.UTC().Format(time.RFC3339)
+		d.LastAuthenticatedAt = &s
+	}
+	if mfaAt != nil {
+		s := mfaAt.UTC().Format(time.RFC3339)
+		d.LastMfaAt = &s
 	}
 	if observedAt != nil {
 		s := observedAt.UTC().Format(time.RFC3339)

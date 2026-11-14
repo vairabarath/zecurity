@@ -148,5 +148,13 @@ func resourcePolicyToGQL(p *posture.ResourcePolicy) *graph.ResourcePolicy {
 		Description:   p.Description,
 		IsDefault:     p.IsDefault,
 		ResourceCount: p.ResourceCount,
+		// PENDING-06 M-2.
+		AuthFrequencyMinutes: p.AuthFrequencyMinutes,
+		RequireMfa:           p.RequireMFA,
 	}
+}
+
+// policyAuthAudit is a policy's authentication requirement for the audit log.
+func policyAuthAudit(p *posture.ResourcePolicy) map[string]any {
+	return map[string]any{"frequency_minutes": p.AuthFrequencyMinutes, "require_mfa": p.RequireMFA}
 }

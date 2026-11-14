@@ -112,21 +112,26 @@ type ComplexityRoot struct {
 	}
 
 	ClientDevice struct {
-		ApprovedAt      func(childComplexity int) int
-		ApprovedByEmail func(childComplexity int) int
-		CertNotAfter    func(childComplexity int) int
-		CommonName      func(childComplexity int) int
-		CreatedAt       func(childComplexity int) int
-		ID              func(childComplexity int) int
-		LastSeenAt      func(childComplexity int) int
-		Name            func(childComplexity int) int
-		ObservedAt      func(childComplexity int) int
-		ObservedCountry func(childComplexity int) int
-		ObservedNetwork func(childComplexity int) int
-		Os              func(childComplexity int) int
-		RevokedAt       func(childComplexity int) int
-		SpiffeID        func(childComplexity int) int
-		UserID          func(childComplexity int) int
+		ApprovedAt          func(childComplexity int) int
+		ApprovedByEmail     func(childComplexity int) int
+		CertNotAfter        func(childComplexity int) int
+		CommonName          func(childComplexity int) int
+		CreatedAt           func(childComplexity int) int
+		ID                  func(childComplexity int) int
+		LastAuthenticatedAt func(childComplexity int) int
+		LastMfaAt           func(childComplexity int) int
+		LastSeenAt          func(childComplexity int) int
+		Name                func(childComplexity int) int
+		ObservedAt          func(childComplexity int) int
+		ObservedCountry     func(childComplexity int) int
+		ObservedNetwork     func(childComplexity int) int
+		Os                  func(childComplexity int) int
+		ReauthRequired      func(childComplexity int) int
+		RevokedAt           func(childComplexity int) int
+		RiskReasons         func(childComplexity int) int
+		RiskScore           func(childComplexity int) int
+		SpiffeID            func(childComplexity int) int
+		UserID              func(childComplexity int) int
 	}
 
 	Connector struct {
@@ -153,6 +158,10 @@ type ComplexityRoot struct {
 
 	ConnectorToken struct {
 		ConnectorID func(childComplexity int) int
+	}
+
+	ConsoleSecurity struct {
+		RequireMfa func(childComplexity int) int
 	}
 
 	CountryRule struct {
@@ -278,17 +287,20 @@ type ComplexityRoot struct {
 		RemoveGroupMember                  func(childComplexity int, groupID string, userID string) int
 		RemoveProfileRequirement           func(childComplexity int, profileID string, checkID string) int
 		ReopenScimConflict                 func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		ResetUserMfa                       func(childComplexity int, userID string) int
 		RevokeConnector                    func(childComplexity int, id string, alsoRevokeShields *bool) int
 		RevokeDevice                       func(childComplexity int, deviceID string) int
 		RevokeScimToken                    func(childComplexity int, connectionID string, tokenID string) int
 		RevokeShield                       func(childComplexity int, id string) int
 		RotateAuditExportSinkSecret        func(childComplexity int, id string) int
 		RotateScimToken                    func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		SetConsoleRequireMfa               func(childComplexity int, required bool) int
 		SetIdpConnectionStatus             func(childComplexity int, id string, status string) int
 		SetMemberRole                      func(childComplexity int, userID string, role Role, reason string) int
 		SetPlatformLoginEnabled            func(childComplexity int, enabled bool) int
 		SetProfilePlatforms                func(childComplexity int, profileID string, platforms []string) int
 		SetResourcePolicy                  func(childComplexity int, resourceID string, policyID string) int
+		SetResourcePolicyAuthentication    func(childComplexity int, id string, frequencyMinutes *int, requireMfa bool) int
 		SetResourcePolicyProfiles          func(childComplexity int, id string, profileIds []string) int
 		TestAuditExportSink                func(childComplexity int, id string) int
 		TestIdpConnection                  func(childComplexity int, id string) int
@@ -329,6 +341,7 @@ type ComplexityRoot struct {
 		Connector               func(childComplexity int, id string) int
 		ConnectorLogs           func(childComplexity int, limit *int) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
+		ConsoleSecurity         func(childComplexity int) int
 		DevicePostureVisibility func(childComplexity int, profileID string) int
 		DeviceProfiles          func(childComplexity int) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
@@ -390,13 +403,15 @@ type ComplexityRoot struct {
 	}
 
 	ResourcePolicy struct {
-		Description   func(childComplexity int) int
-		ID            func(childComplexity int) int
-		IsDefault     func(childComplexity int) int
-		Name          func(childComplexity int) int
-		Profiles      func(childComplexity int) int
-		ResourceCount func(childComplexity int) int
-		Resources     func(childComplexity int) int
+		AuthFrequencyMinutes func(childComplexity int) int
+		Description          func(childComplexity int) int
+		ID                   func(childComplexity int) int
+		IsDefault            func(childComplexity int) int
+		Name                 func(childComplexity int) int
+		Profiles             func(childComplexity int) int
+		RequireMfa           func(childComplexity int) int
+		ResourceCount        func(childComplexity int) int
+		Resources            func(childComplexity int) int
 	}
 
 	ResourcePolicyPreview struct {
@@ -488,6 +503,7 @@ type ComplexityRoot struct {
 		CreatedAt         func(childComplexity int) int
 		Email             func(childComplexity int) int
 		ID                func(childComplexity int) int
+		MfaEnrolled       func(childComplexity int) int
 		Provider          func(childComplexity int) int
 		ProvisionedBy     func(childComplexity int) int
 		ProvisioningOwner func(childComplexity int) int
@@ -552,6 +568,8 @@ type DeviceProfileResolver interface {
 type MutationResolver interface {
 	InitiateAuth(ctx context.Context, provider string, workspaceName *string, connectionID *string) (*model.AuthInitPayload, error)
 	SetMemberRole(ctx context.Context, userID string, role Role, reason string) (*models.User, error)
+	SetConsoleRequireMfa(ctx context.Context, required bool) (*ConsoleSecurity, error)
+	ResetUserMfa(ctx context.Context, userID string) (bool, error)
 	CreateRemoteNetwork(ctx context.Context, name string, location NetworkLocation) (*RemoteNetwork, error)
 	DeleteRemoteNetwork(ctx context.Context, id string) (bool, error)
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
@@ -590,6 +608,7 @@ type MutationResolver interface {
 	CreateResourcePolicy(ctx context.Context, name string, description *string) (*ResourcePolicy, error)
 	UpdateResourcePolicy(ctx context.Context, id string, name *string, description *string) (*ResourcePolicy, error)
 	SetResourcePolicyProfiles(ctx context.Context, id string, profileIds []string) (*ResourcePolicy, error)
+	SetResourcePolicyAuthentication(ctx context.Context, id string, frequencyMinutes *int, requireMfa bool) (*ResourcePolicy, error)
 	DeleteResourcePolicy(ctx context.Context, id string) (bool, error)
 	SetResourcePolicy(ctx context.Context, resourceID string, policyID string) (*Resource, error)
 	CreateIdpConnection(ctx context.Context, input CreateIdpConnectionInput) (*WorkspaceIdpConnection, error)
@@ -619,6 +638,7 @@ type QueryResolver interface {
 	Workspace(ctx context.Context) (*models.Workspace, error)
 	LookupWorkspace(ctx context.Context, slug string) (*WorkspaceLookupResult, error)
 	LookupWorkspacesByEmail(ctx context.Context, email string) (*WorkspaceListResult, error)
+	ConsoleSecurity(ctx context.Context) (*ConsoleSecurity, error)
 	RemoteNetworks(ctx context.Context) ([]*RemoteNetwork, error)
 	RemoteNetwork(ctx context.Context, id string) (*RemoteNetwork, error)
 	Connectors(ctx context.Context, remoteNetworkID string) ([]*Connector, error)
@@ -662,6 +682,7 @@ type UserResolver interface {
 
 	CreatedAt(ctx context.Context, obj *models.User) (string, error)
 
+	MfaEnrolled(ctx context.Context, obj *models.User) (bool, error)
 	Capabilities(ctx context.Context, obj *models.User) ([]Capability, error)
 }
 type WorkspaceResolver interface {
@@ -996,6 +1017,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ClientDevice.ID(childComplexity), true
+	case "ClientDevice.lastAuthenticatedAt":
+		if e.ComplexityRoot.ClientDevice.LastAuthenticatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.LastAuthenticatedAt(childComplexity), true
+	case "ClientDevice.lastMfaAt":
+		if e.ComplexityRoot.ClientDevice.LastMfaAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.LastMfaAt(childComplexity), true
 	case "ClientDevice.lastSeenAt":
 		if e.ComplexityRoot.ClientDevice.LastSeenAt == nil {
 			break
@@ -1032,12 +1065,30 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ClientDevice.Os(childComplexity), true
+	case "ClientDevice.reauthRequired":
+		if e.ComplexityRoot.ClientDevice.ReauthRequired == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ReauthRequired(childComplexity), true
 	case "ClientDevice.revokedAt":
 		if e.ComplexityRoot.ClientDevice.RevokedAt == nil {
 			break
 		}
 
 		return e.ComplexityRoot.ClientDevice.RevokedAt(childComplexity), true
+	case "ClientDevice.riskReasons":
+		if e.ComplexityRoot.ClientDevice.RiskReasons == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.RiskReasons(childComplexity), true
+	case "ClientDevice.riskScore":
+		if e.ComplexityRoot.ClientDevice.RiskScore == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.RiskScore(childComplexity), true
 	case "ClientDevice.spiffeId":
 		if e.ComplexityRoot.ClientDevice.SpiffeID == nil {
 			break
@@ -1155,6 +1206,13 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ConnectorToken.ConnectorID(childComplexity), true
+
+	case "ConsoleSecurity.requireMfa":
+		if e.ComplexityRoot.ConsoleSecurity.RequireMfa == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConsoleSecurity.RequireMfa(childComplexity), true
 
 	case "CountryRule.allow":
 		if e.ComplexityRoot.CountryRule.Allow == nil {
@@ -1893,6 +1951,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.ReopenScimConflict(childComplexity, args["connectionId"].(string), args["canonicalKey"].(string), args["reason"].(string)), true
+	case "Mutation.resetUserMfa":
+		if e.ComplexityRoot.Mutation.ResetUserMfa == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_resetUserMfa_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.ResetUserMfa(childComplexity, args["userId"].(string)), true
 	case "Mutation.revokeConnector":
 		if e.ComplexityRoot.Mutation.RevokeConnector == nil {
 			break
@@ -1959,6 +2028,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RotateScimToken(childComplexity, args["connectionId"].(string), args["label"].(*string), args["expiresAt"].(*time.Time)), true
+	case "Mutation.setConsoleRequireMfa":
+		if e.ComplexityRoot.Mutation.SetConsoleRequireMfa == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setConsoleRequireMfa_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetConsoleRequireMfa(childComplexity, args["required"].(bool)), true
 	case "Mutation.setIdpConnectionStatus":
 		if e.ComplexityRoot.Mutation.SetIdpConnectionStatus == nil {
 			break
@@ -2014,6 +2094,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.SetResourcePolicy(childComplexity, args["resourceId"].(string), args["policyId"].(string)), true
+	case "Mutation.setResourcePolicyAuthentication":
+		if e.ComplexityRoot.Mutation.SetResourcePolicyAuthentication == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setResourcePolicyAuthentication_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetResourcePolicyAuthentication(childComplexity, args["id"].(string), args["frequencyMinutes"].(*int), args["requireMfa"].(bool)), true
 	case "Mutation.setResourcePolicyProfiles":
 		if e.ComplexityRoot.Mutation.SetResourcePolicyProfiles == nil {
 			break
@@ -2303,6 +2394,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Connectors(childComplexity, args["remoteNetworkId"].(string)), true
+	case "Query.consoleSecurity":
+		if e.ComplexityRoot.Query.ConsoleSecurity == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.ConsoleSecurity(childComplexity), true
 	case "Query.devicePostureVisibility":
 		if e.ComplexityRoot.Query.DevicePostureVisibility == nil {
 			break
@@ -2699,6 +2796,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Resource.Status(childComplexity), true
 
+	case "ResourcePolicy.authFrequencyMinutes":
+		if e.ComplexityRoot.ResourcePolicy.AuthFrequencyMinutes == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.AuthFrequencyMinutes(childComplexity), true
 	case "ResourcePolicy.description":
 		if e.ComplexityRoot.ResourcePolicy.Description == nil {
 			break
@@ -2729,6 +2832,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ResourcePolicy.Profiles(childComplexity), true
+	case "ResourcePolicy.requireMfa":
+		if e.ComplexityRoot.ResourcePolicy.RequireMfa == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.RequireMfa(childComplexity), true
 	case "ResourcePolicy.resourceCount":
 		if e.ComplexityRoot.ResourcePolicy.ResourceCount == nil {
 			break
@@ -3117,6 +3226,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.User.ID(childComplexity), true
+	case "User.mfaEnrolled":
+		if e.ComplexityRoot.User.MfaEnrolled == nil {
+			break
+		}
+
+		return e.ComplexityRoot.User.MfaEnrolled(childComplexity), true
 	case "User.provider":
 		if e.ComplexityRoot.User.Provider == nil {
 			break
@@ -3622,6 +3737,16 @@ func (ec *executionContext) childFields_ClientDevice(ctx context.Context, field 
 		return ec.fieldContext_ClientDevice_observedNetwork(ctx, field)
 	case "observedAt":
 		return ec.fieldContext_ClientDevice_observedAt(ctx, field)
+	case "lastAuthenticatedAt":
+		return ec.fieldContext_ClientDevice_lastAuthenticatedAt(ctx, field)
+	case "lastMfaAt":
+		return ec.fieldContext_ClientDevice_lastMfaAt(ctx, field)
+	case "riskScore":
+		return ec.fieldContext_ClientDevice_riskScore(ctx, field)
+	case "riskReasons":
+		return ec.fieldContext_ClientDevice_riskReasons(ctx, field)
+	case "reauthRequired":
+		return ec.fieldContext_ClientDevice_reauthRequired(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ClientDevice", field.Name)
 }
@@ -3676,6 +3801,14 @@ func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, fiel
 		return ec.fieldContext_ConnectorToken_connectorId(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ConnectorToken", field.Name)
+}
+
+func (ec *executionContext) childFields_ConsoleSecurity(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "requireMfa":
+		return ec.fieldContext_ConsoleSecurity_requireMfa(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type ConsoleSecurity", field.Name)
 }
 
 func (ec *executionContext) childFields_CountryRule(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -3956,6 +4089,10 @@ func (ec *executionContext) childFields_ResourcePolicy(ctx context.Context, fiel
 		return ec.fieldContext_ResourcePolicy_resources(ctx, field)
 	case "resourceCount":
 		return ec.fieldContext_ResourcePolicy_resourceCount(ctx, field)
+	case "authFrequencyMinutes":
+		return ec.fieldContext_ResourcePolicy_authFrequencyMinutes(ctx, field)
+	case "requireMfa":
+		return ec.fieldContext_ResourcePolicy_requireMfa(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ResourcePolicy", field.Name)
 }
@@ -4144,6 +4281,8 @@ func (ec *executionContext) childFields_User(ctx context.Context, field graphql.
 		return ec.fieldContext_User_provisionedBy(ctx, field)
 	case "provisioningOwner":
 		return ec.fieldContext_User_provisioningOwner(ctx, field)
+	case "mfaEnrolled":
+		return ec.fieldContext_User_mfaEnrolled(ctx, field)
 	case "capabilities":
 		return ec.fieldContext_User_capabilities(ctx, field)
 	}
@@ -5116,6 +5255,20 @@ func (ec *executionContext) field_Mutation_reopenScimConflict_args(ctx context.C
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_resetUserMfa_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "userId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_revokeConnector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -5232,6 +5385,20 @@ func (ec *executionContext) field_Mutation_rotateScimToken_args(ctx context.Cont
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_setConsoleRequireMfa_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "required",
+		func(ctx context.Context, v any) (bool, error) {
+			return ec.unmarshalNBoolean2bool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["required"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_setIdpConnectionStatus_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -5317,6 +5484,36 @@ func (ec *executionContext) field_Mutation_setProfilePlatforms_args(ctx context.
 		return nil, err
 	}
 	args["platforms"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_setResourcePolicyAuthentication_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "frequencyMinutes",
+		func(ctx context.Context, v any) (*int, error) {
+			return ec.unmarshalOInt2ᚖint(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["frequencyMinutes"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "requireMfa",
+		func(ctx context.Context, v any) (bool, error) {
+			return ec.unmarshalNBoolean2bool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["requireMfa"] = arg2
 	return args, nil
 }
 
@@ -7483,6 +7680,121 @@ func (ec *executionContext) fieldContext_ClientDevice_observedAt(_ context.Conte
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _ClientDevice_lastAuthenticatedAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_lastAuthenticatedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.LastAuthenticatedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_lastAuthenticatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_lastMfaAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_lastMfaAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.LastMfaAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_lastMfaAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_riskScore(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_riskScore(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RiskScore, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v int) graphql.Marshaler {
+			return ec.marshalNInt2int(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_riskScore(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_riskReasons(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_riskReasons(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RiskReasons, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []string) graphql.Marshaler {
+			return ec.marshalNString2ᚕstringᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_riskReasons(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_reauthRequired(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_reauthRequired(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ReauthRequired, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_reauthRequired(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
 func (ec *executionContext) _Connector_id(ctx context.Context, field graphql.CollectedField, obj *Connector) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -7872,6 +8184,29 @@ func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, fie
 }
 func (ec *executionContext) fieldContext_ConnectorToken_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _ConsoleSecurity_requireMfa(ctx context.Context, field graphql.CollectedField, obj *ConsoleSecurity) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConsoleSecurity_requireMfa(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RequireMfa, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConsoleSecurity_requireMfa(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConsoleSecurity", field, false, false, errors.New("field of type Boolean does not have child fields"))
 }
 
 func (ec *executionContext) _CountryRule_allow(ctx context.Context, field graphql.CollectedField, obj *CountryRule) (ret graphql.Marshaler) {
@@ -9357,6 +9692,130 @@ func (ec *executionContext) fieldContext_Mutation_setMemberRole(ctx context.Cont
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_setMemberRole_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_setConsoleRequireMfa(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setConsoleRequireMfa(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetConsoleRequireMfa(ctx, fc.Args["required"].(bool))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "IDENTITY_ADMIN")
+				if err != nil {
+					var zeroVal *ConsoleSecurity
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *ConsoleSecurity
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ConsoleSecurity) graphql.Marshaler {
+			return ec.marshalNConsoleSecurity2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConsoleSecurity(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setConsoleRequireMfa(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ConsoleSecurity(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setConsoleRequireMfa_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_resetUserMfa(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_resetUserMfa(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().ResetUserMfa(ctx, fc.Args["userId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "MEMBERS_ADMIN")
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_resetUserMfa(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_resetUserMfa_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -11719,6 +12178,68 @@ func (ec *executionContext) fieldContext_Mutation_setResourcePolicyProfiles(ctx 
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_setResourcePolicyAuthentication(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setResourcePolicyAuthentication(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetResourcePolicyAuthentication(ctx, fc.Args["id"].(string), fc.Args["frequencyMinutes"].(*int), fc.Args["requireMfa"].(bool))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "POSTURE_WRITE")
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setResourcePolicyAuthentication(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setResourcePolicyAuthentication_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_deleteResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -13465,6 +13986,56 @@ func (ec *executionContext) fieldContext_Query_lookupWorkspacesByEmail(ctx conte
 	if fc.Args, err = ec.field_Query_lookupWorkspacesByEmail_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_consoleSecurity(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_consoleSecurity(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().ConsoleSecurity(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
+				if err != nil {
+					var zeroVal *ConsoleSecurity
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal *ConsoleSecurity
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ConsoleSecurity) graphql.Marshaler {
+			return ec.marshalNConsoleSecurity2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConsoleSecurity(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_consoleSecurity(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ConsoleSecurity(ctx, field)
+		},
 	}
 	return fc, nil
 }
@@ -15983,6 +16554,52 @@ func (ec *executionContext) fieldContext_ResourcePolicy_resourceCount(_ context.
 	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type Int does not have child fields"))
 }
 
+func (ec *executionContext) _ResourcePolicy_authFrequencyMinutes(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_authFrequencyMinutes(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.AuthFrequencyMinutes, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *int) graphql.Marshaler {
+			return ec.marshalOInt2ᚖint(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_authFrequencyMinutes(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicy_requireMfa(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_requireMfa(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RequireMfa, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_requireMfa(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
 func (ec *executionContext) _ResourcePolicyPreview_devices(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicyPreview) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -17462,6 +18079,29 @@ func (ec *executionContext) _User_provisioningOwner(ctx context.Context, field g
 }
 func (ec *executionContext) fieldContext_User_provisioningOwner(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("User", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _User_mfaEnrolled(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_User_mfaEnrolled(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.User().MfaEnrolled(ctx, obj)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_User_mfaEnrolled(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("User", field, true, true, errors.New("field of type Boolean does not have child fields"))
 }
 
 func (ec *executionContext) _User_capabilities(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
@@ -20443,6 +21083,25 @@ func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.Selection
 			out.Values[i] = ec._ClientDevice_observedNetwork(ctx, field, obj)
 		case "observedAt":
 			out.Values[i] = ec._ClientDevice_observedAt(ctx, field, obj)
+		case "lastAuthenticatedAt":
+			out.Values[i] = ec._ClientDevice_lastAuthenticatedAt(ctx, field, obj)
+		case "lastMfaAt":
+			out.Values[i] = ec._ClientDevice_lastMfaAt(ctx, field, obj)
+		case "riskScore":
+			out.Values[i] = ec._ClientDevice_riskScore(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "riskReasons":
+			out.Values[i] = ec._ClientDevice_riskReasons(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "reauthRequired":
+			out.Values[i] = ec._ClientDevice_reauthRequired(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -20609,6 +21268,45 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 			out.Values[i] = graphql.MarshalString("ConnectorToken")
 		case "connectorId":
 			out.Values[i] = ec._ConnectorToken_connectorId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var consoleSecurityImplementors = []string{"ConsoleSecurity"}
+
+func (ec *executionContext) _ConsoleSecurity(ctx context.Context, sel ast.SelectionSet, obj *ConsoleSecurity) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, consoleSecurityImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ConsoleSecurity")
+		case "requireMfa":
+			out.Values[i] = ec._ConsoleSecurity_requireMfa(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -21319,6 +22017,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "setConsoleRequireMfa":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setConsoleRequireMfa(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "resetUserMfa":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_resetUserMfa(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "createRemoteNetwork":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createRemoteNetwork(ctx, field)
@@ -21581,6 +22293,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "setResourcePolicyProfiles":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_setResourcePolicyProfiles(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "setResourcePolicyAuthentication":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setResourcePolicyAuthentication(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -21987,6 +22706,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_lookupWorkspacesByEmail(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "consoleSecurity":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_consoleSecurity(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -22981,6 +23722,13 @@ func (ec *executionContext) _ResourcePolicy(ctx context.Context, sel ast.Selecti
 			if out.Values[i] == graphql.Null {
 				atomic.AddUint32(&out.Invalids, 1)
 			}
+		case "authFrequencyMinutes":
+			out.Values[i] = ec._ResourcePolicy_authFrequencyMinutes(ctx, field, obj)
+		case "requireMfa":
+			out.Values[i] = ec._ResourcePolicy_requireMfa(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -23655,6 +24403,42 @@ func (ec *executionContext) _User(ctx context.Context, sel ast.SelectionSet, obj
 			if out.Values[i] == graphql.Null {
 				atomic.AddUint32(&out.Invalids, 1)
 			}
+		case "mfaEnrolled":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._User_mfaEnrolled(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "capabilities":
 			field := field
 
@@ -24802,6 +25586,20 @@ func (ec *executionContext) marshalNConnectorToken2ᚖgithubᚗcomᚋyourorgᚋz
 		return graphql.Null
 	}
 	return ec._ConnectorToken(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNConsoleSecurity2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConsoleSecurity(ctx context.Context, sel ast.SelectionSet, v ConsoleSecurity) graphql.Marshaler {
+	return ec._ConsoleSecurity(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNConsoleSecurity2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConsoleSecurity(ctx context.Context, sel ast.SelectionSet, v *ConsoleSecurity) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ConsoleSecurity(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNCountryRuleInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCountryRuleInput(ctx context.Context, v any) (CountryRuleInput, error) {

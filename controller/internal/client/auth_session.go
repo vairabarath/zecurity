@@ -25,6 +25,11 @@ type authSession struct {
 	CtrlCode          string    // one-time code; set after the IdP callback completes
 	CtrlCodeExpiresAt time.Time // 60-second TTL after ctrl_code is issued
 	ExpiresAt         time.Time // 10-minute overall session TTL
+
+	// Reauth is set when this round trip is a step-up for an enrolled device
+	// (PENDING-06 M-5, reauth.go), not a sign-in. Such a session never yields
+	// a ctrl_code or tokens.
+	Reauth *reauthInfo
 }
 
 var (

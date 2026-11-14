@@ -27,6 +27,15 @@ type ClientDevice {
   observedCountry:  String
   observedNetwork:  String
   observedAt:       String
+  # PENDING-06: when the device's login session last authenticated and last
+  # passed MFA, and its risk state (M-9). reauthRequired: the risk score
+  # reached the threshold, so the device must authenticate again before it
+  # can reach resources whose policy has an authentication requirement.
+  lastAuthenticatedAt: String
+  lastMfaAt:           String
+  riskScore:           Int!
+  riskReasons:         [String!]!
+  reauthRequired:      Boolean!
 }
 
 extend type Query {

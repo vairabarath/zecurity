@@ -19,6 +19,9 @@ var mutationsAuditedElsewhere = map[string]string{
 	"RejectScimConflict": "audited in scim.DirectoryService.Reject",
 	"ReopenScimConflict": "audited in scim.DirectoryService.Reopen",
 	"SetMemberRole":      "audited in-transaction by setMemberRole (audit.RecordTx)",
+	// PENDING-06: both are audited in mfa_helpers.go (r.auditAdmin).
+	"SetConsoleRequireMfa": "audited in setConsoleRequireMfa",
+	"ResetUserMfa":         "audited in resetUserMfa",
 	// PENDING-11 P-8: sink changes are audited in the store's transaction.
 	"CreateAuditExportSink":       "audited in-transaction by auditexport.Store.Create",
 	"UpdateAuditExportSink":       "audited in-transaction by auditexport.Store.Update",

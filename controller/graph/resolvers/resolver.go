@@ -11,6 +11,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/outbox"
+	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
@@ -50,6 +51,11 @@ type Resolver struct {
 	// and the SCIM/IdP disable paths drop its cache entries after commit.
 	// Nil-safe for invalidation.
 	Roles *rbac.Checker
+
+	// PENDING-06: workspace users' TOTP (M-1, M-8) and Admin Console
+	// Security (M-6).
+	MFA        *mfa.Service
+	ConsoleMFA *mfa.ConsolePolicy
 
 	// IdpStore backs the identity-provider admin API (PENDING-04 Phase 6).
 	IdpStore *idp.Store

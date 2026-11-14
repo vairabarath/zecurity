@@ -11,6 +11,13 @@ type ResourcePolicy {
   profiles: [DeviceProfile!]! @goField(forceResolver: true)
   resources: [Resource!]! @goField(forceResolver: true)
   resourceCount: Int!
+  # PENDING-06 M-2: the authentication requirement. authFrequencyMinutes null
+  # = device-only (no authentication requirement). Otherwise a device reaches
+  # the policy's resources only while its session authenticated within that
+  # many minutes (60 … 44640 = 1 hour … 31 days); with requireMfa, also while
+  # it passed MFA within them.
+  authFrequencyMinutes: Int
+  requireMfa: Boolean!
 }
 
 # How many of the devices the resources' groups allow today would pass the
@@ -37,6 +44,9 @@ extend type Mutation {
   updateResourcePolicy(id: ID!, name: String, description: String): ResourcePolicy! @requires(capability: POSTURE_WRITE)
   # Replaces the policy's profiles; [] means any device. Empty profiles refused.
   setResourcePolicyProfiles(id: ID!, profileIds: [ID!]!): ResourcePolicy! @requires(capability: POSTURE_WRITE)
+  # PENDING-06 M-2: sets the authentication requirement (the Default's too).
+  # frequencyMinutes null = device-only; requireMfa needs a frequency.
+  setResourcePolicyAuthentication(id: ID!, frequencyMinutes: Int, requireMfa: Boolean!): ResourcePolicy! @requires(capability: POSTURE_WRITE)
   # Moves the policy's resources to the Default, then deletes it. Default refused.
   deleteResourcePolicy(id: ID!): Boolean! @requires(capability: POSTURE_WRITE)
   # D-2: POSTURE_WRITE, not NETWORK_WRITE: it changes which devices may connect.
