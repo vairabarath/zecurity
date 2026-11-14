@@ -90,3 +90,38 @@ func TestAndroidChecksAreRecognized(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsChecksAreRecognized(t *testing.T) {
+	for _, id := range []string{CheckWindowsEncryption, CheckWindowsScreenLock, CheckWindowsBiometric, CheckWindowsFirewall, CheckWindowsAntivirus} {
+		if _, ok := recognizedChecks[id]; !ok {
+			t.Fatalf("%s must be a recognized client check", id)
+		}
+		if checkPlatform(id) != "windows" {
+			t.Fatalf("%s must belong to windows", id)
+		}
+	}
+}
+
+// A Windows device is held to the Windows checks only, and a Windows check
+// never applies to the other platforms (ADR-031 D-2).
+func TestWindowsRequirementsApplyToWindowsOnly(t *testing.T) {
+	now := time.Now()
+	all := Profile{ID: uuid.New(), Revision: 1, AllowedPlatforms: []string{"linux", "android", "windows"}}
+	reqs := []Requirement{{CheckID: CheckWindowsEncryption}, {CheckID: CheckAndroidScreenLock}}
+
+	got := EvaluateProfile(now, now, all, "windows", reqs,
+		map[string]Observation{CheckWindowsEncryption: {CheckID: CheckWindowsEncryption, Status: ObservationStatusFail}})
+	if got.Satisfied {
+		t.Fatalf("windows device with BitLocker off must fail: %+v", got)
+	}
+	got = EvaluateProfile(now, now, all, "windows", reqs,
+		map[string]Observation{CheckWindowsEncryption: {CheckID: CheckWindowsEncryption, Status: ObservationStatusPass}})
+	if !got.Satisfied {
+		t.Fatalf("windows device with BitLocker on must pass (android check doesn't apply): %+v", got)
+	}
+	got = EvaluateProfile(now, now, all, "android", reqs,
+		map[string]Observation{CheckAndroidScreenLock: {CheckID: CheckAndroidScreenLock, Status: ObservationStatusPass}})
+	if !got.Satisfied {
+		t.Fatalf("android device must not be held to the windows check: %+v", got)
+	}
+}

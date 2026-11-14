@@ -19,6 +19,8 @@ type DeviceProfileRequirement {
   allowUnsupported: Boolean!
   # Set only for zecurity.network.country (PENDING-20 G1).
   countries: CountryRule
+  # Set only for the *.os.minimum checks (ADR-031 D-11), e.g. "10.0.22631".
+  minVersion: String
 }
 
 # PENDING-20 G1: ISO 3166-1 alpha-2 codes. Deny wins over allow; an empty allow
@@ -108,6 +110,16 @@ extend type Mutation {
     allowUnsupported: Boolean!
     # Required for zecurity.network.country, refused for every other check.
     countries: CountryRuleInput
+    # Required for the *.os.minimum checks (ADR-031 D-11), refused for others.
+    minVersion: String
+  ): DeviceProfile! @requires(capability: POSTURE_WRITE)
+
+  # ADR-031 D-11: replace the minimum of a profile's Minimum OS Version
+  # requirement in place (no window without the check).
+  updateProfileRequirementMinVersion(
+    profileId: ID!
+    checkId: String!
+    minVersion: String!
   ): DeviceProfile! @requires(capability: POSTURE_WRITE)
 
   # PENDING-20 G-10: replace the allow/deny lists of a profile's country

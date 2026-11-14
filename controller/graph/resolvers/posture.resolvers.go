@@ -54,6 +54,10 @@ func (r *deviceProfileResolver) Requirements(ctx context.Context, obj *graph.Dev
 				Deny:  append([]string{}, requirement.Countries.Deny...),
 			}
 		}
+		if requirement.MinVersion != "" {
+			v := requirement.MinVersion
+			result[i].MinVersion = &v
+		}
 	}
 
 	return result, nil
@@ -146,7 +150,7 @@ func (r *mutationResolver) UpdateDeviceProfileManualTrust(ctx context.Context, i
 }
 
 // AddProfileRequirement is the resolver for the addProfileRequirement field.
-func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *graph.CountryRuleInput) (*graph.DeviceProfile, error) {
+func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool, countries *graph.CountryRuleInput, minVersion *string) (*graph.DeviceProfile, error) {
 	tc := tenant.MustGet(ctx)
 
 	workspaceID, err := uuid.Parse(tc.TenantID)
@@ -180,6 +184,24 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		countryRule = &rule
 	}
 
+	// ADR-031 D-11: a Minimum OS Version check needs its minimum; no other
+	// check takes one.
+	minimum := ""
+	switch {
+	case posture.IsMinOSCheck(checkID) && allowUnsupported:
+		return nil, apperr.UserErrorf("addProfileRequirement: allowUnsupported does not apply to %s; an unknown OS version always fails", checkID)
+	case posture.IsMinOSCheck(checkID) && (minVersion == nil || strings.TrimSpace(*minVersion) == ""):
+		return nil, apperr.UserErrorf("addProfileRequirement: %s needs a minimum version", checkID)
+	case !posture.IsMinOSCheck(checkID) && minVersion != nil:
+		return nil, apperr.UserErrorf("addProfileRequirement: minVersion applies only to the Minimum OS Version checks")
+	case minVersion != nil:
+		v, err := posture.NormalizeMinVersion(*minVersion)
+		if err != nil {
+			return nil, apperr.UserErrorf("addProfileRequirement: %v", err)
+		}
+		minimum = v
+	}
+
 	err = r.PostureStore.AddRequirement(
 		ctx,
 		workspaceID,
@@ -188,6 +210,7 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 			CheckID:          checkID,
 			AllowUnsupported: allowUnsupported,
 			Countries:        countryRule,
+			MinVersion:       minimum,
 		},
 	)
 	if err != nil {
@@ -205,6 +228,9 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 	if countryRule != nil {
 		auditDetails["allow_countries"] = countryRule.Allow
 		auditDetails["deny_countries"] = countryRule.Deny
+	}
+	if minimum != "" {
+		auditDetails["min_version"] = minimum
 	}
 	r.auditAdmin(ctx, "device_profile.requirement.add", "device_profile", profileID, auditDetails)
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
@@ -226,6 +252,52 @@ func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID 
 		return nil, fmt.Errorf("addProfileRequirement: %w", err)
 	}
 
+	return postureProfileToGQL(profile), nil
+}
+
+// UpdateProfileRequirementMinVersion is the resolver for the updateProfileRequirementMinVersion field.
+func (r *mutationResolver) UpdateProfileRequirementMinVersion(ctx context.Context, profileID string, checkID string, minVersion string) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+	if !posture.IsMinOSCheck(checkID) {
+		return nil, apperr.UserErrorf("updateProfileRequirementMinVersion: %s is not a Minimum OS Version check", checkID)
+	}
+	minimum, err := posture.NormalizeMinVersion(minVersion)
+	if err != nil {
+		return nil, apperr.UserErrorf("updateProfileRequirementMinVersion: %v", err)
+	}
+	previous, err := r.PostureStore.UpdateMinVersion(ctx, workspaceID, profileUUID, checkID, minimum)
+	if err != nil {
+		if errors.Is(err, posture.ErrNotFound) {
+			return nil, apperr.UserErrorf("updateProfileRequirementMinVersion: profile not found or it doesn't require %s", checkID)
+		}
+		return nil, fmt.Errorf("updateProfileRequirementMinVersion: %w", err)
+	}
+	r.auditAdmin(ctx, "device_profile.requirement.min_version_update", "device_profile", profileID, map[string]any{
+		"check_id":        checkID,
+		"min_version":     minimum,
+		"old_min_version": previous,
+	})
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementMinVersion notify: %w", err)
+	}
+	if r.PostureEvaluator == nil {
+		return nil, fmt.Errorf("updateProfileRequirementMinVersion: posture evaluator is not configured")
+	}
+	if err := r.PostureEvaluator.ReevaluateWorkspace(ctx, workspaceID); err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementMinVersion re-evaluate: %w", err)
+	}
+	profile, err := r.PostureStore.GetProfile(ctx, workspaceID, profileUUID)
+	if err != nil {
+		return nil, fmt.Errorf("updateProfileRequirementMinVersion: %w", err)
+	}
 	return postureProfileToGQL(profile), nil
 }
 

@@ -46,6 +46,7 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   removeProfileRequirement: Capability.PostureWrite,
   deleteDeviceProfile: Capability.PostureWrite,
   updateProfileRequirementCountries: Capability.PostureWrite, // PENDING-20 G-10
+  updateProfileRequirementMinVersion: Capability.PostureWrite, // ADR-031 D-11
   // PENDING-16 resource policies (D-2: assigning a resource is POSTURE_WRITE too)
   createResourcePolicy: Capability.PostureWrite,
   updateResourcePolicy: Capability.PostureWrite,

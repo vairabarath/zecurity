@@ -32,7 +32,7 @@ func TestAddProfileRequirement_UnknownCheck(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false, nil)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), "nonexistent.check", false, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown check")
 	}
@@ -99,7 +99,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil, nil)
 	if err != nil {
 		t.Fatalf("first add: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		t.Fatalf("push hook fired %d times after first add, want 1", got)
 	}
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil, nil)
 	if err == nil {
 		t.Fatal("expected duplicate requirement error")
 	}
@@ -141,7 +141,7 @@ func TestAddProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true, nil)
+	got, err := f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, true, nil, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 		)
 	})
 
-	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil)
+	_, err = f.mr.AddProfileRequirement(f.ctx, profile.ID.String(), posture.CheckFirewall, false, nil, nil)
 	if err != nil {
 		t.Fatalf("AddProfileRequirement: %v", err)
 	}
@@ -275,13 +275,13 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 		{"both empty", posture.CheckNetworkCountry, &graph.CountryRuleInput{Allow: []string{}, Deny: []string{}}, "at least one country"},
 		{"in both lists", posture.CheckNetworkCountry, &graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{"in"}}, "in both the allow and the deny list"},
 	} {
-		_, err := f.mr.AddProfileRequirement(f.ctx, id, tc.check, false, tc.countries)
+		_, err := f.mr.AddProfileRequirement(f.ctx, id, tc.check, false, tc.countries, nil)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
 		}
 	}
 	if _, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckNetworkCountry, true,
-		&graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil || !strings.Contains(err.Error(), "allowUnsupported does not apply") {
+		&graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}, nil); err == nil || !strings.Contains(err.Error(), "allowUnsupported does not apply") {
 		t.Errorf("allowUnsupported on the country check: err = %v", err)
 	}
 	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{"IN"}, Deny: []string{}}); err == nil ||
@@ -293,7 +293,7 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 	}
 
 	got, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckNetworkCountry, false,
-		&graph.CountryRuleInput{Allow: []string{"in", "us"}, Deny: []string{"cn"}})
+		&graph.CountryRuleInput{Allow: []string{"in", "us"}, Deny: []string{"cn"}}, nil)
 	if err != nil {
 		t.Fatalf("valid country rule: %v", err)
 	}
@@ -315,5 +315,74 @@ func TestAddProfileRequirement_CountryRule(t *testing.T) {
 	}
 	if _, err := f.mr.UpdateProfileRequirementCountries(f.ctx, id, graph.CountryRuleInput{Allow: []string{}, Deny: []string{}}); err == nil {
 		t.Fatal("update to an empty rule accepted")
+	}
+}
+
+// ADR-031 D-11: a Minimum OS Version check needs a valid minimum; no other
+// check takes one; the minimum is stored and returned.
+func TestAddProfileRequirement_MinVersion(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	store := posture.NewStore(f.pool)
+	f.mr.Resolver.PostureStore = store
+	f.mr.Resolver.PostureEvaluator = posture.NewEvaluator(store, nil)
+
+	profile, err := store.CreateProfile(f.ctx, uuid.MustParse(f.tenantID), "test-minos-"+uuid.NewString(), true)
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = store.DeleteProfile(context.Background(), uuid.MustParse(f.tenantID), profile.ID, true)
+	})
+	id := profile.ID.String()
+	str := func(s string) *string { return &s }
+
+	for _, tc := range []struct {
+		name  string
+		check string
+		min   *string
+		allow bool
+		want  string
+	}{
+		{"no minimum", posture.CheckWindowsMinOS, nil, false, "needs a minimum version"},
+		{"blank minimum", posture.CheckWindowsMinOS, str("  "), false, "needs a minimum version"},
+		{"minimum on another check", posture.CheckWindowsFirewall, str("10"), false, "minVersion applies only"},
+		{"not a version", posture.CheckAndroidMinOS, str("twelve"), false, "numbers separated by dots"},
+		{"too many parts", posture.CheckWindowsMinOS, str("10.0.1.2.3"), false, "numbers separated by dots"},
+		{"allowUnsupported", posture.CheckIOSMinOS, str("17"), true, "allowUnsupported does not apply"},
+	} {
+		_, err := f.mr.AddProfileRequirement(f.ctx, id, tc.check, tc.allow, nil, tc.min)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	if got := f.fires.Load(); got != 0 {
+		t.Fatalf("refused requirements fired the push hook %d times", got)
+	}
+
+	got, err := f.mr.AddProfileRequirement(f.ctx, id, posture.CheckWindowsMinOS, false, nil, str(" 10.0.22631 "))
+	if err != nil {
+		t.Fatalf("valid minimum: %v", err)
+	}
+	reqs, err := f.mr.DeviceProfile().Requirements(f.ctx, got)
+	if err != nil || len(reqs) != 1 || reqs[0].MinVersion == nil || *reqs[0].MinVersion != "10.0.22631" {
+		t.Fatalf("requirements: %+v %v", reqs, err)
+	}
+
+	// Replaced in place.
+	if _, err := f.mr.UpdateProfileRequirementMinVersion(f.ctx, id, posture.CheckWindowsMinOS, "10.0.26100"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	reqs, _ = f.mr.DeviceProfile().Requirements(f.ctx, got)
+	if len(reqs) != 1 || *reqs[0].MinVersion != "10.0.26100" {
+		t.Fatalf("after update: %+v", reqs)
+	}
+	for _, tc := range []struct{ check, min, want string }{
+		{posture.CheckWindowsMinOS, "ten", "numbers separated by dots"},
+		{posture.CheckAndroidMinOS, "13", "doesn't require"},
+		{posture.CheckWindowsFirewall, "10", "not a Minimum OS Version check"},
+	} {
+		if _, err := f.mr.UpdateProfileRequirementMinVersion(f.ctx, id, tc.check, tc.min); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("update %s %q: err = %v, want %q", tc.check, tc.min, err, tc.want)
+		}
 	}
 }

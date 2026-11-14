@@ -86,6 +86,9 @@ type Requirement struct {
 	// Countries is the rule of a CheckNetworkCountry requirement (stored in
 	// device_profile_requirements.params); nil for every other check.
 	Countries *CountryRule
+	// MinVersion is the minimum of a Minimum OS Version requirement
+	// (ADR-031 D-11, params.min_version); "" for every other check.
+	MinVersion string
 }
 
 type Evaluation struct {
@@ -595,6 +598,11 @@ func (s *Store) AddRequirement(
 			return fmt.Errorf("encode requirement params: %w", err)
 		}
 	}
+	if requirement.MinVersion != "" {
+		if params, err = json.Marshal(minVersionParams{MinVersion: requirement.MinVersion}); err != nil {
+			return fmt.Errorf("encode requirement params: %w", err)
+		}
+	}
 	_, err = tx.Exec(
 		ctx,
 		`INSERT INTO device_profile_requirements
@@ -786,6 +794,11 @@ func (s *Store) ListRequirements(
 		}
 		if requirement.CheckID == CheckNetworkCountry {
 			if requirement.Countries, err = countryRuleFromParams(params); err != nil {
+				return nil, err
+			}
+		}
+		if IsMinOSCheck(requirement.CheckID) {
+			if requirement.MinVersion, err = minVersionFromParams(params); err != nil {
 				return nil, err
 			}
 		}

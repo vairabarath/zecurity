@@ -243,18 +243,33 @@ mutation AddProfileRequirement(
   $checkId: String!
   $allowUnsupported: Boolean!
   $countries: CountryRuleInput
+  $minVersion: String
 ) {
   addProfileRequirement(
     profileId: $profileId
     checkId: $checkId
     allowUnsupported: $allowUnsupported
     countries: $countries
+    minVersion: $minVersion
   ) {
     id
     requirements {
       id
       checkId
       allowUnsupported
+      minVersion
+    }
+  }
+}
+
+# ADR-031 D-11: replace a Minimum OS Version requirement's minimum in place.
+mutation UpdateProfileRequirementMinVersion($profileId: ID!, $checkId: String!, $minVersion: String!) {
+  updateProfileRequirementMinVersion(profileId: $profileId, checkId: $checkId, minVersion: $minVersion) {
+    id
+    requirements {
+      id
+      checkId
+      minVersion
     }
   }
 }

@@ -218,5 +218,10 @@ describe("DeviceProfiles", () => {
     expect(
       await screen.findByText("Edit Device Profile"),
     ).toBeInTheDocument();
+    // ADR-031: the editor opens with the profile's own platforms switched on.
+    expect(
+      await screen.findByRole("switch", { name: "Allow Linux devices" }),
+    ).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Allow Windows devices" })).not.toBeChecked();
   });
 });

@@ -88,6 +88,9 @@ open = "5"
 # Windows client: the daemon runs as a Windows Service (win_service.rs), and
 # the IPC named pipe gets an explicit security descriptor (ipc.rs).
 windows-service = "0.7"
+# Same version the `tun` crate uses: the daemon creates the adapter itself to
+# turn off duplicate address detection before the address is set.
+wintun = "0.3"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",

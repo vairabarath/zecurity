@@ -27,9 +27,12 @@ type EditableProfile = {
   id: string;
   name: string;
   manualTrust: boolean;
+  // ADR-031: the platforms the profile allows.
+  allowedPlatforms?: string[];
   requirements: {
     checkId: string;
     countries?: { allow: string[]; deny: string[] } | null;
+    minVersion?: string | null;
   }[];
   policies?: ProfilePolicy[];
 };
@@ -277,6 +280,9 @@ export default function DeviceProfiles() {
                           id: profile.id,
                           name: profile.name,
                           manualTrust: profile.manualTrust,
+                          // ADR-031: without it every platform card opened off,
+                          // and saving could drop the allowed platforms.
+                          allowedPlatforms: profile.allowedPlatforms,
                           requirements: profile.requirements,
                           policies: profile.policies,
                         })

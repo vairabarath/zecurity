@@ -367,6 +367,7 @@ query GetDeviceProfiles {
       id
       checkId
       allowUnsupported
+      minVersion
       countries {
         allow
         deny

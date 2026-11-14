@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MockedProvider } from "@apollo/client/testing/react";
 import type { MockLink } from "@apollo/client/testing";
@@ -8,6 +8,7 @@ import {
   AddProfileRequirementDocument,
   GetSupportedPostureChecksDocument,
   SetProfilePlatformsDocument,
+  UpdateProfileRequirementMinVersionDocument,
 } from "@/generated/graphql";
 
 vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }));
@@ -25,15 +26,29 @@ const CHECKS = [
   check("android.disk_encryption.enabled", "HD Encryption", "android"),
   check("android.screen_lock.enabled", "Screen Lock", "android"),
   check("android.biometric.enrolled", "Biometric", "android"),
+  check("windows.disk_encryption.bitlocker", "HD Encryption", "windows"),
+  check("windows.screen_lock.enabled", "Screen Lock", "windows"),
+  check("windows.biometric.enrolled", "Biometric", "windows"),
+  check("windows.firewall.enabled", "Firewall", "windows"),
+  check("windows.antivirus.enabled", "Antivirus", "windows"),
+  check("windows.os.minimum", "Minimum OS Version", "windows"),
+  check("android.os.minimum", "Minimum OS Version", "android"),
+  check("ios.os.minimum", "Minimum OS Version", "ios"),
 ];
 
-function profile(platforms: string[]) {
+function profile(
+  platforms: string[],
+  extra: { checkId: string; minVersion?: string | null }[] = [],
+) {
   return {
     id: "p1",
     name: "Company devices",
     manualTrust: true,
     allowedPlatforms: platforms,
-    requirements: [{ checkId: "linux.firewall.active" }],
+    requirements: [{ checkId: "linux.firewall.active" }, ...extra] as {
+      checkId: string;
+      minVersion?: string | null;
+    }[],
     policies: [],
   };
 }
@@ -127,5 +142,88 @@ describe("EditDeviceProfileModal platform cards (ADR-031)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
     expect(calls).toEqual(["platforms android", "add biometric"]);
+  });
+
+  it("turning Windows on lists its five checks, then requires HD Encryption and Antivirus", async () => {
+    const { calls, mock } = recorder();
+    const onSuccess = renderModal(profile(["linux", "android"]), [
+      mock(AddProfileRequirementDocument,
+        { profileId: "p1", checkId: "windows.disk_encryption.bitlocker", allowUnsupported: false },
+        "add bitlocker", addResult),
+      mock(AddProfileRequirementDocument,
+        { profileId: "p1", checkId: "windows.antivirus.enabled", allowUnsupported: false },
+        "add antivirus", addResult),
+      mock(SetProfilePlatformsDocument, { profileId: "p1", platforms: ["linux", "android", "windows"] },
+        "platforms +windows", platformsResult(["linux", "android", "windows"])),
+    ]);
+
+    expect(await screen.findByText("Windows devices are not allowed by this profile.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("switch", { name: "Allow Windows devices" }));
+    const windows = screen.getByRole("group", { name: "Windows posture" });
+    for (const label of ["HD Encryption", "Screen Lock", "Biometric", "Firewall", "Antivirus"]) {
+      expect(within(windows).getByRole("button", { name: `${label} not required` })).toBeInTheDocument();
+    }
+    // Same labels on the Android card stay independent.
+    const android = screen.getByRole("group", { name: "Android posture" });
+    await userEvent.click(within(windows).getByRole("button", { name: "HD Encryption not required" }));
+    await userEvent.click(within(windows).getByRole("button", { name: "Antivirus not required" }));
+    expect(within(android).getByRole("button", { name: "HD Encryption not required" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(calls.slice(-1)).toEqual(["platforms +windows"]);
+    expect([...calls].sort()).toEqual(["add antivirus", "add bitlocker", "platforms +windows"]);
+  });
+
+  it("lays the cards out as in Twingate: macOS is coming soon, iOS has Minimum OS Version", async () => {
+    renderModal(profile(["linux", "ios"]), []);
+    const macos = await screen.findByRole("group", { name: "macOS posture" });
+    expect(within(macos).getByText("Coming soon")).toBeInTheDocument();
+    expect(within(macos).queryByRole("switch")).toBeNull();
+    const ios = screen.getByRole("group", { name: "iOS posture" });
+    expect(within(ios).getByRole("button", { name: "Minimum OS Version not required" })).toBeInTheDocument();
+    const order = screen.getAllByRole("group").map((g) => g.getAttribute("aria-label"));
+    expect(order).toEqual(["Windows posture", "macOS posture", "Linux posture", "iOS posture", "Android posture"]);
+  });
+
+  it("requiring Minimum OS Version asks for the version and sends it", async () => {
+    const { calls, mock } = recorder();
+    const onSuccess = renderModal(profile(["linux", "windows"]), [
+      mock(AddProfileRequirementDocument,
+        { profileId: "p1", checkId: "windows.os.minimum", allowUnsupported: false, minVersion: "10.0.22631" },
+        "add windows min 10.0.22631", addResult),
+    ]);
+    const windows = await screen.findByRole("group", { name: "Windows posture" });
+    await userEvent.click(within(windows).getByRole("button", { name: "Minimum OS Version not required" }));
+
+    // No version yet: saving is refused with a clear message.
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Enter the minimum Windows version/)).toBeInTheDocument();
+    expect(calls).toEqual([]);
+
+    await userEvent.type(within(windows).getByRole("textbox", { name: "Windows minimum OS version" }), "10.0.22631");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(calls).toEqual(["add windows min 10.0.22631"]);
+  });
+
+  it("changing an existing minimum updates it in place", async () => {
+    const { calls, mock } = recorder();
+    const onSuccess = renderModal(
+      profile(["linux", "android"], [{ checkId: "android.os.minimum", minVersion: "12" }]),
+      [
+        mock(UpdateProfileRequirementMinVersionDocument,
+          { profileId: "p1", checkId: "android.os.minimum", minVersion: "13" },
+          "update android min 13",
+          { updateProfileRequirementMinVersion: { __typename: "DeviceProfile", id: "p1", requirements: [] } }),
+      ],
+    );
+    const field = await screen.findByRole("textbox", { name: "Android minimum OS version" });
+    expect(field).toHaveValue("12");
+    await userEvent.clear(field);
+    await userEvent.type(field, "13");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(calls).toEqual(["update android min 13"]);
   });
 });

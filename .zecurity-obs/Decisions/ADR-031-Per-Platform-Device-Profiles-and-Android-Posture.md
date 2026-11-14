@@ -100,3 +100,87 @@ This epic changes `admin/` (the device profile editor). CLAUDE.md's "don't modif
 - Admins can build one profile that covers Linux laptops and Android phones, each with its own requirements.
 - Turning a platform off is an immediate, audited access change.
 - Every new platform needs only check descriptors, a collector and a card. The evaluation rules don't change again.
+
+## Amendment 2026-11-14 — Windows checks and card
+
+Decided by Sathiya (M1) on 2026-11-14: a Windows card like the Android one, with all five offered checks.
+
+### D-8 The Windows checks (all `PASS` / `FAIL` / `UNSUPPORTED` / `ERROR`)
+
+The client daemon (LocalSystem) reads them with one PowerShell script (`client/src/posture_windows.rs`), every 5 minutes and right after sign-in. The per-user checks use the enrolling user's SID from the service command line. The check IDs are identical in Go and Rust.
+
+| Check ID | Label | PASS when |
+|---|---|---|
+| `windows.disk_encryption.bitlocker` | HD Encryption | BitLocker `ProtectionStatus = 1` on the system drive. Protection off or unknown: **FAIL**. No BitLocker on the edition (Home): **UNSUPPORTED**. |
+| `windows.screen_lock.enabled` | Screen Lock | Automatic sign-in (`AutoAdminLogon`) is off **and** the enrolled user has a Windows Hello PIN. |
+| `windows.biometric.enrolled` | Biometric | The enrolled user has a Windows Hello face or fingerprint (`WinBio\AccountInfo\<SID>\EnrolledFactors` ≠ 0). No biometric sensor: **UNSUPPORTED** (`allowUnsupported` meaningful, as for Android). |
+| `windows.firewall.enabled` | Firewall | Windows Firewall is on for the Domain, Private and Public profiles, or a third-party firewall registered with Security Center is on. |
+| `windows.antivirus.enabled` | Antivirus | An antivirus registered with Security Center is on with up-to-date definitions (Defender's status as a fallback). None registered: **FAIL**. |
+
+- A check the script does not report is sent as **ERROR**, never left out, so a broken script is visible and never passes.
+- No credential, biometric data or key is read: only "is it on" or "is it enrolled".
+
+### D-9 Screen Lock requires a Windows Hello PIN
+
+- Whether a local account has a non-blank password can't be read without a sign-in attempt. That attempt would count towards account lockout and fill the security log every 5 minutes, so the check doesn't do it.
+- A device that signs in with a password only therefore **FAILs** Screen Lock. Windows 11 asks every user to set up a PIN, so this matches the default.
+
+### D-10 The admin console
+
+- The device profile editor shows a **Windows** card next to Linux and Android, with the five checks.
+- Each card is a labelled group, because Android and Windows share check labels.
+- "Create profile" still offers Linux only; Windows is set up in the editor, as Android is.
+
+### Live run (2026-11-14, Windows 11 Pro build 26300, LocalSystem service)
+
+| Check | Reported |
+|---|---|
+| HD Encryption | FAIL: BitLocker protection off (C:) |
+| Screen Lock | PASS: Windows Hello PIN set; automatic sign-in off |
+| Biometric | UNSUPPORTED: no biometric sensor |
+| Firewall | PASS: on (Domain, Private, Public) |
+| Antivirus | PASS: Windows Defender on, definitions up to date |
+
+Profile on a resource, with a client loop on that Windows host:
+
+| Change | Effect |
+|---|---|
+| Require Firewall and turn Windows on | reachable in 0.52 s |
+| Also require HD Encryption | blocked within ≤1.2 s |
+| Remove HD Encryption | reachable again in 1.18 s |
+| Turn Windows off | blocked within ≤1.3 s |
+
+## Amendment 2026-11-14 (2) — Minimum OS Version and the Twingate-style card grid
+
+Decided by Sathiya (M1) on 2026-11-14, from Twingate's "Approved Operating Systems" reference:
+- **Look only:** the cards stay per profile (D-1 unchanged). There is no workspace-wide OS gate.
+- **Add Minimum OS Version.**
+
+### D-11 Minimum OS Version (server-side, per platform)
+
+- Check IDs `windows.os.minimum`, `android.os.minimum` and `ios.os.minimum`, all labelled "Minimum OS Version".
+- **Server checks** (like ADR-030): a client can never report them. The controller compares the OS version in the device's latest posture report (`os_info.version`) with the requirement's minimum.
+- **Versions:** the minimum is stored in `device_profile_requirements.params` as `{"min_version": "10.0.22631"}`, so there is **no migration**. A version is 1 to 4 numbers separated by dots, compared number by number (missing parts count as 0, so `14` equals `14.0`).
+- **Fails closed:** an older, unknown or unparsable reported version **fails**, with the version in the reason. `allowUnsupported` is refused.
+- **API:**
+  - `addProfileRequirement(..., minVersion)`: required for these checks, refused for any other check;
+  - `updateProfileRequirementMinVersion(profileId, checkId, minVersion)`: replaces the minimum in place, under `POSTURE_WRITE`, audited as `device_profile.requirement.min_version_update`, then notifies and re-evaluates.
+- **Linux has none:** distribution versions can't be compared with each other, and the reference card has none either.
+- **Same trust as the other checks:** the OS version is self-reported, the known limitation above.
+
+### D-12 The card layout
+
+- The profile editor is wider and shows **Approved Operating Systems** as a two-column grid of cards, in the order Windows, macOS, Linux, iOS, Android, each with an OS glyph.
+- **macOS** is shown as "Coming soon": there is no client, so it can't be switched on.
+- **iOS** is a real card. Its only check is Minimum OS Version, because the app reports `UIDevice.systemVersion`.
+- **Fix, found on the live UI:** the Device Profiles page did not pass `allowedPlatforms` to the editor. Every card therefore opened switched off, and switching a platform on and saving would have dropped the profile's other platforms. The page now passes them, and a page test covers it.
+
+### Live run (2026-11-14, Windows 11 Pro 10.0.26300.9711)
+
+The requirement was saved from the admin UI (Orca's embedded browser), then changed with the update mutation, against a resource behind that profile.
+
+| Change | Effect |
+|---|---|
+| Windows on, Minimum OS Version 10.0.22631 | reachable |
+| Minimum raised to 10.0.27000 | blocked within ≤1.3 s ("OS version 10.0.26300.9711 is older than 10.0.27000") |
+| Minimum back to 10.0.22631 | reachable again in 0.49 s |
