@@ -361,3 +361,32 @@ func TestStartReauth_Preconditions(t *testing.T) {
 		t.Fatalf("disabled: %v", err)
 	}
 }
+
+// A step-up that answers a risk demand without a second factor drops the
+// older MFA mark; without a risk demand the mark is kept.
+func TestCompleteStepUp_RiskDemandDropsOldMFAMark(t *testing.T) {
+	f := newStepUpFixture(t)
+	ra := f.reauth()
+	set := func(reauth string) {
+		t.Helper()
+		if _, err := f.pool.Exec(f.ctx,
+			`UPDATE client_devices SET session_mfa_at = NOW() - INTERVAL '10 minutes',
+			        reauth_required_at = `+reauth+` WHERE id = $1`, f.deviceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set("NULL")
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, false, "none") {
+		t.Fatal("step-up refused")
+	}
+	if d := f.device(); d.mfaAt == nil {
+		t.Fatal("a plain re-authentication dropped the MFA mark")
+	}
+	set("NOW() - INTERVAL '1 minute'")
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, false, "none") {
+		t.Fatal("step-up refused")
+	}
+	if d := f.device(); d.mfaAt != nil || d.reauthAt != nil {
+		t.Fatalf("after a risk-demanded step-up without MFA: %+v, want no MFA mark and no demand", d)
+	}
+}

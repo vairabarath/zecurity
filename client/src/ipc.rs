@@ -88,6 +88,11 @@ pub struct IpcResponse {
     pub synced_resources: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<IpcResource>>,
+    /// PENDING-06: how many resources are waiting for this device to
+    /// authenticate again (`zecurity-client auth`). None before the first
+    /// ACL sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_required_count: Option<u32>,
     /// Sprint 19 Track 2 (PENDING-13): "re_enroll_required" / "revoked" when
     /// the controller has sent a device directive. None when active.
     #[serde(skip_serializing_if = "Option::is_none")]

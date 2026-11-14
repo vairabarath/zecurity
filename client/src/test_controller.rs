@@ -178,6 +178,13 @@ impl ClientService for FakeController {
         Ok(Response::new(LogoutResponse {}))
     }
 
+    async fn start_reauth(
+        &self,
+        _r: Request<crate::grpc::client_v1::StartReauthRequest>,
+    ) -> Result<Response<crate::grpc::client_v1::StartReauthResponse>, Status> {
+        Err(Status::unimplemented("not used by these tests"))
+    }
+
     type WatchChangesStream = crate::change_watch::HintStream;
 
     async fn watch_changes(

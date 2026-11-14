@@ -711,13 +711,12 @@ func (r *mutationResolver) AcceptScimConflict(ctx context.Context, connectionID 
 	if ds == nil {
 		return false, fmt.Errorf("acceptScimConflict: directory service unavailable")
 	}
-	// PENDING-06 M-7: break-glass needs a fresh second factor. Only a caller
-	// who holds the permission is asked for one; AcceptLink still makes the
-	// authoritative permission check inside its transaction.
-	if held, perr := r.PermissionStore.HasPermission(ctx, tc.TenantID, tc.UserID, permission.BreakGlassMapping); perr == nil && held {
-		if err := RequireBreakGlassMFA(ctx, &tc); err != nil {
-			return false, err
-		}
+	// PENDING-06 M-7: break-glass needs a fresh second factor. Unconditional
+	// (fail closed): a successful accept always needs the permission, which
+	// AcceptLink checks authoritatively inside its transaction, so there is
+	// no caller for whom skipping this would be right.
+	if err := RequireBreakGlassMFA(ctx, &tc); err != nil {
+		return false, err
 	}
 	serr := ds.AcceptLink(ctx, tc.TenantID, connectionID, tc.UserID, tc.Email, canonicalKey, reason)
 	if serr != nil {

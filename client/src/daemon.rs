@@ -399,6 +399,7 @@ async fn handle_request(
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                auth_required_count: auth_required_count(),
                 device_state: match s.device_state {
                     DeviceState::Active => None,
                     other => Some(other.as_marker().to_string()),
@@ -442,6 +443,7 @@ async fn handle_request(
                     acl_last_sync_at: Some(result.synced_at),
                     acl_entry_count: Some(result.entry_count),
                     synced_resources: Some(result.entry_count),
+                    auth_required_count: auth_required_count(),
                     ..Default::default()
                 }
             }
@@ -500,6 +502,7 @@ async fn handle_request(
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                auth_required_count: auth_required_count(),
                 resources,
                 ..Default::default()
             }
@@ -4068,6 +4071,23 @@ enum AclFetchOutcome {
     Directive(DeviceDirective, String),
 }
 
+/// PENDING-06: the controller's latest `auth_required_count` — how many
+/// resources this device's groups allow but its session may not reach until
+/// the user authenticates again. Every GetACLSnapshot response carries it, so
+/// it is recorded where that one RPC is made rather than threaded through
+/// every caller. `u32::MAX` = not known yet (no response since start).
+static AUTH_REQUIRED_COUNT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// The last known count of resources waiting for an authentication, if any
+/// ACL response has arrived.
+pub(crate) fn auth_required_count() -> Option<u32> {
+    match AUTH_REQUIRED_COUNT.load(std::sync::atomic::Ordering::Relaxed) {
+        u32::MAX => None,
+        n => Some(n),
+    }
+}
+
 /// Raw GetACLSnapshot RPC. Returns AclFetchOutcome::UpToDate when the
 /// controller reports up_to_date (client's known_version matches — keep the
 /// cached snapshot).
@@ -4091,8 +4111,14 @@ async fn fetch_acl_snapshot(
     let directive = DeviceDirective::try_from(resp.device_directive)
         .unwrap_or(DeviceDirective::DirectiveNone);
     if directive != DeviceDirective::DirectiveNone {
+        // A device under a directive has no resources to authenticate for.
+        AUTH_REQUIRED_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
         return Ok(AclFetchOutcome::Directive(directive, resp.directive_reason));
     }
+    AUTH_REQUIRED_COUNT.store(
+        resp.auth_required_count.min(u32::MAX - 1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if resp.up_to_date {
         return Ok(AclFetchOutcome::UpToDate);
     }
@@ -7067,6 +7093,13 @@ mod renewal_tests {
             &self,
             _request: tonic::Request<crate::grpc::client_v1::LogoutRequest>,
         ) -> Result<tonic::Response<crate::grpc::client_v1::LogoutResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn start_reauth(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::StartReauthRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::StartReauthResponse>, tonic::Status>
         {
             Err(tonic::Status::unimplemented("not used in this test"))
         }

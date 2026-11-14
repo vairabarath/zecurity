@@ -30,6 +30,9 @@ enum Commands {
     },
     /// Authenticate via OAuth, enroll device cert, and save encrypted local state
     Login,
+    /// Authenticate again (and enter an MFA code if a policy requires it)
+    /// to reach resources that need a recent sign-in
+    Auth,
     /// Show current connection status
     Status,
     /// List resources this device has access to
@@ -85,6 +88,7 @@ async fn run_command(cli: Cli) -> anyhow::Result<()> {
             http_base,
         } => cmd::setup::run(workspace, controller, connector, http_base).await,
         Commands::Login => cmd::login::run().await,
+        Commands::Auth => cmd::auth::run().await,
         Commands::Status => cmd::status::run().await,
         Commands::Resources => cmd::resources::run().await,
         Commands::Sync => cmd::sync::run().await,

@@ -346,7 +346,12 @@ func (s *Service) completeStepUp(ctx context.Context, workspaceID string, ra *re
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE client_devices
 		    SET session_auth_at    = NOW(),
-		        session_mfa_at     = CASE WHEN $5 THEN NOW() ELSE session_mfa_at END,
+		        -- A step-up that answers a risk demand without a second factor
+		        -- must not leave an older MFA mark standing: the demand is
+		        -- cleared below, and the old mark would count again.
+		        session_mfa_at     = CASE WHEN $5 THEN NOW()
+		                                  WHEN reauth_required_at IS NOT NULL THEN NULL
+		                                  ELSE session_mfa_at END,
 		        risk_score         = 0,
 		        risk_reasons       = '{}',
 		        reauth_required_at = NULL

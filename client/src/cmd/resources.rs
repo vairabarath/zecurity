@@ -13,6 +13,8 @@ pub async fn run() -> Result<()> {
 
     match send_ipc(&IpcRequest::Resources).await {
         Ok(resp) if resp.ok => {
+            // PENDING-06: resources waiting for a new sign-in are not listed.
+            let auth_hint = crate::cmd::auth::auth_required_line(resp.auth_required_count);
             let resources = resp.resources.unwrap_or_default();
             if resources.is_empty() {
                 println!("No resources — ACL not loaded or no access policies configured.");
@@ -33,6 +35,9 @@ pub async fn run() -> Result<()> {
                         r.protocol.to_uppercase()
                     );
                 }
+            }
+            if let Some(line) = auth_hint {
+                println!("{line}");
             }
         }
         Ok(resp) => {
