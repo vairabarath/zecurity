@@ -227,7 +227,13 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// Step 6 — Issue new access JWT stamped with the current generation and
 	// bound to this session.
 	// Called: session.go → issueSessionAccessToken()
-	newAccessToken, err = s.issueSessionAccessToken(userID, tenantID, role, email, currentGen, newSID)
+	// PENDING-06: the token carries the session's MFA mark. A read error
+	// only drops the mark (fail closed: the user is asked for MFA again).
+	mfaAt, mfaErr := s.redisClient.GetSessionMFA(ctx, userID, newSID)
+	if mfaErr != nil {
+		mfaAt = 0
+	}
+	newAccessToken, err = s.issueSessionAccessToken(userID, tenantID, role, email, currentGen, newSID, mfaAt)
 	if err != nil {
 		return "", "", serverError("token issue failed")
 	}
@@ -246,6 +252,7 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 		Token:         newRefreshToken,
 		OriginalIAT:   stored.OriginalIAT,
 		MaxLifetimeAt: stored.MaxLifetimeAt,
+		AuthAt:        stored.AuthAt,
 	}
 	if err := s.redisClient.SetRefreshSession(ctx, userID, newSID, rotated, s.refreshTTL()); err != nil {
 		return "", "", serverError("token rotate failed")

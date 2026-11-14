@@ -29,6 +29,10 @@ type jwtClaims struct {
 	// so logout ends only that login (refresh:{<user>}:<sid>). Omitted on tokens
 	// minted before per-login sessions; those map to the legacy key.
 	SessionID string `json:"sid,omitempty"`
+	// MFAAt (PENDING-06) is when this session last passed MFA (Unix seconds;
+	// omitted when it never did). Copied from the refresh session at every
+	// mint, so it is at most one access-token lifetime behind the session.
+	MFAAt int64 `json:"mfa_at,omitempty"`
 	jwt.RegisteredClaims
 	// Subject (sub) = user_id    — set via RegisteredClaims.Subject
 	// Issuer  (iss) = appmeta.ControllerIssuer — set via RegisteredClaims.Issuer
@@ -40,12 +44,23 @@ type jwtClaims struct {
 // seconds (for expires_in fields) and the raw refresh token. Each call is an
 // independent session; it never displaces the user's other sessions.
 func (s *serviceImpl) IssueSession(ctx context.Context, userID, tenantID, role, email string, generation int) (string, int64, string, error) {
-	refreshToken, err := s.issueRefreshToken(ctx, userID)
+	return s.IssueSessionWithAuth(ctx, userID, tenantID, role, email, generation, SessionAuth{})
+}
+
+// IssueSessionWithAuth is IssueSession for a sign-in whose authentication
+// context is known (PENDING-06): the session records when it authenticated
+// and, when the IdP proved MFA (M-3), when it passed MFA.
+func (s *serviceImpl) IssueSessionWithAuth(ctx context.Context, userID, tenantID, role, email string, generation int, sa SessionAuth) (string, int64, string, error) {
+	refreshToken, err := s.issueRefreshToken(ctx, userID, sa)
 	if err != nil {
 		return "", 0, "", err
 	}
 	sid, _ := splitRefreshToken(refreshToken)
-	accessToken, err := s.issueSessionAccessToken(userID, tenantID, role, email, generation, sid)
+	var mfaAt int64
+	if !sa.MFAAt.IsZero() {
+		mfaAt = sa.MFAAt.Unix()
+	}
+	accessToken, err := s.issueSessionAccessToken(userID, tenantID, role, email, generation, sid, mfaAt)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -82,6 +97,9 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 		Generation: claims.IdentityGeneration,
 		SessionID:  claims.SessionID,
 	}
+	if claims.MFAAt != 0 {
+		out.MFAAt = time.Unix(claims.MFAAt, 0)
+	}
 	if claims.ExpiresAt != nil {
 		out.ExpiresAt = claims.ExpiresAt.Time
 	}
@@ -92,11 +110,12 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 // exp = JWTAccessTTL (default 15 minutes) from now. Signed with HS256 using JWT_SECRET.
 // Called by: CallbackHandler() in callback.go (Step 8), RefreshHandler() in refresh.go (Step 5).
 func (s *serviceImpl) issueAccessToken(userID, tenantID, role, email string, generation int) (string, error) {
-	return s.issueSessionAccessToken(userID, tenantID, role, email, generation, "")
+	return s.issueSessionAccessToken(userID, tenantID, role, email, generation, "", 0)
 }
 
-// issueSessionAccessToken is issueAccessToken with the sid claim set.
-func (s *serviceImpl) issueSessionAccessToken(userID, tenantID, role, email string, generation int, sid string) (string, error) {
+// issueSessionAccessToken is issueAccessToken with the sid claim set, and
+// mfa_at when the session has passed MFA (0 = it has not).
+func (s *serviceImpl) issueSessionAccessToken(userID, tenantID, role, email string, generation int, sid string, mfaAt int64) (string, error) {
 	ttl, err := time.ParseDuration(s.cfg.JWTAccessTTL)
 	if err != nil {
 		ttl = 15 * time.Minute
@@ -109,6 +128,7 @@ func (s *serviceImpl) issueSessionAccessToken(userID, tenantID, role, email stri
 		Email:              email,
 		IdentityGeneration: generation,
 		SessionID:          sid,
+		MFAAt:              mfaAt,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			Issuer:    s.cfg.JWTIssuer,
@@ -136,7 +156,7 @@ func (s *serviceImpl) issueSessionAccessToken(userID, tenantID, role, email stri
 //
 // ADR-006: original_iat is preserved across rotations; max_lifetime_at caps
 // the absolute session lifetime independently of the rolling idle TTL.
-func (s *serviceImpl) issueRefreshToken(ctx context.Context, userID string) (string, error) {
+func (s *serviceImpl) issueRefreshToken(ctx context.Context, userID string, sa SessionAuth) (string, error) {
 	sid, err := randomToken(16)
 	if err != nil {
 		return "", fmt.Errorf("generate session id: %w", err)
@@ -162,10 +182,18 @@ func (s *serviceImpl) issueRefreshToken(ctx context.Context, userID string) (str
 		Token:         token,
 		OriginalIAT:   now,
 		MaxLifetimeAt: now + int64(maxLifetime.Seconds()),
+		AuthAt:        now,
 	}
 
 	if err := s.redisClient.SetRefreshSession(ctx, userID, sid, sess, ttl); err != nil {
 		return "", fmt.Errorf("store refresh session: %w", err)
+	}
+
+	// M-3: MFA proven by the IdP at this sign-in marks the session.
+	if !sa.MFAAt.IsZero() {
+		if err := s.redisClient.SetSessionMFA(ctx, userID, sid, sa.MFAAt, maxLifetime); err != nil {
+			return "", err
+		}
 	}
 
 	return token, nil
@@ -227,4 +255,90 @@ func (s *serviceImpl) verifyAccessToken(tokenStr string) (*jwtClaims, error) {
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}
 	return claims, nil
+}
+
+// ── PENDING-06: MFA on a session ─────────────────────────────────────────────
+
+// SessionAuth is what a sign-in proved beyond identity. MFAAt is non-zero
+// when the IdP's verified token carried an MFA method (amr), see MFAFromAMR.
+type SessionAuth struct {
+	MFAAt time.Time
+}
+
+// mfaAMR are the RFC 8176 authentication method references that prove more
+// than a password was used. "mfa" is the IdP's own summary (Entra, Okta);
+// the rest are second factors or phishing-resistant single factors that
+// IdPs report without "mfa".
+var mfaAMR = map[string]struct{}{
+	"mfa": {}, "otp": {}, "hwk": {}, "swk": {}, "fpt": {}, "face": {},
+	"iris": {}, "retina": {}, "vbm": {}, "sc": {}, "sms": {}, "tel": {},
+}
+
+// MFAFromAMR reports whether a verified ID token's amr claim proves MFA
+// (M-3). Only the amr claim counts; acr values are IdP-specific and are not
+// interpreted.
+func MFAFromAMR(amr []string) bool {
+	for _, m := range amr {
+		if _, ok := mfaAMR[strings.ToLower(strings.TrimSpace(m))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// SessionAuthFromAMR builds the SessionAuth for a sign-in at `now`.
+func SessionAuthFromAMR(amr []string, now time.Time) SessionAuth {
+	if MFAFromAMR(amr) {
+		return SessionAuth{MFAAt: now}
+	}
+	return SessionAuth{}
+}
+
+// StampSessionMFA records that the claims' session passed MFA at `at` and
+// mints a fresh access token carrying the mark.
+func (s *serviceImpl) StampSessionMFA(ctx context.Context, claims *AccessTokenClaims, at time.Time) (string, int64, error) {
+	if claims == nil || claims.UserID == "" || !validSessionID(claims.SessionID) {
+		return "", 0, ErrSessionNotFound
+	}
+	stored, found, err := s.redisClient.GetRefreshSession(ctx, claims.UserID, claims.SessionID)
+	if err != nil {
+		return "", 0, err
+	}
+	if !found {
+		return "", 0, ErrSessionNotFound
+	}
+	// The mark lives as long as the session can (its absolute cap).
+	ttl := s.refreshTTL()
+	if stored.MaxLifetimeAt != 0 {
+		ttl = time.Until(time.Unix(stored.MaxLifetimeAt, 0))
+		if ttl <= 0 {
+			return "", 0, ErrSessionNotFound
+		}
+	}
+	if err := s.redisClient.SetSessionMFA(ctx, claims.UserID, claims.SessionID, at, ttl); err != nil {
+		return "", 0, err
+	}
+	token, err := s.issueSessionAccessToken(claims.UserID, claims.TenantID, claims.Role, claims.Email, claims.Generation, claims.SessionID, at.Unix())
+	if err != nil {
+		return "", 0, err
+	}
+	accessTTL, perr := time.ParseDuration(s.cfg.JWTAccessTTL)
+	if perr != nil {
+		accessTTL = 15 * time.Minute
+	}
+	return token, int64(accessTTL.Seconds()), nil
+}
+
+// ClearUserSessionMFA removes the MFA mark from every session of the user.
+func (s *serviceImpl) ClearUserSessionMFA(ctx context.Context, userID string) error {
+	return s.redisClient.ClearAllSessionMFA(ctx, userID)
+}
+
+// SignInMFALabel is the sign-in audit detail for a session's MFA state:
+// "idp" when the IdP proved MFA, "none" otherwise. Never the amr list itself.
+func SignInMFALabel(sa SessionAuth) string {
+	if sa.MFAAt.IsZero() {
+		return "none"
+	}
+	return "idp"
 }

@@ -28,7 +28,7 @@ func TestRefreshSession_RotatesAndRejectsReuse(t *testing.T) {
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	ctx := context.Background()
 	access, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
-	refresh, _ := svc.issueRefreshToken(ctx, "user-1")
+	refresh, _ := svc.issueRefreshToken(ctx, "user-1", SessionAuth{})
 
 	newAccess, newRefresh, err := svc.RefreshSession(ctx, access, refresh)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestRefreshSession_DeadSessions(t *testing.T) {
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	ctx := context.Background()
 	access, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
-	refresh, _ := svc.issueRefreshToken(ctx, "user-1")
+	refresh, _ := svc.issueRefreshToken(ctx, "user-1", SessionAuth{})
 
 	other := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	other.cfg.JWTSecret = "a-different-secret-32-bytes-long!"
@@ -94,7 +94,7 @@ func TestEndSession(t *testing.T) {
 
 	other := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	other.cfg.JWTSecret = "a-different-secret-32-bytes-long!"
-	forged, _ := other.issueSessionAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1, sid)
+	forged, _ := other.issueSessionAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1, sid, 0)
 
 	svc.EndSession(ctx, "")
 	svc.EndSession(ctx, "not-a-jwt")
@@ -118,7 +118,7 @@ func TestRefreshHandler_CookiePathKeepsTheRefreshTokenOutOfTheBody(t *testing.T)
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	access, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com", 1)
-	refresh, _ := svc.issueRefreshToken(context.Background(), "user-1")
+	refresh, _ := svc.issueRefreshToken(context.Background(), "user-1", SessionAuth{})
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: refresh})

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -20,6 +21,10 @@ type Claims struct {
 	// (access tokens are ≤15m). A per-request check would add a DB/Valkey read to
 	// the hot path — see internal/identity/revocation.go for the rationale.
 	IdentityGeneration int `json:"gen,omitempty"`
+	// SessionID ("sid") and MFAAt ("mfa_at", Unix seconds; 0 = the session
+	// has not passed MFA) feed the console MFA rules (PENDING-06 M-6, M-7).
+	SessionID string `json:"sid,omitempty"`
+	MFAAt     int64  `json:"mfa_at,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -70,12 +75,17 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := tenant.Set(r.Context(), tenant.TenantContext{
-				TenantID: claims.TenantID,
-				UserID:   claims.Subject,
-				Role:     claims.Role,
-				Email:    claims.Email,
-			})
+			tc := tenant.TenantContext{
+				TenantID:  claims.TenantID,
+				UserID:    claims.Subject,
+				Role:      claims.Role,
+				Email:     claims.Email,
+				SessionID: claims.SessionID,
+			}
+			if claims.MFAAt > 0 {
+				tc.MFAAt = time.Unix(claims.MFAAt, 0)
+			}
+			ctx := tenant.Set(r.Context(), tc)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

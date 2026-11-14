@@ -104,7 +104,7 @@ func TestRefreshHandler_Success(t *testing.T) {
 
 	// Issue access token and refresh token.
 	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com", 1)
-	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1")
+	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1", SessionAuth{})
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: refreshToken})
@@ -154,7 +154,7 @@ func TestRefreshHandler_RejectsHeaderRefreshToken(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
-	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1")
+	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1", SessionAuth{})
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req.Header.Set("X-Refresh-Token", refreshToken)

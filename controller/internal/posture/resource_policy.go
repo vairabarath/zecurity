@@ -76,6 +76,78 @@ type ResourcePolicy struct {
 	ResourceCount int
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+
+	// PENDING-06 M-2: the authentication requirement. AuthFrequencyMinutes
+	// nil = device-only (none). RequireMFA needs a frequency.
+	AuthFrequencyMinutes *int
+	RequireMFA           bool
+}
+
+// Authentication frequency bounds (M-2): 1 hour … 31 days, in minutes.
+const (
+	MinAuthFrequencyMinutes = 60
+	MaxAuthFrequencyMinutes = 31 * 24 * 60
+)
+
+// ErrInvalidPolicyAuthentication: frequency out of range, or MFA required
+// without a frequency.
+var ErrInvalidPolicyAuthentication = apperr.UserErrorf(
+	"authentication frequency must be between 1 hour and 31 days, and requiring MFA needs a frequency")
+
+// AuthRequirement is a resource policy's authentication requirement as the
+// ACL compiler applies it.
+type AuthRequirement struct {
+	Frequency  time.Duration
+	RequireMFA bool
+}
+
+// ResourceAuthForWorkspace maps each resource of the workspace whose policy
+// has an authentication requirement to it (one query, for the ACL compiler).
+// A resource absent from the map has none (device-only).
+func (s *Store) ResourceAuthForWorkspace(ctx context.Context, workspaceID uuid.UUID) (map[uuid.UUID]AuthRequirement, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT r.id, p.auth_frequency_minutes, p.require_mfa
+		   FROM resources r
+		   JOIN resource_policies p ON p.id = r.policy_id
+		  WHERE r.tenant_id = $1 AND p.auth_frequency_minutes IS NOT NULL`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("resource authentication for workspace: %w", err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]AuthRequirement{}
+	for rows.Next() {
+		var id uuid.UUID
+		var minutes int
+		var mfa bool
+		if err := rows.Scan(&id, &minutes, &mfa); err != nil {
+			return nil, err
+		}
+		out[id] = AuthRequirement{Frequency: time.Duration(minutes) * time.Minute, RequireMFA: mfa}
+	}
+	return out, rows.Err()
+}
+
+// SetResourcePolicyAuthentication sets a policy's authentication requirement
+// (the Default's too). frequencyMinutes nil = device-only.
+func (s *Store) SetResourcePolicyAuthentication(ctx context.Context, workspaceID, policyID uuid.UUID, frequencyMinutes *int, requireMFA bool) (*ResourcePolicy, error) {
+	if frequencyMinutes == nil && requireMFA {
+		return nil, ErrInvalidPolicyAuthentication
+	}
+	if frequencyMinutes != nil && (*frequencyMinutes < MinAuthFrequencyMinutes || *frequencyMinutes > MaxAuthFrequencyMinutes) {
+		return nil, ErrInvalidPolicyAuthentication
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE resource_policies
+		    SET auth_frequency_minutes = $3, require_mfa = $4, updated_at = NOW()
+		  WHERE workspace_id = $1 AND id = $2`,
+		workspaceID, policyID, frequencyMinutes, requireMFA)
+	if err != nil {
+		return nil, fmt.Errorf("set resource policy authentication: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrPolicyNotFound
+	}
+	return s.GetResourcePolicy(ctx, workspaceID, policyID)
 }
 
 // ProfileDeleteResult says what deleting a device profile changed.
@@ -106,6 +178,7 @@ func isForeignKeyViolation(err error) bool {
 
 const policySelect = `
 	SELECT p.id, p.workspace_id, p.name, p.description, p.is_default, p.created_at, p.updated_at,
+	       p.auth_frequency_minutes, p.require_mfa,
 	       COALESCE((SELECT array_agg(rpp.profile_id ORDER BY rpp.profile_id)
 	                   FROM resource_policy_profiles rpp WHERE rpp.policy_id = p.id), '{}'),
 	       (SELECT count(*) FROM resources r WHERE r.policy_id = p.id)
@@ -114,7 +187,8 @@ const policySelect = `
 func scanPolicy(row pgx.Row) (*ResourcePolicy, error) {
 	var p ResourcePolicy
 	if err := row.Scan(&p.ID, &p.WorkspaceID, &p.Name, &p.Description, &p.IsDefault,
-		&p.CreatedAt, &p.UpdatedAt, &p.ProfileIDs, &p.ResourceCount); err != nil {
+		&p.CreatedAt, &p.UpdatedAt, &p.AuthFrequencyMinutes, &p.RequireMFA,
+		&p.ProfileIDs, &p.ResourceCount); err != nil {
 		return nil, err
 	}
 	return &p, nil

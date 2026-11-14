@@ -142,7 +142,7 @@ func TestIssueRefreshToken_StoredInRedis(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
-	token, err := svc.issueRefreshToken(context.Background(), "user-rt")
+	token, err := svc.issueRefreshToken(context.Background(), "user-rt", SessionAuth{})
 	if err != nil {
 		t.Fatalf("issueRefreshToken: %v", err)
 	}
@@ -168,8 +168,8 @@ func TestIssueRefreshToken_Unique(t *testing.T) {
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	ctx := context.Background()
 
-	t1, _ := svc.issueRefreshToken(ctx, "user-uniq-1")
-	t2, _ := svc.issueRefreshToken(ctx, "user-uniq-2")
+	t1, _ := svc.issueRefreshToken(ctx, "user-uniq-1", SessionAuth{})
+	t2, _ := svc.issueRefreshToken(ctx, "user-uniq-2", SessionAuth{})
 	if t1 == t2 {
 		t.Fatal("expected unique refresh tokens for different users")
 	}

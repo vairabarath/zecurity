@@ -231,13 +231,27 @@ func insertClientDevice(
 	if !session.deadlines.MaxUntil.IsZero() {
 		maxUntil = &session.deadlines.MaxUntil
 	}
+	// PENDING-06: the device starts with its session's authentication and MFA
+	// times; the ACL compiler gates policies with an authentication
+	// requirement on them. An unknown authentication time is "now": the
+	// session was just verified live.
+	authAt := session.deadlines.AuthAt
+	if authAt.IsZero() {
+		authAt = time.Now()
+	}
+	var mfaAt *time.Time
+	if !session.deadlines.MFAAt.IsZero() {
+		mfaAt = &session.deadlines.MFAAt
+	}
 	err := db.QueryRow(ctx,
 		`INSERT INTO client_devices (user_id, workspace_id, name, os,
-		        session_id, session_idle_until, session_max_until)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		        session_id, session_idle_until, session_max_until,
+		        session_auth_at, session_mfa_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id`,
 		userID, workspaceID, name, os,
 		session.id, session.deadlines.IdleUntil, maxUntil,
+		authAt, mfaAt,
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert client_device: %w", err)

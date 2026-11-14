@@ -84,6 +84,11 @@ type RefreshSession struct {
 	Token         string `json:"token"`
 	OriginalIAT   int64  `json:"original_iat"`    // Unix seconds — initial login time
 	MaxLifetimeAt int64  `json:"max_lifetime_at"` // Unix seconds — hard expiry, ignored if 0
+	// PENDING-06: when this session authenticated (Unix seconds; 0 on
+	// sessions stored before this field). Survives refresh rotation. The MFA
+	// mark is NOT here: it lives in its own key (sessionMFAKey) so stamping
+	// or clearing it never races the rotation's read-modify-write.
+	AuthAt int64 `json:"auth_at,omitempty"`
 }
 
 // SetRefreshSession stores one login's refresh session under
@@ -137,6 +142,7 @@ func (r *valkeyClient) DeleteRefreshSession(ctx context.Context, userID, sid str
 	}
 	_, err := r.rdb.TxPipelined(ctx, func(p valkeycompat.Pipeliner) error {
 		p.Del(ctx, refreshKey(userID, sid))
+		p.Del(ctx, sessionMFAKey(userID, sid))
 		p.SRem(ctx, refreshIndexKey(userID), sid)
 		return nil
 	})
@@ -153,6 +159,7 @@ func (r *valkeyClient) EndRefreshSession(ctx context.Context, userID, sid string
 	var del *valkeycompat.IntCmd
 	_, err := r.rdb.TxPipelined(ctx, func(p valkeycompat.Pipeliner) error {
 		del = p.Del(ctx, refreshKey(userID, sid))
+		p.Del(ctx, sessionMFAKey(userID, sid))
 		p.SRem(ctx, refreshIndexKey(userID), sid)
 		return nil
 	})
@@ -172,12 +179,60 @@ func (r *valkeyClient) DeleteAllRefreshSessions(ctx context.Context, userID stri
 	}
 	keys := []string{refreshIndexKey(userID)}
 	for _, sid := range sids {
-		keys = append(keys, refreshKey(userID, sid))
+		keys = append(keys, refreshKey(userID, sid), sessionMFAKey(userID, sid))
 	}
 	if err := r.rdb.Del(ctx, keys...).Err(); err != nil {
 		return err
 	}
 	return r.rdb.Del(ctx, refreshKey(userID, "")).Err()
+}
+
+// ── PENDING-06: a session's MFA mark ─────────────────────────────────────────
+//
+// refresh_mfa:{<userID>}:<sid> holds the Unix second the session last passed
+// MFA. It is a separate key from the refresh session on purpose: a single SET
+// or DEL cannot lose to (or clobber) a concurrent refresh rotation, which
+// reads and rewrites the session record. The key is deleted with its session
+// and expires on its own at ttl (the session's remaining maximum lifetime).
+
+// SetSessionMFA records that (userID, sid) passed MFA at `at`.
+func (r *valkeyClient) SetSessionMFA(ctx context.Context, userID, sid string, at time.Time, ttl time.Duration) error {
+	if err := r.rdb.Set(ctx, sessionMFAKey(userID, sid), at.Unix(), ttl).Err(); err != nil {
+		return fmt.Errorf("store session mfa: %w", err)
+	}
+	return nil
+}
+
+// GetSessionMFA returns when (userID, sid) last passed MFA, or 0.
+func (r *valkeyClient) GetSessionMFA(ctx context.Context, userID, sid string) (int64, error) {
+	v, err := r.rdb.Get(ctx, sessionMFAKey(userID, sid)).Int64()
+	if err == valkeycompat.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get session mfa: %w", err)
+	}
+	return v, nil
+}
+
+// ClearAllSessionMFA removes the MFA mark from every session of the user.
+func (r *valkeyClient) ClearAllSessionMFA(ctx context.Context, userID string) error {
+	sids, err := r.rdb.SMembers(ctx, refreshIndexKey(userID)).Result()
+	if err != nil && err != valkeycompat.Nil {
+		return fmt.Errorf("list refresh sessions: %w", err)
+	}
+	if len(sids) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(sids))
+	for _, sid := range sids {
+		keys = append(keys, sessionMFAKey(userID, sid))
+	}
+	return r.rdb.Del(ctx, keys...).Err()
+}
+
+func sessionMFAKey(userID, sid string) string {
+	return "refresh_mfa:{" + userID + "}:" + sid
 }
 
 func pkceKey(state string) string {

@@ -71,6 +71,20 @@ type Service interface {
 	// the user's other sessions (admin UI, client daemon).
 	IssueSession(ctx context.Context, userID, tenantID, role, email string, generation int) (accessToken string, expiresIn int64, refreshToken string, err error)
 
+	// IssueSessionWithAuth is IssueSession with the sign-in's authentication
+	// context (PENDING-06): MFA proven by the IdP is recorded on the session.
+	IssueSessionWithAuth(ctx context.Context, userID, tenantID, role, email string, generation int, sa SessionAuth) (accessToken string, expiresIn int64, refreshToken string, err error)
+
+	// StampSessionMFA records that the session the claims belong to passed
+	// MFA at `at` and returns a fresh access token carrying it (PENDING-06
+	// M-6). ErrSessionNotFound if the session has ended.
+	StampSessionMFA(ctx context.Context, claims *AccessTokenClaims, at time.Time) (accessToken string, expiresIn int64, err error)
+
+	// ClearUserSessionMFA removes the MFA mark from every live session of
+	// the user (PENDING-06 M-8, MFA reset). Access tokens already minted keep
+	// theirs until they expire.
+	ClearUserSessionMFA(ctx context.Context, userID string) error
+
 	// InvalidateUserSessions deletes all of the user's server-side refresh sessions so a
 	// generation bump (identity.Revoker) takes effect immediately rather than at
 	// the current access token's expiry. Satisfies identity.SessionInvalidator.
@@ -103,6 +117,9 @@ type AccessTokenClaims struct {
 	// SessionID is the sid claim: the refresh session this token belongs to
 	// ("" for tokens minted without one).
 	SessionID string
+	// MFAAt is when the session last passed MFA (the mfa_at claim; zero if
+	// it never did). PENDING-06.
+	MFAAt time.Time
 	// ExpiresAt is the token's exp claim (zero if absent). Long-lived calls
 	// (the WatchChanges hint stream, FU-8) end when it passes, so a stream is
 	// never authorized beyond its token.

@@ -539,6 +539,13 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroup(ctx context.Context, workspaceID
 type DeviceIdentity struct {
 	DeviceID uuid.UUID
 	SPIFFEID string
+
+	// PENDING-06 (M-4, M-9): when the device's login session last
+	// authenticated and last passed MFA, and since when its risk score
+	// demands a new authentication. nil = never / not demanded.
+	AuthAt           *time.Time
+	MFAAt            *time.Time
+	ReauthRequiredAt *time.Time
 }
 
 // ListActiveDeviceSPIFFEsForGroups returns non-revoked client device identities for the
@@ -548,7 +555,8 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		return map[string][]DeviceIdentity{}, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id
+		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id,
+		        cd.session_auth_at, cd.session_mfa_at, cd.reauth_required_at
 		 FROM group_members gm
 		 JOIN client_devices cd ON cd.user_id = gm.user_id
 		 JOIN users u ON u.id = cd.user_id AND u.tenant_id = cd.workspace_id
@@ -574,7 +582,8 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		var groupID string
 		var identity DeviceIdentity
 
-		if err := rows.Scan(&groupID, &identity.DeviceID, &identity.SPIFFEID); err != nil {
+		if err := rows.Scan(&groupID, &identity.DeviceID, &identity.SPIFFEID,
+			&identity.AuthAt, &identity.MFAAt, &identity.ReauthRequiredAt); err != nil {
 			return nil, fmt.Errorf("scan spiffe row: %w", err)
 		}
 		out[groupID] = append(out[groupID], identity)
