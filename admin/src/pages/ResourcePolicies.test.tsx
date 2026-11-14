@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MockedProvider } from '@apollo/client/testing/react'
+import type { MockedResponse } from '@apollo/client/testing'
 import ResourcePolicies from './ResourcePolicies'
 import {
   GetResourcePoliciesDocument,
   GetDeviceProfilesDocument,
   PreviewResourcePolicyDocument,
+  SetResourcePolicyAuthenticationDocument,
 } from '@/generated/graphql'
 import { Role } from '@/generated/graphql'
 import { setTestRole } from '@/test/roles'
@@ -46,6 +48,8 @@ const POLICIES = [
     description: 'Workspace default policy',
     isDefault: true,
     resourceCount: 2,
+    authFrequencyMinutes: null,
+    requireMfa: false,
     profiles: [],
     resources: [
       { __typename: 'Resource' as const, id: 'res-1', name: 'Internal API' },
@@ -59,6 +63,8 @@ const POLICIES = [
     description: 'Requires corporate firewall',
     isDefault: false,
     resourceCount: 1,
+    authFrequencyMinutes: 1440,
+    requireMfa: true,
     profiles: [
       {
         __typename: 'DeviceProfile' as const,
@@ -72,9 +78,10 @@ const POLICIES = [
   },
 ]
 
-function renderPolicies(policies = POLICIES) {
+function renderPolicies(policies = POLICIES, extraMocks: MockedResponse[] = []) {
   setTestRole(Role.Admin)
-  const mocks = [
+  const mocks: MockedResponse[] = [
+    ...extraMocks,
     {
       request: { query: GetResourcePoliciesDocument },
       result: { data: { resourcePolicies: policies } },
@@ -199,5 +206,62 @@ describe('ResourcePolicies', () => {
     expect(await screen.findByText('Edit Policy: Default')).toBeInTheDocument()
     expect(screen.getByDisplayValue('Default')).toBeDisabled()
     expect(screen.getByText('The Default policy cannot be renamed.')).toBeInTheDocument()
+  })
+
+  // PENDING-06 M-2: the authentication requirement.
+  it('shows a policy authentication requirement in the list', async () => {
+    renderPolicies()
+    expect(await screen.findByText('MFA every 1 day')).toBeInTheDocument()
+  })
+
+  it('sets the authentication requirement on save; MFA needs a frequency', async () => {
+    let sent = false
+    renderPolicies(POLICIES, [
+      {
+        request: {
+          query: SetResourcePolicyAuthenticationDocument,
+          variables: { id: 'pol-default', frequencyMinutes: 60, requireMfa: true },
+        },
+        result: () => {
+          sent = true
+          return {
+          data: {
+            setResourcePolicyAuthentication: {
+              __typename: 'ResourcePolicy' as const,
+              id: 'pol-default',
+              authFrequencyMinutes: 60,
+              requireMfa: true,
+            },
+          },
+          }
+        },
+      },
+    ])
+    await screen.findByText('Strict Prod')
+    await userEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0])
+    await screen.findByText('Edit Policy: Default')
+
+    const mfa = screen.getByRole('checkbox', { name: /Require MFA/ })
+    expect(mfa).toBeDisabled()
+
+    await userEvent.selectOptions(screen.getByLabelText(/Authentication/), '60')
+    expect(mfa).toBeEnabled()
+    await userEvent.click(mfa)
+    await userEvent.click(screen.getByRole('button', { name: 'Save Policy' }))
+
+    await waitFor(() => expect(sent).toBe(true))
+  })
+
+  it('choosing device-only clears Require MFA', async () => {
+    renderPolicies()
+    await screen.findByText('Strict Prod')
+    await userEvent.click(screen.getAllByRole('button', { name: 'Edit' })[1])
+    await screen.findByText('Edit Policy: Strict Prod')
+
+    const mfa = screen.getByRole('checkbox', { name: /Require MFA/ })
+    expect(mfa).toBeChecked()
+    await userEvent.selectOptions(screen.getByLabelText(/Authentication/), '')
+    expect(mfa).not.toBeChecked()
+    expect(mfa).toBeDisabled()
   })
 })

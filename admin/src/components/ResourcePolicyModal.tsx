@@ -4,6 +4,7 @@ import {
   CreateResourcePolicyDocument,
   UpdateResourcePolicyDocument,
   SetResourcePolicyProfilesDocument,
+  SetResourcePolicyAuthenticationDocument,
   GetResourcePoliciesDocument,
   GetDeviceProfilesDocument,
   PreviewResourcePolicyDocument,
@@ -11,9 +12,10 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { AlertTriangle, Info, Loader2, Shield, X } from 'lucide-react'
+import { AlertTriangle, Info, KeyRound, Loader2, Shield, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { toastMutationError } from '@/lib/mutationErrors'
+import { AUTH_FREQUENCY_PRESETS, formatAuthFrequency } from '@/lib/authFrequency'
 
 export interface ResourcePolicyModalProps {
   open: boolean
@@ -25,6 +27,8 @@ export interface ResourcePolicyModalProps {
     isDefault: boolean
     profiles: { id: string; name: string }[]
     resources?: { id: string; name: string }[]
+    authFrequencyMinutes?: number | null
+    requireMfa?: boolean
   } | null
   onSuccess?: () => void
 }
@@ -39,6 +43,9 @@ export function ResourcePolicyModal({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([])
+  // PENDING-06 M-2: null = device-only.
+  const [authFrequency, setAuthFrequency] = useState<number | null>(null)
+  const [requireMfa, setRequireMfa] = useState(false)
   const [confirmReduction, setConfirmReduction] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -50,10 +57,14 @@ export function ResourcePolicyModal({
         setName(policy.name)
         setDescription(policy.description ?? '')
         setSelectedProfileIds(policy.profiles.map((p) => p.id))
+        setAuthFrequency(policy.authFrequencyMinutes ?? null)
+        setRequireMfa(policy.requireMfa ?? false)
       } else {
         setName('')
         setDescription('')
         setSelectedProfileIds([])
+        setAuthFrequency(null)
+        setRequireMfa(false)
       }
       setConfirmReduction(false)
       setError(null)
@@ -105,6 +116,22 @@ export function ResourcePolicyModal({
     onError: toastMutationError,
     refetchQueries: [{ query: GetResourcePoliciesDocument }],
   })
+
+  const [setAuthentication] = useMutation(SetResourcePolicyAuthenticationDocument, {
+    onError: toastMutationError,
+    refetchQueries: [{ query: GetResourcePoliciesDocument }],
+  })
+
+  // The frequency options: the presets, plus the policy's current value if it
+  // was set to something else (through the API).
+  const frequencyOptions = useMemo(() => {
+    const opts = [...AUTH_FREQUENCY_PRESETS]
+    if (authFrequency != null && !opts.includes(authFrequency)) {
+      opts.push(authFrequency)
+      opts.sort((a, b) => a - b)
+    }
+    return opts
+  }, [authFrequency])
 
   function toggleProfile(profileId: string) {
     setSelectedProfileIds((prev) => {
@@ -162,6 +189,15 @@ export function ResourcePolicyModal({
           })
         }
 
+        const authChanged =
+          authFrequency !== (policy.authFrequencyMinutes ?? null) ||
+          requireMfa !== (policy.requireMfa ?? false)
+        if (authChanged) {
+          await setAuthentication({
+            variables: { id: policy.id, frequencyMinutes: authFrequency, requireMfa },
+          })
+        }
+
         toast.success('Resource policy updated')
       } else {
         const created = await createPolicy({
@@ -178,6 +214,11 @@ export function ResourcePolicyModal({
               id: newId,
               profileIds: selectedProfileIds,
             },
+          })
+        }
+        if (newId && authFrequency != null) {
+          await setAuthentication({
+            variables: { id: newId, frequencyMinutes: authFrequency, requireMfa },
           })
         }
 
@@ -353,6 +394,56 @@ export function ResourcePolicyModal({
                   </span>
                 </div>
               )}
+            </div>
+
+            {/* Authentication (PENDING-06 M-2) */}
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="policy-auth-frequency" className="flex items-center gap-1.5 text-sm font-semibold">
+                  <KeyRound className="h-3.5 w-3.5" />
+                  Authentication
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  How recently the user must have signed in for their device to reach these resources. When it
+                  lapses, the resources close until they sign in again (<span className="font-mono">zecurity-client auth</span>).
+                </p>
+              </div>
+              <select
+                id="policy-auth-frequency"
+                value={authFrequency ?? ''}
+                onChange={(e) => {
+                  const next = e.target.value === '' ? null : Number(e.target.value)
+                  setAuthFrequency(next)
+                  if (next === null) setRequireMfa(false)
+                }}
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              >
+                <option value="">Device only (no sign-in requirement)</option>
+                {frequencyOptions.map((m) => (
+                  <option key={m} value={m}>
+                    Every {formatAuthFrequency(m)}
+                  </option>
+                ))}
+              </select>
+              <label
+                className={`flex items-start gap-2.5 text-sm ${authFrequency == null ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={requireMfa}
+                  disabled={authFrequency == null}
+                  onChange={(e) => setRequireMfa(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                />
+                <span>
+                  <span className="font-medium">Require MFA</span>
+                  <span className="block text-xs text-muted-foreground">
+                    The sign-in must include a second factor: the identity provider's MFA, or a code from an
+                    authenticator app set up in Zecurity.
+                    {authFrequency == null && ' Choose a frequency first.'}
+                  </span>
+                </span>
+              </label>
             </div>
 
             {/* Preview Section (P-5) */}

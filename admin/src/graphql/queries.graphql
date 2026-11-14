@@ -275,6 +275,7 @@ query GetUsers {
     provider
     provisioningOwner
     provisionedBy
+    mfaEnrolled
   }
 }
 
@@ -354,6 +355,11 @@ query GetClientDevices {
     observedCountry
     observedNetwork
     observedAt
+    lastAuthenticatedAt
+    lastMfaAt
+    riskScore
+    riskReasons
+    reauthRequired
   }
 }
 
@@ -498,6 +504,8 @@ query GetResourcePolicies {
     description
     isDefault
     resourceCount
+    authFrequencyMinutes
+    requireMfa
     profiles {
       id
       name
@@ -585,5 +593,12 @@ query GetAuditExportSinks {
       oldestPendingAt
       lagging
     }
+  }
+}
+
+# PENDING-06 M-6: Admin Console Security.
+query GetConsoleSecurity {
+  consoleSecurity {
+    requireMfa
   }
 }

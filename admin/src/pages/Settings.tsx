@@ -3,6 +3,7 @@ import { GetWorkspaceDocument, type GetWorkspaceQuery } from '@/generated/graphq
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AuditExportSection } from '@/components/audit/AuditExportSection'
+import { ConsoleSecurityCard } from '@/components/settings/ConsoleSecurityCard'
 import { Capability, useCan } from '@/lib/capabilities'
 
 export default function Settings() {
@@ -46,6 +47,8 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      <ConsoleSecurityCard />
 
       {canExport ? <AuditExportSection /> : null}
     </div>

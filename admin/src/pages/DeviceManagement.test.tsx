@@ -28,6 +28,11 @@ function device(id: string, name: string, approvedAt: string | null) {
     observedCountry: null,
     observedNetwork: null,
     observedAt: null,
+    lastAuthenticatedAt: null,
+    lastMfaAt: null,
+    riskScore: 0,
+    riskReasons: [],
+    reauthRequired: false,
   };
 }
 

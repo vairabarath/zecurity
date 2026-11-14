@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { toastMutationError } from '@/lib/mutationErrors'
 import { useMutation, useQuery } from '@apollo/client/react'
-import { Mail, Plus, UserCircle2, UserCog } from 'lucide-react'
+import { KeyRound, Mail, Plus, UserCircle2, UserCog } from 'lucide-react'
 import {
   CreateInvitationDocument,
   GetGroupsDocument,
@@ -22,6 +22,7 @@ import { EmptyState, StatusPill } from '@/lib/console'
 import { cn } from '@/lib/utils'
 import { UserOwnershipBadge } from '@/components/users/UserOwnershipBadge'
 import { ManageRoleDialog, type ManageRoleTarget } from '@/components/users/ManageRoleDialog'
+import { ResetMfaDialog, type ResetMfaTarget } from '@/components/users/ResetMfaDialog'
 import { Capability, roleLabel, useCan, useCurrentUserId } from '@/lib/capabilities'
 
 type User = {
@@ -32,6 +33,7 @@ type User = {
   provider: string
   provisioningOwner: string
   provisionedBy: string
+  mfaEnrolled: boolean
 }
 
 function roleTone(role: string): 'ok' | 'info' | 'warn' | 'muted' {
@@ -127,6 +129,7 @@ function InviteDialog({
 export default function TeamUsers() {
   const [showInvite, setShowInvite] = useState(false)
   const [roleTarget, setRoleTarget] = useState<ManageRoleTarget | null>(null)
+  const [mfaTarget, setMfaTarget] = useState<ResetMfaTarget | null>(null)
   // Invites and role changes are MEMBERS_ADMIN (Admin only, R-10).
   const canManageMembers = useCan(Capability.MembersAdmin)
   const myId = useCurrentUserId()
@@ -187,16 +190,16 @@ export default function TeamUsers() {
       {/* Table */}
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[860px] items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_130px] gap-4 px-5 py-4">
-            {['Name', 'Email', 'Role', 'Status', 'Number of Groups', 'Created', ''].map((label, i) => (
-              <div key={label + i} className={cn('table-head-label', i === 6 && 'text-right')}>
+          <div className="table-head grid min-w-[1000px] items-center grid-cols-[2fr_2fr_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4">
+            {['Name', 'Email', 'Role', 'Status', 'MFA', 'Number of Groups', 'Created', ''].map((label, i) => (
+              <div key={label + i} className={cn('table-head-label', i === 7 && 'text-right')}>
                 {label}
               </div>
             ))}
           </div>
 
           {usersLoading && !usersData ? (
-            <div className="min-w-[860px] p-5 space-y-3">
+            <div className="min-w-[1000px] p-5 space-y-3">
               {Array.from({ length: 4 }).map((_, i) => (
                 <Skeleton key={i} className="h-14 rounded-2xl bg-secondary" />
               ))}
@@ -209,13 +212,13 @@ export default function TeamUsers() {
               action={canManageMembers ? <Button onClick={() => setShowInvite(true)}>Invite user</Button> : undefined}
             />
           ) : (
-            <div className="min-w-[860px]">
+            <div className="min-w-[1000px]">
               {users.map((user) => {
                 const count = groupCountForUser(user.id)
                 return (
                   <div
                     key={user.id}
-                    className="admin-table-row grid items-center grid-cols-[2fr_2fr_110px_110px_150px_160px_130px] gap-4 px-5 py-4"
+                    className="admin-table-row grid items-center grid-cols-[2fr_2fr_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4"
                   >
                     {/* Name */}
                     <div className="flex min-w-0 items-center gap-3">
@@ -244,6 +247,11 @@ export default function TeamUsers() {
                       <StatusPill label="active" tone="ok" />
                     </div>
 
+                    {/* MFA (PENDING-06): an authenticator app is set up. */}
+                    <div>
+                      <StatusPill label={user.mfaEnrolled ? 'set up' : 'not set up'} tone={user.mfaEnrolled ? 'ok' : 'muted'} />
+                    </div>
+
                     {/* Number of Groups */}
                     <div className="text-[13px] text-muted-foreground">
                       {count === 0 ? 'No groups' : `${count} group${count > 1 ? 's' : ''}`}
@@ -256,7 +264,21 @@ export default function TeamUsers() {
 
                     {/* Manage role (PENDING-19 §7). Shown for directory-managed
                         users too: the role is Zecurity-owned, not synced (R-3). */}
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1">
+                      {/* Reset MFA (PENDING-06 M-8): never your own (the
+                          server refuses it too). */}
+                      {canManageMembers && user.mfaEnrolled && user.id !== myId && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => setMfaTarget({ id: user.id, email: user.email })}
+                          aria-label={`Reset MFA for ${user.email}`}
+                        >
+                          <KeyRound className="h-3.5 w-3.5" />
+                          Reset MFA
+                        </Button>
+                      )}
                       {canManageMembers && (
                         <Button
                           variant="ghost"
@@ -282,6 +304,7 @@ export default function TeamUsers() {
 
       <InviteDialog open={showInvite && canManageMembers} onClose={() => setShowInvite(false)} />
       <ManageRoleDialog target={roleTarget} onClose={() => setRoleTarget(null)} />
+      <ResetMfaDialog target={canManageMembers ? mfaTarget : null} onClose={() => setMfaTarget(null)} />
     </div>
   )
 }

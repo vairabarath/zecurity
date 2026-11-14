@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
-import { Plus, ShieldCheck } from 'lucide-react'
+import { KeyRound, Plus, ShieldCheck } from 'lucide-react'
 import {
   GetResourcePoliciesDocument,
   DeleteResourcePolicyDocument,
@@ -19,6 +19,7 @@ import { Capability, useCan } from '@/lib/capabilities'
 import { EmptyState, ErrorState, EntityIcon } from '@/lib/console'
 import { toastMutationError } from '@/lib/mutationErrors'
 import { toast } from 'sonner'
+import { authRequirementSummary } from '@/lib/authFrequency'
 
 type PolicyRow = {
   id: string
@@ -28,6 +29,8 @@ type PolicyRow = {
   resourceCount: number
   profiles: { id: string; name: string }[]
   resources: { id: string; name: string }[]
+  authFrequencyMinutes?: number | null
+  requireMfa: boolean
 }
 
 function DeletePolicyDialog({
@@ -124,7 +127,7 @@ export default function ResourcePolicies() {
       <div className="table-shell">
         <div className="table-scroll">
           <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_2fr_120px_120px] gap-4 px-5 py-4">
-            {['Name', 'Profiles', 'Resources', 'Actions'].map((label, index) => (
+            {['Name', 'Requirements', 'Resources', 'Actions'].map((label, index) => (
               <div
                 key={label + index}
                 className={`table-head-label ${index === 3 ? 'text-right' : ''}`}
@@ -200,6 +203,13 @@ export default function ResourcePolicies() {
                           {p.name}
                         </span>
                       ))
+                    )}
+                    {/* PENDING-06 M-2: the authentication requirement. */}
+                    {pol.authFrequencyMinutes != null && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-0.5 text-xs font-semibold text-amber-500">
+                        <KeyRound className="h-3 w-3" />
+                        {authRequirementSummary(pol.authFrequencyMinutes, pol.requireMfa)}
+                      </span>
                     )}
                   </div>
 
