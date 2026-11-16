@@ -87,11 +87,17 @@ service ClientService {
   // (PENDING-06 M-5). Returns a URL to open in the browser: the identity
   // provider signs the same user in again and, when a policy needs MFA, the
   // controller asks for a TOTP code (enrolling an authenticator on first
-  // use). On success the device's session is stamped; the device is NOT
-  // re-enrolled. The result reaches the client through the normal ACL
-  // snapshot (resources that needed authentication appear).
+  // use). The device is NOT re-enrolled. The browser result is bound to the
+  // client that started it, like sign-in: the controller redirects a
+  // one-time code to the client's loopback address, and nothing is stamped
+  // until the client redeems it with CompleteReauth.
   // Same authentication as GetACLSnapshot (access_token + device_id).
   rpc StartReauth(StartReauthRequest) returns (StartReauthResponse);
+
+  // CompleteReauth — redeem the one-time code from the step-up's loopback
+  // redirect with the client's PKCE verifier. Only then is the device's
+  // session stamped. Same authentication as StartReauth.
+  rpc CompleteReauth(CompleteReauthRequest) returns (CompleteReauthResponse);
 }
 message ReportDevicePostureRequest {
   string access_token = 1;
@@ -373,12 +379,28 @@ message LogoutResponse {}
 // ── StartReauth (PENDING-06) ────────────────────────────────────────────────
 
 message StartReauthRequest {
-  string access_token = 1;
-  string device_id    = 2;
+  string access_token       = 1;
+  string device_id          = 2;
+  string code_challenge     = 3; // BASE64URL(SHA256(client verifier)), no padding
+  string local_redirect_uri = 4; // http://127.0.0.1:<port>/callback — client loopback server
 }
 
 message StartReauthResponse {
-  string auth_url = 1; // open in the browser; valid for 10 minutes
+  string auth_url   = 1; // open in the browser; valid for 10 minutes
+  string session_id = 2; // passed back in CompleteReauth
+}
+
+message CompleteReauthRequest {
+  string access_token  = 1;
+  string device_id     = 2;
+  string session_id    = 3; // from StartReauthResponse
+  string ctrl_code     = 4; // one-time code from the loopback redirect
+  string code_verifier = 5; // SHA256 must equal StartReauthRequest.code_challenge
+}
+
+message CompleteReauthResponse {
+  bool   mfa                 = 1; // a second factor was proven
+  uint32 auth_required_count = 2; // resources still waiting after this step-up
 }
 
 message WatchChangesRequest {

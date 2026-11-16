@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -51,7 +52,13 @@ type stepUpFixture struct {
 	*deviceHistoryFixture
 	deviceID string
 	mfaSvc   *mfa.Service
+	lastSID  string // step-up session of the last reauth()
 }
+
+const (
+	testStepUpVerifier = "test-step-up-verifier"
+	testLoopback       = "http://127.0.0.1:5555/callback"
+)
 
 func newStepUpFixture(t *testing.T) *stepUpFixture {
 	t.Helper()
@@ -92,7 +99,43 @@ func (f *stepUpFixture) audits(action string) int {
 }
 
 func (f *stepUpFixture) reauth() reauthInfo {
-	return reauthInfo{UserID: f.userID, DeviceID: f.deviceID, SID: "test-sid", Email: "history@example.test", StartedAt: time.Now()}
+	sid, _ := newSessionID()
+	f.lastSID = sid
+	return reauthInfo{UserID: f.userID, DeviceID: f.deviceID, SID: "test-sid", Email: "history@example.test", StartedAt: time.Now(),
+		SessionID: sid, CliCodeChallenge: sha256b64url([]byte(testStepUpVerifier)), LocalRedirectURI: testLoopback}
+}
+
+// loopbackCode checks that the browser was sent to the client's loopback
+// address with a one-time code, and returns the code.
+func (f *stepUpFixture) loopbackCode(rec *httptest.ResponseRecorder) string {
+	f.t.Helper()
+	if rec.Code != http.StatusSeeOther {
+		f.t.Fatalf("want a 303 to the loopback, got %d %s", rec.Code, rec.Body.String())
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil || !strings.HasPrefix(loc.String(), testLoopback+"?code=") || loc.Query().Get("code") == "" {
+		f.t.Fatalf("redirect = %q", rec.Header().Get("Location"))
+	}
+	return loc.Query().Get("code")
+}
+
+// redeem completes the step-up the way the client does.
+func (f *stepUpFixture) redeem(rec *httptest.ResponseRecorder) (*clientv1.CompleteReauthResponse, error) {
+	f.t.Helper()
+	code := f.loopbackCode(rec)
+	f.svc.authSvc = &postureTestAuth{claims: &auth.AccessTokenClaims{
+		UserID: f.userID, TenantID: f.wsID, Email: "history@example.test", SessionID: "test-sid"}}
+	return f.svc.CompleteReauth(f.ctx, &clientv1.CompleteReauthRequest{
+		AccessToken: "tok", DeviceId: f.deviceID, SessionId: f.lastSID, CtrlCode: code, CodeVerifier: testStepUpVerifier})
+}
+
+func (f *stepUpFixture) mustRedeem(rec *httptest.ResponseRecorder) *clientv1.CompleteReauthResponse {
+	f.t.Helper()
+	res, err := f.redeem(rec)
+	if err != nil {
+		f.t.Fatalf("CompleteReauth: %v", err)
+	}
+	return res
 }
 
 // ticket simulates the state right after the IdP round trip.
@@ -147,7 +190,7 @@ func TestReauthMFA_EnrolVerifyStamp(t *testing.T) {
 
 	// The enrolment page shows the key and a QR code, and is never cached.
 	rec := httptest.NewRecorder()
-	stepUpHeaders(rec)
+	stepUpHeaders(rec, testLoopback)
 	renderStepUp(rec, http.StatusOK, mfaPage(id, tk, ""))
 	body := rec.Body.String()
 	if !strings.Contains(body, tk.Enrollment.Secret) || !strings.Contains(body, "data:image/png;base64,") {
@@ -155,6 +198,9 @@ func TestReauthMFA_EnrolVerifyStamp(t *testing.T) {
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" || !strings.Contains(rec.Header().Get("Content-Security-Policy"), "default-src 'none'") {
 		t.Fatalf("enrolment page headers: %v", rec.Header())
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "form-action 'self' http://127.0.0.1:5555;") {
+		t.Fatalf("form-action must allow only self and the client's loopback: %s", rec.Header().Get("Content-Security-Policy"))
 	}
 
 	// Wrong code: page again with an error, nothing stamped.
@@ -166,10 +212,15 @@ func TestReauthMFA_EnrolVerifyStamp(t *testing.T) {
 		t.Fatalf("a wrong code changed the device: %+v", d)
 	}
 
-	// Right code: authenticated, MFA stamped, risk cleared, audited.
+	// Right code: the browser goes to the client's loopback, and nothing is
+	// stamped until the client redeems the code.
 	rec = f.post(url.Values{"ticket": {id}, "code": {totp.Code(secret, time.Now())}, "action": {"verify"}})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "You&#39;re authenticated") {
-		t.Fatalf("right code: %d %s", rec.Code, rec.Body.String())
+	f.loopbackCode(rec)
+	if d := f.device(); d.mfaAt != nil || d.reauthAt == nil {
+		t.Fatalf("stamped before the client redeemed the code: %+v", d)
+	}
+	if res := f.mustRedeem(rec); !res.GetMfa() || res.GetAuthRequiredCount() != 0 {
+		t.Fatalf("CompleteReauth = %+v", res)
 	}
 	d := f.device()
 	if d.authAt == nil || time.Since(*d.authAt) > time.Minute || d.mfaAt == nil || time.Since(*d.mfaAt) > time.Minute {
@@ -214,8 +265,8 @@ func TestReauthMFA_Skip(t *testing.T) {
 
 	optional := f.ticket(true, true)
 	rec = f.post(url.Values{"ticket": {optional}, "action": {"skip"}})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("skip: %d", rec.Code)
+	if res := f.mustRedeem(rec); res.GetMfa() {
+		t.Fatalf("skip reported MFA: %+v", res)
 	}
 	d := f.device()
 	if time.Since(*d.authAt) > time.Minute || d.mfaAt != nil {
@@ -292,9 +343,7 @@ func TestFinishReauthIdP_IdentityMustMatch(t *testing.T) {
 
 	// The owner, no policy requires MFA: authenticated without a TOTP page.
 	rec = run("sub-owner", []string{"pwd"})
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `name="code"`) {
-		t.Fatalf("owner without MFA requirement: %d %s", rec.Code, rec.Body.String())
-	}
+	f.mustRedeem(rec)
 	d := f.device()
 	if time.Since(*d.authAt) > time.Minute || d.mfaAt != nil {
 		t.Fatalf("after re-authentication: %+v", d)
@@ -304,8 +353,8 @@ func TestFinishReauthIdP_IdentityMustMatch(t *testing.T) {
 	// on a live IdP session) is not a second factor: MFA is not stamped.
 	authTime = time.Now().Add(-2 * time.Hour).Unix()
 	rec = run("sub-owner", []string{"pwd", "mfa"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("owner with stale IdP MFA: %d %s", rec.Code, rec.Body.String())
+	if res := f.mustRedeem(rec); res.GetMfa() {
+		t.Fatalf("stale IdP MFA reported as MFA: %+v", res)
 	}
 	if d := f.device(); d.mfaAt != nil {
 		t.Fatalf("a stale IdP amr stamped MFA: %+v", d)
@@ -315,8 +364,8 @@ func TestFinishReauthIdP_IdentityMustMatch(t *testing.T) {
 	// M-3: the IdP proved MFA during this step-up, so the device's MFA is
 	// stamped with no TOTP.
 	rec = run("sub-owner", []string{"pwd", "mfa"})
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `name="code"`) {
-		t.Fatalf("owner with IdP MFA: %d %s", rec.Code, rec.Body.String())
+	if res := f.mustRedeem(rec); !res.GetMfa() {
+		t.Fatalf("IdP MFA not reported: %+v", res)
 	}
 	if d := f.device(); d.mfaAt == nil || time.Since(*d.mfaAt) > time.Minute {
 		t.Fatalf("IdP MFA not recorded: %+v", d)
@@ -357,21 +406,29 @@ func TestStartReauth_Preconditions(t *testing.T) {
 	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("empty request: %v", err)
 	}
+	// The client must bind the step-up to a loopback address.
+	for _, lr := range []string{"", "https://evil.example/cb", "http://10.0.0.5:5555/cb", "http://127.0.0.1/cb"} {
+		if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{
+			AccessToken: "t", DeviceId: f.deviceID, CodeChallenge: "c", LocalRedirectUri: lr}); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("local_redirect_uri %q: %v", lr, err)
+		}
+	}
 	// A device of nobody.
 	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{
-		AccessToken: "t", DeviceId: "00000000-0000-0000-0000-000000000000"}); status.Code(err) != codes.PermissionDenied {
+		AccessToken: "t", DeviceId: "00000000-0000-0000-0000-000000000000",
+		CodeChallenge: "c", LocalRedirectUri: testLoopback}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unknown device: %v", err)
 	}
 	// A revoked device.
 	if _, err := f.pool.Exec(f.ctx, `UPDATE client_devices SET revoked_at = NOW() WHERE id = $1`, f.deviceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{AccessToken: "t", DeviceId: f.deviceID}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{AccessToken: "t", DeviceId: f.deviceID, CodeChallenge: "c", LocalRedirectUri: testLoopback}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("revoked device: %v", err)
 	}
 	// Not enabled.
 	f.svc.mfaSvc = nil
-	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{AccessToken: "t", DeviceId: f.deviceID}); status.Code(err) != codes.Unimplemented {
+	if _, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{AccessToken: "t", DeviceId: f.deviceID, CodeChallenge: "c", LocalRedirectUri: testLoopback}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("disabled: %v", err)
 	}
 }
@@ -426,5 +483,88 @@ func TestIdPMFAFresh(t *testing.T) {
 	}
 	if idpMFAFresh(true, start.Unix(), time.Time{}) {
 		t.Error("zero StartedAt must not count as fresh")
+	}
+}
+
+// Finding (step-up phishing): the browser result is bound to the client that
+// started the step-up. A wrong code, wrong verifier, another session or
+// another device opens nothing, and every grant is single use.
+func TestCompleteReauth_BoundToTheClient(t *testing.T) {
+	f := newStepUpFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE client_devices SET session_auth_at = NOW() - INTERVAL '3 hours' WHERE id = $1`, f.deviceID); err != nil {
+		t.Fatal(err)
+	}
+	stale := func() {
+		t.Helper()
+		if d := f.device(); time.Since(*d.authAt) < time.Hour {
+			t.Fatalf("the device was stamped: %+v", d)
+		}
+	}
+	grant := func() (string, string) {
+		ra := f.reauth()
+		rec := httptest.NewRecorder()
+		f.svc.grantStepUp(rec, httptest.NewRequest(http.MethodGet, "/api/clients/callback", nil), f.wsID, &ra, true, "totp")
+		return f.lastSID, f.loopbackCode(rec)
+	}
+	call := func(sid, code, verifier, device string, claims *auth.AccessTokenClaims) error {
+		f.svc.authSvc = &postureTestAuth{claims: claims}
+		_, err := f.svc.CompleteReauth(f.ctx, &clientv1.CompleteReauthRequest{
+			AccessToken: "tok", DeviceId: device, SessionId: sid, CtrlCode: code, CodeVerifier: verifier})
+		return err
+	}
+	owner := &auth.AccessTokenClaims{UserID: f.userID, TenantID: f.wsID, Email: "history@example.test", SessionID: "test-sid"}
+
+	// Nothing is stamped by the browser step itself.
+	sid, code := grant()
+	stale()
+
+	// Wrong code: refused, audited, and the grant is gone.
+	if err := call(sid, "wrong", testStepUpVerifier, f.deviceID, owner); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("wrong code: %v", err)
+	}
+	if err := call(sid, code, testStepUpVerifier, f.deviceID, owner); status.Code(err) != codes.NotFound {
+		t.Fatalf("grant reused after a failed attempt: %v", err)
+	}
+	stale()
+
+	// Wrong verifier (someone who only saw the code).
+	sid, code = grant()
+	if err := call(sid, code, "not-the-verifier", f.deviceID, owner); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("wrong verifier: %v", err)
+	}
+	stale()
+
+	// Another session of the same user.
+	sid, code = grant()
+	other := *owner
+	other.SessionID = "another-sid"
+	if err := call(sid, code, testStepUpVerifier, f.deviceID, &other); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("other session: %v", err)
+	}
+	stale()
+
+	// Another device id.
+	sid, code = grant()
+	if err := call(sid, code, testStepUpVerifier, "00000000-0000-0000-0000-000000000000", owner); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("other device: %v", err)
+	}
+	stale()
+	if n := f.audits(ActionStepUpFailed); n != 4 {
+		t.Fatalf("step_up_failed audit rows = %d, want 4", n)
+	}
+
+	// The real client: stamped, once.
+	sid, code = grant()
+	if err := call(sid, code, testStepUpVerifier, f.deviceID, owner); err != nil {
+		t.Fatalf("redeem: %v", err)
+	}
+	if d := f.device(); time.Since(*d.authAt) > time.Minute || d.mfaAt == nil {
+		t.Fatalf("not stamped: %+v", d)
+	}
+	if err := call(sid, code, testStepUpVerifier, f.deviceID, owner); status.Code(err) != codes.NotFound {
+		t.Fatalf("second redeem: %v", err)
+	}
+	if n := f.audits(ActionStepUp); n != 1 {
+		t.Fatalf("step_up audit rows = %d, want 1", n)
 	}
 }

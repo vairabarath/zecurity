@@ -71,14 +71,16 @@ func TestStartReauth_SuccessPath(t *testing.T) {
 
 	// 5. StartReauth succeeds
 	resp, err := f.svc.StartReauth(f.ctx, &clientv1.StartReauthRequest{
-		AccessToken: "valid-tok",
-		DeviceId:    f.deviceID,
+		AccessToken:      "valid-tok",
+		DeviceId:         f.deviceID,
+		CodeChallenge:    sha256b64url([]byte("v")),
+		LocalRedirectUri: "http://127.0.0.1:5555/callback",
 	})
 	if err != nil {
 		t.Fatalf("StartReauth: %v", err)
 	}
-	if resp.GetAuthUrl() == "" {
-		t.Fatal("empty AuthUrl")
+	if resp.GetAuthUrl() == "" || resp.GetSessionId() == "" {
+		t.Fatalf("StartReauth response: %+v", resp)
 	}
 
 	u, err := url.Parse(resp.GetAuthUrl())

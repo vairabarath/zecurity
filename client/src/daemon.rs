@@ -7103,6 +7103,13 @@ mod renewal_tests {
         {
             Err(tonic::Status::unimplemented("not used in this test"))
         }
+        async fn complete_reauth(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::CompleteReauthRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::CompleteReauthResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
 
         type WatchChangesStream = crate::change_watch::HintStream;
 

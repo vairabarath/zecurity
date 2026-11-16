@@ -32,6 +32,7 @@ const (
 	ClientService_Logout_FullMethodName               = "/client.v1.ClientService/Logout"
 	ClientService_WatchChanges_FullMethodName         = "/client.v1.ClientService/WatchChanges"
 	ClientService_StartReauth_FullMethodName          = "/client.v1.ClientService/StartReauth"
+	ClientService_CompleteReauth_FullMethodName       = "/client.v1.ClientService/CompleteReauth"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -108,11 +109,16 @@ type ClientServiceClient interface {
 	// (PENDING-06 M-5). Returns a URL to open in the browser: the identity
 	// provider signs the same user in again and, when a policy needs MFA, the
 	// controller asks for a TOTP code (enrolling an authenticator on first
-	// use). On success the device's session is stamped; the device is NOT
-	// re-enrolled. The result reaches the client through the normal ACL
-	// snapshot (resources that needed authentication appear).
+	// use). The device is NOT re-enrolled. The browser result is bound to the
+	// client that started it, like sign-in: the controller redirects a
+	// one-time code to the client's loopback address, and nothing is stamped
+	// until the client redeems it with CompleteReauth.
 	// Same authentication as GetACLSnapshot (access_token + device_id).
 	StartReauth(ctx context.Context, in *StartReauthRequest, opts ...grpc.CallOption) (*StartReauthResponse, error)
+	// CompleteReauth — redeem the one-time code from the step-up's loopback
+	// redirect with the client's PKCE verifier. Only then is the device's
+	// session stamped. Same authentication as StartReauth.
+	CompleteReauth(ctx context.Context, in *CompleteReauthRequest, opts ...grpc.CallOption) (*CompleteReauthResponse, error)
 }
 
 type clientServiceClient struct {
@@ -276,6 +282,16 @@ func (c *clientServiceClient) StartReauth(ctx context.Context, in *StartReauthRe
 	return out, nil
 }
 
+func (c *clientServiceClient) CompleteReauth(ctx context.Context, in *CompleteReauthRequest, opts ...grpc.CallOption) (*CompleteReauthResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompleteReauthResponse)
+	err := c.cc.Invoke(ctx, ClientService_CompleteReauth_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ClientServiceServer is the server API for ClientService service.
 // All implementations must embed UnimplementedClientServiceServer
 // for forward compatibility
@@ -350,11 +366,16 @@ type ClientServiceServer interface {
 	// (PENDING-06 M-5). Returns a URL to open in the browser: the identity
 	// provider signs the same user in again and, when a policy needs MFA, the
 	// controller asks for a TOTP code (enrolling an authenticator on first
-	// use). On success the device's session is stamped; the device is NOT
-	// re-enrolled. The result reaches the client through the normal ACL
-	// snapshot (resources that needed authentication appear).
+	// use). The device is NOT re-enrolled. The browser result is bound to the
+	// client that started it, like sign-in: the controller redirects a
+	// one-time code to the client's loopback address, and nothing is stamped
+	// until the client redeems it with CompleteReauth.
 	// Same authentication as GetACLSnapshot (access_token + device_id).
 	StartReauth(context.Context, *StartReauthRequest) (*StartReauthResponse, error)
+	// CompleteReauth — redeem the one-time code from the step-up's loopback
+	// redirect with the client's PKCE verifier. Only then is the device's
+	// session stamped. Same authentication as StartReauth.
+	CompleteReauth(context.Context, *CompleteReauthRequest) (*CompleteReauthResponse, error)
 	mustEmbedUnimplementedClientServiceServer()
 }
 
@@ -400,6 +421,9 @@ func (UnimplementedClientServiceServer) WatchChanges(*WatchChangesRequest, Clien
 }
 func (UnimplementedClientServiceServer) StartReauth(context.Context, *StartReauthRequest) (*StartReauthResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartReauth not implemented")
+}
+func (UnimplementedClientServiceServer) CompleteReauth(context.Context, *CompleteReauthRequest) (*CompleteReauthResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CompleteReauth not implemented")
 }
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 
@@ -651,6 +675,24 @@ func _ClientService_StartReauth_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_CompleteReauth_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteReauthRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).CompleteReauth(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_CompleteReauth_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).CompleteReauth(ctx, req.(*CompleteReauthRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -705,6 +747,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartReauth",
 			Handler:    _ClientService_StartReauth_Handler,
+		},
+		{
+			MethodName: "CompleteReauth",
+			Handler:    _ClientService_CompleteReauth_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

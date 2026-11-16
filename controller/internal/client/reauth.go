@@ -25,11 +25,13 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -69,6 +71,28 @@ type reauthInfo struct {
 	// StartedAt is when StartReauth ran. The IdP's MFA counts only when its
 	// auth_time is not older than this (see idpMFAFresh).
 	StartedAt time.Time
+
+	// The client that started the step-up (finding: step-up phishing). The
+	// browser result goes to its loopback address as a one-time code, and
+	// nothing is stamped until it redeems the code with its PKCE verifier.
+	SessionID        string
+	CliCodeChallenge string
+	LocalRedirectURI string
+}
+
+// loopbackOrigin validates a client loopback redirect URI and returns its
+// origin (for the step-up pages' form-action).
+func loopbackOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Port() == "" {
+		return "", errors.New("local_redirect_uri must be http://127.0.0.1:<port>/…")
+	}
+	switch u.Hostname() {
+	case "127.0.0.1", "localhost", "::1":
+	default:
+		return "", errors.New("local_redirect_uri must be a loopback address (127.0.0.1 or localhost)")
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 // idpAuthTimeSkew allows for clock skew between the IdP and the controller.
@@ -98,8 +122,11 @@ func (s *Service) StartReauth(ctx context.Context, req *clientv1.StartReauthRequ
 	if s.mfaSvc == nil {
 		return nil, status.Error(codes.Unimplemented, "step-up authentication is not enabled")
 	}
-	if req.GetAccessToken() == "" || req.GetDeviceId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "access_token and device_id are required")
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" || req.GetCodeChallenge() == "" || req.GetLocalRedirectUri() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token, device_id, code_challenge and local_redirect_uri are required")
+	}
+	if _, err := loopbackOrigin(req.GetLocalRedirectUri()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	claims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
 	if err != nil {
@@ -169,14 +196,17 @@ func (s *Service) StartReauth(ctx context.Context, req *clientv1.StartReauthRequ
 		Nonce:           nonce,
 		ExpiresAt:       time.Now().Add(reauthSessionTTL),
 		Reauth: &reauthInfo{
-			UserID:    claims.UserID,
-			DeviceID:  req.GetDeviceId(),
-			SID:       claims.SessionID,
-			Email:     claims.Email,
-			StartedAt: time.Now(),
+			UserID:           claims.UserID,
+			DeviceID:         req.GetDeviceId(),
+			SID:              claims.SessionID,
+			Email:            claims.Email,
+			StartedAt:        time.Now(),
+			SessionID:        sessionID,
+			CliCodeChallenge: req.GetCodeChallenge(),
+			LocalRedirectURI: req.GetLocalRedirectUri(),
 		},
 	})
-	return &clientv1.StartReauthResponse{AuthUrl: authURL}, nil
+	return &clientv1.StartReauthResponse{AuthUrl: authURL, SessionId: sessionID}, nil
 }
 
 // finishReauthIdP runs after the IdP proved an identity for a step-up
@@ -184,7 +214,7 @@ func (s *Service) StartReauth(ctx context.Context, req *clientv1.StartReauthRequ
 func (s *Service) finishReauthIdP(w http.ResponseWriter, r *http.Request, sess *authSession, connID string, authCtx *providers.AuthenticationContext) {
 	ctx := r.Context()
 	ra := sess.Reauth
-	stepUpHeaders(w)
+	stepUpHeaders(w, ra.LocalRedirectURI)
 
 	fail := func(statusCode int, reason, msg string) {
 		s.recordAudit(ctx, audit.Entry{
@@ -237,12 +267,7 @@ func (s *Service) finishReauthIdP(w http.ResponseWriter, r *http.Request, sess *
 	// authentication and the user has an authenticator (M-9).
 	needMFA := !idpMFA && (st.RequiresMFA() || (riskDemanded && enrolled))
 	if !needMFA {
-		if !s.completeStepUp(ctx, sess.WorkspaceID, ra, idpMFA, mfaMethodLabel(idpMFA, false)) {
-			renderStepUp(w, http.StatusForbidden, stepUpPage{Title: "Authentication failed",
-				Message: "This device's session has ended. Run zecurity-client login."})
-			return
-		}
-		renderStepUp(w, http.StatusOK, donePage())
+		s.grantStepUp(w, r, sess.WorkspaceID, ra, idpMFA, mfaMethodLabel(idpMFA, false))
 		return
 	}
 
@@ -274,7 +299,7 @@ func (s *Service) finishReauthIdP(w http.ResponseWriter, r *http.Request, sess *
 // ReauthMFAHandler handles the TOTP page's form (POST /api/clients/reauth/mfa).
 func (s *Service) ReauthMFAHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stepUpHeaders(w)
+		stepUpHeaders(w, "")
 		if s.mfaSvc == nil {
 			http.Error(w, "not enabled", http.StatusNotFound)
 			return
@@ -293,6 +318,7 @@ func (s *Service) ReauthMFAHandler() http.Handler {
 		}
 		ctx := r.Context()
 		ra := &t.Reauth
+		stepUpHeaders(w, ra.LocalRedirectURI)
 
 		if r.PostForm.Get("action") == "skip" {
 			if !t.Skippable {
@@ -300,13 +326,7 @@ func (s *Service) ReauthMFAHandler() http.Handler {
 				return
 			}
 			deleteMFATicket(id)
-			if !s.completeStepUp(ctx, t.WorkspaceID, ra, false, "none") {
-				renderStepUp(w, http.StatusForbidden, stepUpPage{Title: "Authentication failed",
-					Message: "This device's session has ended. Run zecurity-client login."})
-				return
-			}
-			renderStepUp(w, http.StatusOK, stepUpPage{Title: "You're authenticated",
-				Message: "Resources that require a second factor stay unavailable until you set one up. You can close this window."})
+			s.grantStepUp(w, r, t.WorkspaceID, ra, false, "none")
 			return
 		}
 
@@ -350,13 +370,78 @@ func (s *Service) ReauthMFAHandler() http.Handler {
 				Details: map[string]any{"method": "totp", "client": true},
 			})
 		}
-		if !s.completeStepUp(ctx, t.WorkspaceID, ra, true, "totp") {
-			renderStepUp(w, http.StatusForbidden, stepUpPage{Title: "Authentication failed",
-				Message: "This device's session has ended. Run zecurity-client login."})
-			return
-		}
-		renderStepUp(w, http.StatusOK, donePage())
+		s.grantStepUp(w, r, t.WorkspaceID, ra, true, "totp")
 	})
+}
+
+// grantStepUp ends the browser part of a step-up. Nothing is stamped here:
+// the result is parked under a one-time code that goes to the loopback
+// address of the client that called StartReauth. Only that client can
+// redeem it (CompleteReauth, with its PKCE verifier), so a step-up link
+// completed in someone else's browser opens nothing.
+func (s *Service) grantStepUp(w http.ResponseWriter, r *http.Request, workspaceID string, ra *reauthInfo, withMFA bool, method string) {
+	code, err := newCtrlCode()
+	if err != nil {
+		renderStepUp(w, http.StatusInternalServerError, stepUpPage{Title: "Something went wrong", Message: "Try again."})
+		return
+	}
+	putStepUpGrant(ra.SessionID, &stepUpGrant{
+		WorkspaceID: workspaceID,
+		Reauth:      *ra,
+		WithMFA:     withMFA,
+		Method:      method,
+		Code:        code,
+		ExpiresAt:   time.Now().Add(stepUpGrantTTL),
+	})
+	http.Redirect(w, r, ra.LocalRedirectURI+"?code="+url.QueryEscape(code), http.StatusSeeOther)
+}
+
+// CompleteReauth redeems a step-up's one-time code. The code, the PKCE
+// verifier, the access token's user and session, and the device must all
+// match the StartReauth call; only then is the device's session stamped.
+func (s *Service) CompleteReauth(ctx context.Context, req *clientv1.CompleteReauthRequest) (*clientv1.CompleteReauthResponse, error) {
+	if s.mfaSvc == nil {
+		return nil, status.Error(codes.Unimplemented, "step-up authentication is not enabled")
+	}
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" || req.GetSessionId() == "" ||
+		req.GetCtrlCode() == "" || req.GetCodeVerifier() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token, device_id, session_id, ctrl_code and code_verifier are required")
+	}
+	claims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
+	}
+	// Single use: any redemption attempt consumes the grant.
+	g, ok := takeStepUpGrant(req.GetSessionId())
+	if !ok {
+		return nil, status.Error(codes.NotFound, "step-up not found or expired; run zecurity-client auth again")
+	}
+	ra := &g.Reauth
+	refuse := func(c codes.Code, reason, msg string) error {
+		s.recordAudit(ctx, audit.Entry{
+			TenantID: g.WorkspaceID, ActorUserID: ra.UserID, ActorEmail: ra.Email,
+			Action: ActionStepUpFailed, TargetType: "client_device", TargetID: ra.DeviceID,
+			Details: map[string]any{"reason": reason},
+		})
+		return status.Error(c, msg)
+	}
+	if subtle.ConstantTimeCompare([]byte(req.GetCtrlCode()), []byte(g.Code)) != 1 {
+		return nil, refuse(codes.Unauthenticated, "invalid_code", "invalid ctrl_code")
+	}
+	if subtle.ConstantTimeCompare([]byte(sha256b64url([]byte(req.GetCodeVerifier()))), []byte(ra.CliCodeChallenge)) != 1 {
+		return nil, refuse(codes.Unauthenticated, "pkce_failed", "pkce verification failed")
+	}
+	if claims.TenantID != g.WorkspaceID || claims.UserID != ra.UserID ||
+		claims.SessionID != ra.SID || req.GetDeviceId() != ra.DeviceID {
+		return nil, refuse(codes.PermissionDenied, "client_mismatch", "this step-up belongs to another device or session")
+	}
+	if !s.completeStepUp(ctx, g.WorkspaceID, ra, g.WithMFA, g.Method) {
+		return nil, status.Error(codes.FailedPrecondition, "this device's session has ended; run zecurity-client login")
+	}
+	return &clientv1.CompleteReauthResponse{
+		Mfa:               g.WithMFA,
+		AuthRequiredCount: s.authRequiredCount(ctx, g.WorkspaceID, ra.DeviceID),
+	}, nil
 }
 
 // completeStepUp stamps the device's session (and clears its risk score),
@@ -477,6 +562,49 @@ func deleteMFATicket(id string) {
 	delete(mfaTickets, id)
 }
 
+// ── Step-up grants (process-local, D-02) ─────────────────────────────────────
+
+const stepUpGrantTTL = 60 * time.Second
+
+// stepUpGrant is a finished browser step-up waiting for its client.
+type stepUpGrant struct {
+	WorkspaceID string
+	Reauth      reauthInfo
+	WithMFA     bool
+	Method      string
+	Code        string
+	ExpiresAt   time.Time
+}
+
+var (
+	stepUpGrantMu sync.Mutex
+	stepUpGrants  = map[string]*stepUpGrant{}
+)
+
+func putStepUpGrant(id string, g *stepUpGrant) {
+	stepUpGrantMu.Lock()
+	defer stepUpGrantMu.Unlock()
+	now := time.Now()
+	for k, v := range stepUpGrants {
+		if now.After(v.ExpiresAt) {
+			delete(stepUpGrants, k)
+		}
+	}
+	stepUpGrants[id] = g
+}
+
+// takeStepUpGrant removes and returns a live grant.
+func takeStepUpGrant(id string) (*stepUpGrant, bool) {
+	stepUpGrantMu.Lock()
+	defer stepUpGrantMu.Unlock()
+	g, ok := stepUpGrants[id]
+	delete(stepUpGrants, id)
+	if !ok || time.Now().After(g.ExpiresAt) {
+		return nil, false
+	}
+	return g, true
+}
+
 // ── Pages ────────────────────────────────────────────────────────────────────
 
 type stepUpPage struct {
@@ -491,10 +619,6 @@ type stepUpPage struct {
 	Secret string
 	URI    template.URL
 	QR     template.URL // data: URI of the otpauth QR code
-}
-
-func donePage() stepUpPage {
-	return stepUpPage{Title: "You're authenticated", Message: "You can close this window and return to Zecurity."}
 }
 
 func mfaPage(id string, t *mfaTicket, errMsg string) stepUpPage {
@@ -518,8 +642,13 @@ func mfaPage(id string, t *mfaTicket, errMsg string) stepUpPage {
 }
 
 // stepUpHeaders: the pages can show a TOTP secret, so they are never cached,
-// framed or allowed to load anything.
-func stepUpHeaders(w http.ResponseWriter) {
+// framed or allowed to load anything. The TOTP form's answer redirects to the
+// client's loopback address, so form-action also allows that one origin.
+func stepUpHeaders(w http.ResponseWriter, loopbackURI string) {
+	formAction := "'self'"
+	if o, err := loopbackOrigin(loopbackURI); err == nil {
+		formAction += " " + o
+	}
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("Pragma", "no-cache")
@@ -527,7 +656,7 @@ func stepUpHeaders(w http.ResponseWriter) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		"default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
 }
 
 func renderStepUp(w http.ResponseWriter, statusCode int, p stepUpPage) {

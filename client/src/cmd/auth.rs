@@ -4,20 +4,23 @@
 //! the device's last authentication is too old (or its risk score demands a
 //! new one), the controller leaves those resources out of the device's ACL
 //! and reports how many are waiting (`auth_required_count`). This command
-//! asks the controller for a step-up URL, opens it in the browser and waits
-//! until the resources appear. The device is not re-enrolled and the tunnel
+//! asks the controller for a step-up URL, opens it in the browser, receives
+//! the controller's one-time code on a loopback address and redeems it
+//! (`CompleteReauth`), so only this client can finish its own step-up. The device is not re-enrolled and the tunnel
 //! stays up.
 
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::grpc::{client_v1::StartReauthRequest, connect_grpc};
+use crate::grpc::{
+    client_v1::{CompleteReauthRequest, StartReauthRequest},
+    connect_grpc,
+};
 use crate::ipc::{send_ipc, IpcRequest, IpcResponse};
 
 /// How long to wait for the browser flow before giving up.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(300);
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The line `status` and `resources` print when resources are waiting for an
 /// authentication. None when nothing is waiting or the count is unknown.
@@ -40,9 +43,8 @@ pub async fn run() -> Result<()> {
         return Ok(());
     };
 
-    // A sync first: it refreshes the access token if it expired and tells us
-    // how many resources are waiting.
-    let before = sync_count().await;
+    // A sync first: it refreshes the access token if it expired.
+    let _ = sync_count().await;
     let status = send_ipc(&IpcRequest::Status)
         .await
         .map_err(|_| anyhow!("the Zecurity daemon is not running — run `zecurity-client login`"))?;
@@ -71,10 +73,19 @@ pub async fn run() -> Result<()> {
     }
     crate::daemon::check_saved_trust(saved_ca, crate::trust::embedded_platform_root_pem()?)?;
     let mut grpc = connect_grpc(conf.controller(), saved_ca).await?;
+
+    // Bind the browser flow to this client, like sign-in: the controller
+    // sends its one-time code to our loopback address only, and nothing is
+    // stamped until we redeem it with the PKCE verifier.
+    let (code_verifier, code_challenge) = crate::login::new_pkce();
+    let (local_redirect_uri, rx) = crate::login::start_loopback().await?;
+
     let started = grpc
         .start_reauth(StartReauthRequest {
-            access_token: token,
-            device_id,
+            access_token: token.clone(),
+            device_id: device_id.clone(),
+            code_challenge,
+            local_redirect_uri,
         })
         .await
         .map_err(|s| match s.code() {
@@ -95,36 +106,43 @@ pub async fn run() -> Result<()> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     open::that(&started.auth_url).ok();
 
-    // Nothing was waiting: there is no signal to wait for. The controller
-    // pushes the change to the daemon when the browser flow completes.
-    if !matches!(before, Some(n) if n > 0) {
-        println!("Finish in the browser. Your resources update on their own.");
-        return Ok(());
-    }
-
     println!("Waiting for you to finish in the browser...");
-    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
-    loop {
-        tokio::time::sleep(POLL_INTERVAL).await;
-        match sync_count().await {
-            Some(0) => {
-                println!("Authenticated. Run `zecurity-client resources` to see what you can reach.");
-                return Ok(());
-            }
-            // A partial result (for example MFA skipped) still counts as done.
-            Some(n) if Some(n) < before => {
-                println!(
-                    "Authenticated. {n} resource(s) still need a second factor — run `zecurity-client auth` again to set one up."
-                );
-                return Ok(());
-            }
-            _ => {}
+    let ctrl_code = match tokio::time::timeout(WAIT_TIMEOUT, rx).await {
+        Ok(Ok(code)) => code,
+        _ => {
+            return Err(anyhow!(
+                "authentication timed out — run `zecurity-client auth` again"
+            ))
         }
-        if tokio::time::Instant::now() >= deadline {
-            println!("Still waiting. Finish in the browser, then run `zecurity-client status`.");
-            return Ok(());
-        }
+    };
+
+    let done = grpc
+        .complete_reauth(CompleteReauthRequest {
+            access_token: token,
+            device_id,
+            session_id: started.session_id,
+            ctrl_code,
+            code_verifier,
+        })
+        .await
+        .map_err(|s| match s.code() {
+            tonic::Code::FailedPrecondition => {
+                anyhow!("{} — run `zecurity-client login`", s.message())
+            }
+            _ => anyhow!("authentication failed: {}", s.message()),
+        })?
+        .into_inner();
+
+    // Pull the new ACL now rather than waiting for the next change hint.
+    let after = sync_count().await.unwrap_or(done.auth_required_count);
+    match after {
+        0 => println!("Authenticated. Run `zecurity-client resources` to see what you can reach."),
+        n if !done.mfa => println!(
+            "Authenticated. {n} resource(s) still need a second factor — run `zecurity-client auth` again to set one up."
+        ),
+        n => println!("Authenticated. {n} resource(s) are still waiting — run `zecurity-client status`."),
     }
+    Ok(())
 }
 
 /// Asks the daemon to sync the ACL and returns how many resources wait for

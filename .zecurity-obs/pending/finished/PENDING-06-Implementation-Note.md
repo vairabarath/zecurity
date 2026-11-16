@@ -119,4 +119,27 @@ Verified 2026-11-16 against a throwaway DB built from migrations 001–061 (all 
 
 **Tests:** `TestIdPMFAFresh` (fresh, within skew, stale, missing, no amr) and a stale-`amr` case in `TestFinishReauthIdP_IdentityMustMatch`.
 
-**Open (security review, MEDIUM):** the step-up is not bound to the client that started it. Someone holding a stolen device can send the step-up link to its real user. The fix needs PKCE plus a loopback code and a redeem RPC (additive proto and client work). It is tracked as a follow-up.
+**Live check (2026-11-16):** the mock IdP sends `amr: ["mfa"]` but no `auth_time`, so its users now get the TOTP page. That is the intended behaviour.
+
+### Fix: step-up not bound to the client that started it (security review, MEDIUM)
+**Issue:** The IdP callback, and the TOTP or "Skip for now" form, stamped the device directly. Nothing tied the browser to the client that ran `zecurity-client auth`. Someone holding a stolen device and its session could start a step-up and send the link to the real user. If that user signed in and typed a real code, the stolen device was stamped.
+
+**Fix Applied:** the step-up is now bound to the client the same way sign-in is:
+- **Proto (additive):** `StartReauthRequest.code_challenge = 3` and `local_redirect_uri = 4`, both required, and the redirect must be an `http` loopback address with a port. `StartReauthResponse.session_id = 2`. New RPC `CompleteReauth(access_token, device_id, session_id, ctrl_code, code_verifier)` returns `{mfa, auth_required_count}`.
+- **Controller (`reauth.go`):** the browser step no longer stamps the device. `grantStepUp` parks the result under a one-time code (60 s, process-local, D-02) and sends the browser with a 303 to the client's loopback. `CompleteReauth` consumes the grant on any attempt. It checks, in constant time, the code and SHA256(verifier) against the challenge. It also checks that the access token's workspace, user and session and the device id match `StartReauth`. Only then does it call `completeStepUp`. Every refusal is audited as `auth.step_up_failed`. The step-up pages' CSP `form-action` allows `'self'` plus only that client's loopback origin, so the TOTP form's redirect is allowed.
+- **Client:** `login.rs` now shares `new_pkce()` and `start_loopback()` with `cmd/auth.rs`. `auth` waits for the loopback code, calls `CompleteReauth`, then syncs; the polling loop is gone.
+- **Compatibility:** clients built before this change cannot step up (`InvalidArgument`). Nothing is released, so this is acceptable.
+
+**Tests:** `TestCompleteReauth_BoundToTheClient` covers:
+- the browser step stamps nothing;
+- wrong code, wrong verifier, another session or another device is refused and audited;
+- the grant is single use;
+- the right client is stamped exactly once.
+
+The handler tests now redeem through `CompleteReauth`. `TestStartReauth_Preconditions` rejects a missing, non-loopback or portless redirect. Results: controller `internal/client` 100 PASS, 0 skipped; client `cargo test` 384 PASS.
+
+**Live check (2026-11-16, Orca browser):**
+- `login` through the refactored loopback works.
+- `auth` with authenticator enrolment redirects to the loopback, and the resources come back (`mfa.enrolled`, `auth.step_up {mfa: totp}`).
+- **The attack, simulated:** the client was killed after `StartReauth`, then the link was completed with a valid code. The browser's redirect failed, the resources stayed withheld, and no `auth.step_up` row was written.
+- "Skip for now" returns only the resource without MFA.
