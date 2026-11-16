@@ -10,6 +10,7 @@ interface GuidedTourState {
   start: (steps: GuidedStep[]) => void
   next: () => void
   back: () => void
+  goTo: (index: number) => void
   stop: () => void
 }
 
@@ -23,5 +24,10 @@ export const useGuidedTour = create<GuidedTourState>((set, get) => ({
     else set({ index: index + 1 })
   },
   back: () => set((s) => ({ index: Math.max(0, s.index - 1) })),
+  goTo: (index) => {
+    const { steps } = get()
+    if (index >= steps.length) set({ steps: [], index: 0 })
+    else set({ index })
+  },
   stop: () => set({ steps: [], index: 0 }),
 }))

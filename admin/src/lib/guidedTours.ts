@@ -2,18 +2,32 @@
 //
 // - Page tours run once, the first time someone opens that page in this
 //   browser (remembered in localStorage).
-// - Feature tours (started from the Feature Tour page) can span pages: each
-//   step names the route it lives on and the tour navigates there.
+// - Feature tours (started from the Feature Tour page) walk through a task,
+//   possibly across pages. A step with `click` presses its target when the
+//   user clicks Next, so the tour opens the dialog the next steps explain.
+//   The last step leaves the dialog open for the user to finish.
 //
-// Targets are `data-tour="<id>"` attributes on the page's elements. A step
-// whose target is not on screen is shown without a spotlight.
+// How a step finds its element: see lib/tourTargets.ts. A step whose
+// element is not on screen is shown without a spotlight.
 
 export interface GuidedStep {
-  target: string
   title: string
   body: string
+  /** data-tour="…" attribute */
+  target?: string
+  /** CSS selector */
+  selector?: string
+  /** visible text of a button or link (prefix) */
+  button?: string
+  /** a form field: label text (prefix), placeholder or aria-label */
+  field?: string
+  /** the page this step is on; the tour goes there first */
   route?: string
+  /** Next clicks the target before moving on */
+  click?: boolean
 }
+
+const LIST = '.table-shell'
 
 export const pageTours: Record<string, GuidedStep[]> = {
   '/settings': [
@@ -37,14 +51,74 @@ export const pageTours: Record<string, GuidedStep[]> = {
     {
       target: 'policies-list',
       title: 'Resource policies',
-      body: 'Edit a policy to set its Authentication rule: how often users must sign in again, and whether that sign-in needs MFA.',
+      body: 'A resource policy says which devices may reach its resources (device profiles) and how recent the sign-in must be. Every resource uses one policy; the Default policy covers the rest.',
+    },
+    {
+      button: 'Device Profiles',
+      title: 'Device profiles',
+      body: 'Device profiles list what a device must meet (platform, disk encryption, firewall, approval, country, …). Policies pick the profiles they accept.',
     },
   ],
   '/users': [
     {
+      button: 'Add User',
+      title: 'Add people',
+      body: 'Invite someone by email. They sign in with your identity provider and get the role you choose.',
+    },
+    {
       target: 'users-mfa-column',
       title: 'MFA status',
       body: 'Shows who has an authenticator set up. When someone loses their phone, use Reset MFA on their row.',
+    },
+  ],
+  '/groups': [
+    {
+      button: 'New Group',
+      title: 'Groups grant access',
+      body: 'Access is default-deny: a user reaches a resource only through a group that has it. Create a group, then add members and resources to it.',
+    },
+    {
+      selector: LIST,
+      title: 'Your groups',
+      body: 'Click Manage on a group to add members and assign resources.',
+    },
+  ],
+  '/resources': [
+    {
+      button: 'Add Resource',
+      title: 'Resources',
+      body: 'A resource is a service on your network (host and port) that users reach through a connector. Add one, then protect it with a shield and give groups access.',
+    },
+    {
+      selector: LIST,
+      title: 'Your resources',
+      body: 'Open a resource to see how it is secured: its shield, its policy and the groups that have access.',
+    },
+  ],
+  '/remote-networks': [
+    {
+      button: 'Add Network',
+      title: 'Remote networks',
+      body: 'A remote network is a location you connect to Zecurity, such as an office LAN or a cloud VPC. Connectors and resources belong to one.',
+    },
+  ],
+  '/connectors': [
+    {
+      button: 'Add Connector',
+      title: 'Connectors',
+      body: 'A connector runs inside a remote network and carries users’ traffic to its resources. Add one and run the install command it gives you on a host in that network.',
+    },
+    {
+      selector: LIST,
+      title: 'Connector status',
+      body: 'Each connector’s health and last heartbeat. Keep at least one online per network.',
+    },
+  ],
+  '/shields': [
+    {
+      button: 'Add Shield',
+      title: 'Shields',
+      body: 'A shield runs on the machine that hosts a resource and firewalls it, so only traffic through Zecurity gets in.',
     },
   ],
   '/devices': [
@@ -52,6 +126,11 @@ export const pageTours: Record<string, GuidedStep[]> = {
       target: 'devices-signin-column',
       title: 'Last sign-in',
       body: 'When each device last authenticated. An MFA badge means that sign-in included a second factor.',
+    },
+    {
+      selector: LIST,
+      title: 'Enrolled devices',
+      body: 'Every device that enrolled the client: its platform, certificate, status and approval. Approve devices here when a profile requires approval, or revoke a lost one.',
     },
   ],
   '/audit-log': [
@@ -61,16 +140,198 @@ export const pageTours: Record<string, GuidedStep[]> = {
       body: 'Type a prefix such as “mfa.” or “auth.” to see authenticator set-ups, verifications, step-ups and resets.',
     },
   ],
+  '/access-log': [
+    {
+      selector: LIST,
+      title: 'Access log',
+      body: 'Every tunnel attempt across your connectors, allowed or denied, refreshed every 10 seconds.',
+    },
+  ],
 }
 
-// The MFA walk-through from the Feature Tour page, across pages.
 export const featureTours: Record<string, GuidedStep[]> = {
   mfa: [
     ...pageTours['/settings'].map((s) => ({ ...s, route: '/settings' })),
     { ...pageTours['/policies'][0], route: '/policies' },
-    { ...pageTours['/users'][0], route: '/users' },
+    { ...pageTours['/users'][1], route: '/users' },
     { ...pageTours['/devices'][0], route: '/devices' },
     { ...pageTours['/audit-log'][0], route: '/audit-log' },
+  ],
+
+  'add-user': [
+    {
+      route: '/users',
+      button: 'Add User',
+      click: true,
+      title: 'Add a user',
+      body: 'Click Add User. (Press Next and the tour clicks it for you.)',
+    },
+    {
+      field: 'Email address',
+      title: 'Their email address',
+      body: 'Enter the email they sign in with at your identity provider.',
+    },
+    {
+      button: 'Send invite',
+      title: 'Send the invite',
+      body: 'They get an invitation link. Once they accept, they appear in Users. Put them in a group to give them access.',
+    },
+  ],
+
+  'create-group': [
+    {
+      route: '/groups',
+      button: 'New Group',
+      click: true,
+      title: 'Create a group',
+      body: 'Click New Group.',
+    },
+    { field: 'Name', title: 'Name', body: 'A short name, for example Engineering.' },
+    { field: 'Description', title: 'Description', body: 'Optional: what the group is for.' },
+    {
+      button: 'Save',
+      title: 'Save',
+      body: 'Save the group, then open it with Manage to add members and resources.',
+    },
+  ],
+
+  'group-access': [
+    {
+      route: '/groups',
+      button: 'Manage',
+      click: true,
+      title: 'Open a group',
+      body: 'Click Manage on a group to see its members and resources.',
+    },
+    {
+      button: 'Add Member',
+      click: true,
+      title: 'Add members',
+      body: 'Click Add Member.',
+    },
+    { field: 'User', title: 'Pick a user', body: 'Choose who joins the group. Members get every resource the group has.' },
+    {
+      button: 'Cancel',
+      click: true,
+      title: 'Add, or cancel for now',
+      body: 'Click Add to add them. The tour cancels this one so it can show you resources next.',
+    },
+    {
+      target: 'group-tab-resources',
+      click: true,
+      title: 'The group’s resources',
+      body: 'Open the Resources tab. A group with no resources gives its members no access (default-deny).',
+    },
+    {
+      button: 'Assign Resource',
+      click: true,
+      title: 'Assign resources',
+      body: 'Click Assign Resource.',
+    },
+    { field: 'Resource', title: 'Pick a resource', body: 'Choose a resource. Every member of the group can reach it (if their device meets its policy).' },
+    { button: 'Assign', title: 'Assign', body: 'Click Assign. That is all access needs: user → group → resource.' },
+  ],
+
+  'create-resource': [
+    {
+      route: '/resources',
+      button: 'Add Resource',
+      click: true,
+      title: 'Add a resource',
+      body: 'Click Add Resource.',
+    },
+    { field: 'Remote Network', title: 'Remote network', body: 'The network the service is in. Its connector carries the traffic.' },
+    { field: 'Name', title: 'Name', body: 'A name users will see, for example prod-web-01.' },
+    { field: 'Host', title: 'Host', body: 'The service’s IPv4 address or DNS name inside that network.' },
+    { field: 'Protocol', title: 'Protocol', body: 'TCP or UDP.' },
+    { field: 'Port From', title: 'Port', body: 'The port, or the first port of a range (fill Port To for a range).' },
+    {
+      button: 'Add Resource',
+      title: 'Add it',
+      body: 'Add the resource. Then open it to protect it with a shield and choose its policy, and assign it to a group.',
+    },
+  ],
+
+  'create-policy': [
+    {
+      route: '/policies',
+      button: 'Create Resource Policy',
+      click: true,
+      title: 'Create a resource policy',
+      body: 'Click Create Resource Policy.',
+    },
+    { field: 'Policy Name', title: 'Name', body: 'For example Production Services.' },
+    {
+      field: 'Device Profiles',
+      title: 'Device profiles',
+      body: 'Tick the profiles a device may match. A device that meets any one of them is allowed. With none ticked, any device is allowed.',
+    },
+    {
+      field: 'Authentication',
+      title: 'Authentication',
+      body: 'How often users must sign in again for these resources, and whether that sign-in needs MFA.',
+    },
+    {
+      button: 'Create Policy',
+      title: 'Create it',
+      body: 'Create the policy, then choose it on each resource it should cover (open the resource, Resource policy).',
+    },
+  ],
+
+  'create-device-profile': [
+    {
+      route: '/policies',
+      button: 'Device Profiles',
+      click: true,
+      title: 'Device profiles',
+      body: 'Open the Device Profiles tab.',
+    },
+    {
+      button: 'Create Device Profile',
+      click: true,
+      title: 'Create a device profile',
+      body: 'Click Create Device Profile.',
+    },
+    { field: 'Profile Name', title: 'Name', body: 'For example Company laptops. It cannot be changed later.' },
+    {
+      field: 'Verification Requirements',
+      title: 'Verification',
+      body: 'Optional: require an admin to approve each device, or allow only some countries.',
+    },
+    {
+      field: 'Approved Operating Systems',
+      title: 'Platforms',
+      body: 'Turn on each platform the profile allows, then mark the checks its devices must pass (disk encryption, firewall, minimum OS version, …).',
+    },
+    {
+      button: 'Create Profile',
+      title: 'Create it',
+      body: 'Create the profile, then tick it in a resource policy so the policy requires it.',
+    },
+  ],
+
+  'network-connector': [
+    {
+      route: '/remote-networks',
+      button: 'Add Network',
+      click: true,
+      title: 'Add a remote network',
+      body: 'Click Add Network.',
+    },
+    { field: 'Production VPC', title: 'Name the network', body: 'For example Office LAN or Production VPC, then click Create.' },
+    {
+      route: '/connectors',
+      button: 'Add Connector',
+      click: true,
+      title: 'Add a connector',
+      body: 'Next, a connector for that network. Click Add Connector.',
+    },
+    { field: 'e.g. prod-connector-01', title: 'Connector name', body: 'A name for the host it will run on.' },
+    {
+      button: 'Add Connector',
+      title: 'Get the install command',
+      body: 'Choose the network and platform, then add it. Run the install command on a machine in that network; the connector shows online here within a minute.',
+    },
   ],
 }
 

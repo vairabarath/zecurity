@@ -29,7 +29,7 @@ function FeatureCard({ feature }: { feature: TourFeature }) {
   const [open, setOpen] = useState(true)
   const startTour = useGuidedTour((s) => s.start)
   const Icon = feature.icon
-  const guided = feature.guided ? featureTours[feature.guided] : undefined
+  const guided = (feature.guided ?? []).filter((g) => featureTours[g.tour])
   const bodyId = `tour-${feature.id}`
   return (
     <Card>
@@ -55,11 +55,15 @@ function FeatureCard({ feature }: { feature: TourFeature }) {
       </CardHeader>
       {open && (
         <CardContent id={bodyId} className="space-y-5 pt-5 text-sm">
-          {guided && (
-            <Button size="sm" className="gap-1.5" onClick={() => startTour(guided)}>
-              <PlayCircle className="h-4 w-4" />
-              Take the guided tour
-            </Button>
+          {guided.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {guided.map((g) => (
+                <Button key={g.tour} size="sm" className="gap-1.5" onClick={() => startTour(featureTours[g.tour])}>
+                  <PlayCircle className="h-4 w-4" />
+                  {g.label}
+                </Button>
+              ))}
+            </div>
           )}
           <ol className="grid gap-4 md:grid-cols-2">
             {feature.sections.map((section, i) => (

@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { markPageTourSeen, pageTours, pageTourSeen } from '@/lib/guidedTours'
+import { describeStep, findStepTarget } from '@/lib/tourTargets'
 import { useGuidedTour } from '@/store/guidedTour'
 
 // Spotlight + popover for the running guided tour. Mounted once in AppShell.
@@ -15,19 +16,42 @@ const FIND_TIMEOUT_MS = 4000
 
 type Rect = { top: number; left: number; width: number; height: number }
 
-function findTarget(id: string): HTMLElement | null {
-  return document.querySelector<HTMLElement>(`[data-tour="${CSS.escape(id)}"]`)
+function isUnavailable(el: HTMLElement): boolean {
+  return (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true'
 }
 
 export function GuidedTour() {
-  const { steps, index, start, next, back, stop } = useGuidedTour()
+  const { steps, index, start, next: advance, back, goTo, stop } = useGuidedTour()
   const location = useLocation()
   const navigate = useNavigate()
   const step = steps[index]
   // The target found for a step, keyed by that step: a result for another
   // step is stale and ignored. rect is null when the target never appeared.
-  const [found, setFound] = useState<{ key: string; rect: Rect | null } | null>(null)
-  const stepKey = step ? `${index}:${step.target}:${location.pathname}` : ''
+  const [found, setFound] = useState<{ key: string; rect: Rect | null; unavailable?: boolean } | null>(null)
+  const stepKey = step ? `${index}:${describeStep(step)}:${location.pathname}` : ''
+  const layerRef = useRef<HTMLDivElement>(null)
+
+  // A step with `click` performs that click when the user presses Next (it
+  // opens the dialog or page the next steps explain).
+  // When that button is missing or turned off, the steps inside what it
+  // would open are skipped: Next goes to the next part of the walk-through.
+  const next = useCallback(() => {
+    const { steps: all, index: at } = useGuidedTour.getState()
+    const s = all[at]
+    if (!s?.click) {
+      advance()
+      return
+    }
+    const el = findStepTarget(s)
+    if (el && !isUnavailable(el)) {
+      el.click()
+      advance()
+      return
+    }
+    let j = at + 1
+    while (j < all.length && !all[j].click && !all[j].route) j++
+    goTo(j)
+  }, [advance, goTo])
   const nextRef = useRef<HTMLButtonElement>(null)
 
   // First visit to a page with a tour: start it.
@@ -55,19 +79,23 @@ export function GuidedTour() {
     const measure = () => {
       if (!el || cancelled) return
       const r = el.getBoundingClientRect()
-      setFound({ key, rect: { top: r.top, left: r.left, width: r.width, height: r.height } })
+      setFound({
+        key,
+        rect: { top: r.top, left: r.left, width: r.width, height: r.height },
+        unavailable: step.click ? isUnavailable(el) : false,
+      })
     }
     const began = Date.now()
     const poll = window.setInterval(() => {
       if (cancelled) return
-      el = findTarget(step.target)
+      el = findStepTarget(step)
       if (el) {
         window.clearInterval(poll)
         el.scrollIntoView?.({ block: 'center', behavior: 'instant' as ScrollBehavior })
         measure()
       } else if (Date.now() - began > FIND_TIMEOUT_MS) {
         window.clearInterval(poll)
-        setFound({ key, rect: null })
+        setFound({ key, rect: null, unavailable: !!step.click })
       }
     }, 100)
     window.addEventListener('resize', measure)
@@ -97,6 +125,22 @@ export function GuidedTour() {
     if (ready) nextRef.current?.focus()
   }, [ready, stepKey])
 
+  // Keep the tour's own clicks and focus from reaching the page's dialogs:
+  // a Radix dialog closes on a pointer-down outside it and pulls focus back.
+  useEffect(() => {
+    const layer = layerRef.current
+    if (!layer) return
+    const stop = (e: Event) => e.stopPropagation()
+    layer.addEventListener('pointerdown', stop)
+    layer.addEventListener('mousedown', stop)
+    layer.addEventListener('focusin', stop)
+    return () => {
+      layer.removeEventListener('pointerdown', stop)
+      layer.removeEventListener('mousedown', stop)
+      layer.removeEventListener('focusin', stop)
+    }
+  }, [ready])
+
   if (!step || !ready) return null
   const rect = found?.rect ?? null
 
@@ -110,8 +154,12 @@ export function GuidedTour() {
   }
   const last = index === steps.length - 1
 
+  // Back cannot undo a click the tour made (a dialog it opened, a page it
+  // went to), so it is offered only when the previous step clicked nothing.
+  const canGoBack = index > 0 && !steps[index - 1]?.click
+
   return createPortal(
-    <>
+    <div ref={layerRef} data-guided-tour style={{ pointerEvents: 'auto' }}>
       {/* Blocks clicks on the page while the tour runs. */}
       <div className="fixed inset-0 z-[90]" onClick={(e) => e.stopPropagation()} />
       {rect ? (
@@ -143,20 +191,27 @@ export function GuidedTour() {
           </button>
         </div>
         <p className="text-muted-foreground">{step.body}</p>
+        {found?.unavailable && (
+          <p className="mt-2 rounded-lg bg-secondary px-2.5 py-1.5 text-xs text-muted-foreground">
+            {rect
+              ? 'This button is turned off right now (for example, there is nothing left to add), so the tour skips this part.'
+              : 'This isn’t on the page right now, so the tour skips this part.'}
+          </p>
+        )}
         <div className="mt-4 flex items-center justify-between gap-2">
           <span className="text-xs text-muted-foreground">{index + 1} of {steps.length}</span>
           <div className="flex gap-2">
             {!last && (
               <Button variant="ghost" size="sm" onClick={stop}>Skip</Button>
             )}
-            {index > 0 && (
+            {canGoBack && (
               <Button variant="outline" size="sm" onClick={back}>Back</Button>
             )}
             <Button ref={nextRef} size="sm" onClick={next}>{last ? 'Done' : 'Next'}</Button>
           </div>
         </div>
       </div>
-    </>,
+    </div>,
     document.body,
   )
 }

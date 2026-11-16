@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
@@ -95,5 +96,99 @@ describe('GuidedTour', () => {
     for (let i = 0; i < 3; i++) fireEvent.click(await screen.findByRole('button', { name: 'Next' }))
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/policies'))
     expect(await screen.findByText('Resource policies')).toBeInTheDocument()
+  })
+})
+
+// Task walk-throughs: steps find elements by visible text, and a `click`
+// step presses its target on Next (here: opens a dialog, then highlights
+// its field and leaves it open).
+function UsersStub() {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen(true)}>Add User</button>
+      {open && (
+        <div role="dialog">
+          <label htmlFor="invite-email">Email address</label>
+          <input id="invite-email" />
+          <button type="submit">Send invite</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+describe('GuidedTour: task walk-throughs', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('zecurity.tour.seen.v1:/users', '1')
+    act(() => useGuidedTour.getState().stop())
+  })
+  afterEach(() => act(() => useGuidedTour.getState().stop()))
+
+  it('clicks Add User on Next, then points at the dialog field and leaves it open', async () => {
+    render(
+      <MemoryRouter initialEntries={['/users']}>
+        <Routes>
+          <Route path="/users" element={<UsersStub />} />
+        </Routes>
+        <GuidedTour />
+      </MemoryRouter>,
+    )
+    act(() => useGuidedTour.getState().start(featureTours['add-user']))
+    expect(await screen.findByText('Add a user')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email address')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findByText('Their email address')).toBeInTheDocument()
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument()
+    // Back cannot undo the click the tour made.
+    expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findByText('Send the invite')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    await waitFor(() => expect(screen.queryByText('Send the invite')).not.toBeInTheDocument())
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument()
+  })
+
+  it('every walk-through step names exactly one way to find its element', () => {
+    for (const [name, steps] of Object.entries(featureTours)) {
+      for (const s of steps) {
+        const ways = [s.target, s.selector, s.button, s.field].filter(Boolean)
+        expect(ways, `${name}: ${s.title}`).toHaveLength(1)
+      }
+    }
+  })
+})
+
+describe('GuidedTour: a click step whose button is unavailable', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('zecurity.tour.seen.v1:/users', '1')
+    act(() => useGuidedTour.getState().stop())
+  })
+  afterEach(() => act(() => useGuidedTour.getState().stop()))
+
+  it('says so and skips the steps inside what it would open', async () => {
+    render(
+      <MemoryRouter initialEntries={['/x']}>
+        <Routes>
+          <Route path="/x" element={<div><button disabled>Add Member</button><button>Assign Resource</button></div>} />
+        </Routes>
+        <GuidedTour />
+      </MemoryRouter>,
+    )
+    act(() =>
+      useGuidedTour.getState().start([
+        { button: 'Add Member', click: true, title: 'Add members', body: '' },
+        { field: 'User', title: 'Pick a user', body: '' },
+        { button: 'Assign Resource', click: true, title: 'Assign resources', body: '' },
+      ]),
+    )
+    expect(await screen.findByText(/turned off right now/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findByText('Assign resources')).toBeInTheDocument()
+    expect(screen.queryByText('Pick a user')).not.toBeInTheDocument()
   })
 })
