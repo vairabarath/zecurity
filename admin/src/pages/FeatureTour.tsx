@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowRight, ChevronDown, Compass, Info } from 'lucide-react'
+import { ArrowRight, ChevronDown, Compass, Info, PlayCircle, RotateCcw } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { toast } from 'sonner'
+import { featureTours, resetPageTours } from '@/lib/guidedTours'
+import { useGuidedTour } from '@/store/guidedTour'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { tourFeatures, type TourFeature } from '@/lib/featureTour'
 import { cn } from '@/lib/utils'
@@ -23,7 +27,9 @@ function renderStep(text: string) {
 
 function FeatureCard({ feature }: { feature: TourFeature }) {
   const [open, setOpen] = useState(true)
+  const startTour = useGuidedTour((s) => s.start)
   const Icon = feature.icon
+  const guided = feature.guided ? featureTours[feature.guided] : undefined
   const bodyId = `tour-${feature.id}`
   return (
     <Card>
@@ -49,6 +55,12 @@ function FeatureCard({ feature }: { feature: TourFeature }) {
       </CardHeader>
       {open && (
         <CardContent id={bodyId} className="space-y-5 pt-5 text-sm">
+          {guided && (
+            <Button size="sm" className="gap-1.5" onClick={() => startTour(guided)}>
+              <PlayCircle className="h-4 w-4" />
+              Take the guided tour
+            </Button>
+          )}
           <ol className="grid gap-4 md:grid-cols-2">
             {feature.sections.map((section, i) => (
               <li key={section.title} className="rounded-xl border border-border bg-secondary/40 p-4">
@@ -105,9 +117,23 @@ export default function FeatureTour() {
           </h2>
           <p className="page-subtitle">What this console can do, how to use each feature, and where to find it.</p>
         </div>
-        <span className="metric-chip">
-          <strong>{tourFeatures.length}</strong> {tourFeatures.length === 1 ? 'feature' : 'features'}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => {
+              resetPageTours()
+              toast.success('Page tours reset. Each page shows its tour again on your next visit.')
+            }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Show page tours again
+          </Button>
+          <span className="metric-chip">
+            <strong>{tourFeatures.length}</strong> {tourFeatures.length === 1 ? 'feature' : 'features'}
+          </span>
+        </div>
       </div>
       <div className="space-y-4">
         {tourFeatures.map((feature) => (

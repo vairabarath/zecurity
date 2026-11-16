@@ -61,7 +61,7 @@ export function ConsoleSecurityCard() {
   const required = data?.consoleSecurity.requireMfa ?? false
 
   return (
-    <Card>
+    <Card data-tour="security-card">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm font-medium">
           <KeyRound className="h-4 w-4" />
@@ -69,7 +69,7 @@ export function ConsoleSecurityCard() {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-6 text-sm">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div data-tour="mfa-authenticator" className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-1">
             <div className="font-medium">Your authenticator app</div>
             {statusError ? (
@@ -96,7 +96,7 @@ export function ConsoleSecurityCard() {
           )}
         </div>
 
-        <div className="flex flex-wrap items-start justify-between gap-4 border-t border-border pt-5">
+        <div data-tour="mfa-console" className="flex flex-wrap items-start justify-between gap-4 border-t border-border pt-5">
           <div className="max-w-xl space-y-1">
             <div className="font-medium">Require MFA for the admin console</div>
             <p className="text-muted-foreground">

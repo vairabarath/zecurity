@@ -192,7 +192,7 @@ export default function TeamUsers() {
         <div className="table-scroll">
           <div className="table-head grid min-w-[1360px] items-center grid-cols-[minmax(160px,2fr)_minmax(160px,2fr)_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4">
             {['Name', 'Email', 'Role', 'Status', 'MFA', 'Number of Groups', 'Created', ''].map((label, i) => (
-              <div key={label + i} className={cn('table-head-label', i === 7 && 'text-right')}>
+              <div key={label + i} className={cn('table-head-label', i === 7 && 'text-right')} data-tour={label === 'MFA' ? 'users-mfa-column' : undefined}>
                 {label}
               </div>
             ))}

@@ -21,11 +21,14 @@ export interface TourFeature {
   summary: string
   sections: TourSection[]
   notes?: string[]
+  /** Key in guidedTours.featureTours for the "Take the guided tour" button. */
+  guided?: string
 }
 
 export const tourFeatures: TourFeature[] = [
   {
     id: 'mfa',
+    guided: 'mfa',
     title: 'Multi-factor authentication (MFA)',
     icon: KeyRound,
     summary:

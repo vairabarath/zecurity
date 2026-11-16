@@ -124,7 +124,7 @@ export default function ResourcePolicies() {
         </div>
       </div>
 
-      <div className="table-shell">
+      <div className="table-shell" data-tour="policies-list">
         <div className="table-scroll">
           <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_2fr_120px_120px] gap-4 px-5 py-4">
             {['Name', 'Requirements', 'Resources', 'Actions'].map((label, index) => (
