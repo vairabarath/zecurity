@@ -13,6 +13,9 @@ import { useGuidedTour } from '@/store/guidedTour'
 const POPOVER_WIDTH = 340
 const GAP = 12
 const FIND_TIMEOUT_MS = 4000
+const SUBMIT_WAIT_MS = 6000
+// Room the popover needs below a target before it goes above instead.
+const POPOVER_ROOM = 240
 
 type Rect = { top: number; left: number; width: number; height: number }
 
@@ -77,19 +80,46 @@ export function GuidedTour() {
   }, [advance, goTo])
 
   // A click on the step's button (by the user or by Next) moves the tour on,
-  // after the page has handled it.
+  // after the page has handled it. A submit moves on only once it went
+  // through: its button is gone (the dialog closed or the page changed). If
+  // the button is still there, the form refused it; the tour stays and
+  // points at the form's message.
   useEffect(() => {
     if (!step || (!step.click && !step.submit)) return
     const at = index
+    const submit = !!step.submit
+    let waiting: number | undefined
     const onClick = (e: MouseEvent) => {
       const el = targetRef.current
       if (!el || !(e.target instanceof Node) || !el.contains(e.target) || isUnavailable(el)) return
-      window.setTimeout(() => {
-        if (useGuidedTour.getState().index === at) goTo(at + 1)
-      }, 0)
+      if (!submit) {
+        window.setTimeout(() => {
+          if (useGuidedTour.getState().index === at) goTo(at + 1)
+        }, 0)
+        return
+      }
+      const began = Date.now()
+      window.clearInterval(waiting)
+      waiting = window.setInterval(() => {
+        if (useGuidedTour.getState().index !== at) {
+          window.clearInterval(waiting)
+        } else if (!el.isConnected) {
+          window.clearInterval(waiting)
+          goTo(at + 1)
+        } else if (Date.now() - began > SUBMIT_WAIT_MS) {
+          window.clearInterval(waiting)
+          setHint({
+            key: `${at}`,
+            text: 'It didn’t go through yet. Check the message in the form, fix it, and click the button again.',
+          })
+        }
+      }, 150)
     }
     document.addEventListener('click', onClick, true)
-    return () => document.removeEventListener('click', onClick, true)
+    return () => {
+      document.removeEventListener('click', onClick, true)
+      window.clearInterval(waiting)
+    }
   }, [step, index, goTo])
   const nextRef = useRef<HTMLButtonElement>(null)
 
@@ -193,11 +223,16 @@ export function GuidedTour() {
   const rect = found?.rect ?? null
 
   const pad = 6
-  let popTop = window.innerHeight / 2 - 90
+  // Below the target when there is room, otherwise above it, anchored by its
+  // bottom edge so a taller popover (a hint) never covers the target.
+  let popPos: React.CSSProperties = { top: window.innerHeight / 2 - 90 }
   let popLeft = window.innerWidth / 2 - POPOVER_WIDTH / 2
   if (rect) {
     const below = rect.top + rect.height + pad + GAP
-    popTop = below + 190 < window.innerHeight ? below : Math.max(GAP, rect.top - pad - GAP - 190)
+    popPos =
+      below + POPOVER_ROOM < window.innerHeight
+        ? { top: below }
+        : { bottom: Math.max(GAP, window.innerHeight - (rect.top - pad - GAP)) }
     popLeft = Math.min(Math.max(GAP, rect.left), window.innerWidth - POPOVER_WIDTH - GAP)
   }
   const last = index === steps.length - 1
@@ -240,7 +275,7 @@ export function GuidedTour() {
         aria-modal="true"
         aria-labelledby="tour-title"
         className="fixed z-[92] rounded-2xl border border-border bg-card p-4 text-sm shadow-2xl"
-        style={{ top: popTop, left: popLeft, width: POPOVER_WIDTH }}
+        style={{ ...popPos, left: popLeft, width: POPOVER_WIDTH, maxHeight: `calc(100vh - ${GAP * 2}px)`, overflowY: 'auto' }}
       >
         <div className="mb-1 flex items-start justify-between gap-2">
           <h3 id="tour-title" className="font-semibold">{step.title}</h3>

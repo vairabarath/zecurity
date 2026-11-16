@@ -313,6 +313,48 @@ export const featureTours: Record<string, GuidedStep[]> = {
     },
   ],
 
+  'add-shield': [
+    {
+      route: '/shields',
+      button: 'Add Shield',
+      click: true,
+      title: 'Add a shield',
+      body: 'A shield runs on the machine that hosts your resources and firewalls them, so only traffic through Zecurity gets in. It needs a remote network with a connector online. Click Add Shield (or press Next).',
+    },
+    {
+      field: 'Shield Name',
+      title: 'Shield name',
+      body: 'Type a name for the machine it will run on, for example db-server-01.',
+    },
+    {
+      field: 'Remote Network',
+      title: 'Its network',
+      body: 'Choose the remote network the machine is in. It must have a connector online: the shield binds to it at install time.',
+    },
+    {
+      field: 'Platform',
+      title: 'Platform',
+      body: 'Linux is the platform for shields.',
+    },
+    {
+      button: 'Add Shield',
+      submit: true,
+      title: 'Add the shield',
+      body: 'Click Add Shield (or press Next). You go to the shield’s page. If the network has no connector online yet, the form says so: install the connector first.',
+    },
+    {
+      target: 'shield-install',
+      title: 'Install it on the resource’s machine',
+      body: 'Copy this command and run it on the machine that runs your services (not on the connector). The shield shows Active once it checks in.',
+    },
+    {
+      route: '/resources',
+      selector: '.table-shell',
+      title: 'Then protect resources',
+      body: 'Open a resource on that machine and click Protect this resource. The shield then blocks every connection that does not come through Zecurity.',
+    },
+  ],
+
   'network-connector': [
     {
       route: '/remote-networks',

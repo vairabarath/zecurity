@@ -57,7 +57,10 @@ export const tourFeatures: TourFeature[] = [
     icon: Box,
     summary:
       'A resource is a service on a remote network (host and port). A shield on its machine firewalls it so only traffic through Zecurity gets in.',
-    guided: [{ label: 'Show me: add a resource', tour: 'create-resource' }],
+    guided: [
+      { label: 'Show me: add a shield', tour: 'add-shield' },
+      { label: 'Show me: add a resource', tour: 'create-resource' },
+    ],
     sections: [
       {
         title: 'Add a resource',
@@ -70,7 +73,7 @@ export const tourFeatures: TourFeature[] = [
       {
         title: 'Protect it with a shield',
         steps: [
-          'Install a shield on the machine that runs the service (Shields → Add Shield).',
+          'Install a shield on the machine that runs the service (Shields → Add Shield). Its network needs a connector online first.',
           'Open the resource and click Protect this resource. The shield then blocks traffic that does not come through Zecurity.',
         ],
         link: { label: 'Open Shields', to: '/shields' },

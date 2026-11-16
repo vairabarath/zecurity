@@ -27,6 +27,7 @@ describe('FeatureTour', () => {
     render(<MemoryRouter><FeatureTour /></MemoryRouter>)
     for (const label of [
       'Show me: add a network and a connector',
+      'Show me: add a shield',
       'Show me: add a resource',
       'Show me: add a user',
       'Show me: create a group',
