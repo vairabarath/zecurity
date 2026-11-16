@@ -190,7 +190,7 @@ export default function TeamUsers() {
       {/* Table */}
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1000px] items-center grid-cols-[2fr_2fr_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4">
+          <div className="table-head grid min-w-[1360px] items-center grid-cols-[minmax(160px,2fr)_minmax(160px,2fr)_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4">
             {['Name', 'Email', 'Role', 'Status', 'MFA', 'Number of Groups', 'Created', ''].map((label, i) => (
               <div key={label + i} className={cn('table-head-label', i === 7 && 'text-right')}>
                 {label}
@@ -199,7 +199,7 @@ export default function TeamUsers() {
           </div>
 
           {usersLoading && !usersData ? (
-            <div className="min-w-[1000px] p-5 space-y-3">
+            <div className="min-w-[1360px] p-5 space-y-3">
               {Array.from({ length: 4 }).map((_, i) => (
                 <Skeleton key={i} className="h-14 rounded-2xl bg-secondary" />
               ))}
@@ -212,13 +212,13 @@ export default function TeamUsers() {
               action={canManageMembers ? <Button onClick={() => setShowInvite(true)}>Invite user</Button> : undefined}
             />
           ) : (
-            <div className="min-w-[1000px]">
+            <div className="min-w-[1360px]">
               {users.map((user) => {
                 const count = groupCountForUser(user.id)
                 return (
                   <div
                     key={user.id}
-                    className="admin-table-row grid items-center grid-cols-[2fr_2fr_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4"
+                    className="admin-table-row grid items-center grid-cols-[minmax(160px,2fr)_minmax(160px,2fr)_110px_110px_100px_150px_160px_250px] gap-4 px-5 py-4"
                   >
                     {/* Name */}
                     <div className="flex min-w-0 items-center gap-3">

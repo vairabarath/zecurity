@@ -102,3 +102,10 @@ All components — Controller, Rust Client, and Admin Console UI — are built, 
 **Fix Applied:** `cp.now = func() time.Time { return now }` in `newTestHandlers`.
 
 Verified 2026-11-16 against a throwaway DB built from migrations 001–061 (all `*_TEST_DATABASE_URL` set, so the DB-backed tests ran instead of skipping): `./internal/mfa/... ./internal/client/... ./graph/resolvers/...` gave 283 PASS, 0 FAIL. One skip remains, `TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, and it is intentional and older than this work.
+
+### Fix: Users table Name and Email columns collapse (admin UI)
+**Issue:** On the Users page (`admin/src/pages/TeamUsers.tsx`) the Name and Email cells were not visible and the headers were out of line with the cells. Found in the live run on 2026-11-16 in the Orca browser.
+
+**Root Cause:** The MFA column added 100 px and the actions column grew from 130 px to 250 px. The fixed columns plus gaps (about 992 px) now took more than the table's `min-w-[1000px]` minus padding, so the two `2fr` columns got no width.
+
+**Fix Applied:** Name and Email are now `minmax(160px,2fr)`, and the header and rows use `min-w-[1360px]`. The table scrolls horizontally inside `.table-scroll` instead of collapsing.
