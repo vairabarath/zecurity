@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
   ChevronDown,
+  Compass,
   Download,
   History,
   Laptop,
@@ -184,6 +185,7 @@ export function Sidebar() {
             <NavItem to="/devices"        label="Devices"        icon={Laptop} />
             <PoliciesSection />
             <NavItem to="/install"        label="Install Client" icon={Download} />
+            <NavItem to="/tour"           label="Feature Tour"   icon={Compass} />
           </>
         )}
       </nav>
