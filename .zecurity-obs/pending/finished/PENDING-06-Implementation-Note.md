@@ -143,3 +143,15 @@ The handler tests now redeem through `CompleteReauth`. `TestStartReauth_Precondi
 - `auth` with authenticator enrolment redirects to the loopback, and the resources come back (`mfa.enrolled`, `auth.step_up {mfa: totp}`).
 - **The attack, simulated:** the client was killed after `StartReauth`, then the link was completed with a valid code. The browser's redirect failed, the resources stayed withheld, and no `auth.step_up` row was written.
 - "Skip for now" returns only the resource without MFA.
+
+### Fix: a stranger's token could burn a step-up grant (security review, MEDIUM)
+**Issue:** `CompleteReauth` consumed the grant before it checked the caller. Anyone with a valid token who saw the step-up `state` (it is in the auth URL) could destroy the owner's grant and write `auth.step_up_failed` rows into the owner's workspace.
+
+**Fix Applied:** `takeStepUpGrant` takes an ownership check: same workspace, user, session and device. A caller who doesn't own the grant gets `NotFound`, the grant stays in place and no audit row is written. For the owner, any attempt consumes the grant. A wrong code or verifier is still audited. `TestCompleteReauth_BoundToTheClient` covers strangers by session, device, user and workspace, then redeems the same grant as the owner.
+
+### Open: sign-in also trusts an old IdP `amr`
+Fix 1 covers only the step-up. Two sign-in paths still record MFA at "now" from the IdP's `amr` with no `auth_time` check:
+- client login (`TokenExchange`, `service.go` → `sess.IdpMFA`);
+- admin console login (`auth/callback.go` → `SessionAuthFromAMR`).
+
+So `zecurity-client logout && zecurity-client login` on a live IdP session can meet a recent-MFA policy with an old MFA. The same applies to console MFA (M-6). The fix is the same `auth_time` gate, with the start time recorded at `InitiateAuth` or the console's `initiateAuth`. Google is not affected: it never sets `amr`, and its `AuthTime` is only `iat`.

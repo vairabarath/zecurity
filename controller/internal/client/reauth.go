@@ -411,8 +411,14 @@ func (s *Service) CompleteReauth(ctx context.Context, req *clientv1.CompleteReau
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
-	// Single use: any redemption attempt consumes the grant.
-	g, ok := takeStepUpGrant(req.GetSessionId())
+	// Only the client that owns the grant (same workspace, user, session and
+	// device) may touch it. Anyone else gets NotFound, and the grant is left
+	// alone, so a token from elsewhere cannot burn it or write audit rows into
+	// the owner's workspace. For the owner, any attempt consumes it.
+	g, ok := takeStepUpGrant(req.GetSessionId(), func(g *stepUpGrant) bool {
+		return claims.TenantID == g.WorkspaceID && claims.UserID == g.Reauth.UserID &&
+			claims.SessionID == g.Reauth.SID && req.GetDeviceId() == g.Reauth.DeviceID
+	})
 	if !ok {
 		return nil, status.Error(codes.NotFound, "step-up not found or expired; run zecurity-client auth again")
 	}
@@ -430,10 +436,6 @@ func (s *Service) CompleteReauth(ctx context.Context, req *clientv1.CompleteReau
 	}
 	if subtle.ConstantTimeCompare([]byte(sha256b64url([]byte(req.GetCodeVerifier()))), []byte(ra.CliCodeChallenge)) != 1 {
 		return nil, refuse(codes.Unauthenticated, "pkce_failed", "pkce verification failed")
-	}
-	if claims.TenantID != g.WorkspaceID || claims.UserID != ra.UserID ||
-		claims.SessionID != ra.SID || req.GetDeviceId() != ra.DeviceID {
-		return nil, refuse(codes.PermissionDenied, "client_mismatch", "this step-up belongs to another device or session")
 	}
 	if !s.completeStepUp(ctx, g.WorkspaceID, ra, g.WithMFA, g.Method) {
 		return nil, status.Error(codes.FailedPrecondition, "this device's session has ended; run zecurity-client login")
@@ -593,15 +595,23 @@ func putStepUpGrant(id string, g *stepUpGrant) {
 	stepUpGrants[id] = g
 }
 
-// takeStepUpGrant removes and returns a live grant.
-func takeStepUpGrant(id string) (*stepUpGrant, bool) {
+// takeStepUpGrant removes and returns a live grant, but only for its owner:
+// when owns reports false the grant stays in place for the real client.
+func takeStepUpGrant(id string, owns func(*stepUpGrant) bool) (*stepUpGrant, bool) {
 	stepUpGrantMu.Lock()
 	defer stepUpGrantMu.Unlock()
 	g, ok := stepUpGrants[id]
-	delete(stepUpGrants, id)
-	if !ok || time.Now().After(g.ExpiresAt) {
+	if !ok {
 		return nil, false
 	}
+	if time.Now().After(g.ExpiresAt) {
+		delete(stepUpGrants, id)
+		return nil, false
+	}
+	if !owns(g) {
+		return nil, false
+	}
+	delete(stepUpGrants, id)
 	return g, true
 }
 

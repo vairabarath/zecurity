@@ -534,27 +534,35 @@ func TestCompleteReauth_BoundToTheClient(t *testing.T) {
 	}
 	stale()
 
-	// Another session of the same user.
-	sid, code = grant()
-	other := *owner
-	other.SessionID = "another-sid"
-	if err := call(sid, code, testStepUpVerifier, f.deviceID, &other); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("other session: %v", err)
-	}
-	stale()
-
-	// Another device id.
-	sid, code = grant()
-	if err := call(sid, code, testStepUpVerifier, "00000000-0000-0000-0000-000000000000", owner); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("other device: %v", err)
-	}
-	stale()
-	if n := f.audits(ActionStepUpFailed); n != 4 {
-		t.Fatalf("step_up_failed audit rows = %d, want 4", n)
+	if n := f.audits(ActionStepUpFailed); n != 2 {
+		t.Fatalf("step_up_failed audit rows = %d, want 2", n)
 	}
 
-	// The real client: stamped, once.
+	// Not the owner (another session, another device, another user or
+	// workspace): NotFound, no audit row, and the grant is NOT consumed, so
+	// a stranger with any valid token cannot burn the owner's step-up.
 	sid, code = grant()
+	strangers := map[string]struct {
+		device string
+		claims auth.AccessTokenClaims
+	}{
+		"other session":   {f.deviceID, auth.AccessTokenClaims{UserID: f.userID, TenantID: f.wsID, SessionID: "another-sid"}},
+		"other device":    {"00000000-0000-0000-0000-000000000000", *owner},
+		"other user":      {f.deviceID, auth.AccessTokenClaims{UserID: "00000000-0000-0000-0000-000000000001", TenantID: f.wsID, SessionID: "test-sid"}},
+		"other workspace": {f.deviceID, auth.AccessTokenClaims{UserID: f.userID, TenantID: "00000000-0000-0000-0000-000000000002", SessionID: "test-sid"}},
+	}
+	for name, c := range strangers {
+		cl := c.claims
+		if err := call(sid, code, testStepUpVerifier, c.device, &cl); status.Code(err) != codes.NotFound {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	stale()
+	if n := f.audits(ActionStepUpFailed); n != 2 {
+		t.Fatalf("a stranger wrote audit rows: step_up_failed = %d, want 2", n)
+	}
+
+	// The real client, on the same grant the strangers tried: stamped, once.
 	if err := call(sid, code, testStepUpVerifier, f.deviceID, owner); err != nil {
 		t.Fatalf("redeem: %v", err)
 	}

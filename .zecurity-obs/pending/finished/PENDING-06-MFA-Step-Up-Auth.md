@@ -26,7 +26,7 @@ tags: [pending, finished, adr, identity, mfa]
 |---|---|
 | M-1 | **Native TOTP for workspace users** (Twingate model). Sealed secret, replay-safe (Valkey epoch sliding window), rate-limited (5 fails = 15m lockout), fail closed. No WebAuthn, no recovery codes. |
 | M-2 | **Resource policy → Authentication:** frequency (1 h … 31 days, or none = device-only) and `requireMfa` (requires a frequency). Default is device-only. |
-| M-3 | **A verified IdP `amr` (`mfa`, `otp`, `hwk`, …) counts as MFA.** Skip code entry when IdP attests second factor. |
+| M-3 | **A verified IdP `amr` (`mfa`, `otp`, `hwk`, …) counts as MFA.** Code entry is skipped when the IdP attests a second factor. *Amended 2026-11-16 (security review):* on a step-up, the `amr` counts only if the ID token's `auth_time` is from this step-up (1 min skew). Otherwise the TOTP page is shown. Sign-in (client login and admin console) does not check `auth_time` yet; see the implementation note. |
 | M-4 | **Enforced in the ACL compiler** next to posture gate; expiry through snapshot `ValidUntil`. Lazy recompile on client poll or connector heartbeat. |
 | M-5 | **Step-up does not re-enroll device:** `zecurity-client auth` → IdP → TOTP page if needed → tunnel stays up, ACL refreshed. |
 | M-6 | **Admin Console Security:** workspace `consoleRequireMfa`; console requests without MFA receive `MFA_REQUIRED` (403 or GraphQL error) and prompt for TOTP. |
