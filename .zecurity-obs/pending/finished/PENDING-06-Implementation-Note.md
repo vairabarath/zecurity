@@ -91,3 +91,14 @@ All components — Controller, Rust Client, and Admin Console UI — are built, 
 - **Dependencies Reviewed:**
   - `github.com/skip2/go-qrcode` (v0.0.0-20200617195104-da1b6568686e): pure Go, MIT license, zero runtime dependencies outside Go stdlib. No CVEs.
   - `qrcode.react` (4.2.0 exact): ISC license, zero runtime dependencies, peer-depends on React only. 0 vulnerabilities in `npm audit`. Matches provider-console.
+
+## Post-Phase Fixes
+
+### Fix: `TestHandlers_Status` panics after 2026-11-14 (time-bomb)
+**Issue:** `controller/internal/mfa/handlers_test.go` panicked with a nil-pointer dereference in `pgxpool.(*Pool).Acquire` from 2026-11-15 on. The 2026-11-14 report that the suite passed was true only on that day.
+
+**Root Cause:** `newTestHandlers` pinned the service clock to 2026-11-14 12:00 and seeded the `ConsolePolicy` cache "valid until now + 1 h", but left `ConsolePolicy.now = time.Now`. Once real time passed 13:00 that day the entry counted as expired, and `Required` fell through to the nil pool.
+
+**Fix Applied:** `cp.now = func() time.Time { return now }` in `newTestHandlers`.
+
+Verified 2026-11-16 against a throwaway DB built from migrations 001–061 (all `*_TEST_DATABASE_URL` set, so the DB-backed tests ran instead of skipping): `./internal/mfa/... ./internal/client/... ./graph/resolvers/...` gave 283 PASS, 0 FAIL. One skip remains, `TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, and it is intentional and older than this work.

@@ -54,6 +54,9 @@ func newTestHandlers(t *testing.T, repo Repo) (*Handlers, *fakeSessionStamper, *
 		stampedTok: "stamped-token",
 	}
 	cp := NewConsolePolicy(nil)
+	// Pin the policy clock to the test clock: the seeded cache entries are
+	// relative to `now`, and the nil pool must never be reached.
+	cp.now = func() time.Time { return now }
 	cp.cache["w1"] = consoleEntry{required: false, until: now.Add(time.Hour)}
 	handlers := NewHandlers(svc, stamper, cp, auditFn)
 	return handlers, stamper, &aud, &now, cp
