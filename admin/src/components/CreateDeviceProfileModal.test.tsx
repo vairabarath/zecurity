@@ -51,68 +51,43 @@ function renderModal() {
 }
 
 describe("CreateDeviceProfileModal", () => {
-  it("shows the OS picker first, with only Linux enabled", () => {
+  it("shows the same platform cards as Edit: every platform but macOS can be turned on", async () => {
     renderModal();
-
-    expect(screen.getByRole("button", { name: /Linux/ })).toBeEnabled();
-    expect(screen.getByRole("button", { name: /Windows/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /macOS/ })).toBeDisabled();
+    for (const label of ["Windows", "Linux", "iOS", "Android"]) {
+      expect(await screen.findByRole("switch", { name: `Allow ${label} devices` })).toBeEnabled();
+    }
+    expect(screen.queryByRole("switch", { name: "Allow macOS devices" })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "macOS posture" })).toHaveTextContent("Coming soon");
+    expect(screen.queryByText("Soon")).not.toBeInTheDocument();
   });
 
-  it("reveals the Create Trusted Linux Profile panel after choosing Linux", async () => {
+  it("disables Create until there is a name and at least one platform", async () => {
     renderModal();
-
-    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
-
-    expect(
-      await screen.findByText("Create Trusted Linux Profile"),
-    ).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Profile Name")).toBeInTheDocument();
-  });
-
-  it("disables Create until a profile name is entered", async () => {
-    renderModal();
-    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
-
-    const createButton = await screen.findByRole("button", {
-      name: "Create Trusted Profile",
-    });
+    const createButton = screen.getByRole("button", { name: "Create Profile" });
     expect(createButton).toBeDisabled();
-
-    await userEvent.type(
-      screen.getByPlaceholderText("Profile Name"),
-      "Corporate Laptops",
-    );
+    await userEvent.type(screen.getByPlaceholderText("Profile Name"), "Corporate Laptops");
+    expect(createButton).toBeDisabled();
+    await userEvent.click(await screen.findByRole("switch", { name: "Allow Linux devices" }));
     expect(createButton).toBeEnabled();
   });
 
-  it("lists Linux posture checks sourced from supportedPostureChecks", async () => {
+  it("lists a platform's posture checks once it is turned on", async () => {
     renderModal();
-    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
-
-    expect(
-      await screen.findByText("Disk encryption (LUKS)"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Firewall active")).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("switch", { name: "Allow Linux devices" }));
+    expect(screen.getByRole("button", { name: "Disk encryption (LUKS) not required" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Firewall active not required" })).toBeInTheDocument();
   });
 
   it("offers Approved by an admin as an optional requirement, off by default", async () => {
     renderModal();
-    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
-
-    const approval = await screen.findByRole("switch", {
-      name: "Approved by an admin",
-    });
+    const approval = await screen.findByRole("switch", { name: "Approved by an admin" });
     expect(approval).toHaveAttribute("aria-checked", "false");
-    expect(approval).toBeEnabled();
     await userEvent.click(approval);
     expect(approval).toHaveAttribute("aria-checked", "true");
-    expect(screen.queryByText("Manual Trust")).not.toBeInTheDocument();
-    // Server checks are not listed again among the Linux posture checks.
     expect(screen.getAllByText("Approved by an admin")).toHaveLength(1);
   });
 
-  it("turns the chosen platform on after its requirements (ADR-031)", async () => {
+  it("adds the requirements of enabled platforms, then turns the platforms on (ADR-031)", async () => {
     const calls: string[] = [];
     const record = (label: string, data: Record<string, unknown>) => () => {
       calls.push(label);
@@ -150,10 +125,12 @@ describe("CreateDeviceProfileModal", () => {
         <CreateDeviceProfileModal open onOpenChange={vi.fn()} onSuccess={onSuccess} />
       </MockedProvider>,
     );
-    await userEvent.click(screen.getByRole("button", { name: /Linux/ }));
     await userEvent.type(screen.getByPlaceholderText("Profile Name"), "Laptops");
-    await userEvent.click(await screen.findByRole("switch", { name: "Firewall active" }));
-    await userEvent.click(screen.getByRole("button", { name: /^Create/ }));
+    await userEvent.click(await screen.findByRole("switch", { name: "Allow Linux devices" }));
+    await userEvent.click(screen.getByRole("button", { name: "Firewall active not required" }));
+    await userEvent.click(screen.getByRole("button", { name: "Disk encryption (LUKS) not required" }));
+    await userEvent.click(screen.getByRole("button", { name: "Disk encryption (LUKS) required" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create Profile" }));
     await waitFor(() => expect(onSuccess).toHaveBeenCalled());
     expect(calls).toEqual(["create", "add firewall", "platforms linux"]);
   });

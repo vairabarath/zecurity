@@ -95,15 +95,15 @@ describe('CreateDeviceProfileModal: country check', () => {
         <CreateDeviceProfileModal open onOpenChange={vi.fn()} onSuccess={onSuccess} />
       </MockedProvider>,
     )
-    await user.click(screen.getByRole('button', { name: /Linux/ }))
     await user.type(screen.getByPlaceholderText('Profile Name'), 'India only')
+    await user.click(await screen.findByRole('switch', { name: 'Allow Linux devices' }))
 
     // Never a plain switch with the approval text.
     const countrySwitch = await screen.findByRole('switch', { name: 'Device country (public IP)' })
     expect(screen.getAllByRole('switch', { name: /Device country/ })).toHaveLength(1)
     await user.click(countrySwitch)
     expect(screen.getByText(/IP geolocation by DB-IP/)).toBeInTheDocument()
-    const create = screen.getByRole('button', { name: 'Create Trusted Profile' })
+    const create = screen.getByRole('button', { name: 'Create Profile' })
     expect(create).toBeDisabled()
     expect(screen.getByText(/Choose at least one country/)).toBeInTheDocument()
 
@@ -122,7 +122,6 @@ describe('CreateDeviceProfileModal: country check', () => {
         <CreateDeviceProfileModal open onOpenChange={vi.fn()} />
       </MockedProvider>,
     )
-    await user.click(screen.getByRole('button', { name: /Linux/ }))
     await user.click(await screen.findByRole('switch', { name: 'Device country (public IP)' }))
     await pickCountry(user, 'Allow only these countries', 'India', 'India (IN)')
     await user.type(screen.getByLabelText('Block these countries'), 'India')
