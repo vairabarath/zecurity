@@ -23,8 +23,11 @@ export interface GuidedStep {
   field?: string
   /** the page this step is on; the tour goes there first */
   route?: string
-  /** Next clicks the target before moving on */
+  /** Next clicks the target before moving on (opens a dialog or page) */
   click?: boolean
+  /** The target submits what the user filled in: Next clicks it only when
+   *  it is enabled; otherwise the tour stays and asks for the fields. */
+  submit?: boolean
 }
 
 const LIST = '.table-shell'
@@ -316,21 +319,56 @@ export const featureTours: Record<string, GuidedStep[]> = {
       button: 'Add Network',
       click: true,
       title: 'Add a remote network',
-      body: 'Click Add Network.',
+      body: 'A remote network is a place you connect: an office LAN, a cloud VPC. Click Add Network (or press Next).',
     },
-    { field: 'Production VPC', title: 'Name the network', body: 'For example Office LAN or Production VPC, then click Create.' },
+    {
+      target: 'network-name',
+      title: 'Name the network',
+      body: 'Type a name in the box, for example Office LAN or Production VPC.',
+    },
+    {
+      target: 'network-location',
+      title: 'Where it is',
+      body: 'Optional: pick where this network lives (on-premise, a cloud, …). Click the box to choose.',
+    },
+    {
+      target: 'network-create',
+      submit: true,
+      title: 'Create it',
+      body: 'Click Create (or press Next). The network appears in the list.',
+    },
     {
       route: '/connectors',
       button: 'Add Connector',
       click: true,
       title: 'Add a connector',
-      body: 'Next, a connector for that network. Click Add Connector.',
+      body: 'A connector runs on a machine inside the network and carries users’ traffic to it. Click Add Connector (or press Next).',
     },
-    { field: 'e.g. prod-connector-01', title: 'Connector name', body: 'A name for the host it will run on.' },
+    {
+      field: 'Connector Name',
+      title: 'Connector name',
+      body: 'Type a name for it, for example office-connector-01.',
+    },
+    {
+      field: 'Remote Network',
+      title: 'Its network',
+      body: 'Choose the network you just created.',
+    },
+    {
+      field: 'Platform',
+      title: 'Platform',
+      body: 'Linux is the platform for connectors.',
+    },
     {
       button: 'Add Connector',
-      title: 'Get the install command',
-      body: 'Choose the network and platform, then add it. Run the install command on a machine in that network; the connector shows online here within a minute.',
+      submit: true,
+      title: 'Add the connector',
+      body: 'Click Add Connector (or press Next). You go to the connector’s page.',
+    },
+    {
+      target: 'connector-install',
+      title: 'Install it',
+      body: 'Copy this command and run it on a Linux machine inside the network. The connector shows Online within a minute; then add resources in that network.',
     },
   ],
 }

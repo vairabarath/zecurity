@@ -20,6 +20,20 @@ function isUnavailable(el: HTMLElement): boolean {
   return (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true'
 }
 
+function isTyping(el: Element | null): boolean {
+  return (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement ||
+    (el instanceof HTMLElement && el.isContentEditable)
+  )
+}
+
+// Fields the user fills in during a step.
+function isFillable(el: HTMLElement): boolean {
+  return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
+}
+
 export function GuidedTour() {
   const { steps, index, start, next: advance, back, goTo, stop } = useGuidedTour()
   const location = useLocation()
@@ -30,28 +44,53 @@ export function GuidedTour() {
   const [found, setFound] = useState<{ key: string; rect: Rect | null; unavailable?: boolean } | null>(null)
   const stepKey = step ? `${index}:${describeStep(step)}:${location.pathname}` : ''
   const layerRef = useRef<HTMLDivElement>(null)
+  // The element the current step points at, once found.
+  const targetRef = useRef<HTMLElement | null>(null)
+  const [hint, setHint] = useState<{ key: string; text: string } | null>(null)
 
-  // A step with `click` performs that click when the user presses Next (it
-  // opens the dialog or page the next steps explain).
-  // When that button is missing or turned off, the steps inside what it
-  // would open are skipped: Next goes to the next part of the walk-through.
+  // Next on a `click` or `submit` step presses its button; the click
+  // listener below then moves the tour on (the same as when the user clicks
+  // the button themselves).
+  // - click: when the button is missing or turned off, the steps inside what
+  //   it would open are skipped.
+  // - submit: when the button is turned off, the form is not complete yet;
+  //   the tour stays and says so.
   const next = useCallback(() => {
     const { steps: all, index: at } = useGuidedTour.getState()
     const s = all[at]
-    if (!s?.click) {
+    if (!s?.click && !s?.submit) {
       advance()
       return
     }
-    const el = findStepTarget(s)
-    if (el && !isUnavailable(el)) {
-      el.click()
-      advance()
+    const live = targetRef.current?.isConnected ? targetRef.current : findStepTarget(s)
+    if (live && !isUnavailable(live)) {
+      live.click()
+      return
+    }
+    if (s.submit) {
+      setHint({ key: `${at}`, text: 'Fill in the fields above first, then press Next (or click the button).' })
       return
     }
     let j = at + 1
-    while (j < all.length && !all[j].click && !all[j].route) j++
+    while (j < all.length && !all[j].click && !all[j].submit && !all[j].route) j++
     goTo(j)
   }, [advance, goTo])
+
+  // A click on the step's button (by the user or by Next) moves the tour on,
+  // after the page has handled it.
+  useEffect(() => {
+    if (!step || (!step.click && !step.submit)) return
+    const at = index
+    const onClick = (e: MouseEvent) => {
+      const el = targetRef.current
+      if (!el || !(e.target instanceof Node) || !el.contains(e.target) || isUnavailable(el)) return
+      window.setTimeout(() => {
+        if (useGuidedTour.getState().index === at) goTo(at + 1)
+      }, 0)
+    }
+    document.addEventListener('click', onClick, true)
+    return () => document.removeEventListener('click', onClick, true)
+  }, [step, index, goTo])
   const nextRef = useRef<HTMLButtonElement>(null)
 
   // First visit to a page with a tour: start it.
@@ -76,6 +115,7 @@ export function GuidedTour() {
     const key = stepKey
     let el: HTMLElement | null = null
     let cancelled = false
+    targetRef.current = null
     const measure = () => {
       if (!el || cancelled) return
       const r = el.getBoundingClientRect()
@@ -90,6 +130,7 @@ export function GuidedTour() {
       if (cancelled) return
       el = findStepTarget(step)
       if (el) {
+        targetRef.current = el
         window.clearInterval(poll)
         el.scrollIntoView?.({ block: 'center', behavior: 'instant' as ScrollBehavior })
         measure()
@@ -113,6 +154,8 @@ export function GuidedTour() {
     if (!step) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') stop()
+      // Arrows move the caret while the user types in a field.
+      else if (isTyping(document.activeElement)) return
       else if (e.key === 'ArrowRight') next()
       else if (e.key === 'ArrowLeft') back()
     }
@@ -121,9 +164,14 @@ export function GuidedTour() {
   }, [step, next, back, stop])
 
   const ready = !!step && found?.key === stepKey
+  // A field to fill gets the focus, so the user can type at once; otherwise
+  // the Next button does.
   useEffect(() => {
-    if (ready) nextRef.current?.focus()
-  }, [ready, stepKey])
+    if (!ready) return
+    const el = targetRef.current
+    if (step && !step.click && !step.submit && el && isFillable(el)) el.focus()
+    else nextRef.current?.focus()
+  }, [ready, stepKey, step])
 
   // Keep the tour's own clicks and focus from reaching the page's dialogs:
   // a Radix dialog closes on a pointer-down outside it and pulls focus back.
@@ -156,26 +204,36 @@ export function GuidedTour() {
 
   // Back cannot undo a click the tour made (a dialog it opened, a page it
   // went to), so it is offered only when the previous step clicked nothing.
-  const canGoBack = index > 0 && !steps[index - 1]?.click
+  const canGoBack = index > 0 && !steps[index - 1]?.click && !steps[index - 1]?.submit
+  const shownHint = hint?.key === `${index}` ? hint.text : null
+  const hole = rect
+    ? { top: rect.top - pad, left: rect.left - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 }
+    : null
+  // Blocks the page except the highlighted element, which the user can type
+  // in or click. It sits under open dialogs (z-50), so a dialog the walk-
+  // through opened stays usable.
+  const blockers = hole
+    ? [
+        { top: 0, left: 0, right: 0, height: Math.max(0, hole.top) },
+        { top: hole.top + hole.height, left: 0, right: 0, bottom: 0 },
+        { top: hole.top, left: 0, width: Math.max(0, hole.left), height: hole.height },
+        { top: hole.top, left: hole.left + hole.width, right: 0, height: hole.height },
+      ]
+    : [{ top: 0, left: 0, right: 0, bottom: 0 }]
 
   return createPortal(
     <div ref={layerRef} data-guided-tour style={{ pointerEvents: 'auto' }}>
-      {/* Blocks clicks on the page while the tour runs. */}
-      <div className="fixed inset-0 z-[90]" onClick={(e) => e.stopPropagation()} />
-      {rect ? (
+      {blockers.map((b, i) => (
+        <div key={i} data-testid="tour-blocker" className="fixed z-[45]" style={b} onClick={(e) => e.stopPropagation()} />
+      ))}
+      {hole ? (
         <div
           data-testid="tour-spotlight"
           className="pointer-events-none fixed z-[91] rounded-xl ring-2 ring-primary transition-all"
-          style={{
-            top: rect.top - pad,
-            left: rect.left - pad,
-            width: rect.width + pad * 2,
-            height: rect.height + pad * 2,
-            boxShadow: '0 0 0 9999px oklch(0.12 0.02 255 / 0.62)',
-          }}
+          style={{ ...hole, boxShadow: '0 0 0 9999px oklch(0.12 0.02 255 / 0.62)' }}
         />
       ) : (
-        <div className="fixed inset-0 z-[91] bg-[oklch(0.12_0.02_255/0.62)]" />
+        <div className="pointer-events-none fixed inset-0 z-[91] bg-[oklch(0.12_0.02_255/0.62)]" />
       )}
       <div
         role="dialog"
@@ -191,6 +249,11 @@ export function GuidedTour() {
           </button>
         </div>
         <p className="text-muted-foreground">{step.body}</p>
+        {shownHint && (
+          <p role="status" className="mt-2 rounded-lg bg-secondary px-2.5 py-1.5 text-xs text-foreground">
+            {shownHint}
+          </p>
+        )}
         {found?.unavailable && (
           <p className="mt-2 rounded-lg bg-secondary px-2.5 py-1.5 text-xs text-muted-foreground">
             {rect

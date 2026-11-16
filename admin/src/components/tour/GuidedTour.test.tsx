@@ -192,3 +192,60 @@ describe('GuidedTour: a click step whose button is unavailable', () => {
     expect(screen.queryByText('Pick a user')).not.toBeInTheDocument()
   })
 })
+
+function NetworkStub() {
+  const [name, setName] = useState('')
+  const [created, setCreated] = useState<string | null>(null)
+  return (
+    <div>
+      <input data-tour="network-name" value={name} onChange={(e) => setName(e.target.value)} />
+      <button data-tour="network-create" disabled={!name.trim()} onClick={() => setCreated(name)}>Create</button>
+      {created && <p>created {created}</p>}
+    </div>
+  )
+}
+
+describe('GuidedTour: the user fills in the fields', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    act(() => useGuidedTour.getState().stop())
+  })
+  afterEach(() => act(() => useGuidedTour.getState().stop()))
+
+  it('focuses the field, lets the user type, and a submit step waits for valid input', async () => {
+    render(
+      <MemoryRouter initialEntries={['/n']}>
+        <Routes>
+          <Route path="/n" element={<NetworkStub />} />
+        </Routes>
+        <GuidedTour />
+      </MemoryRouter>,
+    )
+    act(() =>
+      useGuidedTour.getState().start([
+        { target: 'network-name', title: 'Name the network', body: '' },
+        { target: 'network-create', submit: true, title: 'Create it', body: '' },
+        { target: 'network-name', title: 'All set', body: '' },
+      ]),
+    )
+    await screen.findByText('Name the network')
+    const input = document.querySelector<HTMLInputElement>('[data-tour="network-name"]')!
+    await waitFor(() => expect(document.activeElement).toBe(input))
+    // Arrow keys move the caret, not the tour, while typing.
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByText('Name the network')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByText('Create it')
+    // Nothing typed: Next stays and asks for the fields.
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Fill in the fields above first')
+    expect(screen.getByText('Create it')).toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: 'Office LAN' } })
+    // The user's own click on the highlighted button moves the tour on.
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    expect(await screen.findByText('created Office LAN')).toBeInTheDocument()
+    expect(await screen.findByText('All set')).toBeInTheDocument()
+  })
+})
