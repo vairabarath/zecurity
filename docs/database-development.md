@@ -35,6 +35,24 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
 - **Two database roles (since `051_`, PENDING-11 D-12).** `ztna` owns the schema: Postgres runs the schema files as `ztna`, and the DB-backed tests and `psql` use it. The controller runs as **`ztna_app`**, which may only INSERT and SELECT the audit tables (`audit_logs`, `connector_logs`, `provider_audit_logs`). `051_` creates `ztna_app`, and `zz_app_role_login.sh` gives it a password from `APP_DB_PASSWORD` (set in `docker-compose.yml`). After the reset, point `DATABASE_URL` in `controller/.env` at `ztna_app` (see `.env.example`). Keep the `*_TEST_DATABASE_URL` variables on `ztna`.
 - Valkey (`ztna_valkey`) holds only caches and rate-limit counters. Recreating it is harmless but usually unnecessary.
 
+### 2a. Exception: apply one new file to a shared local database you want to keep
+
+Sometimes the local database holds lab data that others are still using, and a reset would cost more than it is worth. In that case, and only for a **new file that has never run on this database**, you may apply that file by hand. Always back up first:
+
+```bash
+mkdir -p ~/dev/zecurity-db-backups
+docker exec ztna_postgres pg_dump -U ztna ztna_platform \
+  > ~/dev/zecurity-db-backups/ztna_platform-before-<NNN>-$(date +%F).sql
+docker exec -i ztna_postgres psql -U ztna -d ztna_platform -1 -v ON_ERROR_STOP=1 \
+  < controller/migrations/<NNN>_<name>.sql
+```
+
+- **`-1` runs the file as one transaction, and `ON_ERROR_STOP` stops at the first error.** A failure leaves the database unchanged.
+- **Check afterwards** that the new tables and columns exist (`\d <table>`).
+- **Undo:** create an empty database and load the backup into it (`psql -U ztna -d <db> < backup.sql`), or recreate the database as in section 2.
+- **This is not a migration framework.** Nothing records that the file ran, and the PR is still labelled `[schema: reset DB]`. Fresh databases, test databases and the other developer still use section 2.
+- **Applied this way:** `061_mfa_step_up.sql` on 2026-11-16 (PENDING-06). The backup is `~/dev/zecurity-db-backups/ztna_platform-before-061-2026-11-16.sql`.
+
 ## 3. After a reset: getting back to a working setup
 
 1. **Provider operator.** The first provider super-admin is created by the **create-only bootstrap** (Decision Record D-26). Set these in `controller/.env`, then start the controller:
