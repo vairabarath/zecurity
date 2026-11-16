@@ -66,6 +66,23 @@ type reauthInfo struct {
 	DeviceID string
 	SID      string // the device's login session
 	Email    string
+	// StartedAt is when StartReauth ran. The IdP's MFA counts only when its
+	// auth_time is not older than this (see idpMFAFresh).
+	StartedAt time.Time
+}
+
+// idpAuthTimeSkew allows for clock skew between the IdP and the controller.
+const idpAuthTimeSkew = time.Minute
+
+// idpMFAFresh reports whether the IdP's MFA proof belongs to this step-up.
+// A silent round trip on a live IdP session can carry an amr from a sign-in
+// done long ago; that is not a second factor for this step-up. A missing
+// auth_time (0) is never fresh, so the user is sent to the TOTP page.
+func idpMFAFresh(amrMFA bool, authTime int64, startedAt time.Time) bool {
+	if !amrMFA || authTime <= 0 || startedAt.IsZero() {
+		return false
+	}
+	return !time.Unix(authTime, 0).Before(startedAt.Add(-idpAuthTimeSkew))
 }
 
 // EnableStepUp turns on step-up authentication. Without it StartReauth
@@ -152,10 +169,11 @@ func (s *Service) StartReauth(ctx context.Context, req *clientv1.StartReauthRequ
 		Nonce:           nonce,
 		ExpiresAt:       time.Now().Add(reauthSessionTTL),
 		Reauth: &reauthInfo{
-			UserID:   claims.UserID,
-			DeviceID: req.GetDeviceId(),
-			SID:      claims.SessionID,
-			Email:    claims.Email,
+			UserID:    claims.UserID,
+			DeviceID:  req.GetDeviceId(),
+			SID:       claims.SessionID,
+			Email:     claims.Email,
+			StartedAt: time.Now(),
 		},
 	})
 	return &clientv1.StartReauthResponse{AuthUrl: authURL}, nil
@@ -203,7 +221,9 @@ func (s *Service) finishReauthIdP(w http.ResponseWriter, r *http.Request, sess *
 		fail(http.StatusForbidden, "device_unavailable", "This device is no longer enrolled. Run zecurity-client login.")
 		return
 	}
-	idpMFA := auth.MFAFromAMR(authCtx.AMR)
+	// M-3, tightened: the IdP's MFA counts only when the IdP authenticated
+	// the user during this step-up (auth_time), not on an older sign-in.
+	idpMFA := idpMFAFresh(auth.MFAFromAMR(authCtx.AMR), authCtx.AuthTime, ra.StartedAt)
 	riskDemanded := st.Device.ReauthRequiredAt != nil
 	enrolled, err := s.mfaSvc.Enrolled(ctx, ra.UserID)
 	if err != nil {

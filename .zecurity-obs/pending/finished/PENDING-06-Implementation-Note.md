@@ -109,3 +109,14 @@ Verified 2026-11-16 against a throwaway DB built from migrations 001–061 (all 
 **Root Cause:** The MFA column added 100 px and the actions column grew from 130 px to 250 px. The fixed columns plus gaps (about 992 px) now took more than the table's `min-w-[1000px]` minus padding, so the two `2fr` columns got no width.
 
 **Fix Applied:** Name and Email are now `minmax(160px,2fr)`, and the header and rows use `min-w-[1360px]`. The table scrolls horizontally inside `.table-scroll` instead of collapsing.
+
+### Fix: IdP MFA from an old sign-in counted as a fresh second factor (security review, HIGH)
+**Issue:** A step-up does not force the IdP to prompt again. On a live IdP session the round trip is silent, and the ID token can still carry `amr: ["mfa"]` from a sign-in done days earlier. `finishReauthIdP` counted that `amr` as MFA "now", stamped `session_mfa_at = NOW()` and skipped the TOTP page. A "MFA every 1 hour" policy could therefore be met by an old IdP MFA.
+
+**Fix Applied (`controller/internal/client/reauth.go`):** `reauthInfo.StartedAt` records when `StartReauth` ran. The IdP's MFA now counts only through `idpMFAFresh`, which requires the ID token's `auth_time` to be no older than `StartedAt` minus 1 minute of clock skew. A missing `auth_time` never counts. Otherwise the user gets the controller's TOTP page, the same as with no `amr`. M-3 is tightened: a verified IdP `amr` counts as MFA only if the IdP authenticated the user during this step-up.
+
+**Not done:** `max_age=0` / `prompt=login` is still not sent, so the IdP sign-in itself can stay silent. The `auth_time` check is what stops the stale MFA. Some IdPs, such as the local mock, send no `auth_time`, so their users always get the TOTP page.
+
+**Tests:** `TestIdPMFAFresh` (fresh, within skew, stale, missing, no amr) and a stale-`amr` case in `TestFinishReauthIdP_IdentityMustMatch`.
+
+**Open (security review, MEDIUM):** the step-up is not bound to the client that started it. Someone holding a stolen device can send the step-up link to its real user. The fix needs PKCE plus a loopback code and a redeem RPC (additive proto and client work). It is tracked as a follow-up.

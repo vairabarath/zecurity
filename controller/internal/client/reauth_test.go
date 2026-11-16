@@ -92,7 +92,7 @@ func (f *stepUpFixture) audits(action string) int {
 }
 
 func (f *stepUpFixture) reauth() reauthInfo {
-	return reauthInfo{UserID: f.userID, DeviceID: f.deviceID, SID: "test-sid", Email: "history@example.test"}
+	return reauthInfo{UserID: f.userID, DeviceID: f.deviceID, SID: "test-sid", Email: "history@example.test", StartedAt: time.Now()}
 }
 
 // ticket simulates the state right after the IdP round trip.
@@ -268,11 +268,12 @@ func TestFinishReauthIdP_IdentityMustMatch(t *testing.T) {
 	}
 	ra := f.reauth()
 	sess := &authSession{WorkspaceID: f.wsID, ConnectionID: connID, Reauth: &ra}
+	authTime := time.Now().Unix()
 	run := func(subject string, amr []string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/clients/callback", nil)
 		f.svc.finishReauthIdP(rec, req, sess, connID, &providers.AuthenticationContext{
-			Subject: subject, Email: "history@example.test", AMR: amr,
+			Subject: subject, Email: "history@example.test", AMR: amr, AuthTime: authTime,
 		})
 		return rec
 	}
@@ -299,7 +300,20 @@ func TestFinishReauthIdP_IdentityMustMatch(t *testing.T) {
 		t.Fatalf("after re-authentication: %+v", d)
 	}
 
-	// M-3: the IdP proved MFA, so the device's MFA is stamped with no TOTP.
+	// An amr from an IdP sign-in older than this step-up (a silent round trip
+	// on a live IdP session) is not a second factor: MFA is not stamped.
+	authTime = time.Now().Add(-2 * time.Hour).Unix()
+	rec = run("sub-owner", []string{"pwd", "mfa"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner with stale IdP MFA: %d %s", rec.Code, rec.Body.String())
+	}
+	if d := f.device(); d.mfaAt != nil {
+		t.Fatalf("a stale IdP amr stamped MFA: %+v", d)
+	}
+	authTime = time.Now().Unix()
+
+	// M-3: the IdP proved MFA during this step-up, so the device's MFA is
+	// stamped with no TOTP.
 	rec = run("sub-owner", []string{"pwd", "mfa"})
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `name="code"`) {
 		t.Fatalf("owner with IdP MFA: %d %s", rec.Code, rec.Body.String())
@@ -388,5 +402,29 @@ func TestCompleteStepUp_RiskDemandDropsOldMFAMark(t *testing.T) {
 	}
 	if d := f.device(); d.mfaAt != nil || d.reauthAt != nil {
 		t.Fatalf("after a risk-demanded step-up without MFA: %+v, want no MFA mark and no demand", d)
+	}
+}
+
+func TestIdPMFAFresh(t *testing.T) {
+	start := time.Now()
+	cases := []struct {
+		name     string
+		amr      bool
+		authTime int64
+		want     bool
+	}{
+		{"fresh", true, start.Unix(), true},
+		{"within skew", true, start.Add(-30 * time.Second).Unix(), true},
+		{"older than step-up", true, start.Add(-2 * time.Minute).Unix(), false},
+		{"missing auth_time", true, 0, false},
+		{"no amr mfa", false, start.Unix(), false},
+	}
+	for _, c := range cases {
+		if got := idpMFAFresh(c.amr, c.authTime, start); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	if idpMFAFresh(true, start.Unix(), time.Time{}) {
+		t.Error("zero StartedAt must not count as fresh")
 	}
 }
