@@ -249,7 +249,7 @@ describe('GuidedTour: the user fills in the fields', () => {
     await screen.findByText('Create it')
     // Nothing typed: Next stays and asks for the fields.
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Fill in the fields above first')
+    expect(await screen.findByRole('status')).toHaveTextContent('complete the form first')
     expect(screen.getByText('Create it')).toBeInTheDocument()
 
     // Refused by the server: the form stays, so the tour stays too.

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import { useNavigate } from 'react-router-dom'
 import {
+  ConnectorStatus,
   GenerateConnectorTokenDocument,
   GenerateShieldTokenDocument,
   GetRemoteNetworksDocument,
@@ -55,6 +56,14 @@ export function InstallCommandModal({
     [networkId, networks],
   )
 
+  // A shield binds to an online connector of its network at install time,
+  // and the server refuses a shield for a network without one. Say so as
+  // soon as such a network is chosen (only known when the list is loaded).
+  const noActiveConnector =
+    isShield &&
+    !!selectedNetwork &&
+    !selectedNetwork.connectors.some((c) => c.status === ConnectorStatus.Active)
+
   const [generateConnectorToken, connectorState] = useMutation(GenerateConnectorTokenDocument)
   const [generateShieldToken, shieldState] = useMutation(GenerateShieldTokenDocument)
   const loading = isShield ? shieldState.loading : connectorState.loading
@@ -91,10 +100,13 @@ export function InstallCommandModal({
           ],
         })
         const shieldId = result.data?.generateShieldToken.shieldId
-        handleClose()
-        if (shieldId) {
-          navigate(`/shields/${shieldId}`)
+        // Never close without a result: the user would think it worked.
+        if (!shieldId) {
+          setError('The shield was not created. Try again.')
+          return
         }
+        handleClose()
+        navigate(`/shields/${shieldId}`)
         return
       }
 
@@ -110,16 +122,18 @@ export function InstallCommandModal({
       })
 
       const connectorId = result.data?.generateConnectorToken.connectorId
-      handleClose()
-      if (connectorId) {
-        navigate(`/connectors/${connectorId}`)
+      if (!connectorId) {
+        setError('The connector was not created. Try again.')
+        return
       }
+      handleClose()
+      navigate(`/connectors/${connectorId}`)
     } catch (mutationError: unknown) {
       setError(mutationError instanceof Error ? mutationError.message : 'Failed to create agent')
     }
   }
 
-  const canSubmit = !!agentName.trim() && !!networkId && !loading
+  const canSubmit = !!agentName.trim() && !!networkId && !loading && !noActiveConnector
 
   if (isShield) {
     return (
@@ -190,6 +204,15 @@ export function InstallCommandModal({
                     <p className="mt-2 text-sm text-muted-foreground">
                       The shield will bind to a connector in this network at install time.
                     </p>
+                    {noActiveConnector && (
+                      <p role="alert" className="mt-2 flex items-start gap-2 rounded-lg border border-[oklch(0.80_0.13_80/0.35)] bg-[oklch(0.80_0.13_80/0.10)] px-3 py-2 text-sm text-[oklch(0.85_0.12_80)]">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>
+                          {selectedNetwork?.name} has no connector online yet. Install a connector in it first
+                          (Connectors → Add Connector), then add the shield.
+                        </span>
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="rounded-2xl border border-border bg-secondary px-4 py-3">

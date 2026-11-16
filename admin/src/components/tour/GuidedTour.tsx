@@ -71,7 +71,7 @@ export function GuidedTour() {
       return
     }
     if (s.submit) {
-      setHint({ key: `${at}`, text: 'Fill in the fields above first, then press Next (or click the button).' })
+      setHint({ key: `${at}`, text: 'The button is turned off: complete the form first (check its messages), then press Next or click the button.' })
       return
     }
     let j = at + 1
