@@ -169,5 +169,13 @@ So `zecurity-client logout && zecurity-client login` on a live IdP session can m
 - **Deleted workspace got 503 from the MFA check** (`cmd/server/main.go`). `WorkspaceGuard` now runs before `requireConsoleMFA` on `/graphql` and the three REST routes. Commit 21affa60.
 - Client audit action constants reuse `mfa.ActionEnrolled/ActionLocked` (4f4e85e2).
 
+Second review (PR #209), fixed before merge:
+- A TOTP step-up racing an MFA reset is now refused as a whole (`completeStepUp` WHERE clause), so it neither clears the risk demand nor reports MFA it did not stamp.
+- `StampSessionMFA`: a DB error returns an error (503 at the handler), not ErrSessionNotFound (401).
+- `Verify` counts the attempt after loading and decrypting the record, still before the code check, so not-enrolled or outage results don't use up attempts.
+- `cancelUserStepUps` drops only TOTP grants; IdP and no-MFA step-ups stay valid.
+- `ConsolePolicy.Set` drops the cache entry rather than writing it, so two Sets that finish out of order can't leave the old value cached.
+Left as is: a suspended user's first enrolment code is accepted before the 401 (the authenticator is not usable while suspended); a real regression at the first evaluation after a profile edit is not signalled (accepted trade-off); DB tests skip without `*_TEST_DATABASE_URL` (repo convention; CI sets them).
+
 Not done (performance, follow-up): `GetACLSnapshot` runs `authRequiredCount` on every poll; `User.mfaEnrolled` is N+1 (batch with `EnrolledUsers`).
 Not in this diff, same pattern: the provider operator TOTP limiter (`internal/provider/ratelimit.go`, `totp_handlers.go`) is also check-then-count.

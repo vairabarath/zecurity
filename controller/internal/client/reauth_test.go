@@ -578,9 +578,13 @@ func TestCancelUserStepUps(t *testing.T) {
 	exp := time.Now().Add(time.Minute)
 	putMFATicket("t-a", &mfaTicket{Reauth: reauthInfo{UserID: "user-a"}, ExpiresAt: exp})
 	putMFATicket("t-b", &mfaTicket{Reauth: reauthInfo{UserID: "user-b"}, ExpiresAt: exp})
-	putStepUpGrant("g-a", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, ExpiresAt: exp})
-	putStepUpGrant("g-b", &stepUpGrant{Reauth: reauthInfo{UserID: "user-b"}, WithMFA: true, ExpiresAt: exp})
-	t.Cleanup(func() { cancelUserStepUps("user-b") })
+	putStepUpGrant("g-a", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, Method: "totp", ExpiresAt: exp})
+	putStepUpGrant("g-idp", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, Method: "idp", ExpiresAt: exp})
+	putStepUpGrant("g-b", &stepUpGrant{Reauth: reauthInfo{UserID: "user-b"}, WithMFA: true, Method: "totp", ExpiresAt: exp})
+	t.Cleanup(func() {
+		cancelUserStepUps("user-b")
+		takeStepUpGrant("g-idp", func(*stepUpGrant) bool { return true })
+	})
 
 	cancelUserStepUps("user-a")
 
@@ -589,6 +593,12 @@ func TestCancelUserStepUps(t *testing.T) {
 	}
 	if _, ok := takeStepUpGrant("g-a", func(*stepUpGrant) bool { return true }); ok {
 		t.Fatal("user-a grant survived the reset")
+	}
+	stepUpGrantMu.Lock()
+	_, idpKept := stepUpGrants["g-idp"]
+	stepUpGrantMu.Unlock()
+	if !idpKept {
+		t.Fatal("the reset dropped an IdP step-up")
 	}
 	if _, ok := getMFATicket("t-b"); !ok {
 		t.Fatal("user-b ticket was dropped")
@@ -616,15 +626,23 @@ func (f *stepUpFixture) enrolTOTP() {
 }
 
 // Review fix: a TOTP step-up redeemed after the user's authenticator was
-// reset does not stamp MFA (the reset won the race).
-func TestCompleteReauth_TOTPAfterResetStampsNoMFA(t *testing.T) {
+// reset is refused as a whole: no MFA mark, and the risk demand stays.
+func TestCompleteReauth_TOTPAfterResetIsRefused(t *testing.T) {
 	f := newStepUpFixture(t)
-	ra := f.reauth()
-	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
-		t.Fatal("step-up not applied")
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE client_devices SET risk_score = 60, reauth_required_at = NOW() WHERE id = $1`, f.deviceID); err != nil {
+		t.Fatal(err)
 	}
-	if d := f.device(); d.mfaAt != nil {
-		t.Fatalf("MFA stamped without an authenticator: %+v", d)
+	ra := f.reauth()
+	if f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
+		t.Fatal("TOTP step-up applied without an authenticator")
+	}
+	if d := f.device(); d.mfaAt != nil || d.reauthAt == nil || d.score != 60 {
+		t.Fatalf("refused step-up changed the device: %+v", d)
+	}
+	// An IdP step-up does not depend on the authenticator.
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "idp") {
+		t.Fatal("IdP step-up refused")
 	}
 	f.enrolTOTP()
 	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {

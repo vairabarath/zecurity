@@ -461,19 +461,19 @@ func (s *Service) completeStepUp(ctx context.Context, workspaceID string, ra *re
 		        -- A step-up that answers a risk demand without a second factor
 		        -- must not leave an older MFA mark standing: the demand is
 		        -- cleared below, and the old mark would count again.
-		        -- A TOTP step-up counts only while the authenticator still
-		        -- exists: an MFA reset racing this redemption wins.
-		        session_mfa_at     = CASE WHEN $5 AND (NOT $6 OR EXISTS (
-		                                      SELECT 1 FROM user_totp
-		                                       WHERE user_id = $2 AND enabled_at IS NOT NULL))
-		                                  THEN NOW()
+		        session_mfa_at     = CASE WHEN $5 THEN NOW()
 		                                  WHEN reauth_required_at IS NOT NULL THEN NULL
 		                                  ELSE session_mfa_at END,
 		        risk_score         = 0,
 		        risk_reasons       = '{}',
 		        reauth_required_at = NULL
 		  WHERE id = $1 AND user_id = $2 AND workspace_id = $3
-		    AND session_id = $4 AND revoked_at IS NULL`,
+		    AND session_id = $4 AND revoked_at IS NULL
+		    -- A TOTP step-up counts only while the authenticator still
+		    -- exists: an MFA reset racing this redemption wins, and the
+		    -- step-up (risk demand included) is refused as a whole.
+		    AND (NOT $6 OR EXISTS (SELECT 1 FROM user_totp
+		                            WHERE user_id = $2 AND enabled_at IS NOT NULL))`,
 		ra.DeviceID, ra.UserID, workspaceID, ra.SID, withMFA, method == "totp")
 	if err != nil {
 		log.Printf("client reauth: stamp device %s: %v", ra.DeviceID, err)
@@ -625,7 +625,7 @@ func takeStepUpGrant(id string, owns func(*stepUpGrant) bool) (*stepUpGrant, boo
 	return g, true
 }
 
-// cancelUserStepUps drops every MFA ticket and step-up grant of the user.
+// cancelUserStepUps drops the user's open TOTP pages and TOTP step-up grants.
 func cancelUserStepUps(userID string) {
 	mfaTicketMu.Lock()
 	for k, t := range mfaTickets {
@@ -636,7 +636,9 @@ func cancelUserStepUps(userID string) {
 	mfaTicketMu.Unlock()
 	stepUpGrantMu.Lock()
 	for k, g := range stepUpGrants {
-		if g.Reauth.UserID == userID {
+		// Only a grant the removed authenticator vouched for; an IdP or
+		// no-MFA step-up stays valid.
+		if g.Reauth.UserID == userID && g.Method == "totp" {
 			delete(stepUpGrants, k)
 		}
 	}

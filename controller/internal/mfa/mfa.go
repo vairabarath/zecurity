@@ -163,13 +163,6 @@ type Failure struct {
 // enrolment. On refusal the error is ErrInvalidCode, ErrRateLimited,
 // ErrNotEnrolled or ErrUnavailable.
 func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Failure, error) {
-	attempt, retry, err := s.limiter.Attempt(ctx, userID)
-	if err != nil {
-		return Result{}, Failure{}, ErrUnavailable
-	}
-	if attempt > FailMax {
-		return Result{}, Failure{RetryAfter: retry}, ErrRateLimited
-	}
 	rec, err := s.repo.Get(ctx, userID)
 	if err != nil {
 		return Result{}, Failure{}, ErrUnavailable
@@ -180,6 +173,16 @@ func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Fail
 	secret, err := s.sealer.DecryptSecret(rec.Ciphertext, rec.Nonce, sealContext(userID))
 	if err != nil {
 		return Result{}, Failure{}, ErrUnavailable
+	}
+	// Counted before the code is checked (parallel requests can't all slip
+	// under the limit), but after the lookups, so a missing authenticator or
+	// an outage doesn't use up the user's attempts.
+	attempt, retry, err := s.limiter.Attempt(ctx, userID)
+	if err != nil {
+		return Result{}, Failure{}, ErrUnavailable
+	}
+	if attempt > FailMax {
+		return Result{}, Failure{RetryAfter: retry}, ErrRateLimited
 	}
 	step, ok := totp.Match(secret, code, s.now(), rec.LastStep)
 	if ok {

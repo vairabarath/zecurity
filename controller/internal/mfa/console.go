@@ -15,7 +15,7 @@ import (
 // console?" (PENDING-06 M-6, workspaces.console_require_mfa).
 //
 // The answer is read on every console request, so it is cached in process
-// for a short time. Set writes the new value into the cache, and the controller is a
+// for a short time. Set drops the cache entry, and the controller is a
 // single instance (D-02), so a change made here applies immediately; the TTL
 // only bounds a change made by something else (a DB restore, a test).
 type ConsolePolicy struct {
@@ -80,8 +80,11 @@ func (p *ConsolePolicy) Set(ctx context.Context, workspaceID string, required bo
 		return false, fmt.Errorf("mfa: set console policy: %w", err)
 	}
 	p.mu.Lock()
+	// Drop rather than write: two Sets can reach here in the opposite order
+	// to their commits. The next read loads the committed value, and the
+	// version bump stops a read already in flight from caching its answer.
 	p.versions[workspaceID]++
-	p.cache[workspaceID] = consoleEntry{required: required, until: p.now().Add(p.ttl)}
+	delete(p.cache, workspaceID)
 	p.mu.Unlock()
 	return previous, nil
 }
