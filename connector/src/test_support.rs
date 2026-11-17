@@ -550,3 +550,174 @@ pub async fn plain_quic_pair() -> (quinn::Connection, quinn::Connection) {
     std::mem::forget(client);
     (server_side, client_side)
 }
+
+// ---- in-process relay ------------------------------------------------------------
+
+impl TestPki {
+    /// A relay identity as production issues it: signed by the Platform
+    /// Intermediate, SPIFFE `spiffe://zecurity.in/relay/<relay_id>`.
+    pub fn relay_identity(
+        &self,
+        relay_id: &str,
+    ) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        let key = new_key();
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![SanType::URI(
+            format!("spiffe://zecurity.in/relay/{relay_id}")
+                .try_into()
+                .unwrap(),
+        )];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.serial_number = Some(random_serial());
+        let cert = params
+            .signed_by(&key, &Issuer::from_params(&self.int_params, &self.int_key))
+            .unwrap();
+        (
+            CertificateDer::from(cert.der().to_vec()),
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        )
+    }
+
+    /// Install an empty, valid Relay CRL (issued by the Platform
+    /// Intermediate): relay dials fail closed without one.
+    pub fn install_empty_relay_crl(&self, manager: &crate::crl::CrlManager) {
+        let now = OffsetDateTime::now_utc();
+        let crl = rcgen::CertificateRevocationListParams {
+            this_update: now - Duration::minutes(1),
+            next_update: now + Duration::hours(1),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: Vec::new(),
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&Issuer::from_params(&self.int_params, &self.int_key))
+        .unwrap();
+        manager
+            .install_verified_der(crl.der().as_ref(), self.intermediate_pem.as_bytes())
+            .unwrap();
+    }
+}
+
+/// An in-process relay that answers probes and registrations. While it is
+/// not `accepting` it closes every connection right after the handshake, as
+/// a real relay refuses a workspace its policy doesn't allow yet (D-40):
+/// the connector sees the connection end before any reply.
+pub struct TestRelay {
+    pub relay_id: String,
+    pub addr: std::net::SocketAddr,
+    accepting: Arc<std::sync::atomic::AtomicBool>,
+    registered: Arc<std::sync::atomic::AtomicUsize>,
+    refused: Arc<std::sync::atomic::AtomicUsize>,
+    endpoint: quinn::Endpoint,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TestRelay {
+    pub fn spawn(pki: &TestPki, relay_id: &str, accepting: bool) -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        install_crypto_provider();
+        let (cert, key) = pki.relay_identity(relay_id);
+        let mut tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        tls.alpn_protocols = vec![b"ztna-relay-v1".to_vec()];
+        let quic = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+        let endpoint = quinn::Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(quic)),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let accepting = Arc::new(AtomicBool::new(accepting));
+        let registered = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let (ep, acc, reg, refu) = (
+            endpoint.clone(),
+            accepting.clone(),
+            registered.clone(),
+            refused.clone(),
+        );
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let (acc, reg, refu) = (acc.clone(), reg.clone(), refu.clone());
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    if !acc.load(Ordering::SeqCst) {
+                        refu.fetch_add(1, Ordering::SeqCst);
+                        conn.close(0u32.into(), b"workspace not allowed");
+                        return;
+                    }
+                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                        let Ok(msg) =
+                            crate::relay_client::read_message::<serde_json::Value>(&mut recv).await
+                        else {
+                            return;
+                        };
+                        let reply = match msg["type"].as_str() {
+                            Some("register") => {
+                                reg.fetch_add(1, Ordering::SeqCst);
+                                serde_json::json!({ "ok": true, "error": null })
+                            }
+                            Some("probe") => serde_json::json!({
+                                "request_id": msg["request_id"],
+                                "connection_count": 0,
+                                "capacity": 100,
+                            }),
+                            _ => return,
+                        };
+                        if crate::relay_client::write_message(&mut send, &reply)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let _ = send.finish();
+                    }
+                    // Keep the connection until the peer closes it.
+                    conn.closed().await;
+                });
+            }
+        });
+        Self {
+            relay_id: relay_id.to_owned(),
+            addr,
+            accepting,
+            registered,
+            refused,
+            endpoint,
+            task,
+        }
+    }
+
+    pub fn info(&self) -> crate::proto::LabelledRelayInfo {
+        crate::proto::LabelledRelayInfo {
+            relay_id: self.relay_id.clone(),
+            relay_addr: self.addr.to_string(),
+            spiffe_id: format!("spiffe://zecurity.in/relay/{}", self.relay_id),
+            label: crate::proto::RelayCapacityLabel::RelayCapacityHigh as i32,
+        }
+    }
+
+    /// The relay's policy now allows the workspace.
+    pub fn accept(&self) {
+        self.accepting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn registered(&self) -> usize {
+        self.registered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn refused(&self) -> usize {
+        self.refused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for TestRelay {
+    fn drop(&mut self) {
+        self.endpoint.close(0u32.into(), b"test relay dropped");
+        self.task.abort();
+    }
+}

@@ -104,6 +104,26 @@ struct ActiveRelay {
     handle: JoinHandle<anyhow::Result<()>>,
     drain_tracker: RelayDrainTracker,
     last_score: Option<u64>,
+    /// Set while this relay is no longer in the published list and a
+    /// migration away from it failed (live test F10-1): the next attempt is
+    /// due at `at`. Cleared by a successful migration or when the relay is
+    /// listed again.
+    migration_retry: Option<MigrationRetry>,
+}
+
+/// A pending retry of a failed migration away from an unlisted relay. The
+/// delay follows the reconnect backoff (`reconnect_base`, growing by
+/// `reconnect_backoff_factor` up to `reconnect_max`), so a target that keeps
+/// refusing (a residency relay whose workspace policy hasn't arrived yet,
+/// D-40) is retried without a tight loop.
+#[derive(Clone, Copy, Debug)]
+struct MigrationRetry {
+    at: TokioInstant,
+    delay: Duration,
+}
+
+fn is_listed(list: &LabelledRelayList, relay_id: &str) -> bool {
+    list.relays.iter().any(|r| r.relay_id == relay_id)
 }
 
 enum State {
@@ -414,6 +434,14 @@ async fn connected_step(
             }
         }
 
+        // F10-1: retry a failed migration away from a relay that left the
+        // list. The deadline is absolute, so other wake-ups don't push it back.
+        _ = sleep_until(active.migration_retry.map(|r| r.at).unwrap_or(reprobe_at)),
+            if active.migration_retry.is_some() => {
+            info!(relay_id = %active.info.relay_id, "Retrying migration away from unlisted relay");
+            handle_list_change(cfg, list, active, relay_handler, attachment_slot, ctrl_tx).await
+        }
+
         // Background re-probe.
         _ = sleep_until(reprobe_at) => {
             reprobe_and_maybe_migrate(cfg, list, active, relay_handler, attachment_slot, ctrl_tx).await
@@ -424,16 +452,16 @@ async fn connected_step(
 async fn handle_list_change(
     cfg: &RelaySelectorConfig,
     list: &LabelledRelayList,
-    active: ActiveRelay,
+    mut active: ActiveRelay,
     relay_handler: &Arc<RelayHandler>,
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
 ) -> State {
-    let still_present = list
-        .relays
-        .iter()
-        .any(|r| r.relay_id == active.info.relay_id);
-    if !still_present {
+    let still_present = is_listed(list, &active.info.relay_id);
+    if still_present {
+        // Listed again: nothing to move away from.
+        active.migration_retry = None;
+    } else {
         info!(
             relay_id = %active.info.relay_id,
             "Active relay absent from new list; migrating immediately"
@@ -482,8 +510,12 @@ async fn reprobe_and_maybe_migrate(
     emit_event(SelectorEvent::RankingPersisted { entries });
 
     // Latch the active relay's current score for the next migration check.
+    // A relay that left the list is never probed, so its old score must not
+    // survive (F10-1): any listed relay is then a meaningful improvement.
     if let Some(r) = results.iter().find(|r| r.relay_id == active.info.relay_id) {
         active.last_score = Some(r.score);
+    } else if !is_listed(list, &active.info.relay_id) {
+        active.last_score = None;
     }
 
     let best = results
@@ -667,6 +699,7 @@ async fn migrate(
                     handle: new_handle,
                     drain_tracker: new_tracker,
                     last_score: None,
+                    migration_retry: None,
                 });
             }
             Err(_) => {
@@ -679,7 +712,34 @@ async fn migrate(
         }
     }
 
-    warn!("Migration could not find a usable target; remaining on current relay");
+    let mut old = old;
+    if is_listed(list, &old.info.relay_id) {
+        warn!("Migration could not find a usable target; remaining on current relay");
+        old.migration_retry = None;
+    } else {
+        // F10-1: the current relay left the list, so staying put is only a
+        // bridge (make-before-break). Retry on the reconnect backoff; a new
+        // list push also retries at once (`handle_list_change`). The delay
+        // keeps growing across attempts, so a target that keeps refusing
+        // (e.g. a residency relay without the workspace's policy yet) can't
+        // cause a tight loop.
+        let delay = old
+            .migration_retry
+            .map(|r| next_backoff_delay(r.delay, cfg.reconnect_backoff_factor, cfg.reconnect_max))
+            .unwrap_or(cfg.reconnect_base);
+        warn!(
+            relay_id = %old.info.relay_id,
+            retry_in_ms = delay.as_millis() as u64,
+            "Migration could not find a usable target; current relay is no longer listed, retrying"
+        );
+        emit_event(SelectorEvent::MigrationRetryScheduled {
+            delay_ms: delay.as_millis() as u64,
+        });
+        old.migration_retry = Some(MigrationRetry {
+            at: TokioInstant::now() + delay,
+            delay,
+        });
+    }
     State::Connected(old)
 }
 
@@ -804,6 +864,7 @@ async fn connect(
                 handle,
                 drain_tracker,
                 last_score: None,
+                migration_retry: None,
             }),
             Err(_) => {
                 handle.abort();
@@ -819,6 +880,7 @@ async fn connect(
             handle,
             drain_tracker,
             last_score: None,
+            migration_retry: None,
         })
     }
 }
@@ -973,6 +1035,11 @@ pub enum SelectorEvent {
         to: String,
     },
     MigrationCompleted,
+    /// F10-1: a migration away from an unlisted relay failed; the next
+    /// attempt is due in `delay_ms`.
+    MigrationRetryScheduled {
+        delay_ms: u64,
+    },
     DrainTimeoutFired,
     /// F38: the connector became terminal; the selector stopped for good.
     StoppedTerminal,
@@ -1574,6 +1641,7 @@ mod terminal_tests {
             handle,
             drain_tracker: RelayDrainTracker::new(),
             last_score: None,
+            migration_retry: None,
         };
         (active, ended)
     }
@@ -1803,5 +1871,192 @@ mod terminal_tests {
         .expect("stops without a list ever arriving");
         assert_eq!(start.elapsed(), Duration::from_secs(1));
         drop(tx);
+    }
+}
+
+/// Live test F10-1 (2026-11-17): a migration target that refuses the first
+/// dial (a residency relay whose workspace policy arrives a heartbeat after
+/// the connector's new relay list) must not strand the connector on a relay
+/// that left its list. Real QUIC against in-process relays, real time.
+#[cfg(test)]
+mod migration_retry_tests {
+    use super::*;
+    use crate::agent_tunnel::AgentTunnelHub;
+    use crate::crl::CrlManager;
+    use crate::policy::PolicyCache;
+    use crate::session_registry::SessionRegistry;
+    use crate::test_support::{selector_config, TestPki, TestRelay, CONNECTOR_ID};
+
+    const RELAY_A: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const RELAY_B: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    struct Fx {
+        pki: TestPki,
+        _dir: tempfile::TempDir,
+        cfg: RelaySelectorConfig,
+        handler: Arc<RelayHandler>,
+        slot: RelayAttachmentSlot,
+        ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
+        _ctrl_rx: mpsc::Receiver<ConnectorControlMessage>,
+    }
+
+    fn fx() -> Fx {
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(64);
+        let handler = Arc::new(
+            RelayHandler::new(
+                holder.clone(),
+                Arc::new(PolicyCache::new()),
+                Arc::new(SessionRegistry::new()),
+                AgentTunnelHub::new(),
+                CrlManager::new(),
+                CONNECTOR_ID.to_string(),
+                ctrl_tx.clone(),
+                5,
+                16,
+                AuthzGate::open_for_tests(),
+            )
+            .unwrap(),
+        );
+        let mut cfg = selector_config(holder, dir.path());
+        pki.install_empty_relay_crl(&cfg.relay_crl_manager);
+        // Short backoff so the test runs in about a second; the re-probe
+        // stays far away so it can't be what rescues the connector.
+        cfg.reconnect_base = Duration::from_millis(200);
+        cfg.reconnect_max = Duration::from_secs(2);
+        cfg.reprobe_interval = Duration::from_secs(300);
+        cfg.probe_timeout = Duration::from_secs(1);
+        Fx {
+            pki,
+            _dir: dir,
+            cfg,
+            handler,
+            slot: RelayAttachmentSlot::new(),
+            ctrl_tx,
+            _ctrl_rx: ctrl_rx,
+        }
+    }
+
+    fn list(relays: &[&TestRelay], version: u64) -> Option<LabelledRelayList> {
+        Some(LabelledRelayList {
+            relays: relays.iter().map(|r| r.info()).collect(),
+            version,
+        })
+    }
+
+    async fn active_relay(slot: &RelayAttachmentSlot) -> Option<String> {
+        slot.active().await.map(|a| a.relay_id)
+    }
+
+    /// Wait (real time) until `check` holds, or fail with `what`.
+    async fn eventually<F, Fut>(within: Duration, what: &str, mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = TokioInstant::now() + within;
+        while TokioInstant::now() < deadline {
+            if check().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out after {within:?} waiting for: {what}");
+    }
+
+    /// The F10-1 race: the new list names only B; B refuses until its
+    /// policy arrives (here 800 ms later, 8 s in the live run). The connector
+    /// stays on A meanwhile and moves to B on its own once B accepts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_migration_is_retried_until_the_new_relay_accepts() {
+        let f = fx();
+        let a = TestRelay::spawn(&f.pki, RELAY_A, true);
+        let b = TestRelay::spawn(&f.pki, RELAY_B, false);
+        let (tx, rx) = watch::channel(list(&[&a], 1));
+        let selector = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            rx,
+            f.ctrl_tx.clone(),
+            AuthzGate::open_for_tests(),
+        ));
+        eventually(Duration::from_secs(10), "registered with A", || async {
+            a.registered() == 1 && active_relay(&f.slot).await.as_deref() == Some(RELAY_A)
+        })
+        .await;
+
+        // The tenant moves to B's pool; B doesn't allow the workspace yet.
+        tx.send(list(&[&b], 2)).unwrap();
+        eventually(
+            Duration::from_secs(5),
+            "B refused the first dial",
+            || async { b.refused() >= 1 },
+        )
+        .await;
+        assert_eq!(
+            active_relay(&f.slot).await.as_deref(),
+            Some(RELAY_A),
+            "stays on A while B refuses (make-before-break)"
+        );
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let refused_while_closed = b.refused();
+        assert!(
+            refused_while_closed <= 4,
+            "bounded backoff, not a tight loop: {refused_while_closed} refused dials in ~0.8 s"
+        );
+        b.accept(); // B's relay applied the policy that allows the workspace.
+
+        eventually(
+            Duration::from_secs(10),
+            "moved to B without a restart",
+            || async {
+                b.registered() == 1 && active_relay(&f.slot).await.as_deref() == Some(RELAY_B)
+            },
+        )
+        .await;
+        selector.abort();
+    }
+
+    /// If the old relay comes back into the list while B keeps refusing,
+    /// the connector stays on it and stops dialling B.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_retry_stops_when_the_active_relay_is_listed_again() {
+        let f = fx();
+        let a = TestRelay::spawn(&f.pki, RELAY_A, true);
+        let b = TestRelay::spawn(&f.pki, RELAY_B, false);
+        let (tx, rx) = watch::channel(list(&[&a], 1));
+        let selector = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            rx,
+            f.ctrl_tx.clone(),
+            AuthzGate::open_for_tests(),
+        ));
+        eventually(Duration::from_secs(10), "registered with A", || async {
+            a.registered() == 1
+        })
+        .await;
+        tx.send(list(&[&b], 2)).unwrap();
+        eventually(Duration::from_secs(5), "B refused", || async {
+            b.refused() >= 1
+        })
+        .await;
+
+        tx.send(list(&[&a, &b], 3)).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after_relisted = b.refused();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(
+            b.refused(),
+            after_relisted,
+            "no more migration retries once A is listed again"
+        );
+        assert_eq!(active_relay(&f.slot).await.as_deref(), Some(RELAY_A));
+        assert_eq!(a.registered(), 1, "A was never left");
+        selector.abort();
     }
 }
