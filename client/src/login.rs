@@ -113,31 +113,26 @@ mod tpm_mode_tests {
     }
 }
 
-pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<LoginResult> {
-    // Certificate audit bug 1: trust starts at the platform root compiled
-    // into this client, never at the plain-HTTP download.
-    let platform_root_pem = crate::trust::embedded_platform_root_pem()?;
-    let (mut grpc, trusted_intermediate_pem) = connect_controller(conf, platform_root_pem).await?;
-
-    // CLI-Controller PKCE — CLI generates this pair.
-    // code_challenge is sent to the controller in InitiateAuth.
-    // code_verifier is kept locally and sent in TokenExchange.
-    // The controller verifies SHA256(code_verifier) == code_challenge.
+/// A fresh client PKCE pair: (verifier, BASE64URL(SHA256(verifier))).
+pub(crate) fn new_pkce() -> (String, String) {
     let mut verifier_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
     let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
     let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    (code_verifier, code_challenge)
+}
 
-    // Local callback server — receives the ctrl_code from the controller's
-    // redirect after it handles the Google OAuth callback server-side.
+/// Starts the loopback server that receives the controller's one-time code
+/// (`/callback?code=…`). Returns the redirect URI to register and a receiver
+/// for the first code. Used by `login` and by `auth` (step-up), so a browser
+/// flow completed on another machine never reaches this client.
+pub(crate) async fn start_loopback() -> Result<(String, oneshot::Receiver<String>)> {
     let (tx, rx) = oneshot::channel::<String>();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
-    let tx_clone = tx.clone();
-
     let app = Router::new().route(
         "/callback",
         get(move |Query(params): Query<HashMap<String, String>>| {
-            let tx = tx_clone.clone();
+            let tx = tx.clone();
             async move {
                 if let Some(code) = params.get("code") {
                     if let Some(sender) = tx.lock().await.take() {
@@ -151,13 +146,29 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             }
         }),
     );
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let local_redirect_uri = format!("http://127.0.0.1:{}/callback", port);
     tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
+    Ok((format!("http://127.0.0.1:{}/callback", port), rx))
+}
+
+pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<LoginResult> {
+    // Certificate audit bug 1: trust starts at the platform root compiled
+    // into this client, never at the plain-HTTP download.
+    let platform_root_pem = crate::trust::embedded_platform_root_pem()?;
+    let (mut grpc, trusted_intermediate_pem) = connect_controller(conf, platform_root_pem).await?;
+
+    // CLI-Controller PKCE — CLI generates this pair.
+    // code_challenge is sent to the controller in InitiateAuth.
+    // code_verifier is kept locally and sent in TokenExchange.
+    // The controller verifies SHA256(code_verifier) == code_challenge.
+    let (code_verifier, code_challenge) = new_pkce();
+
+    // Local callback server — receives the ctrl_code from the controller's
+    // redirect after it handles the Google OAuth callback server-side.
+    let (local_redirect_uri, rx) = start_loopback().await?;
 
     // InitiateAuth — controller builds the Google OAuth URL, stores the
     // PKCE session, and returns the full auth_url. The CLI never constructs

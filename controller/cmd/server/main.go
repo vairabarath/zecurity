@@ -24,6 +24,7 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -56,6 +57,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
+	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/outbox"
@@ -67,6 +69,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/risk"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/telemetry"
@@ -341,6 +344,18 @@ func main() {
 	postureStore := posture.NewStore(db.Pool)
 	postureEvaluator := posture.NewEvaluator(postureStore, policyNotifier)
 
+	// PENDING-06: workspace users' TOTP (M-1) and the per-device risk score
+	// (M-9). A device that stops satisfying a required profile gains risk.
+	mfaStore := mfa.NewStore(db.Pool)
+	mfaSvc := mfa.NewService(mfaStore, pkiService, mfa.NewValkeyLimiter(valkeycompat.NewAdapter(connectorValkey)))
+	consoleMFA := mfa.NewConsolePolicy(db.Pool)
+	riskSvc := risk.NewService(db.Pool, policyNotifier)
+	postureEvaluator.SetRegressionHook(func(ctx context.Context, workspaceID, deviceID uuid.UUID) {
+		if _, err := riskSvc.Add(ctx, workspaceID.String(), deviceID.String(), risk.PostureRegressed); err != nil {
+			log.Printf("risk: %v", err)
+		}
+	})
+
 	// Certificate audit bug 3: drain the shield revocation outbox — at start
 	// (work left by a previous process), on every revocation, and on a timer.
 	shieldRevocations := &connector.ShieldRevocationDispatcher{
@@ -448,6 +463,8 @@ func main() {
 				IdpStore:          idpStore,
 				ScimStore:         scimStore,
 				PermissionStore:   permissionStore,
+				MFA:               mfaSvc,
+				ConsoleMFA:        consoleMFA,
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 				OIDCRedirectURI:   oidcRedirectURI,
@@ -545,8 +562,21 @@ func main() {
 		mux.Handle("/playground", playground.Handler(appmeta.ProductName, "/graphql"))
 	}
 
+	// PENDING-06 M-6: Admin Console Security. The MFA endpoints are how a
+	// session gets its MFA mark, so they sit behind AuthMiddleware only;
+	// every other console route also requires the mark when the workspace
+	// asks for it.
+	requireConsoleMFA := middleware.RequireConsoleMFA(consoleMFA)
+	mfaHandlers := mfa.NewHandlers(mfaSvc, authSvc, consoleMFA, func(ctx context.Context, e audit.Entry) {
+		_ = audit.Record(context.WithoutCancel(ctx), db.Pool, e)
+	})
+	consoleAuth := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))
+	mux.Handle("GET /auth/mfa/status", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Status))))
+	mux.Handle("POST /auth/mfa/enroll", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Enroll))))
+	mux.Handle("POST /auth/mfa/verify", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Verify))))
+
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(gqlSrv),
+		requireConsoleMFA(middleware.WorkspaceGuard(db.Pool)(gqlSrv)),
 	)
 	// The discovery middleware sits outside the public/protected routing, so both
 	// routes share one budget and a refusal becomes 429/503 on either.
@@ -557,12 +587,12 @@ func main() {
 	mux.HandleFunc("/relay.crl", relay.RelayCRLHandler(pkiService, relayStore))
 
 	// REST endpoints: invitations
-	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
 		middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 			middleware.WorkspaceGuard(db.Pool)(
 				http.HandlerFunc(inviteHandler.Create),
 			),
-		),
+		)),
 	)
 	mux.Handle("POST /api/invitations", inviteCreateRoute)
 	mux.Handle("GET /api/invitations/{token}", http.HandlerFunc(inviteHandler.Get))
@@ -574,22 +604,22 @@ func main() {
 	mux.Handle("POST /api/invitations/{token}/accept", inviteAcceptRoute)
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
-	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
 		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 			),
-		),
+		)),
 	)
 	mux.Handle("/api/connectors/", connectorTokenRoute)
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
-	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
 		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 			middleware.WorkspaceGuard(db.Pool)(
 				shieldSvc.TokenHandler(),
 			),
-		),
+		)),
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
@@ -822,6 +852,7 @@ func main() {
 	)
 	// Open hint streams end on shutdown so they don't hold GracefulStop (O-8).
 	clientSvc.EnableChangeHints(hintHub, transportNotifier, ctx.Done())
+	clientSvc.EnableStepUp(mfaSvc, riskSvc)
 
 	// PENDING-20 G1: country of the address each device connects from.
 	geoDB := openGeoIP()
@@ -841,6 +872,8 @@ func main() {
 	// Google redirects here after user consent; controller exchanges the code
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
+	// PENDING-06 M-5: the step-up TOTP page's form.
+	mux.Handle("POST /api/clients/reauth/mfa", clientSvc.ReauthMFAHandler())
 
 	workers.Go("outbox-processor", func() {
 

@@ -15,7 +15,17 @@ tags: [pending, adr, operations, observability, metrics, tracing, health]
 
 # Pending ADR 10 — Observability: Metrics, Tracing, Health
 
-> **Status: IMPLEMENTED (2026-11-04).** All four phases of enterprise observability have been implemented, tested, and live-verified on branch `feat/pending10-observability`:
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED for the controller.**
+> - Health and readiness, Prometheus metrics, OpenTelemetry tracing (including outbox trace context,
+>   migration `050`), and alerts and dashboards (`deploy/monitoring/`) are all on `main`.
+> - The phase hashes below predate a rebase. The `main` commits are `6f9fd248`, `8782decc`, `877dc722` and
+>   `fe832b18`, with fixes `f1f4be86`, `ce6ae2ca`, `32959043` and `1d24c8ba`. `GET /provider/health` came later (`9f95faf8`).
+>
+> **Not built:** Option A also promised `/metrics` and OTel traces on each service. The relay, connector and
+> shield have no Prometheus or OpenTelemetry (none in their `Cargo.toml`). The blackbox exporter one alert
+> needs is not shipped either.
+>
+> **Original status (2026-11-04):** All four phases of enterprise observability have been implemented, tested, and live-verified on branch `feat/pending10-observability`:
 > 1. **Phase 1 — Health & Readiness Subsystem (`cad18733`):** Minimal public probes on `:8080` (`/livez`, `/readyz`, `/healthz`, `/health`) and detailed internal diagnostics on `:9102` (`METRICS_ADDR`).
 > 2. **Phase 2 — Prometheus Metrics & Low-Cardinality Enforcement (`b1bd8034`):** Real-time fleet gauges, ACL compile histograms, PKI cert runway/validity, and outbox pipeline telemetry with strict zero-high-cardinality invariant.
 > 3. **Phase 3 — OpenTelemetry Distributed Tracing (`ce737446`):** Opt-in OTLP exporter and W3C TraceContext propagation across HTTP and gRPC. Outbox dispatch spans start a new trace that links to the publishing request's span (`050_outbox_trace_context.sql`, see Post-live-test fixes).

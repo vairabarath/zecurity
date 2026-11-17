@@ -30,6 +30,16 @@ func (r *mutationResolver) SetMemberRole(ctx context.Context, userID string, rol
 	return r.setMemberRole(ctx, userID, role, reason)
 }
 
+// SetConsoleRequireMfa is the resolver for the setConsoleRequireMfa field.
+func (r *mutationResolver) SetConsoleRequireMfa(ctx context.Context, required bool) (*graph.ConsoleSecurity, error) {
+	return r.setConsoleRequireMfa(ctx, required)
+}
+
+// ResetUserMfa is the resolver for the resetUserMfa field.
+func (r *mutationResolver) ResetUserMfa(ctx context.Context, userID string) (bool, error) {
+	return r.resetUserMfa(ctx, userID)
+}
+
 // Me is the resolver for the me field.
 func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
 	tc := tenant.MustGet(ctx)
@@ -182,6 +192,16 @@ func (r *queryResolver) LookupWorkspacesByEmail(ctx context.Context, email strin
 	return result, nil
 }
 
+// ConsoleSecurity is the resolver for the consoleSecurity field.
+func (r *queryResolver) ConsoleSecurity(ctx context.Context) (*graph.ConsoleSecurity, error) {
+	tc := tenant.MustGet(ctx)
+	required, err := r.ConsoleMFA.Required(ctx, tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("consoleSecurity: %w", err)
+	}
+	return &graph.ConsoleSecurity{RequireMfa: required}, nil
+}
+
 // Role is the resolver for the role field.
 func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, error) {
 	role := graph.Role(strings.ToUpper(obj.Role))
@@ -195,6 +215,18 @@ func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, 
 // CreatedAt is the resolver for the createdAt field.
 func (r *userResolver) CreatedAt(ctx context.Context, obj *models.User) (string, error) {
 	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
+}
+
+// MfaEnrolled is the resolver for the mfaEnrolled field.
+func (r *userResolver) MfaEnrolled(ctx context.Context, obj *models.User) (bool, error) {
+	if r.MFA == nil {
+		return false, nil
+	}
+	enrolled, err := r.MFA.Enrolled(ctx, obj.ID)
+	if err != nil {
+		return false, fmt.Errorf("mfaEnrolled: %w", err)
+	}
+	return enrolled, nil
 }
 
 // Capabilities is the resolver for the capabilities field.

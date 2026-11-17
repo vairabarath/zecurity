@@ -649,3 +649,24 @@ mutation SetProfilePlatforms($profileId: ID!, $platforms: [String!]!) {
     allowedPlatforms
   }
 }
+
+# PENDING-06 M-2: a resource policy's authentication requirement.
+mutation SetResourcePolicyAuthentication($id: ID!, $frequencyMinutes: Int, $requireMfa: Boolean!) {
+  setResourcePolicyAuthentication(id: $id, frequencyMinutes: $frequencyMinutes, requireMfa: $requireMfa) {
+    id
+    authFrequencyMinutes
+    requireMfa
+  }
+}
+
+# PENDING-06 M-6: require MFA to use the admin console.
+mutation SetConsoleRequireMfa($required: Boolean!) {
+  setConsoleRequireMfa(required: $required) {
+    requireMfa
+  }
+}
+
+# PENDING-06 M-8: delete another user's authenticator.
+mutation ResetUserMfa($userId: ID!) {
+  resetUserMfa(userId: $userId)
+}

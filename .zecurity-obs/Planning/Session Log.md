@@ -10,6 +10,28 @@ tags:
 
 ---
 
+## 2026-11-14 — PENDING-06: MFA & Step-Up Authentication (Complete, Verified, Promoted to Finished)
+
+**Branch:** `feat/pending06-mfa-step-up`
+**What was done:**
+- Implemented and verified PENDING-06 end to end across Controller, Rust Client, and Admin Console:
+  - **Decisions M-1…M-10:** Native TOTP for workspace users, resource policy authentication frequencies (1h…31d) + optional MFA, IdP `amr` claim bypass, ACL compiler gate with `ValidUntil` expiry, step-up without re-enrolling (`zecurity-client auth`), console MFA policy, fresh MFA required for break-glass (`RequireBreakGlassMFA`), admin Reset MFA action, and risk scoring (country moves, failed TOTP attempts, posture regressions).
+  - **Controller:** `migrations/061_mfa_step_up.sql`, `internal/totp`, `internal/mfa` (service, store, Valkey rate limiter, handlers), session auth timestamps in `internal/auth` + token claims, `RequireConsoleMFA` middleware, `DeviceAuthenticated` compiler gate, `internal/risk` engine, `StartReauth` gRPC RPC, and controller-hosted TOTP page.
+  - **Rust Client:** `zecurity-client auth` command (`client/src/cmd/auth.rs`), status & resources CLI hints.
+  - **Admin Console UI:** `MfaPrompt` modal, Apollo error link interceptor for 403 `MFA_REQUIRED` and GraphQL errors with automatic re-send, Settings → Security card, Resource Policies authentication editor, Users page Reset MFA, Devices page sign-in & risk columns. Added `qrcode.react` (4.2.0 pinned).
+  - **Tests added & passing:** `internal/mfa` REST handlers, resolvers (`setConsoleRequireMfa`, `resetUserMfa`, `setResourcePolicyAuthentication`), client `StartReauth` success with mock IdP, `auth_required_count` on `GetACLSnapshot`, and risk hooks end to end.
+- **Verification:**
+  - Automated: Controller full test suite passes; Admin 324 unit tests pass, lint & build clean; Client tests pass.
+  - Live Run (`ztna_p06`): Console MFA flow (enrol, invalid code, right code, session rejection), client step-up end to end in Orca browser, session aging and lazy expiry, "Skip for now" non-MFA reachability, Reset MFA from UI, break-glass MFA prompt and replay in UI, member accessing `/install`, prompt sign-out, and IdP `amr: ["mfa"]` code skip.
+- **Security & Dependency Reviews:**
+  - Reviewed commits `5af0175d` (fail-closed SCIM check & clearing old MFA mark), `46dc4333` (admin UI & interceptors), `e2822e8a` (dev proxy).
+  - Reviewed `github.com/skip2/go-qrcode` (pure Go, zero deps, MIT) and `qrcode.react` 4.2.0 (zero runtime deps, ISC).
+- **Documentation:**
+  - Promoted `PENDING-06-MFA-Step-Up-Auth.md` and `PENDING-06-Implementation-Note.md` to `.zecurity-obs/pending/finished/`.
+  - Updated `.zecurity-obs/pending/README.md` (18 finished docs, 3 not finished), `PENDING-09-Continuous-Authorization.md` (Option C / C-5 implemented), and `docs/database-development.md` (`061_`).
+
+---
+
 ## 2026-11-04 — PENDING-10: Observability (Phases 1–4 Complete, Live-Verified, Promoted to Finished)
 
 **What was done:**
@@ -3822,3 +3844,18 @@ serves on `127.0.0.1:9102`.
   - "Approved by an admin" on → blocked in 143 ms; off → back in 1.2 s;
   - the control resource is unaffected.
 - The user decided the 5-minute on-phone posture interval is enough (no faster sampling). Pushed `feat/android-posture`.
+
+## 2026-11-14 — Windows live run, Windows posture, Minimum OS Version; pending-docs audit
+
+- First real Windows run of the client (Windows 11, luffy): install, login, tunnel, revoke, down/up, service restart and sign-out all pass.
+  - Fixed: harmless Wintun/tun ERROR log lines.
+  - Fixed: ~2 s of refused connections after `up` (duplicate address detection turned off on the adapter).
+- Windows posture (BitLocker, screen lock, biometric, firewall, antivirus) and the Windows card: ADR-031 D-8…D-10.
+- Minimum OS Version server checks and the Twingate-style card grid: D-11, D-12.
+  - Fixed: the profile editor didn't receive `allowedPlatforms`.
+- All of the above merged as **PR #204** (`25a0cfb5`). Lab torn down (luffy, shields .53/.46, connector .75, local controller).
+- Pending-docs audit against `main` 25a0cfb5 (branch `docs/pending-audit`):
+  - every doc carries a dated "verified" status block, and its frontmatter matches;
+  - 07b and 21 moved to `finished/`;
+  - the README has a new scorecard and an "Open follow-ups" table;
+  - the moved PENDING-21's links were updated.

@@ -1,6 +1,9 @@
 package tenant
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // contextKey is an unexported named type.
 // Prevents key collisions with any other package storing values in context.
@@ -18,6 +21,11 @@ type TenantContext struct {
 	UserID   string // user UUID
 	Role     string // JWT role claim: display only, never read for authorization (live role: rbac.Checker)
 	Email    string // authenticated user's email
+
+	// PENDING-06: the login session the token belongs to ("" on tokens with
+	// no sid) and when that session last passed MFA (zero = it has not).
+	SessionID string
+	MFAAt     time.Time
 }
 
 // Set stores a TenantContext into ctx.

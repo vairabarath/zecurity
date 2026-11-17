@@ -1,5 +1,23 @@
+---
+type: adr
+status: implemented
+id: PENDING-19
+domain: rbac
+priority: P1
+created: 2026-10-31
+verified: 2026-11-14
+tags: [pending, finished, rbac, admin]
+---
+
 # PENDING-19: Workspace admin-console roles (RBAC)
 
+**Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED.**
+- **Merged:** PR #168 (`6e36b9b7`), with migration `047_workspace_roles.sql` and `controller/internal/rbac/`.
+- **Fixed since:** the R1 "known gap" (the stale role in the refreshed JWT) is fixed in `8b9c7cf3`;
+  `controller/internal/auth/refresh.go` re-stamps the current role.
+- **Still open:** the SCIM last-Admin case (R-11) is tested against the database only.
+
+**History:** 
 **Status:** approved 2026-11-02. **R1 (backend) built** on local branch `feat/workspace-rbac-r1` (not pushed); build gate green. O-6/O-7 decided as R-12/R-13 and built. **R2 (admin UI) built** on the same branch. **R3 live run 2026-11-02: PASS** (41/41 API checks, UI pass; one R2 fix, one follow-up, both fixed). Branch local, not pushed.
 **Date:** 2026-10-31
 **Base:** `fixed-pendings` (`origin/main` is stale; it has 41 gated operations, `fixed-pendings` has 73).

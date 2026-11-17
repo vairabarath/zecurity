@@ -179,6 +179,13 @@ func (*postureTestAuth) VerifyIDToken(context.Context, string) (*auth.GoogleClai
 func (*postureTestAuth) IssueSession(context.Context, string, string, string, string, int) (string, int64, string, error) {
 	panic("not used")
 }
+func (*postureTestAuth) IssueSessionWithAuth(context.Context, string, string, string, string, int, auth.SessionAuth) (string, int64, string, error) {
+	panic("not used")
+}
+func (*postureTestAuth) StampSessionMFA(context.Context, *auth.AccessTokenClaims, time.Time) (string, int64, error) {
+	panic("not used")
+}
+func (*postureTestAuth) ClearUserSessionMFA(context.Context, string) error { return nil }
 func (*postureTestAuth) RefreshSession(context.Context, string, string) (string, string, error) {
 	return "", "", nil
 }

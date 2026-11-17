@@ -1,6 +1,7 @@
 ---
 type: plan
-status: locked
+status: implemented
+verified: 2026-11-14
 id: PENDING-05-PLAN
 domain: identity
 created: 2026-08-10
@@ -15,6 +16,11 @@ tags: [plan, identity, scim, pending-05, locked]
 ---
 
 # PENDING-05 — SCIM Implementation Plan (LOCKED)
+
+> **Status (verified 2026-11-14): this plan is built.** It is kept as the build record for Sprint 17. The
+> "interim sink" steps below are history: **P10 is done**. The production durable outbox sink
+> (`scim.NewDurableOutboxSink`) is wired in the controller's `main.go`; `UnwiredSink` no longer exists.
+> Open gaps (conformance suite, live IdP interop) are listed in [[PENDING-05-Directory-Sync-SCIM]].
 
 > **Authoritative contract:** [[ADR-025-SCIM-Directory-Synchronization]] (ACCEPTED 2026-08-10). This
 > plan **implements** that ADR; it does **not** change its architecture. Where this plan and the ADR

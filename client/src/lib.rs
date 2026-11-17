@@ -54,6 +54,7 @@ mod tpm;
 pub mod mobile;
 
 pub mod cmd {
+    pub mod auth;
     pub mod down;
     pub mod login;
     pub mod logout;

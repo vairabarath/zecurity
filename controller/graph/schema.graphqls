@@ -53,6 +53,24 @@ type Mutation {
   # active Admin. `reason` is required and stored in the audit log only. Applies
   # on the target's next request (live role check); their client is untouched.
   setMemberRole(userId: ID!, role: Role!, reason: String!): User! @requires(capability: MEMBERS_ADMIN)
+
+  # PENDING-06 M-6 (Admin Console Security): require MFA to use this console.
+  # Turning it on is refused unless your own session has passed MFA, so the
+  # workspace can't lock itself out.
+  setConsoleRequireMfa(required: Boolean!): ConsoleSecurity! @requires(capability: IDENTITY_ADMIN)
+  # PENDING-06 M-8: delete another user's authenticator; they set one up again
+  # at their next MFA prompt. Refused for your own account. Returns whether
+  # the user had one.
+  resetUserMfa(userId: ID!): Boolean! @requires(capability: MEMBERS_ADMIN)
+}
+
+# PENDING-06 M-6.
+type ConsoleSecurity {
+  requireMfa: Boolean!
+}
+
+extend type Query {
+  consoleSecurity: ConsoleSecurity! @requires(capability: CONSOLE_READ)
 }
 
 type AuthInitPayload {
@@ -85,6 +103,9 @@ type User {
   # from `provider`.
   provisionedBy:     String!
   provisioningOwner: String!
+
+  # PENDING-06: the user has set up an authenticator app (TOTP).
+  mfaEnrolled: Boolean! @goField(forceResolver: true)
 
   # Console capabilities of this user's current role (PENDING-19 §4). The admin
   # UI uses it on `me` to choose what to show; the server still checks every

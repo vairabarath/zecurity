@@ -21,6 +21,21 @@ function shortId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 8)}…` : id
 }
 
+// PENDING-06 M-9: why a device's risk score went up.
+const RISK_REASON_LABEL: Record<string, string> = {
+  country_changed: 'country changed',
+  mfa_failures: 'repeated wrong MFA codes',
+  posture_regressed: 'device check started failing',
+}
+
+function riskTitle(device: Device): string {
+  const reasons = device.riskReasons.map((r) => RISK_REASON_LABEL[r] ?? r).join(', ')
+  const head = `Risk score ${device.riskScore}${reasons ? `: ${reasons}` : ''}.`
+  return device.reauthRequired
+    ? `${head} The user must sign in again before reaching resources whose policy requires authentication.`
+    : head
+}
+
 function formatExpiry(notAfter: string | null | undefined): string {
   if (!notAfter) return '—'
   const d = new Date(notAfter)
@@ -100,14 +115,14 @@ export default function DeviceManagement() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1540px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_120px_140px_240px] gap-4 px-5 py-4">
-            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Country', 'Status', 'Approval', 'Actions'].map((label, index) => (
-              <div key={label} className={`table-head-label ${index === 7 ? 'text-right' : ''}`}>{label}</div>
+          <div className="table-head grid min-w-[1730px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_170px_120px_140px_240px] gap-4 px-5 py-4">
+            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Country', 'Sign-in', 'Status', 'Approval', 'Actions'].map((label, index) => (
+              <div key={label} className={`table-head-label ${index === 9 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[1540px] p-5 space-y-3">
+            <div className="min-w-[1730px] p-5 space-y-3">
               {Array.from({ length: 5 }).map((_, index) => (
                 <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
               ))}
@@ -119,11 +134,11 @@ export default function DeviceManagement() {
               description="Devices appear here as users enroll through the client."
             />
           ) : (
-            <div className="min-w-[1540px]">
+            <div className="min-w-[1730px]">
               {devices.map((device) => {
                 const revoked = !!device.revokedAt
                 return (
-                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_120px_140px_240px] gap-4 px-5 py-4">
+                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_170px_120px_140px_240px] gap-4 px-5 py-4">
                     <div className="flex min-w-0 items-center gap-3">
                       <span className="grid h-9 w-9 place-items-center rounded-xl border border-[oklch(0.78_0.09_310/0.25)] bg-[oklch(0.78_0.09_310/0.14)] text-[oklch(0.78_0.09_310)]">
                         <Laptop className="h-4 w-4" />
@@ -164,6 +179,26 @@ export default function DeviceManagement() {
                         countryLabel(device.observedCountry)
                       ) : (
                         <span className="opacity-60">{device.observedAt ? 'unknown' : '—'}</span>
+                      )}
+                    </div>
+
+                    {/* PENDING-06: when the device's session last signed in
+                        and passed MFA, and its risk state (M-9). */}
+                    <div className="min-w-0 space-y-1">
+                      <div
+                        className="truncate font-mono text-[12.5px] text-muted-foreground/80"
+                        title={`Signed in ${relativeTime(device.lastAuthenticatedAt)} · MFA ${relativeTime(device.lastMfaAt)}`}
+                      >
+                        {relativeTime(device.lastAuthenticatedAt)}
+                        {device.lastMfaAt && <span className="ml-1.5 font-sans text-[11px] font-semibold text-primary">MFA</span>}
+                      </div>
+                      {(device.reauthRequired || device.riskScore > 0) && (
+                        <div title={riskTitle(device)}>
+                          <StatusPill
+                            label={device.reauthRequired ? 'sign-in required' : `risk ${device.riskScore}`}
+                            tone={device.reauthRequired ? 'danger' : 'warn'}
+                          />
+                        </div>
                       )}
                     </div>
 

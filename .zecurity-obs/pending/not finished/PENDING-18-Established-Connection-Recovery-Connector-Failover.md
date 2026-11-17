@@ -15,6 +15,18 @@ tags: [pending, adr, data-plane, client, connector, failover, deferred, future-w
 
 # Pending ADR 18 — Future Implementation: Established Connection Recovery and Connector Failover
 
+> **Re-checked against `main` 25a0cfb5 (2026-11-14): still NOT IMPLEMENTED, but the prerequisites partly exist.**
+> - **Built:** since connector revocation Phase C (`af30176a`, PR #133), the client records each flow's connector:
+>   `connector_id` on the transport context (`client/src/transport.rs`), and `ActiveRelay.selected`.
+> - **Revocation only:** `close_connector_flows` (`net_stack.rs`) closes one connector's flows, wired only to
+>   connector **revocation** (`close_revoked_connector_flows`).
+> - **Still missing:** nothing closes or re-routes flows when a connector becomes unavailable, and nothing
+>   re-selects a connector.
+> - **Different layer:** relay-pool failover (PR #201) works at the relay level, not the connector level.
+>
+> The §1 row "no component records which connector a flow uses" and the §7 prerequisite "`ClientTransport` needs a
+> `connector_id`" are out of date. Line references in §1 have shifted.
+
 > **Status: DEFERRED / NOT IMPLEMENTED.** Future implementation. It is excluded from the Sprint 20
 > scope and was deferred out of Sprint 20 / Fix 01 **Q3** on 2026-10-10. Nothing in this file is
 > implemented, accepted or approved. Proposed behaviour and acceptance criteria below are

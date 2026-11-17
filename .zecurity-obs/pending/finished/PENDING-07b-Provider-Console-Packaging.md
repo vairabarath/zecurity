@@ -1,6 +1,7 @@
 ---
 type: adr
-status: pending
+status: implemented
+verified: 2026-11-14
 id: PENDING-07b
 domain: operator
 priority: P1
@@ -13,7 +14,16 @@ tags: [pending, adr, operator, provider, frontend, deployment]
 
 # Pending ADR 07b — Provider Console Packaging (separate app vs shared)
 
-> **Status: PENDING — for team discussion.** Frontend/deployment half of
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): DECIDED AND BUILT — Option A, a separate app.**
+> - **Decision:** D-18 (`docs/provider-dashboard-architecture-decisions.md`; `Sprint21/path.md`). It answers open questions 1–3
+>   below.
+> - **Built:** `provider-console/` (scaffold `899585b7`, PR #108 `f4a69fd3`, CI #191). It is its own build and origin,
+>   guarded by `PROVIDER_CONSOLE_ORIGIN`, and it never imports from `admin/`.
+> - **Residual:** network lockdown (VPN or allowlist) is deployment guidance in `provider-console/README.md`, not
+>   enforced in code.
+> - **Superseded:** the "no relay/provider UI today" statement below.
+>
+> **Original status:** PENDING — for team discussion. Frontend/deployment half of
 > [[PENDING-07-Provider-Dashboard-Vision]]. Depends on 07a (the backend tier is separated
 > regardless of this choice).
 

@@ -81,6 +81,34 @@ func (r *mutationResolver) SetResourcePolicyProfiles(ctx context.Context, id str
 	return resourcePolicyToGQL(p), nil
 }
 
+// SetResourcePolicyAuthentication is the resolver for the setResourcePolicyAuthentication field.
+func (r *mutationResolver) SetResourcePolicyAuthentication(ctx context.Context, id string, frequencyMinutes *int, requireMfa bool) (*graph.ResourcePolicy, error) {
+	tc := tenant.MustGet(ctx)
+	ws, err := policyWorkspace(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pid, ok := parsePolicyID(id)
+	if !ok {
+		return nil, posture.ErrPolicyNotFound
+	}
+	before, err := r.PostureStore.GetResourcePolicy(ctx, ws, pid)
+	if err != nil {
+		return nil, fmt.Errorf("setResourcePolicyAuthentication: %w", err)
+	}
+	p, err := r.PostureStore.SetResourcePolicyAuthentication(ctx, ws, pid, frequencyMinutes, requireMfa)
+	if err != nil {
+		return nil, fmt.Errorf("setResourcePolicyAuthentication: %w", err)
+	}
+	r.auditAdmin(ctx, "resource_policy.authentication", "resource_policy", id, map[string]any{
+		"from": policyAuthAudit(before), "to": policyAuthAudit(p),
+	})
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("setResourcePolicyAuthentication notify: %w", err)
+	}
+	return resourcePolicyToGQL(p), nil
+}
+
 // DeleteResourcePolicy is the resolver for the deleteResourcePolicy field.
 func (r *mutationResolver) DeleteResourcePolicy(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)

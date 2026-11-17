@@ -1,6 +1,7 @@
 ---
 type: adr
-status: in-progress
+status: implemented
+verified: 2026-11-14
 id: PENDING-13
 domain: identity/ops
 priority: P2
@@ -13,7 +14,17 @@ tags: [pending, adr, client, device, pki, lifecycle]
 
 # Pending ADR 13 — Client Device Lifecycle & Cert Renewal
 
-> **Status: DRAFTED as [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] (PROPOSED, 2026-08-20).**
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): IMPLEMENTED, all three tracks.**
+> - **Track 3:** the client `RenewCert` RPC (`proto/client/v1/client.proto`, `controller/internal/client/service.go`)
+>   and the daemon renewal scheduler (`run_cert_renewal_scheduler`, `client/src/daemon.rs`) shipped in `a5f6a3ca`
+>   (2026-09-02).
+> - **Device management:** the admin Devices page (`admin/src/pages/DeviceManagement.tsx`, `clientDevices` /
+>   `revokeDevice`) exists.
+> - **Doc gap:** [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] still says `status: proposed` although it is built.
+>
+> The two blocks below ("drafted", "Track 3 still open") are history.
+
+> **Drafted as [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] (PROPOSED, 2026-08-20).**
 > The scope below was written 2026-07-03 and partly inferred. It has since been **verified against the
 > code** and reshaped into three tracks (close-the-SCIM-loop / server→client trust signal / auto-renew +
 > re-enroll). **Read ADR-028 for the authoritative, grounded design** — this file is retained as the
@@ -34,8 +45,8 @@ tags: [pending, adr, client, device, pki, lifecycle]
 Connectors and shields have automatic cert renewal (ADR-003 pattern). For **client devices**,
 Sprint 11.3 delivered **access-token refresh & session management**, but that is the bearer/session
 layer — **device certificate renewal** appears to still be unaddressed (the original roadmap listed
-"Client cert renewal — same pattern, future sprint" as deferred). There is also no evident
-**device management UI**: an admin/user can't list a user's enrolled devices, see last-seen, or
+"Client cert renewal — same pattern, future sprint" as deferred). There was also no evident
+**device management UI** *(since built: `admin/src/pages/DeviceManagement.tsx`)*: an admin/user can't list a user's enrolled devices, see last-seen, or
 revoke a specific lost/stolen device. Client SPIFFE revocation on logout exists
 (recent commit "revoke device SPIFFE on logout"), which is a good start but not full lifecycle.
 

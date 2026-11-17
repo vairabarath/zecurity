@@ -43,13 +43,14 @@ function device(id: string, userId: string) {
     __typename: 'ClientDevice', id, userId, name: `dev-${id}`, commonName: id, os: 'linux',
     spiffeId: null, certNotAfter: null, lastSeenAt: null, createdAt: '2026-11-02T00:00:00Z',
     revokedAt: null, approvedAt: null, approvedByEmail: null,
+    lastAuthenticatedAt: null, lastMfaAt: null, riskScore: 0, riskReasons: [], reauthRequired: false,
   }
 }
 
 function user(id: string, email: string, role: string) {
   return {
     __typename: 'User', id, email, role, createdAt: '2026-11-02', provider: 'google',
-    provisioningOwner: 'jit', provisionedBy: 'jit',
+    provisioningOwner: 'jit', provisionedBy: 'jit', mfaEnrolled: true,
   }
 }
 
@@ -121,6 +122,13 @@ describe('TeamUsers by role', () => {
     expect(screen.getByRole('button', { name: 'Manage role for other@x' })).toBeEnabled()
   })
 
+  it('Admin: Reset MFA for others, never on your own row (PENDING-06 M-8)', () => {
+    setTestRole(Role.Admin)
+    render(<MemoryRouter><TeamUsers /></MemoryRouter>)
+    expect(screen.getByRole('button', { name: 'Reset MFA for other@x' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset MFA for me@x' })).toBeNull()
+  })
+
   it.each([Role.Viewer, Role.Devops, Role.Security, Role.Helpdesk])(
     '%s: no invite, no Manage role (R-10)',
     (role) => {
@@ -128,6 +136,7 @@ describe('TeamUsers by role', () => {
       render(<MemoryRouter><TeamUsers /></MemoryRouter>)
       expect(screen.queryByRole('button', { name: /Invite/ })).toBeNull()
       expect(screen.queryByRole('button', { name: /Manage role/ })).toBeNull()
+      expect(screen.queryByRole('button', { name: /Reset MFA/ })).toBeNull()
       expect(screen.getAllByText('other@x').length).toBeGreaterThan(0)
     },
   )

@@ -13,6 +13,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/geoip"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/risk"
 )
 
 // observationRefresh bounds how long a poll may skip writing an unchanged
@@ -88,13 +89,19 @@ func (s *Service) observeLocation(ctx context.Context, workspaceID, deviceID uui
 			}
 		}
 	}
-	changed, err := s.postureStore.RecordNetworkObservation(ctx, workspaceID, deviceID, lookup, now)
+	changed, moved, err := s.postureStore.RecordNetworkObservationMove(ctx, workspaceID, deviceID, lookup, now)
 	if err != nil {
 		log.Printf("client: record network observation for device %s: %v", deviceID, err)
 		lo.last.Delete(deviceID)
 		return false
 	}
 	lo.last.Store(deviceID, sighting{country: lookup.Country, written: now})
+	// PENDING-06 M-9: a move between two known countries is a risk signal.
+	if moved && s.riskSvc != nil {
+		if _, rerr := s.riskSvc.Add(ctx, workspaceID.String(), deviceID.String(), risk.CountryChanged); rerr != nil {
+			log.Printf("client: %v", rerr)
+		}
+	}
 	if changed {
 		log.Printf("client: device %s seen in country %q", deviceID, lookup.Country)
 	}

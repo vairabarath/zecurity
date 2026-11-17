@@ -48,7 +48,7 @@ var expectedCapability = func() map[string]rbac.Capability {
 			m[n] = c
 		}
 	}
-	put(rbac.ConsoleRead, `clientDevices remoteNetworks remoteNetwork connectors connector
+	put(rbac.ConsoleRead, `consoleSecurity clientDevices remoteNetworks remoteNetwork connectors connector
 		shields shield resources allResources getDiscoveredServices getScanResults groups group
 		supportedPostureChecks deviceProfiles devicePostureVisibility idpConnections
 		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users auditLogs
@@ -64,14 +64,15 @@ var expectedCapability = func() map[string]rbac.Capability {
 		deleteDeviceProfile updateProfileRequirementCountries setProfilePlatforms
 		updateProfileRequirementMinVersion
 		createResourcePolicy updateResourcePolicy setResourcePolicyProfiles
-		deleteResourcePolicy setResourcePolicy`)
+		deleteResourcePolicy setResourcePolicy setResourcePolicyAuthentication`)
 	put(rbac.DeviceWrite, `approveDevice unapproveDevice`)
 	put(rbac.DeviceAdmin, `revokeDevice`)
 	put(rbac.IdentityAdmin, `createIdpConnection updateIdpConnection setIdpConnectionStatus
 		deleteIdpConnection testIdpConnection updateScimConfig setPlatformLoginEnabled
 		mintScimToken rotateScimToken revokeScimToken acceptScimConflict rejectScimConflict
-		reopenScimConflict grantPermission enableScimBreakGlass`)
-	put(rbac.MembersAdmin, `createInvitation setMemberRole`)
+		reopenScimConflict grantPermission enableScimBreakGlass
+		setConsoleRequireMfa`)
+	put(rbac.MembersAdmin, `createInvitation setMemberRole resetUserMfa`)
 	put(rbac.AuditAdmin, `auditExportSinks createAuditExportSink updateAuditExportSink
 		rotateAuditExportSinkSecret deleteAuditExportSink testAuditExportSink`)
 	return m
@@ -184,7 +185,7 @@ func TestAllFieldsAuthorized(t *testing.T) {
 	// 73 console operations + setMemberRole (PENDING-19 §4.1)
 	// + updateProfileRequirementCountries (PENDING-20 G-10). A drop below
 	// means schema collection broke and a pass would be meaningless.
-	const wantGated = 89 // ADR-031: +1 (setProfilePlatforms), +1 (updateProfileRequirementMinVersion); PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
+	const wantGated = 93 // PENDING-06: +4 (consoleSecurity, setResourcePolicyAuthentication, setConsoleRequireMfa, resetUserMfa); ADR-031: +1 (setProfilePlatforms), +1 (updateProfileRequirementMinVersion); PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
 	if gated != wantGated {
 		t.Fatalf("authz check found %d gated operations, want %d — schema collection broken or "+
 			"an operation was added/removed without updating expectedCapability", gated, wantGated)

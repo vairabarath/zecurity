@@ -1,6 +1,7 @@
 ---
 type: adr
 status: implemented
+verified: 2026-11-14
 id: PENDING-17
 domain: identity/client
 priority: P2
@@ -12,6 +13,13 @@ tags: [pending, adr, client, pki, tpm, key-storage]
 ---
 
 # Pending ADR 17 — Hardware-Backed Device Key Storage
+
+> **Platform note (verified 2026-11-14):** the client is no longer Linux-only. The Windows, Android and iOS clients
+> exist (PR #203/#204). TPM-backed keys are **Linux-only by design**; the other platforms use software keys (no CNG,
+> Android Keystore or Secure Enclave code). The "no Windows code path / only platform this client ships on"
+> wording below dates from 2026-09.
+>
+> **Still open, as listed below:** the `tss` group in the systemd unit, and a `linux.tpm.present` posture check.
 
 > **Status: CORE IMPLEMENTATION COMPLETE (2026-09-02).** Raised while implementing PENDING-13 /
 > ADR-028 Track 3 (cert renewal + fingerprint pinning) — that track hardens *who can renew a

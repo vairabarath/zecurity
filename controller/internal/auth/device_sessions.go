@@ -32,6 +32,11 @@ type SessionObserver interface {
 type SessionDeadlines struct {
 	IdleUntil time.Time
 	MaxUntil  time.Time
+	// PENDING-06: when the session last authenticated and last passed MFA
+	// (zero = unknown / never). A device enrolled under the session starts
+	// with these.
+	AuthAt time.Time
+	MFAAt  time.Time
 }
 
 // ErrSessionNotFound means the session does not exist (ended or expired).
@@ -52,6 +57,14 @@ func (s *serviceImpl) SessionDeadlines(ctx context.Context, userID, sid string) 
 		return SessionDeadlines{}, ErrSessionNotFound
 	}
 	d := SessionDeadlines{IdleUntil: time.Now().Add(s.refreshTTL())}
+	if stored.AuthAt != 0 {
+		d.AuthAt = time.Unix(stored.AuthAt, 0)
+	} else if stored.OriginalIAT != 0 {
+		d.AuthAt = time.Unix(stored.OriginalIAT, 0)
+	}
+	if mfaAt, err := s.redisClient.GetSessionMFA(ctx, userID, sid); err == nil && mfaAt != 0 {
+		d.MFAAt = time.Unix(mfaAt, 0)
+	}
 	if stored.MaxLifetimeAt != 0 {
 		d.MaxUntil = time.Unix(stored.MaxLifetimeAt, 0)
 		if time.Now().After(d.MaxUntil) {

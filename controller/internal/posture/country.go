@@ -114,6 +114,21 @@ func (s *Store) RecordNetworkObservation(
 	lookup geoip.Lookup,
 	now time.Time,
 ) (bool, error) {
+	changed, _, err := s.RecordNetworkObservationMove(ctx, workspaceID, deviceID, lookup, now)
+	return changed, err
+}
+
+// RecordNetworkObservationMove is RecordNetworkObservation that also reports
+// whether the device moved from one known country to a different known
+// country (the PENDING-06 M-9 risk signal). A first sighting, and a change to
+// or from "no country" (private address, GeoIP database not loaded), is not
+// a move.
+func (s *Store) RecordNetworkObservationMove(
+	ctx context.Context,
+	workspaceID, deviceID uuid.UUID,
+	lookup geoip.Lookup,
+	now time.Time,
+) (changed, moved bool, err error) {
 	var prefix any
 	if lookup.Prefix.IsValid() {
 		prefix = lookup.Prefix.String()
@@ -123,7 +138,7 @@ func (s *Store) RecordNetworkObservation(
 		build = lookup.Build
 	}
 	var previous *string
-	err := s.pool.QueryRow(ctx,
+	err = s.pool.QueryRow(ctx,
 		`WITH prev AS (
 		   SELECT country FROM device_network_observations
 		    WHERE device_id = $1 AND workspace_id = $2
@@ -145,12 +160,14 @@ func (s *Store) RecordNetworkObservation(
 	).Scan(&previous)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The row belongs to another workspace: refuse rather than move it.
-		return false, ErrNotFound
+		return false, false, ErrNotFound
 	}
 	if err != nil {
-		return false, fmt.Errorf("record network observation: %w", err)
+		return false, false, fmt.Errorf("record network observation: %w", err)
 	}
-	return previous == nil || *previous != lookup.Country, nil
+	changed = previous == nil || *previous != lookup.Country
+	moved = previous != nil && *previous != "" && lookup.Country != "" && *previous != lookup.Country
+	return changed, moved, nil
 }
 
 // LatestNetworkObservation returns the device's last sighting, or ErrNotFound.

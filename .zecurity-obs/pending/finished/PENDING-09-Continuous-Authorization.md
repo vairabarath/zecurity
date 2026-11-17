@@ -15,9 +15,9 @@ tags: [pending, finished, adr, zero-trust, authorization]
 
 # Pending ADR 09 — Continuous / Re-evaluated Authorization
 
-> **Implemented (2026-11-12), PR #198** `[schema: reset DB]`. Options A and B are in place (built over earlier sprints and verified here); C-1 … C-5 were decided and C-1 and D-8 built. **Option C (risk scoring, step-up) is deferred to PENDING-06.** What shipped, where it lives and how it was verified: **Implementation summary** at the end. The sections below keep the original discussion and the build history.
+> **Implemented (2026-11-12), PR #198** `[schema: reset DB]`. Options A and B are in place (built over earlier sprints and verified here); C-1 … C-5 were decided and C-1 and D-8 built. **Option C (risk scoring, step-up) is built in PENDING-06 (2026-11-14).** What shipped, where it lives and how it was verified: **Implementation summary** at the end. The sections below keep the original discussion and the build history.
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **History — original framing, superseded by the implementation note above (PR #198):**
 >
 > **Partial implementation note (Sprint 15):** a bounded variant of **Option B only** shipped as a
 > side effect of PENDING-08's connector session-registry work — no new revocation RPC; the connector
@@ -103,7 +103,7 @@ The Context above is out of date: connectors have no 60 s TTL any more, and Opti
 | C-2 | **No CRL-driven live cut.** Every client-cert CRL entry comes from the `client_devices.revoked_at` trigger (`039_certificate_history.sql`), and the same statement drops the device from the compiled ACL, which already cuts its sessions. Cutting by SPIFFE ID on a CRL entry would also wrongly kill a renewed cert's sessions: renewal keeps the SPIFFE ID, and the session registry stores no serial. Revisit only if a path ever revokes a single serial without `revoked_at`. |
 | C-3 | **Posture and geofence latency (≤ 300 s report, 10 min staleness, ≤ 60 s country) is acceptable.** |
 | C-4 | **Log SCIM's ignored `NotifyPolicyChange` errors** (six post-commit sites). The change is already committed, so the request must not fail. |
-| C-5 | **Option C (risk scoring, step-up) waits for PENDING-06.** `RequireBreakGlassMFA` is still a no-op. |
+| C-5 | **Option C (risk scoring, step-up) built in PENDING-06 (2026-11-14).** `RequireBreakGlassMFA` is enforced. |
 
 ## Design for C-1 (proposed, for approval)
 
@@ -194,7 +194,7 @@ Gate: 1795 pass / 2 known skips. One `auditexport` timing test (`TestExporterRun
 
 - **C-2, no CRL-driven live cut:** every client-cert CRL entry already comes from the `revoked_at` trigger, which drops the device from the ACL; a renewed cert keeps its SPIFFE ID, so cutting by ID on a CRL entry would hit the wrong sessions.
 - **C-3:** posture and geofence latency (report every ≤ 300 s, 10 min staleness, ≤ 60 s country check) is acceptable.
-- **C-5 / Option C:** risk scoring and step-up wait for PENDING-06 (`RequireBreakGlassMFA` is still a no-op).
+- **C-5 / Option C:** risk scoring and step-up built in PENDING-06 (2026-11-14; `RequireBreakGlassMFA` enforced).
 
 ### Verification
 

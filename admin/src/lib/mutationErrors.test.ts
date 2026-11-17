@@ -65,6 +65,8 @@ const HANDLED_AT_CALL_SITE: Record<string, string> = {
   'pages/signup/Step3Auth.tsx initiateAuth': 'try/catch + hook error state',
   'components/audit/AuditExportSection.tsx create': 'try/catch → setError in the sink dialog',
   'components/audit/AuditExportSection.tsx update': 'try/catch → setError in the sink dialog',
+  'components/settings/ConsoleSecurityCard.tsx setRequireMfa': 'try/catch → toast (MFA_REQUIRED answered by the prompt)',
+  'components/users/ResetMfaDialog.tsx resetMfa': 'try/catch → toast',
 }
 
 const SOURCES = import.meta.glob(['../**/*.tsx', '!../**/*.test.tsx'], {

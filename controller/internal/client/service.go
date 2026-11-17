@@ -32,6 +32,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/mfa"
+	"github.com/yourorg/ztna/controller/internal/risk"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -78,6 +80,10 @@ type Service struct {
 
 	// location records where devices connect from (PENDING-20); nil = off.
 	location *locationObserver
+
+	// PENDING-06: step-up authentication (reauth.go); nil until EnableStepUp.
+	mfaSvc  *mfa.Service
+	riskSvc *risk.Service
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -322,13 +328,24 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 			return
 		}
 
+		// PENDING-06 M-5: a step-up round trip ends here; it never issues a
+		// ctrl_code. The session is single-use.
+		if sess.Reauth != nil {
+			if _, ok := consumeSession(sessionID); !ok {
+				http.Error(w, "auth session not found or expired", http.StatusBadRequest)
+				return
+			}
+			s.finishReauthIdP(w, r, sess, conn.ID, authCtx)
+			return
+		}
+
 		ctrlCode, err := newCtrlCode()
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
-		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, ctrlCode, time.Now().Add(60*time.Second)) {
+		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, auth.IdPMFAAt(authCtx.AMR, authCtx.AuthTime, time.Now()), ctrlCode, time.Now().Add(60*time.Second)) {
 			http.Error(w, "auth session expired during callback", http.StatusBadRequest)
 			return
 		}
@@ -439,7 +456,10 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, refreshToken, err := s.authSvc.IssueSession(ctx, user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
+	// PENDING-06 M-3: MFA proven by the IdP's verified amr marks the
+	// session at the IdP's auth_time, never at now.
+	sessionAuth := auth.SessionAuth{MFAAt: sess.IdpMFAAt}
+	accessToken, expiresIn, refreshToken, err := s.authSvc.IssueSessionWithAuth(ctx, user.ID, sess.WorkspaceID, user.Role, sess.Email, gen, sessionAuth)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue session: %v", err)
 	}
@@ -450,7 +470,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		Action:      auth.ActionSignIn,
 		TargetType:  "user",
 		TargetID:    user.ID,
-		Details:     map[string]any{"client": true, "connection_id": conn.ID},
+		Details:     map[string]any{"client": true, "connection_id": conn.ID, "mfa": auth.SignInMFALabel(sessionAuth)},
 	})
 
 	return &clientv1.TokenExchangeResponse{
@@ -865,10 +885,12 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	// GetTransportSnapshot. Compared against the compiled snapshot's version (not
 	// the notifier directly) so a compile raced by a policy change can never report
 	// up_to_date for a version the client isn't actually holding.
+	// PENDING-06: how many resources wait for this device to authenticate.
+	authRequired := s.authRequiredCount(ctx, workspaceID, req.GetDeviceId())
 	if req.GetKnownVersion() != 0 && req.GetKnownVersion() == snap.Version {
-		return &clientv1.GetACLSnapshotResponse{UpToDate: true}, nil
+		return &clientv1.GetACLSnapshotResponse{UpToDate: true, AuthRequiredCount: authRequired}, nil
 	}
-	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
+	return &clientv1.GetACLSnapshotResponse{Snapshot: snap, AuthRequiredCount: authRequired}, nil
 }
 
 // GetTransportSnapshot returns the workspace transport (connectivity) snapshot

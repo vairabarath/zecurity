@@ -17,6 +17,7 @@ type authSession struct {
 	Provider          string    // set by AuthCallbackHandler after the IdP verifies identity
 	Email             string    // set by AuthCallbackHandler after the IdP verifies identity
 	Subject           string    // set by AuthCallbackHandler — immutable per-issuer subject → provider_sub
+	IdpMFAAt          time.Time // set by AuthCallbackHandler — when the IdP performed MFA (its auth_time; zero = none) (PENDING-06 M-3)
 	CliCodeChallenge  string    // BASE64URL(SHA256(cli_code_verifier)) — verified in TokenExchange
 	LocalRedirectURI  string    // http://127.0.0.1:<port>/callback — CLI's local server
 	IdpCodeVerifier   string    // controller's own IdP PKCE verifier — never leaves server
@@ -24,6 +25,11 @@ type authSession struct {
 	CtrlCode          string    // one-time code; set after the IdP callback completes
 	CtrlCodeExpiresAt time.Time // 60-second TTL after ctrl_code is issued
 	ExpiresAt         time.Time // 10-minute overall session TTL
+
+	// Reauth is set when this round trip is a step-up for an enrolled device
+	// (PENDING-06 M-5, reauth.go), not a sign-in. Such a session never yields
+	// a ctrl_code or tokens.
+	Reauth *reauthInfo
 }
 
 var (
@@ -85,7 +91,7 @@ func consumeSession(id string) (*authSession, bool) {
 
 // updateSessionCtrlCode records the verified identity and ctrl_code after the
 // Google callback completes. Returns false if the session has already expired.
-func updateSessionCtrlCode(id, email, provider, subject, ctrlCode string, expiresAt time.Time) bool {
+func updateSessionCtrlCode(id, email, provider, subject string, idpMFAAt time.Time, ctrlCode string, expiresAt time.Time) bool {
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
 	s, ok := sessionStore[id]
@@ -95,6 +101,7 @@ func updateSessionCtrlCode(id, email, provider, subject, ctrlCode string, expire
 	s.Email = email
 	s.Provider = provider
 	s.Subject = subject
+	s.IdpMFAAt = idpMFAAt
 	s.CtrlCode = ctrlCode
 	s.CtrlCodeExpiresAt = expiresAt
 	return true

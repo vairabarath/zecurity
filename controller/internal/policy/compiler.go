@@ -154,11 +154,21 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 	}
 	requiredProfilesByResource := requiredProfiles(profiles, resourceProfiles)
 
+	// Authentication (PENDING-06 M-4): a resource whose policy has an
+	// authentication requirement is only for devices whose session
+	// authenticated (and passed MFA, if required) recently enough.
+	resourceAuth, err := postureStore.ResourceAuthForWorkspace(ctx, workspaceUUID)
+	if err != nil {
+		return nil, fmt.Errorf("compile acl: resource policy authentication: %w", err)
+	}
+
 	allDeviceIDs := make(map[uuid.UUID]struct{})
+	deviceByID := make(map[uuid.UUID]DeviceIdentity)
 
 	for _, devices := range groupSPIFFEs {
 		for _, device := range devices {
 			allDeviceIDs[device.DeviceID] = struct{}{}
+			deviceByID[device.DeviceID] = device
 		}
 	}
 	deviceIDs := make([]uuid.UUID, 0, len(allDeviceIDs))
@@ -181,6 +191,10 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 	snapshotValidUntil := time.Time{}
 
 	hasPostureGatedEntry := false
+
+	// The earliest instant an allowed device's authentication (or MFA) runs
+	// out under some policy's frequency; the snapshot is stale from then.
+	earliestAuthExpiry := time.Time{}
 
 	keys := make([]entryKey, 0, len(keyGroups))
 	for key := range keyGroups {
@@ -206,6 +220,16 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		for _, gid := range groups {
 			for _, device := range groupSPIFFEs[gid] {
 				entryDevices[device.DeviceID] = device.SPIFFEID
+			}
+		}
+		// Authentication first: it narrows the devices posture then judges.
+		if resourceUUID, perr := uuid.Parse(key.resourceID); perr == nil {
+			if req, ok := resourceAuth[resourceUUID]; ok {
+				var authValidUntil time.Time
+				entryDevices, authValidUntil = applyAuthentication(now, entryDevices, req, deviceByID)
+				if !authValidUntil.IsZero() && (earliestAuthExpiry.IsZero() || authValidUntil.Before(earliestAuthExpiry)) {
+					earliestAuthExpiry = authValidUntil
+				}
 			}
 		}
 		allowedSPIFFEs, pairValidUntil, isGated := applyPosture(
@@ -236,6 +260,10 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 			RemoteNetworkId:      rnByKey[key],
 			PreferredConnectorId: preferredConnectorIDs[key],
 		})
+	}
+
+	if !earliestAuthExpiry.IsZero() && (snapshotValidUntil.IsZero() || earliestAuthExpiry.Before(snapshotValidUntil)) {
+		snapshotValidUntil = earliestAuthExpiry
 	}
 
 	// Collect remote networks into a stable slice.
@@ -389,6 +417,65 @@ func applyPosture(
 		}
 	}
 	return allowedSPIFFEs, pairValidUntil, true
+}
+
+// DeviceAuthenticated reports whether a device satisfies an authentication
+// requirement at `now`, and until when (PENDING-06 M-4). Fail closed: an
+// unknown authentication time never passes.
+//
+//   - the session's last authentication is younger than the frequency;
+//   - if the policy requires MFA, so is its last MFA;
+//   - if the device's risk score demands re-authentication (M-9), both of
+//     the above must be newer than that demand.
+func DeviceAuthenticated(now time.Time, req posture.AuthRequirement, d DeviceIdentity) (bool, time.Time) {
+	fresh := func(at *time.Time) (time.Time, bool) {
+		if at == nil {
+			return time.Time{}, false
+		}
+		if d.ReauthRequiredAt != nil && !at.After(*d.ReauthRequiredAt) {
+			return time.Time{}, false
+		}
+		expires := at.Add(req.Frequency)
+		return expires, expires.After(now)
+	}
+	validUntil, ok := fresh(d.AuthAt)
+	if !ok {
+		return false, time.Time{}
+	}
+	if req.RequireMFA {
+		mfaUntil, ok := fresh(d.MFAAt)
+		if !ok {
+			return false, time.Time{}
+		}
+		if mfaUntil.Before(validUntil) {
+			validUntil = mfaUntil
+		}
+	}
+	return true, validUntil
+}
+
+// applyAuthentication narrows a resource's devices to those that satisfy its
+// policy's authentication requirement, and returns the earliest instant one
+// of the kept devices stops satisfying it (zero when none is kept).
+func applyAuthentication(
+	now time.Time,
+	entryDevices map[uuid.UUID]string,
+	req posture.AuthRequirement,
+	devices map[uuid.UUID]DeviceIdentity,
+) (map[uuid.UUID]string, time.Time) {
+	kept := make(map[uuid.UUID]string, len(entryDevices))
+	var earliest time.Time
+	for deviceID, spiffe := range entryDevices {
+		ok, until := DeviceAuthenticated(now, req, devices[deviceID])
+		if !ok {
+			continue
+		}
+		kept[deviceID] = spiffe
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	return kept, earliest
 }
 
 // resolveConnectorRelayAddr builds the per-connector relay address for an

@@ -1,5 +1,25 @@
+---
+type: adr
+status: implemented
+id: PENDING-20
+domain: zero-trust
+priority: P2
+created: 2026-11-02
+verified: 2026-11-14
+tags: [pending, finished, geofencing, posture]
+---
+
 # PENDING-20: Geofencing for resource access
 
+**Status (verified against `main` 25a0cfb5, 2026-11-14): G1 IMPLEMENTED.**
+- **Merged:** PR #171 (`646f198b`), with migration `048_geofencing.sql`, `controller/internal/posture/country.go`
+  and `GEOIP_DB_PATH`.
+- **Not started:** G2 (the device's own OS location). There is no GeoClue, CoreLocation, Windows Location or Android location code.
+  The "client is Linux-only" reason below no longer holds: Windows and Android clients exist (PR #203/#204).
+- **Superseded:** `bindResourceToProfile` and the enforce/audit modes below were replaced by resource policies
+  (PENDING-16, PR #177).
+
+**History:** 
 **Status:** approved 2026-11-02. **G1a (backend), G1b (console) built; G1c live run PASS (2026-11-02)** on local branch `feat/geofencing-g1` (not pushed). Next: one PR.
 **Date:** 2026-11-02
 **Base:** `fixed-pendings`. Builds on the device-posture pipeline (ADR-030, migrations 030 and 044). It assumes PENDING-19 (workspace roles, PR #168) is merged: profile writes need `POSTURE_WRITE`.

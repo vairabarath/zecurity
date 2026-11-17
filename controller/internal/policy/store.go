@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -539,6 +541,13 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroup(ctx context.Context, workspaceID
 type DeviceIdentity struct {
 	DeviceID uuid.UUID
 	SPIFFEID string
+
+	// PENDING-06 (M-4, M-9): when the device's login session last
+	// authenticated and last passed MFA, and since when its risk score
+	// demands a new authentication. nil = never / not demanded.
+	AuthAt           *time.Time
+	MFAAt            *time.Time
+	ReauthRequiredAt *time.Time
 }
 
 // ListActiveDeviceSPIFFEsForGroups returns non-revoked client device identities for the
@@ -548,7 +557,8 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		return map[string][]DeviceIdentity{}, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id
+		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id,
+		        cd.session_auth_at, cd.session_mfa_at, cd.reauth_required_at
 		 FROM group_members gm
 		 JOIN client_devices cd ON cd.user_id = gm.user_id
 		 JOIN users u ON u.id = cd.user_id AND u.tenant_id = cd.workspace_id
@@ -574,7 +584,8 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		var groupID string
 		var identity DeviceIdentity
 
-		if err := rows.Scan(&groupID, &identity.DeviceID, &identity.SPIFFEID); err != nil {
+		if err := rows.Scan(&groupID, &identity.DeviceID, &identity.SPIFFEID,
+			&identity.AuthAt, &identity.MFAAt, &identity.ReauthRequiredAt); err != nil {
 			return nil, fmt.Errorf("scan spiffe row: %w", err)
 		}
 		out[groupID] = append(out[groupID], identity)
@@ -678,4 +689,85 @@ func (s *Store) GetActiveRelay(ctx context.Context) (*RelayDiscoveryRow, error) 
 		return nil, fmt.Errorf("get active relay: %w", err)
 	}
 	return row, nil
+}
+
+// DeviceAuthState is a device's authentication state and the authentication
+// requirements of the resources its user's groups allow (PENDING-06). The
+// client service uses it to tell the device how many resources are waiting
+// for an authentication, and the step-up flow to decide whether MFA is needed.
+type DeviceAuthState struct {
+	Device DeviceIdentity
+	UserID string
+	// Requirements: one per reachable resource whose policy has an
+	// authentication requirement.
+	Requirements []posture.AuthRequirement
+}
+
+// Pending counts the requirements the device does not satisfy at now, using
+// the compiler's own decision (DeviceAuthenticated).
+func (s DeviceAuthState) Pending(now time.Time) int {
+	n := 0
+	for _, req := range s.Requirements {
+		if ok, _ := DeviceAuthenticated(now, req, s.Device); !ok {
+			n++
+		}
+	}
+	return n
+}
+
+// RequiresMFA reports whether any reachable resource's policy requires MFA.
+func (s DeviceAuthState) RequiresMFA() bool {
+	for _, req := range s.Requirements {
+		if req.RequireMFA {
+			return true
+		}
+	}
+	return false
+}
+
+// GetDeviceAuthState loads the state for one active device of the workspace.
+// pgx.ErrNoRows (wrapped) when the device is unknown, foreign or revoked.
+func (s *Store) GetDeviceAuthState(ctx context.Context, workspaceID, deviceID string) (*DeviceAuthState, error) {
+	if !validUUIDs(workspaceID, deviceID) {
+		return nil, fmt.Errorf("device auth state: invalid id")
+	}
+	var st DeviceAuthState
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, COALESCE(spiffe_id, ''), user_id::text,
+		        session_auth_at, session_mfa_at, reauth_required_at
+		   FROM client_devices
+		  WHERE id = $1 AND workspace_id = $2 AND revoked_at IS NULL`,
+		deviceID, workspaceID,
+	).Scan(&st.Device.DeviceID, &st.Device.SPIFFEID, &st.UserID,
+		&st.Device.AuthAt, &st.Device.MFAAt, &st.Device.ReauthRequiredAt)
+	if err != nil {
+		return nil, fmt.Errorf("device auth state: %w", err)
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT r.id, p.auth_frequency_minutes, p.require_mfa
+		   FROM group_members gm
+		   JOIN access_rules ar ON ar.group_id = gm.group_id AND ar.enabled = TRUE
+		   JOIN resources r ON r.id = ar.resource_id AND r.tenant_id = ar.workspace_id
+		   JOIN resource_policies p ON p.id = r.policy_id
+		  WHERE gm.user_id = $1
+		    AND ar.workspace_id = $2
+		    AND r.status != 'deleting'
+		    AND p.auth_frequency_minutes IS NOT NULL`,
+		st.UserID, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("device auth requirements: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var minutes int
+		var mfa bool
+		if err := rows.Scan(&id, &minutes, &mfa); err != nil {
+			return nil, err
+		}
+		st.Requirements = append(st.Requirements, posture.AuthRequirement{
+			Frequency: time.Duration(minutes) * time.Minute, RequireMFA: mfa,
+		})
+	}
+	return &st, rows.Err()
 }

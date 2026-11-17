@@ -13,6 +13,14 @@ tags: [pending, adr, operations, ha, availability]
 
 # Pending ADR 12 — Controller HA & Multi-Region
 
+> **Status (verified against `main` 25a0cfb5, 2026-11-14): NOT STARTED.** Two facts answer this doc's questions:
+> - **Single controller instance:** D-02 makes the controller a single instance on purpose. Version counters, caches,
+>   `ConnectorRegistry` and the notify fan-out are process-local (`transport/notifier.go`; decision record).
+>   `BroadcastRelayList` and policy-notify do **not** work across replicas.
+> - **No Placement Engine lease:** the only Valkey `SetNX` is the relay renew lock (`controller/internal/relay/renew.go`).
+>
+> The relay "regions" of D-37…D-41 (PRs #200–#202) are relay routing and residency, not controller regions.
+>
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 > *(Current state below is partly inferred — confirm deployment model before scoping.)*
 
@@ -34,7 +42,7 @@ What availability target do we commit to, and what topology delivers it?
 
 ### Option A — Multi-replica single-region (HA)
 N stateless controller replicas behind a load balancer; control streams shard across replicas;
-Postgres + Valkey in HA; Placement Engine uses the Valkey lease (already designed).
+Postgres + Valkey in HA; Placement Engine uses the Valkey lease *(designed, not built: 2026-11-14)*.
 - **Pros:** removes single point of failure; matches existing design hints. **Cons:** control-stream
   affinity + cross-replica fan-out (BroadcastRelayList/policy notify) must work across replicas.
 

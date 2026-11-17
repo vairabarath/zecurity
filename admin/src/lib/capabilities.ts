@@ -51,6 +51,7 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   createResourcePolicy: Capability.PostureWrite,
   updateResourcePolicy: Capability.PostureWrite,
   setResourcePolicyProfiles: Capability.PostureWrite,
+  setResourcePolicyAuthentication: Capability.PostureWrite, // PENDING-06 M-2
   deleteResourcePolicy: Capability.PostureWrite,
   setResourcePolicy: Capability.PostureWrite,
   // DEVICE_WRITE — Helpdesk
@@ -74,9 +75,11 @@ export const MUTATION_CAPABILITY: Record<string, Capability> = {
   reopenScimConflict: Capability.IdentityAdmin,
   grantPermission: Capability.IdentityAdmin,
   enableScimBreakGlass: Capability.IdentityAdmin,
+  setConsoleRequireMfa: Capability.IdentityAdmin, // PENDING-06 M-6
   // MEMBERS_ADMIN — Admin (R-10)
   createInvitation: Capability.MembersAdmin,
   setMemberRole: Capability.MembersAdmin,
+  resetUserMfa: Capability.MembersAdmin, // PENDING-06 M-8
   // AUDIT_ADMIN — Admin + Security (PENDING-11 S-7): SIEM export sinks
   createAuditExportSink: Capability.AuditAdmin,
   updateAuditExportSink: Capability.AuditAdmin,
