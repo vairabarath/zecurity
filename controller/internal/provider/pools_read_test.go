@@ -170,9 +170,69 @@ func TestRelayPoolReads_FailoverState(t *testing.T) {
 			t.Fatalf("failover pool failover_tenants %d, want 1", p.FailoverTenants)
 		}
 	}
-	if got[relaypool.DefaultPoolID] != relaypool.StateFailedOver || got[fo] != relaypool.StateHealthy {
-		t.Fatalf("pool states %v", got)
+	// F11-1: the failover pool has no relay at all, so it must not read
+	// "healthy", and the tenant (failed over onto it) has no relay path.
+	if got[relaypool.DefaultPoolID] != relaypool.StateFailedOver || got[fo] != relaypool.StateNoEligibleRelays {
+		t.Fatalf("pool states %v, want default failed_over and the empty failover pool no_eligible_relays", got)
 	}
+	if p := relayPath(t, e); p != relaypool.RelayPathNone {
+		t.Fatalf("failed over onto an empty failover pool: relay_path %q, want none", p)
+	}
+
+	// The failover pool gets an eligible relay: healthy, and the tenant's
+	// relay path is the failover pool.
+	exec(t, e.pool, `INSERT INTO relays (name, status, pool_id, capacity_label, public_addr)
+	                  VALUES ('backup-1', 'active', $1, 'high', '198.51.100.7:9093')`, fo)
+	r = e.get(t, "/provider/relay-pools/"+fo, e.opsTok)
+	var d struct {
+		State          string `json:"state"`
+		EligibleRelays int    `json:"eligible_relays"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &d); err != nil || d.State != relaypool.StateHealthy || d.EligibleRelays != 1 {
+		t.Fatalf("failover pool with an eligible relay: %s (%v)", r.body, err)
+	}
+	if p := relayPath(t, e); p != relaypool.RelayPathFailover {
+		t.Fatalf("relay_path %q, want failover", p)
+	}
+
+	// Back on a primary with an eligible relay.
+	exec(t, e.pool, `UPDATE relay_pools SET exhausted_at = NULL WHERE id = $1`, relaypool.DefaultPoolID)
+	exec(t, e.pool, `UPDATE relays SET pool_id = $1 WHERE name = 'backup-1'`, relaypool.DefaultPoolID)
+	if p := relayPath(t, e); p != relaypool.RelayPathPrimary {
+		t.Fatalf("relay_path %q, want primary", p)
+	}
+}
+
+// F11-1: a primary without a failover pool and without an eligible relay has
+// no relay path, and the pool doesn't read "healthy".
+func TestRelayPoolReads_EmptyPoolHasNoRelayPath(t *testing.T) {
+	e := newReadEnv(t)
+	empty := scalar[string](t, e.pool, `INSERT INTO relay_pools (name) VALUES ('empty') RETURNING id::text`)
+	exec(t, e.pool, `UPDATE workspaces SET relay_pool_id = $2 WHERE id = $1`, e.tenantID, empty)
+	if p := relayPath(t, e); p != relaypool.RelayPathNone {
+		t.Fatalf("empty primary without failover: relay_path %q, want none", p)
+	}
+	r := e.get(t, "/provider/relay-pools/"+empty, e.opsTok)
+	var d struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &d); err != nil || d.State != relaypool.StateNoEligibleRelays {
+		t.Fatalf("empty pool state: %s (%v)", r.body, err)
+	}
+}
+
+func relayPath(t *testing.T, e *readEnv) string {
+	t.Helper()
+	r := e.get(t, "/provider/tenants/"+e.tenantID, e.superTok)
+	var d struct {
+		RelayPool struct {
+			RelayPath string `json:"relay_path"`
+		} `json:"relay_pool"`
+	}
+	if err := json.Unmarshal([]byte(r.body), &d); err != nil || r.code != 200 {
+		t.Fatalf("tenant detail %d %s: %v", r.code, r.body, err)
+	}
+	return d.RelayPool.RelayPath
 }
 
 // D-40 (PR 3): a residency pool reads as enforced only while every active

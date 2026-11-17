@@ -71,7 +71,7 @@ async function openChange(user: ReturnType<typeof userEvent.setup>) {
   return screen.findByRole('dialog', { name: 'Change relay pool' })
 }
 
-const EU_TENANT_POOL = { ...EU_POOL, eligible_relays: 1, previous: null, failover: null, using_failover: false, failed_over_since: null }
+const EU_TENANT_POOL = { ...EU_POOL, eligible_relays: 1, previous: null, failover: null, using_failover: false, failed_over_since: null, relay_path: 'primary' as const }
 const EU2_REF = { id: EU2_POOL_ID, name: 'eu-2', region: 'eu-central-1', residency: true }
 const BACKUP_REF = { id: BACKUP_POOL_ID, name: 'backup', region: null, residency: false }
 
@@ -109,12 +109,31 @@ describe('Tenant detail: relay pool section', () => {
 
   it('says clearly when the tenant is using its failover pool', async () => {
     const since = '2026-11-12T10:00:00Z'
-    setup(tenant({ relay_pool: { ...EU_TENANT_POOL, eligible_relays: 0, failover: { ...EU2_REF, eligible_relays: 1 }, using_failover: true, failed_over_since: since } }))
+    setup(tenant({ relay_pool: { ...EU_TENANT_POOL, eligible_relays: 0, failover: { ...EU2_REF, eligible_relays: 1 }, using_failover: true, failed_over_since: since, relay_path: 'failover' } }))
     const status = await screen.findByText(/Using failover pool/)
     expect(status).toHaveTextContent(`Using failover pool eu-2 since ${new Date(since).toLocaleString()}: the primary pool eu-1 has no eligible relay`)
     expect(within(status).getByRole('link', { name: 'eu-2' })).toBeInTheDocument()
     // While on failover, the "relay path is down" alert doesn't apply.
     expect(within(screen.getByRole('region', { name: 'Relay pool' })).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  // F11-1: failed over onto a failover pool with no eligible relay.
+  it('says there is no relay path when the failover pool is empty too (never "Using failover pool")', async () => {
+    const since = '2026-11-12T10:00:00Z'
+    setup(tenant({ relay_pool: { ...EU_TENANT_POOL, eligible_relays: 0, failover: { ...EU2_REF, eligible_relays: 0 }, using_failover: true, failed_over_since: since, relay_path: 'none' } }))
+    const section = within(await screen.findByRole('region', { name: 'Relay pool' }))
+    const alert = section.getByRole('alert')
+    expect(alert).toHaveTextContent('No relay path: the primary pool eu-1 has no eligible relay, and its failover pool eu-2 has none either')
+    expect(alert).toHaveAttribute('data-relay-path', 'none')
+    expect(section.queryByText(/Using failover pool/)).not.toBeInTheDocument()
+  })
+
+  it('on failover with an empty failover pool while the primary is eligible again, says it waits for the hold-down', async () => {
+    const since = '2026-11-12T10:00:00Z'
+    setup(tenant({ relay_pool: { ...EU_TENANT_POOL, eligible_relays: 1, failover: { ...EU2_REF, eligible_relays: 0 }, using_failover: true, failed_over_since: since, relay_path: 'none' } }))
+    const alert = within(await screen.findByRole('region', { name: 'Relay pool' })).getByRole('alert')
+    expect(alert).toHaveTextContent('No relay path: the tenant is still on its failover pool eu-2, which has no eligible relay')
+    expect(alert).toHaveTextContent(/eu-1 is eligible again; the controller switches back after the hold-down/)
   })
 
   it('shows a graceful migration in progress', async () => {
@@ -126,7 +145,7 @@ describe('Tenant detail: relay pool section', () => {
   })
 
   it('warns when the pool has no eligible relay and there is no failover pool', async () => {
-    setup(tenant({ relay_pool: { ...TENANT_DEFAULT_POOL, eligible_relays: 0 } }))
+    setup(tenant({ relay_pool: { ...TENANT_DEFAULT_POOL, eligible_relays: 0, relay_path: 'none' } }))
     const section = within(await screen.findByRole('region', { name: 'Relay pool' }))
     expect(section.getByRole('alert')).toHaveTextContent(/its relay path is down .* and it has no failover pool/)
     expect(section.getByText('No eligible relay')).toBeInTheDocument()

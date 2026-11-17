@@ -28,8 +28,9 @@ type RelayPoolSummary struct {
 	CreatedAt      time.Time `json:"created_at"`
 	// Failover (D-39). FailoverTenants: workspaces using this pool as their
 	// failover pool. State: healthy | failed_over | recovering (its tenants
-	// with a failover pool use that pool unless healthy). ExhaustedAt and
-	// EligibleSince are the stored state behind it.
+	// with a failover pool use that pool unless healthy) | no_eligible_relays
+	// (not failed over, but no eligible relay: never shown as healthy,
+	// F11-1). ExhaustedAt and EligibleSince are the stored state behind it.
 	FailoverTenants int64      `json:"failover_tenants"`
 	State           string     `json:"state"`
 	ExhaustedAt     *time.Time `json:"exhausted_at"`
@@ -92,7 +93,7 @@ func scanRelayPoolSummary(row pgx.Row) (RelayPoolSummary, error) {
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.ExhaustedAt, s.EligibleSince = utcPtr(s.ExhaustedAt), utcPtr(s.EligibleSince)
-	s.State = relaypool.State(s.ExhaustedAt, s.EligibleSince)
+	s.State = relaypool.ReadState(s.ExhaustedAt, s.EligibleSince, s.EligibleRelays)
 	s.IsDefault = s.ID == relaypool.DefaultPoolID
 	return s, nil
 }
@@ -167,7 +168,10 @@ SELECT id::text, slug, name
 // D-40). Previous is set while a graceful migration keeps the old pool
 // authorized. Failover is the failover pool, if any; UsingFailover reports
 // that the primary is exhausted, so connectors get the failover pool's relays
-// since FailedOverSince.
+// since FailedOverSince. RelayPath (F11-1) is primary | failover, the pool
+// whose list the connectors get, or none when that pool has no eligible
+// relay (an empty primary without a failover pool, or a failover onto an
+// empty failover pool): the tenant then has no relay path.
 type TenantRelayPool struct {
 	RelayPoolRef
 	EligibleRelays  int64                    `json:"eligible_relays"`
@@ -175,6 +179,7 @@ type TenantRelayPool struct {
 	Failover        *TenantFailoverPool      `json:"failover"`
 	UsingFailover   bool                     `json:"using_failover"`
 	FailedOverSince *time.Time               `json:"failed_over_since"`
+	RelayPath       string                   `json:"relay_path"`
 }
 
 // TenantFailoverPool is a tenant's failover pool.
@@ -227,6 +232,18 @@ SELECT p.id::text, p.name, p.region, p.residency,
 			t.UsingFailover = true
 			t.FailedOverSince = utcPtr(exhaustedAt)
 		}
+	}
+	// F11-1: the same effective pool as the relay lists, and whether it has
+	// an eligible relay.
+	switch {
+	case t.UsingFailover && t.Failover.EligibleRelays > 0:
+		t.RelayPath = relaypool.RelayPathFailover
+	case t.UsingFailover:
+		t.RelayPath = relaypool.RelayPathNone
+	case t.EligibleRelays > 0:
+		t.RelayPath = relaypool.RelayPathPrimary
+	default:
+		t.RelayPath = relaypool.RelayPathNone
 	}
 	if prevID != nil && prevUntil != nil {
 		t.Previous = &TenantRelayPoolPrevious{

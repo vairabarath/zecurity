@@ -213,6 +213,45 @@ func TestFailoverDB_NoFallbackWhenNoneOrBothExhausted(t *testing.T) {
 	}
 }
 
+// F11-1: a failover onto an empty failover pool is still a switch (the lists
+// change), but its transition says how many of the tenants were left without
+// a relay path, so the audit row doesn't read as a successful failover.
+func TestFailoverDB_FailoverReportsTenantsWithoutRelayPath(t *testing.T) {
+	e := newAdminEnv(t, false)
+	ctx := context.Background()
+	primary := e.createPool(t, "primary", strPtr("in-south-1"), false)
+	emptyFO := e.createPool(t, "failover-empty", strPtr("in-south-1"), false)
+	liveFO := e.createPool(t, "failover-live", strPtr("in-south-1"), false)
+	p1, f1, f2 := e.eligibleRelay(t, "relay-p1"), e.eligibleRelay(t, "relay-f1"), e.eligibleRelay(t, "relay-f2")
+	_ = e.eligibleRelay(t, "relay-d1")
+	e.setRelayPool(t, p1, primary)
+	e.setRelayPool(t, f1, emptyFO)
+	e.setRelayPool(t, f2, liveFO)
+	stranded := e.workspace(t, "tenant-stranded")
+	served := e.workspace(t, "tenant-served")
+	e.assign(t, stranded, primary, &emptyFO)
+	e.assign(t, served, primary, &liveFO)
+
+	e.setActive(t, f1, false) // the first failover pool is empty
+	e.setActive(t, p1, false) // the primary is exhausted
+	log := &switchLog{}
+	if _, err := e.store.ReconcilePools(ctx, time.Now(), time.Minute, log.hook); err != nil {
+		t.Fatal(err)
+	}
+	if got := log.actions(); len(got) != 1 || got[0] != ActionPoolFailover {
+		t.Fatalf("switches %v, want one failover", got)
+	}
+	if tr := log.all[0]; tr.Tenants != 2 || tr.TenantsWithoutRelayPath != 1 {
+		t.Fatalf("transition %+v, want 2 tenants, 1 without a relay path", tr)
+	}
+	if b, _ := relayIDsFor(t, e, stranded); len(b) != 0 {
+		t.Fatalf("tenant on the empty failover pool: list %v, want empty", b)
+	}
+	if b, _ := relayIDsFor(t, e, served); !sameIDs(b, []string{f2}) {
+		t.Fatalf("tenant on the live failover pool: list %v, want [%s]", b, f2)
+	}
+}
+
 // D-39 assignment rules: different pools, same region, residency needs a
 // residency failover in the same region, and the failover pool must have an
 // eligible relay. Omitting the failover pool removes it.

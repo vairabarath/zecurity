@@ -320,9 +320,13 @@ function relayItems(relays: RelaySummary[]): AttentionItem[] {
   return items
 }
 
-/** Pools the controller reports as failed over (D-39); the state is never derived here. */
+/**
+ * Pools the controller reports as failed over (D-39), and pools it reports
+ * with no eligible relay that tenants use as primary or failover (F11-1); an
+ * unused empty pool isn't listed. The state is never derived here.
+ */
 function poolItems(pools: RelayPoolSummary[]): AttentionItem[] {
-  return pools
+  const failedOver = pools
     .filter((p) => p.state === 'failed_over')
     .map((p) => ({
       key: `pool:${p.id}`,
@@ -331,6 +335,22 @@ function poolItems(pools: RelayPoolSummary[]): AttentionItem[] {
       title: `Relay pool ${p.name} has failed over`,
       note: `No eligible relay since ${formatRelative(p.exhausted_at)}; its tenants with a failover pool are using it`,
     }))
+  const empty = pools
+    .filter((p) => p.state === 'no_eligible_relays' && (p.tenants > 0 || p.failover_tenants > 0))
+    .map((p) => ({
+      key: `pool:${p.id}`,
+      to: `/relay-pools/${encodeURIComponent(p.id)}`,
+      tag: <Badge variant="destructive">No relay</Badge>,
+      title: `Relay pool ${p.name} has no eligible relay`,
+      note: [
+        p.tenants > 0 && `${p.tenants.toLocaleString()} ${p.tenants === 1 ? 'tenant uses' : 'tenants use'} it as their pool`,
+        p.failover_tenants > 0 &&
+          `${p.failover_tenants.toLocaleString()} ${p.failover_tenants === 1 ? 'tenant uses' : 'tenants use'} it as their failover pool`,
+      ]
+        .filter(Boolean)
+        .join('; '),
+    }))
+  return [...failedOver, ...empty]
 }
 
 function certificateItems(entries: CertificateEntry[]): AttentionItem[] {

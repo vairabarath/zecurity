@@ -288,6 +288,19 @@ describe('Relay pools: failover state', () => {
     expect(headers).toContain('Failover for')
   })
 
+  // F11-1: the controller reports an empty pool as no_eligible_relays; it never reads "Healthy".
+  it('a pool with no eligible relay shows that state, not Healthy', async () => {
+    signedInAs(relayOpsMe)
+    const empty = { ...POOLS[2], failover_tenants: 1, state: 'no_eligible_relays' as const }
+    mockFetch({ 'GET /provider/relay-pools': { status: 200, body: { items: [POOLS[0], empty] } } })
+    renderApp('/relay-pools')
+    const row = await screen.findByRole('row', { name: 'spare' })
+    const badge = row.querySelector('[data-pool-state]')
+    expect(badge).toHaveAttribute('data-pool-state', 'no_eligible_relays')
+    expect(badge).toHaveTextContent('No eligible relay')
+    expect(within(row).queryByText('Healthy')).not.toBeInTheDocument()
+  })
+
   it('a pool used only as a failover pool, with no eligible relay, is flagged', async () => {
     signedInAs(relayOpsMe)
     mockFetch({ 'GET /provider/relay-pools': { status: 200, body: { items: [POOLS[0], { ...POOLS[2], failover_tenants: 2 }] } } })

@@ -43,6 +43,7 @@ export const TENANT_DEFAULT_POOL: TenantRelayPool = {
   failover: null,
   using_failover: false,
   failed_over_since: null,
+  relay_path: 'primary',
 }
 
 // D-39 failover candidates: eu-2 is a residency pool in eu-1's region; eu-plain

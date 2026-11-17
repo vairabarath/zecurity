@@ -60,6 +60,32 @@ const (
 	StateHealthy    = "healthy"     // not exhausted
 	StateFailedOver = "failed_over" // exhausted: tenants with a failover pool use it
 	StateRecovering = "recovering"  // exhausted, eligible again, inside the hold-down
+	// StateNoEligibleRelays is a read-only state (F11-1): the pool isn't
+	// failed over or recovering, but has no eligible relay, so a tenant whose
+	// connectors get its list has no relay path. Failover state is tracked
+	// only for pools some tenant uses as primary with a failover pool, so an
+	// empty failover pool (or an empty primary without one) would otherwise
+	// read "healthy".
+	StateNoEligibleRelays = "no_eligible_relays"
+)
+
+// ReadState is the state reads show: State, except that a pool that is
+// neither failed over nor recovering and has no eligible relay reads
+// StateNoEligibleRelays, never healthy (F11-1).
+func ReadState(exhaustedAt, eligibleSince *time.Time, eligibleRelays int64) string {
+	s := State(exhaustedAt, eligibleSince)
+	if s == StateHealthy && eligibleRelays == 0 {
+		return StateNoEligibleRelays
+	}
+	return s
+}
+
+// A tenant's relay path (F11-1): the pool whose list its connectors get, or
+// none when that pool has no eligible relay.
+const (
+	RelayPathPrimary  = "primary"
+	RelayPathFailover = "failover"
+	RelayPathNone     = "none"
 )
 
 // State returns a pool's failover state from its stored fields.

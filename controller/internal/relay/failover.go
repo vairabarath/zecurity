@@ -48,6 +48,10 @@ type PoolTransition struct {
 	// Tenants is how many workspaces use the pool as primary with a failover
 	// pool, so the switch changed their relay list.
 	Tenants int
+	// TenantsWithoutRelayPath (failover only, F11-1): how many of those
+	// tenants' failover pools have no eligible relay either, so the switch
+	// left them without a relay path (their connectors get an empty list).
+	TenantsWithoutRelayPath int
 	// ExhaustedAt is when the pool became exhausted (failback only).
 	ExhaustedAt *time.Time
 }
@@ -139,7 +143,18 @@ func (s *Store) reconcilePool(ctx context.Context, poolID string, now time.Time,
 			if err := set(&at, nil); err != nil {
 				return false, err
 			}
-			return switched(PoolTransition{PoolID: poolID, PoolName: name, Action: ActionPoolFailover, At: at, Tenants: tenants})
+			// F11-1: tenants whose failover pool is empty too have no relay
+			// path after this switch; the audit row says so.
+			var stranded int
+			if err := tx.QueryRow(ctx, `
+				SELECT count(*) FROM workspaces w
+				 WHERE w.relay_pool_id = $1 AND w.relay_failover_pool_id IS NOT NULL
+				   AND NOT EXISTS (SELECT 1 FROM relays WHERE pool_id = w.relay_failover_pool_id AND `+eligible.Where+`)`,
+				poolID).Scan(&stranded); err != nil {
+				return false, err
+			}
+			return switched(PoolTransition{PoolID: poolID, PoolName: name, Action: ActionPoolFailover, At: at,
+				Tenants: tenants, TenantsWithoutRelayPath: stranded})
 		}
 		if eligibleSince != nil { // recovery interrupted: the hold-down restarts
 			if err := set(exhaustedAt, nil); err != nil {

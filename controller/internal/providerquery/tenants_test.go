@@ -549,7 +549,7 @@ func TestTenantDTOSurface(t *testing.T) {
 		"DeviceCounts":        {DeviceCounts{}, []string{"active", "re_enroll_required", "renew_pending", "revoked"}},
 		"TenantRemoteNetwork": {TenantRemoteNetwork{}, []string{"id", "name", "status"}},
 		"TenantRelayPool": {TenantRelayPool{}, []string{"eligible_relays", "failed_over_since", "failover", "id", "name",
-			"previous", "region", "residency", "using_failover"}},
+			"previous", "region", "relay_path", "residency", "using_failover"}},
 		"TenantFailoverPool":      {TenantFailoverPool{}, []string{"eligible_relays", "id", "name", "region", "residency"}},
 		"TenantRelayPoolPrevious": {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
 		"TenantConnector": {TenantConnector{}, []string{"cert_not_after", "id", "last_heartbeat_at", "name",
