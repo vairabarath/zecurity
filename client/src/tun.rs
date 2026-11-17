@@ -303,7 +303,7 @@ async fn del_link_by_index(handle: &Handle, if_index: u32) -> Result<()> {
         .with_context(|| format!("rtnetlink delete link index {}", if_index))
 }
 
-fn cleanup_policy_routes() {
+pub(crate) fn cleanup_policy_routes() {
     let _ = Command::new("nft")
         .args(["delete", "table", "inet", ZECURITY_TABLE])
         .stdout(Stdio::null())

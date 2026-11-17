@@ -92,6 +92,12 @@ pub async fn run() -> Result<()> {
     // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
     let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
+    // A service stop (SIGTERM) or Ctrl-C tears the tunnel down before exit.
+    // Desktop Unix only: on Android and iOS the daemon runs inside the app
+    // process, whose signals are not ours to take over.
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+    spawn_stop_signal_handler(Arc::clone(&state), Arc::clone(&tun_slot))?;
+
     // Load encrypted durable state on startup if present — only if its saved
     // trust anchors chain to the platform root compiled into this client
     // (certificate audit bug 1); otherwise the device must log in again.
@@ -190,23 +196,9 @@ pub async fn run() -> Result<()> {
     // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
     // the scheduler's own tick keeps running whether or not this is connected.
     tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
-    // A service stop (SIGTERM) or Ctrl-C tears the tunnel down like
-    // `zecurity-client down`, so the nft table, the fwmark rule and the route
-    // table don't outlive the daemon.
-    #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("install SIGTERM handler")?;
-    #[cfg(unix)]
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .context("install SIGINT handler")?;
     #[cfg(unix)]
     loop {
-        let accepted = tokio::select! {
-            r = listener.accept() => r,
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
-        };
-        match accepted {
+        match listener.accept().await {
             Ok((stream, _)) => {
                 if !check_same_user(&stream) {
                     warn!("rejected IPC connection from a different user");
@@ -223,12 +215,6 @@ pub async fn run() -> Result<()> {
             }
             Err(e) => error!(error = %e, "IPC accept error"),
         }
-    }
-    #[cfg(unix)]
-    {
-        info!("daemon stopping: taking the tunnel down");
-        let _ = handle_down(&state, &tun_slot).await;
-        return Ok(());
     }
 
     // Windows: the pipe's security descriptor (SYSTEM, Administrators and the
@@ -385,7 +371,7 @@ where
 
     if shutdown {
         info!("shutdown requested via IPC — exiting");
-        crate::exit_daemon(0);
+        shutdown_and_exit(&state, &tun_slot).await;
     }
 
     Ok(())
@@ -4048,6 +4034,70 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     // shouldn't be the common case, but must still recover correctly).
     s.device_state = DeviceState::from_marker(&stored.device.device_state);
     s.tunnel_wanted = stored.tunnel_wanted;
+}
+
+/// How long a deliberate shutdown waits for the tunnel teardown.
+const SHUTDOWN_TEARDOWN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Tears the tunnel down (like `zecurity-client down`) and exits the process.
+/// The tunnel intent lock is held until exit, so a restore or IPC `up` cannot
+/// bring the tunnel back in between. The final routing flush also covers a
+/// restart pass that was part-way through bringing the tunnel up.
+async fn shutdown_and_exit(state: &SharedState, tun_slot: &TunSlot) -> ! {
+    #[cfg(unix)]
+    sd_notify(b"STOPPING=1\n");
+    let intent_lock = state.read().await.tunnel_intent_lock.clone();
+    let guard = tokio::time::timeout(SHUTDOWN_TEARDOWN_LIMIT, async {
+        let guard = intent_lock.lock_owned().await;
+        let down = handle_down(state, tun_slot).await;
+        if !down.ok {
+            warn!(error = ?down.error, "tunnel teardown at shutdown failed");
+        }
+        guard
+    })
+    .await;
+    if guard.is_err() {
+        warn!("tunnel teardown at shutdown timed out");
+    }
+    #[cfg(target_os = "linux")]
+    crate::tun::cleanup_policy_routes();
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(crate::ipc::ipc_socket_path());
+    crate::exit_daemon(0)
+}
+
+/// SIGTERM/SIGINT: tear down and exit. A second signal during the teardown
+/// exits at once, so a stuck teardown never makes the daemon unkillable.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+fn spawn_stop_signal_handler(state: SharedState, tun_slot: TunSlot) -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        info!("daemon stopping: taking the tunnel down");
+        tokio::select! {
+            _ = shutdown_and_exit(&state, &tun_slot) => {}
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        warn!("second stop signal — exiting without waiting for the teardown");
+        #[cfg(target_os = "linux")]
+        crate::tun::cleanup_policy_routes();
+        crate::exit_daemon(1);
+    });
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sd_notify(msg: &[u8]) {
+    let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
+        return;
+    };
+    let _ = std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(msg, &path));
 }
 
 #[cfg(unix)]
