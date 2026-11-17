@@ -173,9 +173,13 @@ message ShieldControlMessage {
     // Shield → Connector: FU-9 — only for a tunnel the shield could not open
     // (ok = false). Success is the Tunnel stream itself.
     TunnelOpened tunnel_opened = 9;
-    // Deprecated by FU-9: tunnel data and closes travel on the Tunnel stream.
-    // Neither side sends or handles these any more.
+    // Deprecated by FU-9: tunnel data travels on the Tunnel stream. Neither
+    // side sends or handles TunnelData any more.
     TunnelData tunnel_data = 10;
+    // Connector → Shield: abort a tunnel (FU-15 revocation, session ended).
+    // Still in use after FU-9: sent through the connector's abort mailbox and
+    // handled by the Shield, which drops the tunnel and resets the resource
+    // connection. A normal end travels on the Tunnel stream instead.
     TunnelClose tunnel_close = 11;
     // Connector → Shield
     ResourceSnapshot resource_snapshot = 12;
@@ -235,7 +239,9 @@ message TunnelData {
   bytes data = 2; // raw bytes (max 16 KB chunks)
 }
 
-// Deprecated by FU-9 (see ShieldControlMessage.tunnel_close).
+// Connector → Shield on Control: abort one tunnel (see
+// ShieldControlMessage.tunnel_close). Not deprecated: FU-9 moved only data and
+// normal ends to the Tunnel stream.
 message TunnelClose {
   string connection_id = 1;
   string error = 2; // empty = clean close

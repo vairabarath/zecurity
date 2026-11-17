@@ -766,13 +766,19 @@ func leakyReport(at time.Time) *health.DiagnosticReport {
 	}
 }
 
+var checkedAtValue = regexp.MustCompile(`"checked_at":"[^"]*"`)
+
 func TestHealth_SanitizedShapeAndStatuses(t *testing.T) {
 	e := newReadEnv(t)
 	r := e.get(t, "/provider/health", e.superTok)
 	if r.code != 200 {
 		t.Fatalf("health = %d %s: a failing check must not fail the endpoint", r.code, r.body)
 	}
-	lower := strings.ToLower(r.body)
+	// checked_at is a nanosecond timestamp: its digits can contain "5432" or
+	// "6379" by chance (CI flake 2026-11-17, "…835432Z"), so it is blanked
+	// before the leak check. It can't hide a leak: it must parse as a
+	// time.Time (Unmarshal below).
+	lower := strings.ToLower(checkedAtValue.ReplaceAllString(r.body, `"checked_at":""`))
 	for _, bad := range []string{"db.internal", "10.20.30.40", "5432", "hunter2", "postgres://", "ztna", "connection refused",
 		"dial tcp", "valkey.internal", "6379", "total_conns", "idle_conns", "dsn", "details", "\"error\"", "running"} {
 		if strings.Contains(lower, bad) {

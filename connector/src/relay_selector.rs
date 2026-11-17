@@ -49,6 +49,10 @@ const MIGRATION_IMPROVEMENT_RATIO: f64 = 0.15;
 const MIGRATION_IMPROVEMENT_MIN_MS: u64 = 10;
 const TOP_RANKING_ENTRIES: usize = 5;
 const FAILOVER_PER_ENTRY_BUDGET: Duration = Duration::from_secs(5);
+/// O3: how long a selector dial (bootstrap or failover) may take to register.
+/// Without it a dial to a dead relay waited out the whole QUIC handshake
+/// (the relay idle timeout), while a newer relay list sat unread.
+const RELAY_DIAL_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct RelaySelectorConfig {
@@ -219,15 +223,23 @@ async fn run_until_terminal(
 
         state = match state {
             State::Disconnected { next_backoff } => {
-                bootstrap(
-                    &cfg,
-                    &list,
-                    &relay_handler,
-                    &attachment_slot,
-                    &ctrl_tx,
-                    next_backoff,
-                )
-                .await
+                // O3: a list pushed while dialling replaces the list being
+                // dialled at once, instead of after every dial on it failed.
+                tokio::select! {
+                    biased;
+                    next = bootstrap(
+                        &cfg,
+                        &list,
+                        &relay_handler,
+                        &attachment_slot,
+                        &ctrl_tx,
+                        next_backoff,
+                    ) => next,
+                    _ = next_list_push(&mut relay_list_rx, &mut current_list) => {
+                        dial_interrupted(&attachment_slot).await;
+                        State::Disconnected { next_backoff }
+                    }
+                }
             }
             State::Connected(active) => {
                 connected_step(
@@ -329,6 +341,31 @@ async fn wait_backoff(
     }
 }
 
+/// Resolves when the controller pushes a new LabelledRelayList, after adopting
+/// it into `current_list`. Never resolves once the sender is gone (shutdown).
+/// Cancel-safe.
+async fn next_list_push(
+    relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
+    current_list: &mut Option<LabelledRelayList>,
+) {
+    if relay_list_rx.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+    if let Some(list) = relay_list_rx.borrow_and_update().clone() {
+        *current_list = Some(list);
+    }
+}
+
+/// A bootstrap or failover dial was abandoned for a newer list. Its session
+/// task is already aborted (`AbortOnDrop`); it may have registered just
+/// before, and an aborted task can't clear its own attachment. Nothing else
+/// is active in these states, so clearing it is correct.
+async fn dial_interrupted(attachment_slot: &RelayAttachmentSlot) {
+    info!("New LabelledRelayList while dialling; dialling the new list now");
+    emit_event(SelectorEvent::DialInterruptedByList);
+    attachment_slot.set_active(None).await;
+}
+
 async fn bootstrap(
     cfg: &RelaySelectorConfig,
     list: &LabelledRelayList,
@@ -417,7 +454,16 @@ async fn connected_step(
                 Ok(Err(e)) => warn!(relay_id = %active.info.relay_id, error = %e, "Active relay session failed; failing over"),
                 Err(e) => warn!(relay_id = %active.info.relay_id, error = %e, "Active relay session task crashed; failing over"),
             }
-            failover(cfg, list, relay_handler, attachment_slot, ctrl_tx).await
+            // O3: the controller usually pushes a new list soon after a relay
+            // dies; dial that one instead of finishing on the old list.
+            tokio::select! {
+                biased;
+                next = failover(cfg, list, relay_handler, attachment_slot, ctrl_tx) => next,
+                _ = next_list_push(relay_list_rx, current_list) => {
+                    dial_interrupted(attachment_slot).await;
+                    State::Disconnected { next_backoff: cfg.reconnect_base }
+                }
+            }
         }
 
         // Terminal (F38): back to the loop top, which stops the session.
@@ -770,20 +816,15 @@ async fn failover(
         .unwrap_or_default();
 
     for target in ranked_targets {
-        if let Some(active) = tokio::time::timeout(
+        if let Some(active) = connect_within(
+            cfg,
+            target.clone(),
+            relay_handler,
+            attachment_slot,
+            ctrl_tx,
             FAILOVER_PER_ENTRY_BUDGET,
-            connect(
-                cfg,
-                target.clone(),
-                relay_handler,
-                attachment_slot,
-                ctrl_tx,
-                None,
-            ),
         )
         .await
-        .ok()
-        .flatten()
         {
             emit_event(SelectorEvent::EnteredConnected {
                 relay_id: active.info.relay_id.clone(),
@@ -832,9 +873,28 @@ async fn failover(
     }
 }
 
-/// Spawn a `run_session` task, await register-OK via the oneshot, and on
-/// success build the `ActiveRelay`. On failure (oneshot dropped or session
-/// exits before registering) returns None and aborts the task.
+/// Aborts a dialling session task when dropped, unless disarmed. A dial that
+/// is abandoned (budget elapsed, or the caller's future dropped because a new
+/// relay list arrived) must not leave a detached session behind: dropping a
+/// `JoinHandle` only detaches the task, which kept dialling and could still
+/// register and take the attachment.
+struct AbortOnDrop(Option<JoinHandle<anyhow::Result<()>>>);
+
+impl AbortOnDrop {
+    fn disarm(mut self) -> JoinHandle<anyhow::Result<()>> {
+        self.0.take().expect("armed until disarmed")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// `connect_within` with the default selector dial budget.
 async fn connect(
     cfg: &RelaySelectorConfig,
     info: LabelledRelayInfo,
@@ -843,46 +903,102 @@ async fn connect(
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
     on_registered: Option<oneshot::Sender<()>>,
 ) -> Option<ActiveRelay> {
-    let (tx, rx) = on_registered.map(|t| (Some(t), None)).unwrap_or_else(|| {
-        let (s, r) = oneshot::channel();
-        (Some(s), Some(r))
-    });
+    if on_registered.is_some() {
+        return connect_unawaited(
+            cfg,
+            info,
+            relay_handler,
+            attachment_slot,
+            ctrl_tx,
+            on_registered,
+        );
+    }
+    connect_within(
+        cfg,
+        info,
+        relay_handler,
+        attachment_slot,
+        ctrl_tx,
+        RELAY_DIAL_BUDGET,
+    )
+    .await
+}
+
+/// Spawn a `run_session` task, await register-OK via the oneshot for at most
+/// `budget`, and on success build the `ActiveRelay`. On failure (oneshot
+/// dropped, session exits before registering, or the budget elapsed) the task
+/// is aborted and None returned. Cancel-safe: dropping the future aborts the
+/// task too.
+async fn connect_within(
+    cfg: &RelaySelectorConfig,
+    info: LabelledRelayInfo,
+    relay_handler: &Arc<RelayHandler>,
+    attachment_slot: &RelayAttachmentSlot,
+    ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
+    budget: Duration,
+) -> Option<ActiveRelay> {
+    let (tx, rx) = oneshot::channel();
     let (handle, drain_tracker) = spawn_session(
         cfg,
         info.clone(),
         relay_handler.clone(),
         attachment_slot.clone(),
         ctrl_tx.clone(),
-        tx,
+        Some(tx),
     );
+    let guard = AbortOnDrop(Some(handle));
 
-    if let Some(rx) = rx {
-        // Caller did not supply their own oneshot — wait here for register-OK.
-        match rx.await {
-            Ok(()) => Some(ActiveRelay {
-                info,
-                handle,
-                drain_tracker,
-                last_score: None,
-                migration_retry: None,
-            }),
-            Err(_) => {
-                handle.abort();
-                None
-            }
-        }
-    } else {
-        // Caller is awaiting the oneshot themselves; return without waiting.
-        // (Currently no internal caller takes this branch — keeping the
-        // option open for future use.)
-        Some(ActiveRelay {
+    match tokio::time::timeout(budget, rx).await {
+        Ok(Ok(())) => Some(ActiveRelay {
             info,
-            handle,
+            handle: guard.disarm(),
             drain_tracker,
             last_score: None,
             migration_retry: None,
-        })
+        }),
+        // The session ended before registering; it cleaned up after itself.
+        Ok(Err(_)) => None,
+        Err(_) => {
+            warn!(
+                relay_id = %info.relay_id,
+                budget_ms = budget.as_millis() as u64,
+                "Relay did not register within the dial budget; trying the next one"
+            );
+            drop(guard);
+            // The aborted task can't run its own clean-up. It may have
+            // registered in the instant before the budget ran out.
+            attachment_slot.clear_active_if_relay(&info.relay_id).await;
+            None
+        }
     }
+}
+
+/// Caller supplied its own register-OK oneshot and waits for it itself.
+/// (Currently no internal caller takes this path — keeping the option open
+/// for future use.)
+fn connect_unawaited(
+    cfg: &RelaySelectorConfig,
+    info: LabelledRelayInfo,
+    relay_handler: &Arc<RelayHandler>,
+    attachment_slot: &RelayAttachmentSlot,
+    ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
+    on_registered: Option<oneshot::Sender<()>>,
+) -> Option<ActiveRelay> {
+    let (handle, drain_tracker) = spawn_session(
+        cfg,
+        info.clone(),
+        relay_handler.clone(),
+        attachment_slot.clone(),
+        ctrl_tx.clone(),
+        on_registered,
+    );
+    Some(ActiveRelay {
+        info,
+        handle,
+        drain_tracker,
+        last_score: None,
+        migration_retry: None,
+    })
 }
 
 fn spawn_session(
@@ -1041,6 +1157,8 @@ pub enum SelectorEvent {
         delay_ms: u64,
     },
     DrainTimeoutFired,
+    /// O3: a bootstrap or failover dial was abandoned for a newly pushed list.
+    DialInterruptedByList,
     /// F38: the connector became terminal; the selector stopped for good.
     StoppedTerminal,
 }
@@ -2057,6 +2175,163 @@ mod migration_retry_tests {
         );
         assert_eq!(active_relay(&f.slot).await.as_deref(), Some(RELAY_A));
         assert_eq!(a.registered(), 1, "A was never left");
+        selector.abort();
+    }
+
+    // --- O3: dials to a dead relay are bounded and give way to a new list ---
+
+    const RELAY_DEAD: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    /// A relay that died without closing: its address takes packets and never
+    /// answers, so a QUIC handshake to it only ends at the idle timeout.
+    fn black_hole(relay_id: &str) -> (std::net::UdpSocket, LabelledRelayInfo) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let info = LabelledRelayInfo {
+            relay_id: relay_id.to_owned(),
+            relay_addr: sock.local_addr().unwrap().to_string(),
+            spiffe_id: format!("spiffe://zecurity.in/relay/{relay_id}"),
+            label: RelayCapacityLabel::RelayCapacityHigh as i32,
+        };
+        (sock, info)
+    }
+
+    /// The live O3 case: the selector is dialling a dead relay when the
+    /// controller pushes a list with a live one. It must dial the new list at
+    /// once, not after the dead dial times out (here 30 s, 60 s in the field).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_list_pushed_during_a_dead_dial_is_dialled_at_once() {
+        let mut f = fx();
+        f.cfg.idle_timeout = Duration::from_secs(30);
+        let (_hole, dead) = black_hole(RELAY_DEAD);
+        let b = TestRelay::spawn(&f.pki, RELAY_B, true);
+        let (tx, rx) = watch::channel(Some(LabelledRelayList {
+            relays: vec![dead],
+            version: 1,
+        }));
+        let selector = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            rx,
+            f.ctrl_tx.clone(),
+            AuthzGate::open_for_tests(),
+        ));
+        // Let the bootstrap start its dial to the dead relay.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let pushed = TokioInstant::now();
+        tx.send(list(&[&b], 2)).unwrap();
+
+        eventually(
+            Duration::from_secs(3),
+            "on B soon after the push",
+            || async {
+                b.registered() == 1 && active_relay(&f.slot).await.as_deref() == Some(RELAY_B)
+            },
+        )
+        .await;
+        assert!(
+            pushed.elapsed() < RELAY_DIAL_BUDGET,
+            "the dead dial was abandoned for the new list, not waited out"
+        );
+        selector.abort();
+    }
+
+    /// A dial that never registers ends at its budget, and its session task
+    /// is stopped rather than left dialling in the background.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dial_that_never_registers_ends_at_its_budget() {
+        let mut f = fx();
+        f.cfg.idle_timeout = Duration::from_secs(30);
+        let (_hole, dead) = black_hole(RELAY_DEAD);
+
+        let started = TokioInstant::now();
+        let got = connect_within(
+            &f.cfg,
+            dead,
+            &f.handler,
+            &f.slot,
+            &f.ctrl_tx,
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(got.is_none());
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(3),
+            "ended at the budget, not the 30 s handshake timeout: {took:?}"
+        );
+        eventually(Duration::from_secs(2), "session task stopped", || async {
+            f.cfg.relay_sessions.live() == 0
+        })
+        .await;
+        assert_eq!(active_relay(&f.slot).await, None);
+    }
+
+    /// Dropping a dial (what a list push does to bootstrap and failover)
+    /// stops its session task too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_dial_stops_its_session() {
+        let mut f = fx();
+        f.cfg.idle_timeout = Duration::from_secs(30);
+        let (_hole, dead) = black_hole(RELAY_DEAD);
+        let dial = connect_within(
+            &f.cfg,
+            dead,
+            &f.handler,
+            &f.slot,
+            &f.ctrl_tx,
+            Duration::from_secs(20),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), dial)
+                .await
+                .is_err(),
+            "still dialling the dead relay"
+        );
+        eventually(Duration::from_secs(2), "session task stopped", || async {
+            f.cfg.relay_sessions.live() == 0
+        })
+        .await;
+    }
+
+    /// After the active relay goes away, a list pushed by the controller is
+    /// taken up whether the selector is in failover, backoff or bootstrap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_the_active_relay_goes_the_pushed_list_is_used() {
+        let mut f = fx();
+        f.cfg.idle_timeout = Duration::from_secs(30);
+        let a = TestRelay::spawn(&f.pki, RELAY_A, true);
+        let (_hole, dead) = black_hole(RELAY_DEAD);
+        let (tx, rx) = watch::channel(list(&[&a], 1));
+        let selector = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            rx,
+            f.ctrl_tx.clone(),
+            AuthzGate::open_for_tests(),
+        ));
+        eventually(Duration::from_secs(10), "registered with A", || async {
+            active_relay(&f.slot).await.as_deref() == Some(RELAY_A)
+        })
+        .await;
+        // The old list still names A, plus a dead relay that keeps the
+        // selector busy dialling once A is gone.
+        let mut stale = list(&[&a], 2).unwrap();
+        stale.relays.push(dead);
+        tx.send(Some(stale)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(a);
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let b = TestRelay::spawn(&f.pki, RELAY_B, true);
+        let pushed = TokioInstant::now();
+        tx.send(list(&[&b], 3)).unwrap();
+        eventually(Duration::from_secs(5), "on B after the push", || async {
+            active_relay(&f.slot).await.as_deref() == Some(RELAY_B)
+        })
+        .await;
+        assert!(pushed.elapsed() < RELAY_DIAL_BUDGET);
         selector.abort();
     }
 }

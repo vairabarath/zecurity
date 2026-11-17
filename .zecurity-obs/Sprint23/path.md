@@ -174,4 +174,4 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 
 ## Out of scope
 
-Billing and invoicing (F34), usage metering and session quotas (F32, F33), alerting (F26), more provider roles (F19), impersonation (F31), reseller hierarchy (F37), bulk tenant pool moves (F30), connector relay-failure detection (O1/O3, separate ticket), backup retention policy (D-46 open item).
+Billing and invoicing (F34), usage metering and session quotas (F32, F33), alerting (F26), more provider roles (F19), impersonation (F31), reseller hierarchy (F37), bulk tenant pool moves (F30), backup retention policy (D-46 open item). Connector relay-failure detection (O1/O3) was fixed separately in PR #218.

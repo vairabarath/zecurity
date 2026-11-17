@@ -116,6 +116,6 @@ docker exec -i ztna_postgres psql -U ztna -d ztna_platform -1 -v ON_ERROR_STOP=1
 |---|---|
 | Pulled a PR labelled `[schema: reset DB]` | `cd controller && docker compose down -v && docker compose up -d`, then re-bootstrap (section 3) |
 | `column/relation "…" does not exist` locally | You skipped the reset: see above |
-| Writing a schema change | New `NNN_description.sql` (next: `039_`); never edit old files; PR label `[schema: reset DB]` |
+| Writing a schema change | New `NNN_description.sql` (next free number: section 4, step 1); never edit old files; PR label `[schema: reset DB]` |
 | Writing a DB-backed test | Throwaway DB + apply all schema files (section 5); no `FlushDB` |
 | Running the gate | All `*_TEST_DATABASE_URL` set, `-count=1`, check for `--- SKIP` |
