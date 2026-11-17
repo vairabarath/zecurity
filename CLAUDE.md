@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 23 is the active sprint: Provider Dashboard, remaining Must-have features (F5, F7, F8, F12).** Finish the Must-have list (14 / 18 → 18 / 18). Decisions **D-42 … D-47** are made (Decision Record amendment **2026-11-17**); the Sprint 23 documents are **in review: no implementation until the product owner (Barath) signs them off**.
+**Sprint 23 is the active sprint: Provider Dashboard, remaining Must-have features (F5, F7, F8, F12).** Finish the Must-have list (14 / 18 → 18 / 18). Decisions **D-42 … D-47** are made (Decision Record amendment **2026-11-17**); the Sprint 23 documents were **signed off by the product owner (Barath) on 2026-11-17**; implementation may start in the phase order below.
 - **B1 — plans (F8, D-43)**, Barath: provider-managed plans (name, default limits, one default), a plan per workspace, no billing. Lands first: S2 and S3 read plans.
 - **B2 — relay link capacity and headroom (F5, D-42)**, Barath: operator-set `link_capacity_bps` (bytes/s); headroom = capacity − measured rate; "Not configured" when unset. No relay/proto change.
 - **S2 — provider tenant creation (F7, D-44)**, Barath, after B1: same bootstrap path as self-signup + single-use, time-limited first-admin invitation.

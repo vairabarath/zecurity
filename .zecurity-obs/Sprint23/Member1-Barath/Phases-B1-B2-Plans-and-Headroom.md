@@ -5,7 +5,7 @@ owner: Barath (Person 1, M2)
 features: [F8 plan, F5 headroom, F7 tenant creation]
 phases: [B1, B2, S2]
 decisions: [D-43, D-42, D-44]
-status: decided; waiting for document review before implementation
+status: signed off 2026-11-17; ready for implementation
 ---
 
 # Sprint 23 — Barath: B1 Plans (F8), B2 Relay headroom (F5), S2 Tenant creation (F7)
