@@ -92,6 +92,12 @@ pub async fn run() -> Result<()> {
     // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
     let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
+    // A service stop (SIGTERM) or Ctrl-C tears the tunnel down before exit.
+    // Desktop Unix only: on Android and iOS the daemon runs inside the app
+    // process, whose signals are not ours to take over.
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+    spawn_stop_signal_handler(Arc::clone(&state), Arc::clone(&tun_slot))?;
+
     // Load encrypted durable state on startup if present — only if its saved
     // trust anchors chain to the platform root compiled into this client
     // (certificate audit bug 1); otherwise the device must log in again.
@@ -365,7 +371,7 @@ where
 
     if shutdown {
         info!("shutdown requested via IPC — exiting");
-        crate::exit_daemon(0);
+        shutdown_and_exit(&state, &tun_slot).await;
     }
 
     Ok(())
@@ -4030,13 +4036,75 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     s.tunnel_wanted = stored.tunnel_wanted;
 }
 
+/// How long a deliberate shutdown waits for the tunnel intent lock, then for
+/// the teardown itself.
+const SHUTDOWN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const SHUTDOWN_TEARDOWN_LIMIT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Tears the tunnel down (like `zecurity-client down`) and exits the process.
+/// It takes the tunnel intent lock when it can get it quickly, so a restore or
+/// IPC `up` waiting on that lock cannot bring the tunnel back in between; a
+/// slow `up` holding the lock does not stop the teardown from running. On
+/// Linux the final routing flush also covers a restart pass caught part-way
+/// through bringing the tunnel up (restart passes don't take the intent lock).
+async fn shutdown_and_exit(state: &SharedState, tun_slot: &TunSlot) -> ! {
+    #[cfg(unix)]
+    sd_notify(b"STOPPING=1\n");
+    let intent_lock = state.read().await.tunnel_intent_lock.clone();
+    let _intent = tokio::time::timeout(SHUTDOWN_LOCK_WAIT, intent_lock.lock_owned())
+        .await
+        .ok();
+    match tokio::time::timeout(SHUTDOWN_TEARDOWN_LIMIT, handle_down(state, tun_slot)).await {
+        Ok(down) if !down.ok => warn!(error = ?down.error, "tunnel teardown at shutdown failed"),
+        Ok(_) => {}
+        Err(_) => warn!("tunnel teardown at shutdown timed out"),
+    }
+    #[cfg(target_os = "linux")]
+    crate::tun::cleanup_policy_routes();
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(crate::ipc::ipc_socket_path());
+    crate::exit_daemon(0)
+}
+
+/// SIGTERM/SIGINT: tear down and exit. A second signal during the teardown
+/// exits at once, so a stuck teardown never makes the daemon unkillable.
+#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+fn spawn_stop_signal_handler(state: SharedState, tun_slot: TunSlot) -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        info!("daemon stopping: taking the tunnel down");
+        tokio::select! {
+            _ = shutdown_and_exit(&state, &tun_slot) => {}
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        warn!("second stop signal — exiting without waiting for the teardown");
+        #[cfg(target_os = "linux")]
+        crate::tun::cleanup_policy_routes();
+        // 0, not 1: a stop the user asked for must not look like a crash
+        // to Restart=on-failure, which would bring the tunnel back.
+        crate::exit_daemon(0);
+    });
+    Ok(())
+}
+
 #[cfg(unix)]
-fn sd_notify_ready() {
+fn sd_notify(msg: &[u8]) {
     let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
         return;
     };
-    let _ =
-        std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(b"READY=1\n", &path));
+    let _ = std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(msg, &path));
+}
+
+#[cfg(unix)]
+fn sd_notify_ready() {
+    sd_notify(b"READY=1\n");
 }
 
 #[cfg(unix)]
