@@ -449,3 +449,19 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 **Live retest (2026-11-17, fixed connector `41d7acb0…` on the lab host, no restart in the test path):** `zero` moved into residency pool R at 05:40:19; the relay refused the connector at 05:40:19, 05:40:24 and 05:40:34 (retries at 5 s and 10 s); the relay applied the policy allowing `zero` at 05:40:49; the next retry (20 s step) registered at 05:40:54; placement `manoj-lt` and traffic 200 at 05:40:59.
 
 **Not covered here:** the controller could additionally hold a tenant's new list until the residency pool's relays have applied the policy; not done (it would couple policy propagation to list publication). With the fix, recovery takes at most one backoff step after the relay's next heartbeat.
+
+### Fix: no relay path shown as healthy / "using failover" (live test F11-1, 2026-11-17)
+**Issue:** with both a tenant's primary and failover pool down, the console read the primary "failed over", the tenant "using failover pool B" and B "healthy" (0 eligible relays), and a plain `relay_pool.failover` audit row was written. Traffic was correct (empty list, no fallback), but the console suggested a working path.
+
+**Root cause:** failover state is tracked only for pools some tenant uses as primary with a failover pool; every other pool read `healthy` whatever its relays. The tenant read had no notion of whether its effective pool had an eligible relay.
+
+**Fix applied:**
+- `relaypool.ReadState` (reads only): a pool that is neither failed over nor recovering and has no eligible relay reads `no_eligible_relays`. `State` (the failover state machine) is unchanged.
+- Tenant detail `relay_pool.relay_path`: `primary` | `failover` (the effective pool, same rule as `EffectivePool`) or `none` when that pool has no eligible relay.
+- `PoolTransition.TenantsWithoutRelayPath`; the failover audit row carries `tenants_without_relay_path` (and the log line).
+- Console: "No eligible relay" pool badge; the tenant card shows a red "No relay path" alert (two wordings: both pools empty / still on an empty failover pool while the primary recovers) instead of "Using failover pool"; the Overview lists empty pools that tenants use as primary or failover pool.
+
+**Tests:** `TestFailoverDB_FailoverReportsTenantsWithoutRelayPath`; `TestRelayPoolReads_FailoverState` (it asserted the bug: an empty failover pool read `healthy`) and `TestRelayPoolReads_EmptyPoolHasNoRelayPath`; DTO surface pin updated for `relay_path`; console tests for the badge, both card wordings and the Overview item. Mutation-checked (restoring `State` in the read fails both read tests). Controller 1,892 tests pass (2 known skips); console 611 tests, lint and build pass. Live check: see `Pending-Live-Tests.md` → F11-1.
+
+**Open (F11-2):** the hold-down keeps a tenant on an empty failover pool while its primary is eligible again (up to 5 minutes without a relay path). Display is honest now; the behaviour needs a D-39 refinement (decision pending).
+

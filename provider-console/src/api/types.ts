@@ -308,7 +308,11 @@ export interface RelayPoolSummary extends RelayPoolRef {
   policy_version: number
   /** Workspaces using this pool as their failover pool (D-39). */
   failover_tenants: number
-  /** Failover state (D-39); tracked only for pools some tenant uses as primary with a failover pool. */
+  /**
+   * Failover state (D-39); tracked only for pools some tenant uses as primary
+   * with a failover pool. `no_eligible_relays` (F11-1): not failed over, but
+   * no eligible relay, so it's never shown as healthy.
+   */
   state: RelayPoolState
   /** failed_over: since when the pool has had no eligible relay. */
   exhausted_at: string | null
@@ -317,7 +321,7 @@ export interface RelayPoolSummary extends RelayPoolRef {
   created_at: string
 }
 
-export const RELAY_POOL_STATES = ['healthy', 'failed_over', 'recovering'] as const
+export const RELAY_POOL_STATES = ['healthy', 'failed_over', 'recovering', 'no_eligible_relays'] as const
 export type RelayPoolState = (typeof RELAY_POOL_STATES)[number]
 
 export interface RelayPoolRelay {
@@ -362,7 +366,16 @@ export interface TenantRelayPool extends RelayPoolRef {
   /** The controller has switched the tenant to its failover pool (the primary has no eligible relay). */
   using_failover: boolean
   failed_over_since: string | null
+  /**
+   * F11-1: the pool whose relay list the tenant's connectors get (`primary`
+   * or `failover`), or `none` when that pool has no eligible relay, so the
+   * tenant has no relay path. Never derived here.
+   */
+  relay_path: TenantRelayPath
 }
+
+export const TENANT_RELAY_PATHS = ['primary', 'failover', 'none'] as const
+export type TenantRelayPath = (typeof TENANT_RELAY_PATHS)[number]
 
 export const TENANT_STATUSES = ['provisioning', 'active', 'suspended', 'deleted'] as const
 export type TenantStatus = (typeof TENANT_STATUSES)[number]

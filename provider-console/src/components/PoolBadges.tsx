@@ -129,6 +129,17 @@ export function PoolStateBadge({ pool, withTime = false }: { pool: Pick<RelayPoo
           Healthy
         </Badge>
       )
+    case 'no_eligible_relays':
+      // F11-1: not failed over, but nothing to serve with; never "Healthy".
+      return (
+        <Badge
+          variant="destructive"
+          data-pool-state="no_eligible_relays"
+          title="No relay in this pool is eligible: tenants whose connectors get this pool’s list have no relay path (direct connections still work)."
+        >
+          No eligible relay
+        </Badge>
+      )
     default:
       return (
         <Badge variant="secondary" data-pool-state={String(pool.state)}>

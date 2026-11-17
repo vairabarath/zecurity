@@ -49,7 +49,28 @@ export function TenantRelayPoolSection({ tenant, onDone }: { tenant: TenantDetai
           </Button>
         )}
       </div>
-      {rp.using_failover && fo && (
+      {rp.using_failover && fo && rp.relay_path === 'none' && (
+        // F11-1: on failover, but the failover pool has no eligible relay
+        // either: the tenant has no relay path. Never "Using failover pool".
+        <Alert variant="destructive" role="alert" data-relay-path="none" className="mt-4">
+          <AlertDescription>
+            {rp.eligible_relays === 0 ? (
+              <>
+                No relay path: the primary pool {rp.name} has no eligible relay, and its failover pool{' '}
+                <PoolLink pool={fo} /> has none either (direct connections still work). Add, move or resume a relay in
+                either pool, or move the tenant to another pool.
+              </>
+            ) : (
+              <>
+                No relay path: the tenant is still on its failover pool <PoolLink pool={fo} />, which has no eligible
+                relay (direct connections still work). {rp.name} is eligible again; the controller switches back after the
+                hold-down ({HOLD_DOWN_NOTE}).
+              </>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {rp.using_failover && fo && rp.relay_path !== 'none' && (
         <Alert role="status" data-using-failover className="mt-4">
           <AlertDescription>
             Using failover pool <PoolLink pool={fo} /> since{' '}
@@ -117,7 +138,7 @@ export function TenantRelayPoolSection({ tenant, onDone }: { tenant: TenantDetai
           <p className="mt-3 text-sm text-destructive">{fo.name} has no eligible relay, so it can’t take over if {rp.name} fails.</p>
         )}
       </div>
-      {rp.eligible_relays === 0 && !rp.using_failover && (
+      {rp.relay_path === 'none' && !rp.using_failover && (
         <Alert variant="destructive" role="alert" className="mt-4">
           <AlertDescription>
             This tenant’s pool has no eligible relay, so its relay path is down (direct connections still work)

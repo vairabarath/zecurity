@@ -245,6 +245,19 @@ describe('Overview: failed-over relay pools', () => {
     expect(screen.queryByText(/us-1/)).not.toBeInTheDocument()
   })
 
+  // F11-1: an empty pool that tenants depend on needs attention too; an unused empty pool doesn't.
+  it('lists a pool with no eligible relay that tenants use (as primary or failover), not an unused one', async () => {
+    signedInAs(relayOpsMe)
+    const emptyFO = poolSummary({ id: 'eeeeeeee-0000-0000-0000-0000000000f3', name: 'backup', is_default: false, tenants: 0, failover_tenants: 2, eligible_relays: 0, state: 'no_eligible_relays' })
+    const unused = poolSummary({ id: 'eeeeeeee-0000-0000-0000-0000000000f4', name: 'spare', is_default: false, tenants: 0, failover_tenants: 0, eligible_relays: 0, state: 'no_eligible_relays' })
+    mockFetch({ ...routes, 'GET /provider/relay-pools': { status: 200, body: { items: [POOLS[0], emptyFO, unused] } } })
+    renderApp('/')
+    const link = await screen.findByRole('link', { name: /Relay pool backup has no eligible relay/ })
+    expect(link).toHaveAttribute('href', `/relay-pools/${emptyFO.id}`)
+    expect(link).toHaveTextContent('2 tenants use it as their failover pool')
+    expect(screen.queryByText(/Relay pool spare/)).not.toBeInTheDocument()
+  })
+
   it('a failed pool read offers Retry without hiding the relay items', async () => {
     signedInAs(relayOpsMe)
     mockFetch({ ...routes, 'GET /provider/relay-pools': { status: 500, body: { error: 'server_error' } } })

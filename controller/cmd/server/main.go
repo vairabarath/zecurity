@@ -384,7 +384,12 @@ func main() {
 		if t.ExhaustedAt != nil {
 			details["exhausted_since"] = t.ExhaustedAt.UTC()
 		}
-		log.Printf("relay pool failover: %s pool=%s (%s) tenants=%d", t.Action, t.PoolName, t.PoolID, t.Tenants)
+		if t.Action == relay.ActionPoolFailover {
+			// F11-1: tenants whose failover pool is empty too have no relay path.
+			details["tenants_without_relay_path"] = t.TenantsWithoutRelayPath
+		}
+		log.Printf("relay pool failover: %s pool=%s (%s) tenants=%d without_relay_path=%d",
+			t.Action, t.PoolName, t.PoolID, t.Tenants, t.TenantsWithoutRelayPath)
 		return providerStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
 			ProviderEmail: relay.PoolFailoverActor,
 			Action:        t.Action,
