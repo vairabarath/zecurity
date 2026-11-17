@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yourorg/ztna/controller/internal/totp"
@@ -89,6 +90,18 @@ type Service struct {
 	sealer  Sealer
 	limiter Limiter
 	now     func() time.Time
+
+	resetMu    sync.Mutex
+	resetHooks []func(userID string)
+}
+
+// OnReset registers fn to run after a user's authenticator is reset, so
+// work in flight that the old authenticator vouched for (a finished but
+// unredeemed step-up) is withdrawn. Register before the service is used.
+func (s *Service) OnReset(fn func(userID string)) {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	s.resetHooks = append(s.resetHooks, fn)
 }
 
 func NewService(repo Repo, sealer Sealer, limiter Limiter) *Service {
@@ -193,5 +206,11 @@ func (s *Service) Reset(ctx context.Context, workspaceID, userID string) (bool, 
 		return false, err
 	}
 	_ = s.limiter.Reset(ctx, userID)
+	s.resetMu.Lock()
+	hooks := append([]func(string){}, s.resetHooks...)
+	s.resetMu.Unlock()
+	for _, fn := range hooks {
+		fn(userID)
+	}
 	return existed, nil
 }

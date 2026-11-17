@@ -570,3 +570,35 @@ func TestCompleteReauth_BoundToTheClient(t *testing.T) {
 		t.Fatalf("step_up audit rows = %d, want 1", n)
 	}
 }
+
+// Review fix: an MFA reset withdraws the user's step-ups in flight, and only
+// that user's.
+func TestCancelUserStepUps(t *testing.T) {
+	exp := time.Now().Add(time.Minute)
+	putMFATicket("t-a", &mfaTicket{Reauth: reauthInfo{UserID: "user-a"}, ExpiresAt: exp})
+	putMFATicket("t-b", &mfaTicket{Reauth: reauthInfo{UserID: "user-b"}, ExpiresAt: exp})
+	putStepUpGrant("g-a", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, ExpiresAt: exp})
+	putStepUpGrant("g-b", &stepUpGrant{Reauth: reauthInfo{UserID: "user-b"}, WithMFA: true, ExpiresAt: exp})
+	t.Cleanup(func() { cancelUserStepUps("user-b") })
+
+	cancelUserStepUps("user-a")
+
+	if _, ok := getMFATicket("t-a"); ok {
+		t.Fatal("user-a ticket survived the reset")
+	}
+	if _, ok := takeStepUpGrant("g-a", func(*stepUpGrant) bool { return true }); ok {
+		t.Fatal("user-a grant survived the reset")
+	}
+	if _, ok := getMFATicket("t-b"); !ok {
+		t.Fatal("user-b ticket was dropped")
+	}
+	if _, ok := takeStepUpGrant("g-b", func(*stepUpGrant) bool { return false }); ok {
+		t.Fatal("owns=false must not take the grant")
+	}
+	stepUpGrantMu.Lock()
+	_, ok := stepUpGrants["g-b"]
+	stepUpGrantMu.Unlock()
+	if !ok {
+		t.Fatal("user-b grant was dropped")
+	}
+}

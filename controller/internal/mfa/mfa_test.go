@@ -236,3 +236,16 @@ func TestReset(t *testing.T) {
 		t.Fatalf("enrol after reset: %v", err)
 	}
 }
+
+// Review fix: Reset runs the registered hooks with the user id.
+func TestResetRunsHooks(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	var got []string
+	svc.OnReset(func(u string) { got = append(got, u) })
+	if _, err := svc.Reset(context.Background(), "ws", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "u1" {
+		t.Fatalf("hooks ran with %v, want [u1]", got)
+	}
+}

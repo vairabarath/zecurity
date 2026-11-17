@@ -114,6 +114,10 @@ func idpMFAFresh(amrMFA bool, authTime int64, startedAt time.Time) bool {
 func (s *Service) EnableStepUp(mfaSvc *mfa.Service, riskSvc *risk.Service) {
 	s.mfaSvc = mfaSvc
 	s.riskSvc = riskSvc
+	// An MFA reset withdraws the user's step-ups in flight: a TOTP page
+	// still open or a finished grant not yet redeemed must not stamp MFA
+	// from the authenticator that was just removed.
+	mfaSvc.OnReset(cancelUserStepUps)
 }
 
 // StartReauth begins a step-up for the calling device and returns the IdP
@@ -613,6 +617,24 @@ func takeStepUpGrant(id string, owns func(*stepUpGrant) bool) (*stepUpGrant, boo
 	}
 	delete(stepUpGrants, id)
 	return g, true
+}
+
+// cancelUserStepUps drops every MFA ticket and step-up grant of the user.
+func cancelUserStepUps(userID string) {
+	mfaTicketMu.Lock()
+	for k, t := range mfaTickets {
+		if t.Reauth.UserID == userID {
+			delete(mfaTickets, k)
+		}
+	}
+	mfaTicketMu.Unlock()
+	stepUpGrantMu.Lock()
+	for k, g := range stepUpGrants {
+		if g.Reauth.UserID == userID {
+			delete(stepUpGrants, k)
+		}
+	}
+	stepUpGrantMu.Unlock()
 }
 
 // ── Pages ────────────────────────────────────────────────────────────────────
