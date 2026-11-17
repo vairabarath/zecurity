@@ -20,7 +20,7 @@ tags: [pending, adr, client, device, pki, lifecycle]
 >   (2026-09-02).
 > - **Device management:** the admin Devices page (`admin/src/pages/DeviceManagement.tsx`, `clientDevices` /
 >   `revokeDevice`) exists.
-> - **Doc gap:** [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] still says `status: proposed` although it is built.
+> - **Doc gap (closed 2026-11-17):** [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] now says `status: implemented`.
 >
 > The two blocks below ("drafted", "Track 3 still open") are history.
 

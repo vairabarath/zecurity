@@ -1,6 +1,6 @@
 ---
 type: adr
-status: proposed
+status: implemented
 id: ADR-028
 former_id: PENDING-13
 domain: identity/ops
@@ -18,7 +18,12 @@ tags: [adr, client, device, pki, lifecycle, revocation, renewal]
 
 # ADR-028 — Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution
 
-> **Status: PROPOSED (2026-08-20).** Promoted from `PENDING-13`. The original pending doc was written
+> **Status: IMPLEMENTED (verified against `main` 25a0cfb5, 2026-11-14; corrected 2026-11-17).** All three
+> tracks shipped in Sprint 19: the client `RenewCert` RPC and the daemon renewal scheduler (`a5f6a3ca`,
+> 2026-09-02), and the admin Devices page. Evidence: [[PENDING-13-Client-Device-Lifecycle]] → Status.
+> The text below is the proposal as written.
+>
+> **Originally: PROPOSED (2026-08-20).** Promoted from `PENDING-13`. The original pending doc was written
 > 2026-07-03 and self-flagged as "partly inferred — confirm actual client cert-renewal status in code."
 > This ADR replaces that guesswork with **verified ground truth** (client + controller code surveyed
 > 2026-08-20) and reshapes the scope around what actually shipped since: the durable outbox (Sprint 18),

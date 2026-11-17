@@ -69,6 +69,8 @@ discussion — the "Options" and "Open Questions" are the point; the
 
 ### Open follow-ups from finished items (verified 2026-11-14)
 
+*2026-11-17: closed 13 (ADR-028 now `status: implemented`) and the `TunnelClose` proto comment from 21 (`shield.proto` now says it carries aborts).*
+
 None of these has its own pending doc yet. Each is recorded in the finished doc named here.
 
 | From | Open item |
@@ -77,12 +79,11 @@ None of these has its own pending doc yet. Each is recorded in the finished doc 
 | 05 | No SCIM conformance suite; live Okta/Entra interop is still waiting on tenant access. |
 | 08 | No MDM/EDR posture feeds; no hardware-attested posture; no iOS/macOS posture checks. |
 | 10 | Relay, connector and shield have no Prometheus metrics or OTel tracing; the blackbox exporter is not shipped. |
-| 13 | ADR-028 still says `status: proposed` although it is built. |
 | 14 | DNS-name resources are Linux-client only (Windows NRPT and mobile DNS are not built). |
 | 17 | TPM keys are Linux-only. Windows, Android and iOS use software keys. The systemd `tss` group and the `linux.tpm.present` check are open. |
 | 19 | The SCIM last-Admin case (R-11) is tested against the database only. |
 | 20 | G2: the device's own OS location is not started. |
-| 21 | Proto comment on `TunnelClose` (`shield.proto`) wrongly says it is unused. ADR-016 is still Proposed (relates to 03). |
+| 21 | ADR-016 is still Proposed (relates to 03). |
 | 11 | Access events are lost while a connector is disconnected (S-10): there is no connector-side buffer. |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·

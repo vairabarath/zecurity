@@ -18,8 +18,9 @@ tags:
 - **Correction:** §8.1 says `TunnelClose` is no longer sent or handled. That is wrong; only `TunnelData` is gone.
   `TunnelClose` still carries aborts through the connector's abort mailbox (`connector/src/agent_tunnel.rs`) and the
   shield handles it (`shield/src/control_stream.rs`), as §8.4 says.
-- **Same error in code:** the proto comment at `proto/shield/v1/shield.proto` ("Neither side sends or handles these any
-  more") repeats it. That comment needs a follow-up correction, since it is generated into the stubs.
+- **Same error in code (corrected 2026-11-17):** the proto comment at `proto/shield/v1/shield.proto` said "Neither side
+  sends or handles these any more" for both fields. It now says only `TunnelData` is unused and that `TunnelClose`
+  carries aborts. The shield Go stubs are not tracked in git; `buf generate` picks the comment up.
 
 **History:**
 - Proposed 2026-11-03. The spike passed and Barath approved the final decisions (§7) on 2026-11-03.

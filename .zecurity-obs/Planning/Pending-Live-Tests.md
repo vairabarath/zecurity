@@ -3,7 +3,7 @@
 Merged features whose tracker box stays unticked until a live check on the lab passes. Run them in one session once the Must-have work is done, then tick each box in `Provider-Dashboard-Features.md`.
 
 **Before the session**
-- `main` pulled; local DB recreated (`cd controller && docker compose down -v && docker compose up -d`); migration `051_` is the latest one. This wipes local data, so bootstrap the super-admin again and enrol TOTP.
+- `main` pulled; local DB recreated (`cd controller && docker compose down -v && docker compose up -d`); migration `061_` is the latest one (2026-11-17; check with `ls controller/migrations | tail -3`). This wipes local data, so bootstrap the super-admin again and enrol TOTP.
 - Controller and provider console running; a super-admin signed in (TOTP); a relay-ops operator for the role checks.
 - At least one tenant with resources and policies, and at least one relay enrolled (lab: `inkyank` 192.168.1.75, `manojinkyank` 192.168.1.53).
 - Lab cautions: don't touch inkyank's `zecurity-relay` service (restart loop, missing config). Don't re-enable manoj's connector until `/etc/zecurity/ca.crt` is restored.

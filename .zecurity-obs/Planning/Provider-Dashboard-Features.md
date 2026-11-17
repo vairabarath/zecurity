@@ -238,7 +238,7 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 
 From `CLAUDE.md` and the Decision Record (binding):
 - A feature that needs a new architectural choice (⚖️) stops for a decision first; don't decide it in code.
-- Schema changes are new numbered files in `controller/migrations/` (next: `053_`); label the PR `[schema: reset DB]`.
+- Schema changes are new numbered files in `controller/migrations/` (next: `062_` as of 2026-11-17; check with `ls controller/migrations | tail -3`); label the PR `[schema: reset DB]`.
 - Console writes are limited to D-30 (auth, operator management, relay create/revoke/delete/drain/resume); every new console read or write goes into `api-surface.test.ts` on purpose.
 - Provider read APIs never return secrets; query services in `internal/providerquery/` don't import `net/http`.
 - Tests first; DB-backed tests must run (a skipped DB test is a failure); live check before ticking a box.
