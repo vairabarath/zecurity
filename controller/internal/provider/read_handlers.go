@@ -117,6 +117,34 @@ func (h *ReadHandlers) ListRelayPools(w http.ResponseWriter, r *http.Request) {
 	writeReadJSON(w, map[string]any{"items": pools})
 }
 
+// ListPlans: GET /provider/plans (plan.read, super-admin; Sprint 23 B1).
+func (h *ReadHandlers) ListPlans(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadPlans(actor)) {
+		return
+	}
+	plans, err := providerquery.ListPlans(r.Context(), h.db)
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, map[string]any{"items": plans})
+}
+
+// GetPlan: GET /provider/plans/{id} (plan.read, super-admin).
+func (h *ReadHandlers) GetPlan(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadPlans(actor)) {
+		return
+	}
+	p, err := providerquery.GetPlan(r.Context(), h.db, r.PathValue("id"))
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, p)
+}
+
 // GetRelayPool: GET /provider/relay-pools/{id} (relay.read). The tenant list
 // is included only for callers allowed tenant.read (super-admin, D-41);
 // relay-ops get counts only.

@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react'
+import { TENANT_FREE_PLAN } from '@/test/plans'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
@@ -48,6 +49,7 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     shields: [],
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
+    plan: TENANT_FREE_PLAN,
     ...over,
   }
 }

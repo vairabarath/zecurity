@@ -5,6 +5,7 @@ import { getTenant } from '@/api/reads'
 import type { TenantDetail as TenantDetailDTO } from '@/api/types'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
+import { TenantPlanSection } from '@/components/TenantPlan'
 import { TenantRelayPoolSection } from '@/components/TenantRelayPool'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TenantAvatar } from '@/components/TenantAvatar'
@@ -224,6 +225,8 @@ function TenantView({
           {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks
         </CountTile>
       </section>
+
+      <TenantPlanSection tenant={t} onDone={onActionDone} />
 
       <TenantRelayPoolSection tenant={t} onDone={onActionDone} />
 
