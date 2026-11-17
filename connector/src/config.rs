@@ -40,7 +40,11 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
 const DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_RELAY_MAX_TUNNEL_STREAMS: u32 = 256;
-const DEFAULT_RELAY_IDLE_TIMEOUT_SECS: u64 = 60;
+/// O1: the only signal that a relay died without closing (crash, kill, host
+/// or network loss) is this timeout; the keep-alive is a third of it. At 60 s
+/// a dead relay went unnoticed for over a minute. QUIC uses the lower of the
+/// two peers' values, so this alone sets the connector-relay timeout.
+const DEFAULT_RELAY_IDLE_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_RELAY_REPROBE_INTERVAL_SECS: u64 = 300;
 const DEFAULT_RELAY_MAX_CONCURRENT_PROBES: usize = 5;
 const DEFAULT_RELAY_RECONNECT_BASE_SECS: u64 = 5;
