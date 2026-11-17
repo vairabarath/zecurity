@@ -179,3 +179,25 @@ Left as is: a suspended user's first enrolment code is accepted before the 401 (
 
 Not done (performance, follow-up): `GetACLSnapshot` runs `authRequiredCount` on every poll; `User.mfaEnrolled` is N+1 (batch with `EnrolledUsers`).
 Not in this diff, same pattern: the provider operator TOTP limiter (`internal/provider/ratelimit.go`, `totp_handlers.go`) is also check-then-count.
+
+### Live run after #205–#209 (2026-11-17, main at e8641069)
+Isolated stack: the controller built from `e8641069` on a copy of the shared database and its own Valkey DB, reachable from the lab at this machine's LAN address. Connector on luffy (nika), test resource on omarchy (manoj, a web server on port 8765, never 22), client on this machine. Sign-in through the local test identity provider.
+
+| Check | Result |
+|---|---|
+| Console sign-in, IdP sends no `auth_time` | PASS: no `mfa_at`, audit `mfa: none` (e86690bf) |
+| Console MFA turned on | PASS: the next MFA-less request gets `MFA_REQUIRED` immediately |
+| 20 wrong codes in parallel | PASS: exactly 5 checked (401), 15 refused (429), one `mfa.locked`, 900 s window |
+| Suspended user's correct code at `/auth/mfa/verify` | PASS: 401, no token |
+| Inactive workspace | PASS: 403 `workspace inactive` on `/graphql` and `/api/connectors/…`, not 503 |
+| Connector reinstall with an old identity present (#205) | PASS: moved to `/var/lib/zecurity-connector.bak-<timestamp>`; the earlier `.bak-p16live` untouched; connector active |
+| Client step-up, policy requires MFA | PASS: TOTP page → `auth.step_up {"mfa":"totp"}` → resource released |
+| Skip on the TOTP page | as designed: sign-in refreshed, earlier MFA mark kept |
+| Tightening a required profile (M-9 fix) | PASS: device fails revision 4, `risk_score` stays 0, no reauth demand |
+| Data path client → luffy connector → omarchy | PASS: connector `access allowed` + `tunnel_opened ok`, page served |
+
+Not run live: MFA reset during a step-up (the copied database has one admin; covered by DB tests); IdP MFA with an old `auth_time` (would need the shared test IdP's config changed).
+
+Observations (not bugs in the fixes):
+- A stopped system client left its `fwmark 0x5a lookup main` rule (priority 49) behind; the test client's `ip rule add` then failed. Worth checking that `systemctl stop` cleans it up (it may be left from an earlier crash).
+- A dev client can't run its tunnel without root: iproute2's `ip` drops file capabilities for non-root users, so `setcap` on a copy of `ip` does not help. The test daemon ran as root for the data path.
