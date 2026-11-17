@@ -20,7 +20,7 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F5 | Relay bandwidth | #193 | ☑ 2026-11-12 |
 | F14 | Daily certificate expiry email | #195 | ☑ 2026-11-12 |
 | F4 / F9 (+ F10 routing) | Relay pools PR 1: tenant pools, per-pool relay lists, per-pool guard (D-37 … D-41) | #200 | ☑ 2026-11-17 (step 7 skipped, covered by F10) |
-| F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201 | ☑ 2026-11-17 (finding F11-1 open, display/audit only) |
+| F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201 | ◐ 2026-11-17: failover PASS; F11-1 open (console/audit when both pools are down), tick with its fix |
 | F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | #202, #210 | ☑ 2026-11-17 (step 1 first failed on F10-1; connector fix #210 retested live against the same race, no restart) |
 
 Add each Must-have item here as it merges.
