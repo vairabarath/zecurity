@@ -122,6 +122,23 @@ force_reinstall() {
     rm -rf "$STATE_DIR"
 }
 
+# Every install brings a new ENROLLMENT_TOKEN, but the connector skips
+# enrollment when it finds an earlier identity in STATE_DIR ("already
+# enrolled") and keeps using that one: a reinstall after a controller or
+# database reset then fails with a certificate error, and the new token is
+# never used. Move an earlier identity aside (kept, not deleted) so this
+# install enrolls with the new token. -f still wipes everything.
+retire_previous_enrollment() {
+    if [[ ! -d "$STATE_DIR" ]] || [[ -z "$(ls -A "$STATE_DIR" 2>/dev/null)" ]]; then
+        return 0
+    fi
+    local backup="${STATE_DIR}.bak-$(date +%Y%m%d%H%M%S)"
+    warn "found an earlier connector identity in ${STATE_DIR}; moving it to ${backup}"
+    warn "so this install enrolls with the new ENROLLMENT_TOKEN"
+    systemctl stop zecurity-connector.service 2>/dev/null || true
+    mv "$STATE_DIR" "$backup"
+}
+
 create_user() {
     if ! id "$SERVICE_USER" >/dev/null 2>&1; then
         log "creating system user: $SERVICE_USER"
@@ -296,6 +313,7 @@ main() {
     check_commands
     platform_binary
     force_reinstall
+    retire_previous_enrollment
     create_user
     create_directories
     fetch_ca_cert
