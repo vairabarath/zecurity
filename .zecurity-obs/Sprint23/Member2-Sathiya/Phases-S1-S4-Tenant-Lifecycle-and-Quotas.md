@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [F7 suspend/resume and deletion, F12 quotas]
 phases: [S1, S3, S4]
 decisions: [D-45, D-47, D-46]
-status: decided; waiting for document review before implementation
+status: signed off 2026-11-17; ready for implementation
 ---
 
 # Sprint 23 — Sathiya: S1 Suspend/resume (F7), S3 Quotas (F12), S4 Delete (F7)

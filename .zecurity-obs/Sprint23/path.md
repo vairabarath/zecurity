@@ -2,7 +2,7 @@
 type: sprint
 sprint: 23
 title: Provider Dashboard — remaining Must-have features (F5, F7, F8, F12)
-status: decided, documents in review (no implementation yet)
+status: decided and signed off (2026-11-17); implementation in progress
 created: 2026-11-17
 team:
   - Person 1 = Barath (M2): F8 plans (B1), F5 headroom (B2), F7 tenant creation (S2)
@@ -163,7 +163,7 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 ## Checklist
 
 - [x] Phase 0: D-42 … D-47 decided and written into the Decision Record (2026-11-17)
-- [ ] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — before any implementation
+- [x] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — signed off by Barath 2026-11-17; implementation may start
 - [ ] B1 — Plans (Barath) — merged — live-checked
 - [ ] B2 — Relay link capacity + headroom (Barath) — merged — live-checked
 - [ ] S2 — Provider tenant creation (Barath) — merged — live-checked
