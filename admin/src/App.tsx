@@ -30,6 +30,7 @@ import Policies from '@/pages/Policies'
 import IdpConnections from '@/pages/IdpConnections'
 import IdpConnectionDetail from '@/pages/IdpConnectionDetail'
 import ScimConflicts from '@/pages/ScimConflicts'
+import FeatureTour from '@/pages/FeatureTour'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 import { useAuthStore } from '@/store/auth'
@@ -103,6 +104,7 @@ export default function App() {
         <Route path="/idp-connections"     element={<IdpConnections />} />
         <Route path="/idp-connections/:id" element={<IdpConnectionDetail />} />
         <Route path="/scim-conflicts" element={<ScimConflicts />} />
+        <Route path="/tour"           element={<FeatureTour />} />
       </Route>
     </Routes>
   )

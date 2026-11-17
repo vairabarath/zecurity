@@ -295,7 +295,7 @@ export default function ShieldDetail() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.95fr)]">
         <div className="space-y-4">
           {pending && canWrite ? (
-            <div className="surface-card overflow-hidden">
+            <div className="surface-card overflow-hidden" data-tour="shield-install">
               <div className="flex items-center justify-between border-b border-border px-5 py-4">
                 <div className="text-sm font-semibold uppercase tracking-[0.08em] text-muted-foreground">Install Command</div>
                 <div className="flex items-center gap-2">

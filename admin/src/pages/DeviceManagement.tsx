@@ -117,7 +117,7 @@ export default function DeviceManagement() {
         <div className="table-scroll">
           <div className="table-head grid min-w-[1730px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_150px_170px_120px_140px_240px] gap-4 px-5 py-4">
             {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Country', 'Sign-in', 'Status', 'Approval', 'Actions'].map((label, index) => (
-              <div key={label} className={`table-head-label ${index === 9 ? 'text-right' : ''}`}>{label}</div>
+              <div key={label} className={`table-head-label ${index === 9 ? 'text-right' : ''}`} data-tour={label === 'Sign-in' ? 'devices-signin-column' : undefined}>{label}</div>
             ))}
           </div>
 

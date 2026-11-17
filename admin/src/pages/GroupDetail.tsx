@@ -214,6 +214,7 @@ export default function GroupDetail() {
         {(['members', 'resources'] as Tab[]).map((t) => (
           <button
             key={t}
+            data-tour={`group-tab-${t}`}
             onClick={() => setTab(t)}
             className={cn(
               'rounded-full px-4 py-1.5 text-xs font-bold capitalize transition',

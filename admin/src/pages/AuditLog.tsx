@@ -80,6 +80,7 @@ export default function AuditLog() {
           }}
         >
           <Input
+            data-tour="audit-filter"
             aria-label="Filter by action prefix"
             placeholder="Action prefix, e.g. auth."
             value={filter}

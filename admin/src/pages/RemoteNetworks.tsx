@@ -131,6 +131,7 @@ export default function RemoteNetworks() {
           </div>
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
             <Input
+              data-tour="network-name"
               value={name}
               onChange={(event) => setName(event.target.value)}
               onKeyDown={(event) => event.key === 'Enter' && handleCreate()}
@@ -140,7 +141,7 @@ export default function RemoteNetworks() {
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" className="h-11 justify-between rounded-xl bg-secondary">
+                <Button data-tour="network-location" variant="outline" className="h-11 justify-between rounded-xl bg-secondary">
                   <span className="flex items-center gap-2">
                     <selectedLocation.icon className="h-4 w-4" />
                     {selectedLocation.label}
@@ -162,7 +163,7 @@ export default function RemoteNetworks() {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <Button onClick={handleCreate} disabled={!name.trim() || creating} className="h-11 rounded-xl">
+            <Button data-tour="network-create" onClick={handleCreate} disabled={!name.trim() || creating} className="h-11 rounded-xl">
               {creating ? 'Creating...' : 'Create'}
             </Button>
           </div>

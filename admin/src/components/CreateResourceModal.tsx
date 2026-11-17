@@ -125,7 +125,7 @@ export function CreateResourceModal({
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div className="fixed inset-0 z-50" data-tour-dialog>
       <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={() => handleClose(false)}

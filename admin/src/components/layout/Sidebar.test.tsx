@@ -12,7 +12,7 @@ describe('Sidebar navigation by role', () => {
   it.each([Role.Admin, Role.Viewer, Role.Devops, Role.Security, Role.Helpdesk])('%s', (role) => {
     setTestRole(role)
     render(<MemoryRouter><Sidebar /></MemoryRouter>)
-    for (const label of ['Identity Providers', 'Access Log', 'Devices', 'Policies', 'Remote Networks', 'Resources']) {
+    for (const label of ['Identity Providers', 'Access Log', 'Devices', 'Policies', 'Remote Networks', 'Resources', 'Feature Tour']) {
       expect(screen.getByText(label), label).toBeInTheDocument()
     }
   })
