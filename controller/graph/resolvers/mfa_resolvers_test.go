@@ -17,7 +17,9 @@ import (
 type dummySealer struct{}
 
 func (dummySealer) EncryptSecret([]byte, string) (string, string, error) { return "ct", "nonce", nil }
-func (dummySealer) DecryptSecret(string, string, string) ([]byte, error) { return []byte("secret"), nil }
+func (dummySealer) DecryptSecret(string, string, string) ([]byte, error) {
+	return []byte("secret"), nil
+}
 
 type dummyLimiter struct{}
 
