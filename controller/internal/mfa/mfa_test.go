@@ -75,19 +75,12 @@ type fakeLimiter struct {
 	err error
 }
 
-func (l *fakeLimiter) Blocked(context.Context, string) (bool, time.Duration, error) {
+func (l *fakeLimiter) Attempt(context.Context, string) (int64, time.Duration, error) {
 	if l.err != nil {
-		return false, 0, l.err
-	}
-	return l.n >= FailMax, time.Minute, nil
-}
-
-func (l *fakeLimiter) RecordFailure(context.Context, string) (bool, error) {
-	if l.err != nil {
-		return false, l.err
+		return 0, 0, l.err
 	}
 	l.n++
-	return l.n == FailMax, nil
+	return int64(l.n), time.Minute, nil
 }
 
 func (l *fakeLimiter) Reset(context.Context, string) error { l.n = 0; return nil }
@@ -241,5 +234,18 @@ func TestReset(t *testing.T) {
 	}
 	if _, err := svc.StartEnrollment(ctx, "u1", "ws1", "u1@example.com"); err != nil {
 		t.Fatalf("enrol after reset: %v", err)
+	}
+}
+
+// Review fix: Reset runs the registered hooks with the user id.
+func TestResetRunsHooks(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	var got []string
+	svc.OnReset(func(u string) { got = append(got, u) })
+	if _, err := svc.Reset(context.Background(), "ws", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "u1" {
+		t.Fatalf("hooks ran with %v, want [u1]", got)
 	}
 }

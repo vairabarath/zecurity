@@ -53,8 +53,9 @@ import (
 const (
 	ActionStepUp       = "auth.step_up"
 	ActionStepUpFailed = "auth.step_up_failed"
-	ActionMFAEnrolled  = "mfa.enrolled"
-	ActionMFALocked    = "mfa.locked"
+	// The same actions as the console's, so audit filters see both.
+	ActionMFAEnrolled = mfa.ActionEnrolled
+	ActionMFALocked   = mfa.ActionLocked
 )
 
 const (
@@ -114,6 +115,10 @@ func idpMFAFresh(amrMFA bool, authTime int64, startedAt time.Time) bool {
 func (s *Service) EnableStepUp(mfaSvc *mfa.Service, riskSvc *risk.Service) {
 	s.mfaSvc = mfaSvc
 	s.riskSvc = riskSvc
+	// An MFA reset withdraws the user's step-ups in flight: a TOTP page
+	// still open or a finished grant not yet redeemed must not stamp MFA
+	// from the authenticator that was just removed.
+	mfaSvc.OnReset(cancelUserStepUps)
 }
 
 // StartReauth begins a step-up for the calling device and returns the IdP
@@ -463,8 +468,13 @@ func (s *Service) completeStepUp(ctx context.Context, workspaceID string, ra *re
 		        risk_reasons       = '{}',
 		        reauth_required_at = NULL
 		  WHERE id = $1 AND user_id = $2 AND workspace_id = $3
-		    AND session_id = $4 AND revoked_at IS NULL`,
-		ra.DeviceID, ra.UserID, workspaceID, ra.SID, withMFA)
+		    AND session_id = $4 AND revoked_at IS NULL
+		    -- A TOTP step-up counts only while the authenticator still
+		    -- exists: an MFA reset racing this redemption wins, and the
+		    -- step-up (risk demand included) is refused as a whole.
+		    AND (NOT $6 OR EXISTS (SELECT 1 FROM user_totp
+		                            WHERE user_id = $2 AND enabled_at IS NOT NULL))`,
+		ra.DeviceID, ra.UserID, workspaceID, ra.SID, withMFA, method == "totp")
 	if err != nil {
 		log.Printf("client reauth: stamp device %s: %v", ra.DeviceID, err)
 		return false
@@ -613,6 +623,26 @@ func takeStepUpGrant(id string, owns func(*stepUpGrant) bool) (*stepUpGrant, boo
 	}
 	delete(stepUpGrants, id)
 	return g, true
+}
+
+// cancelUserStepUps drops the user's open TOTP pages and TOTP step-up grants.
+func cancelUserStepUps(userID string) {
+	mfaTicketMu.Lock()
+	for k, t := range mfaTickets {
+		if t.Reauth.UserID == userID {
+			delete(mfaTickets, k)
+		}
+	}
+	mfaTicketMu.Unlock()
+	stepUpGrantMu.Lock()
+	for k, g := range stepUpGrants {
+		// Only a grant the removed authenticator vouched for; an IdP or
+		// no-MFA step-up stays valid.
+		if g.Reauth.UserID == userID && g.Method == "totp" {
+			delete(stepUpGrants, k)
+		}
+	}
+	stepUpGrantMu.Unlock()
 }
 
 // ── Pages ────────────────────────────────────────────────────────────────────

@@ -149,9 +149,33 @@ The handler tests now redeem through `CompleteReauth`. `TestStartReauth_Precondi
 
 **Fix Applied:** `takeStepUpGrant` takes an ownership check: same workspace, user, session and device. A caller who doesn't own the grant gets `NotFound`, the grant stays in place and no audit row is written. For the owner, any attempt consumes the grant. A wrong code or verifier is still audited. `TestCompleteReauth_BoundToTheClient` covers strangers by session, device, user and workspace, then redeems the same grant as the owner.
 
-### Open: sign-in also trusts an old IdP `amr`
+### Fixed (e86690bf, in #206): sign-in also trusted an old IdP `amr`
+Client and console sign-in now stamp MFA at the IdP's `auth_time` (capped at now); a missing `auth_time` means no MFA (`auth.IdPMFAAt`). The original note follows.
+
 Fix 1 covers only the step-up. Two sign-in paths still record MFA at "now" from the IdP's `amr` with no `auth_time` check:
 - client login (`TokenExchange`, `service.go` → `sess.IdpMFA`);
 - admin console login (`auth/callback.go` → `SessionAuthFromAMR`).
 
 So `zecurity-client logout && zecurity-client login` on a live IdP session can meet a recent-MFA policy with an old MFA. The same applies to console MFA (M-6). The fix is the same `auth_time` gate, with the start time recorded at `InitiateAuth` or the console's `initiateAuth`. Google is not affected: it never sets `amr`, and its `AuthTime` is only `iat`.
+
+
+### Fixes from the code review of merged #205–#208 (2026-11-17, branch `fix/mfa-review-findings`)
+- **Wrong-code limit was check-then-act** (`internal/mfa/limiter.go`, `mfa.go` Verify). Parallel codes all passed `Blocked()` before any failure was counted. `Limiter` is now `Attempt` (INCR first, refuse above `FailMax`) + `Reset`; the FailMax-th wrong code trips the lockout. Every attempt counts, including one that fails as not-enrolled or unavailable. Test: `limiter_test.go` (50 parallel attempts → exactly 5 allowed). Commit 3f0a807c.
+- **`/auth/mfa/verify` renewed a suspended user's token** (`internal/auth/session.go` StampSessionMFA). Now runs the same lifecycle + generation check as `RefreshSession`. Test: `TestStampSessionMFA_RefusesSuspendedOrRevoked` (DB). Commit 3f0a807c.
+- **A profile edit counted as a device regression (M-9)** (`internal/posture/evaluate.go`). The hook now also requires `previous.ProfileRevision == profile.Revision`. Test: `regression_integration_test.go` (DB; fails without the fix). Commit 10f0cde5.
+- **MFA reset left step-ups in flight** (`graph/resolvers/mfa_helpers.go` → `mfa.Service.Reset`). `mfa.Service.OnReset` hooks; the client service drops the user's tickets and grants (`cancelUserStepUps`). `completeStepUp` also stamps a TOTP step-up's MFA only while a confirmed `user_totp` row exists, so a redemption racing the reset gets no MFA. Tests: `TestCancelUserStepUps`, `TestResetRunsHooks`, `TestCompleteReauth_TOTPAfterResetStampsNoMFA`. Commits e1d610ad, 46eef997.
+- **Console-policy cache could keep the old value for 15 s** (`internal/mfa/console.go`). Per-workspace version counter; `Set` writes the new value; a read caches only if no `Set` ran meanwhile. No test (race). Commit 498008e4.
+- **`zecurity-client auth` redeemed with a stale token** (`client/src/cmd/auth.rs`). Syncs and takes the current token after the browser step. Commit 19a22880.
+- **Deleted workspace got 503 from the MFA check** (`cmd/server/main.go`). `WorkspaceGuard` now runs before `requireConsoleMFA` on `/graphql` and the three REST routes. Commit 21affa60.
+- Client audit action constants reuse `mfa.ActionEnrolled/ActionLocked` (4f4e85e2).
+
+Second review (PR #209), fixed before merge:
+- A TOTP step-up racing an MFA reset is now refused as a whole (`completeStepUp` WHERE clause), so it neither clears the risk demand nor reports MFA it did not stamp.
+- `StampSessionMFA`: a DB error returns an error (503 at the handler), not ErrSessionNotFound (401).
+- `Verify` counts the attempt after loading and decrypting the record, still before the code check, so not-enrolled or outage results don't use up attempts.
+- `cancelUserStepUps` drops only TOTP grants; IdP and no-MFA step-ups stay valid.
+- `ConsolePolicy.Set` drops the cache entry rather than writing it, so two Sets that finish out of order can't leave the old value cached.
+Left as is: a suspended user's first enrolment code is accepted before the 401 (the authenticator is not usable while suspended); a real regression at the first evaluation after a profile edit is not signalled (accepted trade-off); DB tests skip without `*_TEST_DATABASE_URL` (repo convention; CI sets them).
+
+Not done (performance, follow-up): `GetACLSnapshot` runs `authRequiredCount` on every poll; `User.mfaEnrolled` is N+1 (batch with `EnrolledUsers`).
+Not in this diff, same pattern: the provider operator TOTP limiter (`internal/provider/ratelimit.go`, `totp_handlers.go`) is also check-then-count.

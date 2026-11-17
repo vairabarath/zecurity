@@ -15,7 +15,7 @@ import (
 // console?" (PENDING-06 M-6, workspaces.console_require_mfa).
 //
 // The answer is read on every console request, so it is cached in process
-// for a short time. The cache is dropped by Set, and the controller is a
+// for a short time. Set drops the cache entry, and the controller is a
 // single instance (D-02), so a change made here applies immediately; the TTL
 // only bounds a change made by something else (a DB restore, a test).
 type ConsolePolicy struct {
@@ -25,6 +25,9 @@ type ConsolePolicy struct {
 
 	mu    sync.Mutex
 	cache map[string]consoleEntry
+	// versions counts Set calls per workspace, so a read that started
+	// before a Set never caches its older answer.
+	versions map[string]uint64
 }
 
 type consoleEntry struct {
@@ -33,7 +36,7 @@ type consoleEntry struct {
 }
 
 func NewConsolePolicy(pool *pgxpool.Pool) *ConsolePolicy {
-	return &ConsolePolicy{pool: pool, ttl: 15 * time.Second, now: time.Now, cache: map[string]consoleEntry{}}
+	return &ConsolePolicy{pool: pool, ttl: 15 * time.Second, now: time.Now, cache: map[string]consoleEntry{}, versions: map[string]uint64{}}
 }
 
 // Required reports whether the workspace requires MFA on the console. An
@@ -44,6 +47,9 @@ func (p *ConsolePolicy) Required(ctx context.Context, workspaceID string) (bool,
 		p.mu.Unlock()
 		return e.required, nil
 	}
+	// A Set that commits while this read is in flight bumps the version,
+	// and then this (possibly older) value is not cached.
+	version := p.versions[workspaceID]
 	p.mu.Unlock()
 
 	var required bool
@@ -56,7 +62,9 @@ func (p *ConsolePolicy) Required(ctx context.Context, workspaceID string) (bool,
 		return false, fmt.Errorf("mfa: read console policy: %w", err)
 	}
 	p.mu.Lock()
-	p.cache[workspaceID] = consoleEntry{required: required, until: p.now().Add(p.ttl)}
+	if p.versions[workspaceID] == version {
+		p.cache[workspaceID] = consoleEntry{required: required, until: p.now().Add(p.ttl)}
+	}
 	p.mu.Unlock()
 	return required, nil
 }
@@ -72,6 +80,10 @@ func (p *ConsolePolicy) Set(ctx context.Context, workspaceID string, required bo
 		return false, fmt.Errorf("mfa: set console policy: %w", err)
 	}
 	p.mu.Lock()
+	// Drop rather than write: two Sets can reach here in the opposite order
+	// to their commits. The next read loads the committed value, and the
+	// version bump stops a read already in flight from caching its answer.
+	p.versions[workspaceID]++
 	delete(p.cache, workspaceID)
 	p.mu.Unlock()
 	return previous, nil

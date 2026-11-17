@@ -190,3 +190,46 @@ func TestIdPMFAAt(t *testing.T) {
 		t.Errorf("SessionAuthFromAMR stamped %v, want the IdP auth_time %v", got, old)
 	}
 }
+
+// Review fix: /auth/mfa/verify mints a new access token, so it must refuse a
+// suspended user or a revoked generation, the same as RefreshSession.
+func TestStampSessionMFA_RefusesSuspendedOrRevoked(t *testing.T) {
+	pool := schemaPool(t)
+	ctx := context.Background()
+	var ws, user string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO workspaces (slug, name, status, trust_domain) VALUES ('mfa', 'mfa', 'active', 'mfa.example') RETURNING id`).Scan(&ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO users (tenant_id, email, provider, provider_sub, role, status, identity_generation)
+		 VALUES ($1, 'u@example.test', 'test', 'sub-1', 'member', 'active', 1) RETURNING id`, ws).Scan(&user); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := observedService(t, func(c *Config) { c.Pool = pool })
+	access, _, _, err := svc.IssueSession(ctx, user, ws, "member", "u@example.test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := svc.VerifyAccessToken(access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.StampSessionMFA(ctx, claims, time.Now()); err != nil {
+		t.Fatalf("active user: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE users SET status = 'suspended' WHERE id = $1`, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.StampSessionMFA(ctx, claims, time.Now()); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("suspended user: err = %v, want ErrSessionNotFound", err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE users SET status = 'active', identity_generation = 2 WHERE id = $1`, user); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.StampSessionMFA(ctx, claims, time.Now()); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("revoked generation: err = %v, want ErrSessionNotFound", err)
+	}
+}

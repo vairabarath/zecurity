@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
 // jwtClaims is the payload for JWTs issued by this controller.
@@ -321,6 +325,25 @@ func (s *serviceImpl) StampSessionMFA(ctx context.Context, claims *AccessTokenCl
 	}
 	if !found {
 		return "", 0, ErrSessionNotFound
+	}
+	// This mints a new access token, so it must not outlive a suspension or
+	// a session revocation: the same lifecycle and generation check as
+	// RefreshSession. Skipped only without a pool (unit tests).
+	if s.cfg.Pool != nil {
+		var status string
+		var currentGen int
+		if err := s.cfg.Pool.QueryRow(ctx,
+			`SELECT status, identity_generation FROM users WHERE id = $1`, claims.UserID,
+		).Scan(&status, &currentGen); errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, ErrSessionNotFound
+		} else if err != nil {
+			// A database failure is not a signed-out user: the caller
+			// answers 503 and the user retries.
+			return "", 0, fmt.Errorf("stamp session mfa: read user: %w", err)
+		}
+		if identity.CheckLifecycle(status) != nil || identity.CheckGeneration(claims.Generation, currentGen) != nil {
+			return "", 0, ErrSessionNotFound
+		}
 	}
 	// The mark lives as long as the session can (its absolute cap).
 	ttl := s.refreshTTL()

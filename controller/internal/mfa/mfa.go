@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yourorg/ztna/controller/internal/totp"
@@ -72,12 +73,14 @@ type Repo interface {
 	Delete(ctx context.Context, workspaceID, userID string) (bool, error)
 }
 
-// Limiter counts wrong codes per user.
+// Limiter counts code attempts per user. An attempt is counted before its
+// code is checked, so parallel requests cannot all pass the limit before any
+// failure lands; a correct code resets the count.
 type Limiter interface {
-	Blocked(ctx context.Context, userID string) (blocked bool, retryAfter time.Duration, err error)
-	// RecordFailure counts one wrong code; tripped is true when this failure
-	// crossed the threshold (the start of a lockout).
-	RecordFailure(ctx context.Context, userID string) (tripped bool, err error)
+	// Attempt counts one attempt and returns the count in the current
+	// window. A count above FailMax is refused; retryAfter is then the time
+	// left in the window.
+	Attempt(ctx context.Context, userID string) (n int64, retryAfter time.Duration, err error)
 	Reset(ctx context.Context, userID string) error
 }
 
@@ -87,6 +90,18 @@ type Service struct {
 	sealer  Sealer
 	limiter Limiter
 	now     func() time.Time
+
+	resetMu    sync.Mutex
+	resetHooks []func(userID string)
+}
+
+// OnReset registers fn to run after a user's authenticator is reset, so
+// work in flight that the old authenticator vouched for (a finished but
+// unredeemed step-up) is withdrawn. Register before the service is used.
+func (s *Service) OnReset(fn func(userID string)) {
+	s.resetMu.Lock()
+	defer s.resetMu.Unlock()
+	s.resetHooks = append(s.resetHooks, fn)
 }
 
 func NewService(repo Repo, sealer Sealer, limiter Limiter) *Service {
@@ -148,13 +163,6 @@ type Failure struct {
 // enrolment. On refusal the error is ErrInvalidCode, ErrRateLimited,
 // ErrNotEnrolled or ErrUnavailable.
 func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Failure, error) {
-	blocked, retry, err := s.limiter.Blocked(ctx, userID)
-	if err != nil {
-		return Result{}, Failure{}, ErrUnavailable
-	}
-	if blocked {
-		return Result{}, Failure{RetryAfter: retry}, ErrRateLimited
-	}
 	rec, err := s.repo.Get(ctx, userID)
 	if err != nil {
 		return Result{}, Failure{}, ErrUnavailable
@@ -166,6 +174,16 @@ func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Fail
 	if err != nil {
 		return Result{}, Failure{}, ErrUnavailable
 	}
+	// Counted before the code is checked (parallel requests can't all slip
+	// under the limit), but after the lookups, so a missing authenticator or
+	// an outage doesn't use up the user's attempts.
+	attempt, retry, err := s.limiter.Attempt(ctx, userID)
+	if err != nil {
+		return Result{}, Failure{}, ErrUnavailable
+	}
+	if attempt > FailMax {
+		return Result{}, Failure{RetryAfter: retry}, ErrRateLimited
+	}
 	step, ok := totp.Match(secret, code, s.now(), rec.LastStep)
 	if ok {
 		// The UPDATE is the authority: it only succeeds for a newer step.
@@ -175,11 +193,9 @@ func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Fail
 		}
 	}
 	if !ok {
-		tripped, lerr := s.limiter.RecordFailure(ctx, userID)
-		if lerr != nil {
-			return Result{}, Failure{}, ErrUnavailable
-		}
-		return Result{}, Failure{Tripped: tripped}, ErrInvalidCode
+		// The attempt is already counted; the FailMax-th wrong code starts
+		// the lockout.
+		return Result{}, Failure{Tripped: attempt == FailMax}, ErrInvalidCode
 	}
 	// Best effort: a stale failure counter only shortens the next window.
 	_ = s.limiter.Reset(ctx, userID)
@@ -193,5 +209,11 @@ func (s *Service) Reset(ctx context.Context, workspaceID, userID string) (bool, 
 		return false, err
 	}
 	_ = s.limiter.Reset(ctx, userID)
+	s.resetMu.Lock()
+	hooks := append([]func(string){}, s.resetHooks...)
+	s.resetMu.Unlock()
+	for _, fn := range hooks {
+		fn(userID)
+	}
 	return existed, nil
 }

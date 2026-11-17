@@ -565,7 +565,9 @@ func main() {
 	// PENDING-06 M-6: Admin Console Security. The MFA endpoints are how a
 	// session gets its MFA mark, so they sit behind AuthMiddleware only;
 	// every other console route also requires the mark when the workspace
-	// asks for it.
+	// asks for it. The workspace guard runs first, so a missing or inactive
+	// workspace gets its 403 rather than "console security policy
+	// unavailable" (503).
 	requireConsoleMFA := middleware.RequireConsoleMFA(consoleMFA)
 	mfaHandlers := mfa.NewHandlers(mfaSvc, authSvc, consoleMFA, func(ctx context.Context, e audit.Entry) {
 		_ = audit.Record(context.WithoutCancel(ctx), db.Pool, e)
@@ -576,7 +578,7 @@ func main() {
 	mux.Handle("POST /auth/mfa/verify", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Verify))))
 
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		requireConsoleMFA(middleware.WorkspaceGuard(db.Pool)(gqlSrv)),
+		middleware.WorkspaceGuard(db.Pool)(requireConsoleMFA(gqlSrv)),
 	)
 	// The discovery middleware sits outside the public/protected routing, so both
 	// routes share one budget and a refusal becomes 429/503 on either.
@@ -587,9 +589,9 @@ func main() {
 	mux.HandleFunc("/relay.crl", relay.RelayCRLHandler(pkiService, relayStore))
 
 	// REST endpoints: invitations
-	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
-		middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
-			middleware.WorkspaceGuard(db.Pool)(
+	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+		requireConsoleMFA(
+			middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 				http.HandlerFunc(inviteHandler.Create),
 			),
 		)),
@@ -604,9 +606,9 @@ func main() {
 	mux.Handle("POST /api/invitations/{token}/accept", inviteAcceptRoute)
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
-	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
-		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
-			middleware.WorkspaceGuard(db.Pool)(
+	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+		requireConsoleMFA(
+			middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 			),
 		)),
@@ -614,9 +616,9 @@ func main() {
 	mux.Handle("/api/connectors/", connectorTokenRoute)
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
-	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(requireConsoleMFA(
-		middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
-			middleware.WorkspaceGuard(db.Pool)(
+	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+		requireConsoleMFA(
+			middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 				shieldSvc.TokenHandler(),
 			),
 		)),

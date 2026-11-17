@@ -116,6 +116,17 @@ pub async fn run() -> Result<()> {
         }
     };
 
+    // The browser step can outlast the token taken before it: sync again
+    // (the daemon refreshes an expired token, keeping the session) and use
+    // the current token. Fall back to the earlier one if that fails.
+    let _ = sync_count().await;
+    let token = send_ipc(&IpcRequest::GetToken)
+        .await
+        .ok()
+        .and_then(|r| r.token)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(token);
+
     let done = grpc
         .complete_reauth(CompleteReauthRequest {
             access_token: token,

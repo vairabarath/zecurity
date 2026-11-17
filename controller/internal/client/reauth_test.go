@@ -28,17 +28,11 @@ type memLimiter struct {
 	n  map[string]int
 }
 
-func (l *memLimiter) Blocked(_ context.Context, u string) (bool, time.Duration, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.n[u] >= mfa.FailMax, time.Minute, nil
-}
-
-func (l *memLimiter) RecordFailure(_ context.Context, u string) (bool, error) {
+func (l *memLimiter) Attempt(_ context.Context, u string) (int64, time.Duration, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.n[u]++
-	return l.n[u] == mfa.FailMax, nil
+	return int64(l.n[u]), time.Minute, nil
 }
 
 func (l *memLimiter) Reset(_ context.Context, u string) error {
@@ -494,6 +488,7 @@ func TestCompleteReauth_BoundToTheClient(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, `UPDATE client_devices SET session_auth_at = NOW() - INTERVAL '3 hours' WHERE id = $1`, f.deviceID); err != nil {
 		t.Fatal(err)
 	}
+	f.enrolTOTP()
 	stale := func() {
 		t.Helper()
 		if d := f.device(); time.Since(*d.authAt) < time.Hour {
@@ -574,5 +569,86 @@ func TestCompleteReauth_BoundToTheClient(t *testing.T) {
 	}
 	if n := f.audits(ActionStepUp); n != 1 {
 		t.Fatalf("step_up audit rows = %d, want 1", n)
+	}
+}
+
+// Review fix: an MFA reset withdraws the user's step-ups in flight, and only
+// that user's.
+func TestCancelUserStepUps(t *testing.T) {
+	exp := time.Now().Add(time.Minute)
+	putMFATicket("t-a", &mfaTicket{Reauth: reauthInfo{UserID: "user-a"}, ExpiresAt: exp})
+	putMFATicket("t-b", &mfaTicket{Reauth: reauthInfo{UserID: "user-b"}, ExpiresAt: exp})
+	putStepUpGrant("g-a", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, Method: "totp", ExpiresAt: exp})
+	putStepUpGrant("g-idp", &stepUpGrant{Reauth: reauthInfo{UserID: "user-a"}, WithMFA: true, Method: "idp", ExpiresAt: exp})
+	putStepUpGrant("g-b", &stepUpGrant{Reauth: reauthInfo{UserID: "user-b"}, WithMFA: true, Method: "totp", ExpiresAt: exp})
+	t.Cleanup(func() {
+		cancelUserStepUps("user-b")
+		takeStepUpGrant("g-idp", func(*stepUpGrant) bool { return true })
+	})
+
+	cancelUserStepUps("user-a")
+
+	if _, ok := getMFATicket("t-a"); ok {
+		t.Fatal("user-a ticket survived the reset")
+	}
+	if _, ok := takeStepUpGrant("g-a", func(*stepUpGrant) bool { return true }); ok {
+		t.Fatal("user-a grant survived the reset")
+	}
+	stepUpGrantMu.Lock()
+	_, idpKept := stepUpGrants["g-idp"]
+	stepUpGrantMu.Unlock()
+	if !idpKept {
+		t.Fatal("the reset dropped an IdP step-up")
+	}
+	if _, ok := getMFATicket("t-b"); !ok {
+		t.Fatal("user-b ticket was dropped")
+	}
+	if _, ok := takeStepUpGrant("g-b", func(*stepUpGrant) bool { return false }); ok {
+		t.Fatal("owns=false must not take the grant")
+	}
+	stepUpGrantMu.Lock()
+	_, ok := stepUpGrants["g-b"]
+	stepUpGrantMu.Unlock()
+	if !ok {
+		t.Fatal("user-b grant was dropped")
+	}
+}
+
+// enrolTOTP gives the fixture user a confirmed authenticator, as a TOTP
+// step-up has.
+func (f *stepUpFixture) enrolTOTP() {
+	f.t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO user_totp (user_id, workspace_id, secret_ciphertext, secret_nonce, enabled_at)
+		 VALUES ($1, $2, 'ct', 'nonce', NOW())`, f.userID, f.wsID); err != nil {
+		f.t.Fatalf("enrol totp: %v", err)
+	}
+}
+
+// Review fix: a TOTP step-up redeemed after the user's authenticator was
+// reset is refused as a whole: no MFA mark, and the risk demand stays.
+func TestCompleteReauth_TOTPAfterResetIsRefused(t *testing.T) {
+	f := newStepUpFixture(t)
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE client_devices SET risk_score = 60, reauth_required_at = NOW() WHERE id = $1`, f.deviceID); err != nil {
+		t.Fatal(err)
+	}
+	ra := f.reauth()
+	if f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
+		t.Fatal("TOTP step-up applied without an authenticator")
+	}
+	if d := f.device(); d.mfaAt != nil || d.reauthAt == nil || d.score != 60 {
+		t.Fatalf("refused step-up changed the device: %+v", d)
+	}
+	// An IdP step-up does not depend on the authenticator.
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "idp") {
+		t.Fatal("IdP step-up refused")
+	}
+	f.enrolTOTP()
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
+		t.Fatal("step-up not applied")
+	}
+	if d := f.device(); d.mfaAt == nil {
+		t.Fatalf("MFA not stamped with an authenticator: %+v", d)
 	}
 }

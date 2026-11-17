@@ -279,8 +279,12 @@ func (e *Evaluator) evaluateDevice(
 			policyChanged = true
 		}
 
-		// M-9: passing → failing on a profile that a policy requires.
-		if previousErr == nil && previous.Satisfied && !result.Satisfied && e.onRegression != nil && !regressed {
+		// M-9: passing → failing on a profile that a policy requires. Only a
+		// change in the device counts: a failure caused by an admin editing
+		// the profile (a new revision) is not a risk signal, or tightening
+		// one profile would raise the risk of every device it now fails.
+		if previousErr == nil && previous.Satisfied && !result.Satisfied &&
+			previous.ProfileRevision == profile.Revision && e.onRegression != nil && !regressed {
 			if used, err := profileInUse(ctx, e.store.pool, profile.ID); err == nil && used {
 				regressed = true
 			}
