@@ -479,3 +479,29 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 
 **Live test (run 2, 2026-11-17, reset DB, `main` 883fed1c, migration 061): PASS.** With the failover pool emptied during the hold-down the controller sent the tenant back to its primary at once (override 08:50:15, logged, not audited) while the primary stayed `recovering`; with both pools empty and then the primary back, traffic returned 3 s after the primary relay started (08:56:19 → 08:56:22) instead of after the 5-minute hold-down; a returning failover pool took the tenant back for the rest of the hold-down; failbacks after the full hold-down with 80/80 and 146/146 probes 200. F11-1's display and audit (`tenants_without_relay_path: 1`, "No relay path" card) passed in the same run. Details in `Pending-Live-Tests.md` → F11 (run 2).
 
+
+### Fix: slow connector failover after a relay dies (live observations O1 and O3, 2026-11-17)
+**Issue:** in F11 run 2 a relay was killed at 08:44:01 and traffic came back only at 08:46:24 (2 min 23 s), although the controller pushed a list with a live relay at 08:45:27.
+- **O1:** the connector noticed the dead relay only after ~60–80 s.
+- **O3:** after that it kept dialling the dead relay from its old list for ~60 s and ignored the new list.
+
+**Root cause (connector only, not relay pools):**
+- O1: a relay that dies without closing (crash, kill, host or network loss) is detected only by the QUIC idle timeout of the connector–relay connection, `relay_idle_timeout_secs`, default 60 s (`connector/src/config.rs`). QUIC uses the lower of the two peers' values, and the relay's is also 60 s.
+- O3: `bootstrap()` dialled with `connect()`, which waited for register-OK with no time limit. A QUIC handshake to a dead relay only fails at the idle timeout, so each dial to it took 60 s. Neither `bootstrap()` nor `failover()` watched the relay list, so a list pushed meanwhile was read only after the dial gave up. Matching run 2: failover tried the dead relay (5 s) and probed it (3 s), backed off, then `bootstrap()` dialled it again on the old list from ~08:45:23 until the handshake timed out ~08:46:23; the list pushed at 08:45:27 was then picked up at once and the connector registered with manoj-lt at 08:46:23.
+- Also found: a dial that timed out (failover's 5 s per-entry budget) dropped its `JoinHandle`, which only detaches the session task. It kept dialling in the background and could still register and take the attachment.
+
+**Fix applied** (`connector/src/relay_selector.rs`, `connector/src/config.rs`; branch `fix/connector-relay-failover-o1-o3`):
+- **Dial budget:** `connect_within()` waits at most `RELAY_DIAL_BUDGET` (10 s) for register-OK (failover's ranked entries keep 5 s). The dialling session is held by `AbortOnDrop`, so a timed-out or dropped dial aborts its task; a timed-out dial also clears an attachment it may have taken (`clear_active_if_relay`).
+- **A pushed list interrupts the dial:** in the selector loop, `bootstrap()` and `failover()` race `next_list_push()`. A new list adopts it, aborts the dial in flight, clears the attachment (`dial_interrupted`, event `DialInterruptedByList`) and bootstraps on the new list at once. The backoff is unchanged (`Disconnected { next_backoff }`), and failed bootstraps still back off, so list pushes can't cause a tight loop.
+- **Faster detection:** default `relay_idle_timeout_secs` 60 → **15 s** (keep-alive every 5 s, a third of it). Still configurable. No relay, controller or proto change; the relay keeps its own 60 s default, and the lower value wins.
+- `migrate()` is unchanged: it dials while the old relay still carries traffic.
+
+**Tests** (`relay_selector::migration_retry_tests`, all with a 30 s handshake timeout and a UDP "black hole" relay that never answers):
+- `a_list_pushed_during_a_dead_dial_is_dialled_at_once`: bootstrap stuck on the dead relay, list with B pushed → on B within 3 s. Mutant check: without the list race in the bootstrap arm it fails ("timed out after 3s waiting for: on B soon after the push").
+- `a_dial_that_never_registers_ends_at_its_budget`: 500 ms budget → None in < 3 s, session task gone, no attachment.
+- `a_dropped_dial_stops_its_session`: dropping the dial future stops the session task.
+- `after_the_active_relay_goes_the_pushed_list_is_used`: active relay closes with a dead relay left in the list; a pushed list with B is used well within the dial budget.
+
+Gates: `cargo test` 341 pass / 0 fail / 1 ignored (connector); `cargo clippy --all-targets` no new warnings; rustfmt clean on the changed files.
+
+**Expected live effect:** relay killed → connector notices in ~15 s (was 60–80 s) → a list pushed by the controller is dialled at once (was up to 60 s later). The controller's own eviction delay (~1.5–2.5 min before it publishes a list without the dead relay) is unchanged. Live check: rerun F11 step 2 and compare with run 2.
