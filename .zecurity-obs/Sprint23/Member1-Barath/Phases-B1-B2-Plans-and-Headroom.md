@@ -85,6 +85,49 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
 - A new signup gets the default plan.
 - Deleting an assigned plan and deleting the default plan are both refused.
 
+
+### B1 implementation record (branch `feat/sprint23-b1-plans`)
+- **Schema `062_tenant_plans.sql`:**
+  - `plan_limits_valid(jsonb)`: exactly the six keys, each null or a whole number. It's used by a CHECK, so the database itself refuses a plan with a missing, extra, negative or fractional limit.
+  - The `plans` table with a single-default partial unique index.
+  - Seeds with fixed ids: **Free** `00000000-0000-0000-0001-000000000001` (the default: 5 / 50 / 3 / 10 / 10 / 25) and **Legacy** `…0001-000000000002` (all null).
+  - `workspaces.plan_id` (FK `ON DELETE RESTRICT`, `NOT NULL`), backfilled to Legacy.
+  - The `workspaces_default_plan` `BEFORE INSERT` trigger, which fills the current default.
+  - A grant to `ztna_app`.
+- **`internal/plans`** (`plans.go`, no `net/http`):
+  - `Limits` with `Validate`.
+  - Store `Create` / `Update` / `Delete` / `SetDefault` / `Assign`: each takes row locks and runs its audit hook in the same transaction. `SetDefault` locks **every plan row in id order**. A lock set that depends on the changing default ("the default plus the target") deadlocked under concurrency; this was found in the full suite; `Delete` locks the plan row, and the FK backs the in-use rule.
+  - `Get`.
+  - **`EffectiveLimits(ctx, q, workspaceID)`**, the S3 interface: `nil` = unlimited; an unknown workspace or a missing key returns an error (fail closed).
+- **`internal/plans/handler.go`:** `POST /provider/plans`, `PATCH /provider/plans/{id}`, `DELETE /provider/plans/{id}`, `POST /provider/plans/{id}/default`, `PUT /provider/tenants/{id}/plan`.
+  - Error codes: `invalid_limits`, `invalid_name`, `invalid_description`, `plan_name_taken`, `plan_in_use`, `plan_is_default`, `plan_not_found`, `reason_required`, `reason_too_long`, `forbidden`, `not_found`.
+  - Audit rows carry before/after.
+- **Authz:** actions `plan.read`, `plan.create`, `plan.update`, `plan.delete`, `plan.set_default`, `tenant.plan.assign` (super-admin only through `decide()`'s existing prefix rule); `CanReadPlans`, `CanManagePlans`.
+- **Reads (`providerquery/plans.go`, `read_handlers.go`):** `GET /provider/plans` (default first, with a tenant count) and `GET /provider/plans/{id}`. Tenant detail gains `plan {id, name, limits, is_default}`: one more constant statement, so the statement-count pins moved from 5 to 6.
+- **Console:**
+  - a **Plans** page (super-admin nav entry under Fleet): list with the six limits and tenant count, Create, Edit, Make default, and Delete (disabled while tenants are on the plan);
+  - `PlanDialogs.tsx`, where each limit is a whole number or "Unlimited";
+  - a tenant detail **Plan** section with a Change plan dialog;
+  - `api/plans.ts`, `listPlans` / `getPlan`, `lib/plan-format.ts`;
+  - `api-surface.test.ts` with 5 writes and 2 reads added.
+- **Choices beyond the doc:**
+  - A **reason is also required** for plan update, delete and set-default, not only assignment, because each changes what tenants may create. Create needs none.
+  - Deleting the default plan is refused with `plan_is_default`, and the console hides Delete and Make default on the default plan.
+- **Tests:**
+  - `internal/plans` (8):
+    - seeds and the current-default trigger, including after switching the default and when an insert names a plan;
+    - limits validation, in the app and the DB CHECK;
+    - set-default, including **24 concurrent switches across 3 plans** → exactly one default and no deadlock (10/10 runs; the earlier lock set deadlocks reliably in this test);
+    - delete guards;
+    - assignment and edits taking effect at once in `EffectiveLimits`, which fails closed;
+    - parsing a missing key → error;
+    - HTTP: relay-ops 403 on every write with no state change and no audit; create/update/assign/delete/default with error codes and audit before/after.
+  - `internal/provider`: plan reads (super-admin list and get, relay-ops 403, tenant detail plan).
+  - `providerquery`: DTO pins for `TenantPlan`, `PlanSummary` and `plan` on `TenantDetail`.
+  - Console: `Plans.test.tsx` (6), `TenantDetailPlan.test.tsx` (4); the tenant-detail button pin includes Change plan.
+- **Gates (2026-11-17):** controller `go vet ./...` clean; full `go test ./...` 1,906 passed, 0 failed (2 known hard-coded skips). Provider console 621 tests, lint and build clean.
+- **Live check:** pending (reset DB on this branch; migration `062_`).
+
 ---
 
 ## B2 — Relay link capacity and bandwidth headroom (F5) — D-42

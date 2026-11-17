@@ -1,0 +1,32 @@
+import type { PlanSummary, TenantPlan } from '@/api/types'
+
+// Plan fixtures shared by the page tests (Sprint 23 B1, D-43).
+
+export const FREE_PLAN_ID = '00000000-0000-0000-0001-000000000001'
+export const LEGACY_PLAN_ID = '00000000-0000-0000-0001-000000000002'
+export const PRO_PLAN_ID = '00000000-0000-0000-0001-0000000000a1'
+
+export const FREE_LIMITS = { users: 5, resources: 50, remote_networks: 3, connectors: 10, shields: 10, client_devices: 25 }
+export const UNLIMITED = { users: null, resources: null, remote_networks: null, connectors: null, shields: null, client_devices: null }
+
+export const TENANT_FREE_PLAN: TenantPlan = { id: FREE_PLAN_ID, name: 'Free', limits: FREE_LIMITS, is_default: true }
+
+export function planSummary(over: Partial<PlanSummary> = {}): PlanSummary {
+  return {
+    id: FREE_PLAN_ID,
+    name: 'Free',
+    description: 'Default plan for new workspaces.',
+    limits: FREE_LIMITS,
+    is_default: true,
+    tenants: 3,
+    created_at: '2026-11-17T00:00:00Z',
+    updated_at: '2026-11-17T00:00:00Z',
+    ...over,
+  }
+}
+
+export const PLANS: PlanSummary[] = [
+  planSummary(),
+  planSummary({ id: LEGACY_PLAN_ID, name: 'Legacy', description: 'Unlimited compatibility plan.', limits: UNLIMITED, is_default: false, tenants: 0 }),
+  planSummary({ id: PRO_PLAN_ID, name: 'Pro', description: 'Paid', limits: { ...FREE_LIMITS, users: 50 }, is_default: false, tenants: 1 }),
+]

@@ -248,6 +248,8 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("GET /provider/relays/{id}", rp(http.HandlerFunc(h.GetRelay)))
 	mux.Handle("GET /provider/relay-pools", rp(http.HandlerFunc(h.ListRelayPools)))
 	mux.Handle("GET /provider/relay-pools/{id}", rp(http.HandlerFunc(h.GetRelayPool)))
+	mux.Handle("GET /provider/plans", rp(http.HandlerFunc(h.ListPlans)))
+	mux.Handle("GET /provider/plans/{id}", rp(http.HandlerFunc(h.GetPlan)))
 	mux.Handle("GET /provider/tenants", rp(http.HandlerFunc(h.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", rp(http.HandlerFunc(h.GetTenant)))
 	mux.Handle("GET /provider/audit", rp(http.HandlerFunc(h.QueryAudit)))
@@ -716,9 +718,9 @@ func TestTenantDetail_OneRepeatableReadSnapshot(t *testing.T) {
 	if e.db.begins != 1 || e.db.iso != pgx.RepeatableRead {
 		t.Fatalf("begins=%d iso=%v, want one REPEATABLE READ transaction", e.db.begins, e.db.iso)
 	}
-	// tenant+counts, networks, connectors, shields, relay pool (D-38).
-	if e.db.txReads != 5 || e.db.poolReads != 0 {
-		t.Fatalf("reads: %d in the transaction, %d on the pool; want 5 and 0", e.db.txReads, e.db.poolReads)
+	// tenant+counts, networks, connectors, shields, relay pool (D-38), plan (D-43).
+	if e.db.txReads != 6 || e.db.poolReads != 0 {
+		t.Fatalf("reads: %d in the transaction, %d on the pool; want 6 and 0", e.db.txReads, e.db.poolReads)
 	}
 }
 
