@@ -27,6 +27,7 @@ function tenant(over: Partial<TenantSummary>): TenantSummary {
       client_devices: { active: 30, re_enroll_required: 1, renew_pending: 0, revoked: 4 },
       policies: { resources: 12, groups: 4, access_rules: 9, resource_policies: 2 },
     },
+    suspension: null,
     ...over,
   }
 }

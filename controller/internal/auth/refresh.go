@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // RefreshHandler handles POST /auth/refresh — the browser (admin UI) path.
@@ -76,6 +77,11 @@ func (e *SessionError) Error() string { return e.Msg }
 
 // Dead reports whether the session is dead and the caller must sign in again.
 func (e *SessionError) Dead() bool { return e.Status == http.StatusUnauthorized }
+
+// ErrMsgWorkspaceSuspended is the refusal message of a refresh while the
+// tenant is suspended by the provider (Sprint 23 S1, D-45). The admin UI and
+// the client match it to show the suspended message.
+const ErrMsgWorkspaceSuspended = "workspace suspended"
 
 func dead(msg string) error { return &SessionError{Status: http.StatusUnauthorized, Msg: msg} }
 
@@ -175,6 +181,21 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
 			s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
 			return "", "", dead("session revoked")
+		}
+		// Sprint 23 S1 (D-45): no refresh while the tenant is suspended by
+		// the provider. The sessions were already revoked at suspension;
+		// this also refuses a refresh that races it. The token's tenant must
+		// be the user's. A lookup error refuses (fail closed).
+		if err := tenantstate.Check(ctx, s.cfg.Pool, tenantID); err != nil {
+			if tenantstate.IsSuspended(err) {
+				s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+				s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
+				return "", "", dead(ErrMsgWorkspaceSuspended)
+			}
+			if errors.Is(err, tenantstate.ErrNotFound) {
+				return "", "", dead("session revoked")
+			}
+			return "", "", serverError("server error")
 		}
 	}
 

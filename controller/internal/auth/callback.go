@@ -9,6 +9,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // CallbackHandler handles GET /auth/callback (registered public in main.go).
@@ -139,6 +140,21 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			return
 		}
 		core := principal.Core
+
+		// Sprint 23 S1 (D-45): a tenant suspended by the provider can't sign
+		// in. A lookup error refuses too (fail closed). Checked after the
+		// identity pipeline, so the workspace is known; nothing is issued.
+		if s.cfg.Pool != nil {
+			if err := tenantstate.Check(ctx, s.cfg.Pool, core.TenantID); err != nil {
+				if tenantstate.IsSuspended(err) {
+					log.Printf("auth callback: workspace %s is suspended: sign-in refused", core.TenantID)
+					fail("workspace_suspended")
+					return
+				}
+				failErr("server_error", conn.ID, err)
+				return
+			}
+		}
 
 		// Steps 8–9 — start a new login session: refresh token (httpOnly
 		// cookie) plus an access JWT stamped with the identity generation and

@@ -48,6 +48,7 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     shields: [],
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
+    suspension: null,
     ...over,
   }
 }

@@ -23,6 +23,8 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201, #213, #215 | ☑ 2026-11-17 (run 2: reset DB, `main` 883fed1c, migration 061; all scenarios incl. F11-1 and F11-2 PASS with traffic probes) |
 | F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | #202, #210 | ☑ 2026-11-17 (step 1 first failed on F10-1; connector fix #210 retested live against the same race, no restart) |
 
+| F7 (S1) | Tenant suspend / resume (D-45, migration `064_tenant_suspension.sql`) | not yet (local branch `feat/s1-tenant-suspension`) | ☐ |
+
 Add each Must-have item here as it merges.
 
 ## F8: Tenant detail policy counts
@@ -143,6 +145,16 @@ Needs the new relay build on every relay of the residency pool.
    - When the path is restored, service returns at the next heartbeat.
 6. **Restart:** restart the relay during an outage; the persisted policy keeps its original lease expiry. Restart with no state file: workspace peers are refused until the first heartbeat.
 7. **Mixed versions:** an old relay build in R makes the pool read **Residency (not enforced)** and the relay "Not supported".
+
+## F7 (S1): Tenant suspend / resume (migration `064_tenant_suspension.sql`)
+Reset DB (schema change). A lab tenant with a connector, a shield, a protected resource, an enrolled client and traffic probes running; a residency pool assigned to it for the allowlist step.
+1. Suspend in the console (reason + typed slug). **Pass:** one `tenant.suspend` provider audit row with before/after and the reason; tenant detail and list show "Suspended"; `workspaces.status` is still `active`.
+2. **Pass (refusals):** admin UI sign-in lands on "suspended by the provider"; an open admin tab is sent there on its next request (403 `TENANT_SUSPENDED`); `/auth/refresh` answers 401 `workspace suspended`; client `login` prints the suspended message; the client's refresh fails.
+3. **Pass (traffic):** client probes stop within seconds (deny-all ACL push, device revoked by the session end).
+4. **Pass (D-08):** the connector and shield stay connected (control stream up, heartbeats continue); the connector log shows an ACL snapshot with no entries; no re-enrollment.
+5. **Pass:** a new connector enrollment (fresh token) is refused with the suspended message.
+6. **Pass (relays):** the tenant's connectors get an empty relay list; the residency relay's policy version goes up and its allowlist no longer lists the workspace.
+7. Resume (reason). **Pass:** `tenant.resume` audit row; traffic returns after the user signs in again (new device), with no connector or shield re-enrollment; the relay list and allowlist come back.
 
 ## Relay pools findings (live run 2026-11-17)
 - **F10-1 (defect, blocks F10): connector does not recover from a refused migration.** Moving a tenant into a residency pool, the controller pushes the new relay list at once, but the residency relay learns that the workspace is allowed only at its next heartbeat. The connector dialled `manoj-lt` at 04:52:07; the relay refused it ("refusing Relay peer: workspace policy") and applied policy v23 (workspace allowed) at 04:52:15. The connector's `migrate()` logged "Migration could not find a usable target; remaining on current relay" and never retried: it stayed on `local-a` (no longer listed; its placement rejected), with no relay path for 10+ minutes, through the 300 s background reprobe (the unlisted active relay keeps its old score, so no "meaningful improvement"). Reproduced twice more (05:04:15, ~05:12:50). Evidence: scratchpad `lt/evidence-f10-step1/` and on the lab host `~/zecurity-lt/connector-f10-*.log`, `relay-at-repro2.log`. Fix: separate connector PR (bounded retry while the active relay is unlisted; unlisted active relay never wins a score comparison); acceptance = reproduce the race with the connector left running and see it recover with no restart. **Fixed in PR #210 (merged 2026-11-17), retested live:** same race at 05:40:19, refused at :19/:24/:34, relay allowed the workspace at 05:40:49, connector registered on its own at 05:40:54 (no restart); details in `Relay-Pools-Implementation-Plan.md` → Post-PR fixes. F10 closed.

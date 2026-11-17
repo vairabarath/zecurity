@@ -531,7 +531,7 @@ func jsonKeys(t *testing.T, v any) []string {
 // The DTOs are the allowed response surface; any new field must be a
 // deliberate change to these lists.
 func TestTenantDTOSurface(t *testing.T) {
-	summary := []string{"ca_not_after", "counts", "created_at", "id", "name", "slug", "status", "trust_domain"}
+	summary := []string{"ca_not_after", "counts", "created_at", "id", "name", "slug", "status", "suspension", "trust_domain"}
 	detail := append(append([]string{}, summary...), "connectors", "connectors_truncated", "remote_networks",
 		"relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
 	sort.Strings(detail)
@@ -548,6 +548,7 @@ func TestTenantDTOSurface(t *testing.T) {
 		"UserCounts":          {UserCounts{}, []string{"active", "deleted", "locked", "suspended"}},
 		"DeviceCounts":        {DeviceCounts{}, []string{"active", "re_enroll_required", "renew_pending", "revoked"}},
 		"TenantRemoteNetwork": {TenantRemoteNetwork{}, []string{"id", "name", "status"}},
+		"TenantSuspension":    {TenantSuspension{}, []string{"by", "reason", "suspended_at"}},
 		"TenantRelayPool": {TenantRelayPool{}, []string{"eligible_relays", "failed_over_since", "failover", "id", "name",
 			"previous", "region", "relay_path", "residency", "using_failover"}},
 		"TenantFailoverPool":      {TenantFailoverPool{}, []string{"eligible_relays", "id", "name", "region", "residency"}},

@@ -78,6 +78,28 @@ Order: **S1 → S3** (after Barath's **B1** is merged) **→ S4** (after S1). S2
 - **Authz and audit.**
 - **Mutation checks:** remove the check from one path → its test fails; refuse agents → the D-08 test fails.
 
+### Implementation status (2026-11-17)
+Built on the local branch `feat/s1-tenant-suspension` (from `main` 7ed6faec). **Not committed**: commit, push, PR and merge wait for the product owner's go. Live check not run yet.
+- Schema `064_tenant_suspension.sql` (with a CHECK that the three columns are set and cleared together).
+- `internal/tenantstate`: `Check` / `CheckForShare` (share lock for enrollment) and the SQL `NotSuspended` / `Suspended`; lookup error = ineligible.
+- Refused while suspended:
+  - admin sign-in (`auth/callback.go`, redirect `?error=workspace_suspended`);
+  - refresh, admin and client (`auth/refresh.go`, 401 `workspace suspended`, refresh sessions deleted);
+  - client sign-in (`client.TokenExchange`, before anything is written);
+  - device enrollment and renewal (`authorizeDeviceIssuance` + the atomic `deviceOwnerActiveSQL`);
+  - connector and shield enrollment (`CheckForShare` in the enrollment transaction, next to the unchanged status check);
+  - every tenant console route (`middleware.TenantEligibilityGuard` next to `WorkspaceGuard`, wired once in `main.go` through `workspaceGuard`; 403 `TENANT_SUSPENDED`).
+- Suspend (`internal/tenantlifecycle`): one transaction for the columns, the users' `identity_generation` bump, the pool policy versions (`relay.BumpWorkspacePoolPoliciesTx`) and the audit row. After commit: `InvalidateUserSessions` per user (refresh sessions + client devices, PENDING-09 C-1), `NotifyPolicyChange` (deny-all), relay lists published.
+- Deny-all: `policy.CompileACLSnapshot` returns `DenyAllSnapshot` for a suspended tenant. Relays: an empty list on both delivery paths (`relaylist.NoPool`), and the tenant is left out of `RelayWorkspacePolicy`.
+- Provider API `POST /provider/tenants/{id}/suspend|resume`, actions `tenant.suspend` / `tenant.resume`; `suspension` on the tenant list and detail DTO (`TestTenantDTOSurface` updated).
+- Provider console: Suspension section, Suspend dialog (reason + typed slug), Resume dialog (reason), "Suspended" badge on the list and detail, `api-surface.test.ts`.
+- Admin UI: `lib/suspension.ts`; login message `workspace_suspended`; the error link and the silent refresh send a suspended session there. Client: a clear message at `login`, and a warning on a suspended refresh.
+- Gates: controller build, vet and full `go test -count=1 ./...` with the DB env (only the two known skips); provider console test (619), lint, build; admin test (348) and build (lint has 17 problems that are already on `main`, none in S1 files); client `cargo test --lib` 384 (built in the dev-disk container).
+- Mutation checks: all 18 caught: every refused path, the console guard and its wiring, deny-all, both relay lists, the allowlist, the slug check, session revocation, relay-ops authz, and D-08 for connector renewal and shield heartbeat.
+- Open for review:
+  - SCIM provisioning isn't refused while suspended. D-45 lists config mutations next to `WorkspaceGuard`, and SCIM has its own auth. Product-owner call.
+  - The guard refuses reads as well as mutations (the admin sessions are revoked anyway).
+
 ### Live check
 Suspend a lab tenant:
 - admin UI and client login refused, refresh refused;

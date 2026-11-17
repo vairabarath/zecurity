@@ -288,10 +288,64 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("refreshed token role = %q, want devops (current users.role)", refreshedClaims.Role)
 	}
 
+	// Sprint 23 S1 (D-45): while the tenant is suspended by the provider,
+	// refresh and sign-in are refused with the suspended message; after
+	// resume, sign-in works again. The suspension is written directly so
+	// these checks test the eligibility check alone (no generation bump).
+	var rotated *http.Cookie
+	for _, c := range refreshRec.Result().Cookies() {
+		if c.Name == "refresh_token" {
+			rotated = c
+		}
+	}
+	if rotated == nil {
+		t.Fatal("refresh did not rotate the cookie")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NOW(), suspended_by = 'op@provider.test', suspension_reason = 'test' WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	suspendedRefresh := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	suspendedRefresh.AddCookie(rotated)
+	suspendedRefresh.Header.Set("Authorization", "Bearer "+refreshed["access_token"])
+	suspendedRec := httptest.NewRecorder()
+	svc.RefreshHandler().ServeHTTP(suspendedRec, suspendedRefresh)
+	if suspendedRec.Code != http.StatusUnauthorized || !strings.Contains(suspendedRec.Body.String(), ErrMsgWorkspaceSuspended) {
+		t.Fatalf("refresh while suspended: %d %s, want 401 %q", suspendedRec.Code, suspendedRec.Body.String(), ErrMsgWorkspaceSuspended)
+	}
+	if _, found, _ := svc.redisClient.GetRefreshSession(ctx, userID, sidOf(t, rotated.Value)); found {
+		t.Fatal("refresh session kept after a suspended refresh")
+	}
+	if loc := runAuthCallbackLocation(t, svc, "code-suspended"); loc != "/login?error=workspace_suspended" {
+		t.Fatalf("sign-in while suspended redirected to %q, want /login?error=workspace_suspended", loc)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if tok, _ := runAuthRoundTrip(t, svc, "code-resumed"); tok == "" {
+		t.Fatal("sign-in after resume issued no token")
+	}
+
 	// Nothing outside this run's keys was disturbed.
 	if v, err := valkeyClient.Get(ctx, sentinel).Result(); err != nil || v != "keep" {
 		t.Fatalf("sentinel key %s was removed or changed (value=%q, err=%v)", sentinel, v, err)
 	}
+}
+
+// runAuthCallbackLocation runs a login up to the callback and returns where
+// it redirects, without requiring success.
+func runAuthCallbackLocation(t *testing.T, svc *serviceImpl, code string) string {
+	t.Helper()
+	initPayload, err := svc.InitiateAuth(context.Background(), "google", nil, nil)
+	if err != nil {
+		t.Fatalf("InitiateAuth: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code="+code+"&state="+url.QueryEscape(initPayload.State), nil)
+	rec := httptest.NewRecorder()
+	svc.CallbackHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback status %d", rec.Code)
+	}
+	return rec.Header().Get("Location")
 }
 
 func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *http.Cookie) {

@@ -19,6 +19,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 	"github.com/yourorg/ztna/controller/internal/relay/relaylist"
 	"github.com/yourorg/ztna/controller/internal/relay/relaypool"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 var ErrRelayNotFound = errors.New("relay not found")
@@ -819,9 +820,13 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 	// primary is exhausted, otherwise its primary; F11-2: never an empty
 	// failover pool while the primary has an eligible relay. overridden marks
 	// a workspace that F11-2 sent back to its primary during the hold-down.
+	//
+	// Sprint 23 S1 (D-45): a suspended workspace gets no pool (an empty list,
+	// never the default pool); resume gives its pool back.
 	wsRows, err := s.pool.Query(ctx, `
 		SELECT w.id::text, eff::text,
-		       (w.relay_failover_pool_id IS NOT NULL AND p.exhausted_at IS NOT NULL AND eff = w.relay_pool_id)
+		       (w.relay_failover_pool_id IS NOT NULL AND p.exhausted_at IS NOT NULL AND eff = w.relay_pool_id),
+		       `+tenantstate.Suspended("w")+`
 		  FROM workspaces w
 		  JOIN relay_pools p ON p.id = w.relay_pool_id
 		 CROSS JOIN LATERAL (SELECT `+relaypool.EffectivePool("p")+` AS eff) e`)
@@ -833,9 +838,13 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 	overridden := map[string]bool{}
 	for wsRows.Next() {
 		var wsID, poolID string
-		var over bool
-		if err := wsRows.Scan(&wsID, &poolID, &over); err != nil {
+		var over, suspended bool
+		if err := wsRows.Scan(&wsID, &poolID, &over, &suspended); err != nil {
 			return nil, fmt.Errorf("scan workspace relay pool: %w", err)
+		}
+		if suspended {
+			workspacePools[wsID] = relaylist.NoPool
+			continue
 		}
 		workspacePools[wsID] = poolID
 		if over {
@@ -859,8 +868,18 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 
 // BuildLabelledRelayListForWorkspace builds one workspace's list (the
 // connect-time push): the eligible relays of its effective pool (D-39). An unknown workspace
-// gets the default pool's list, where a new workspace starts.
+// gets the default pool's list, where a new workspace starts. A suspended
+// workspace gets an empty list (Sprint 23 S1, D-45); a lookup error is an
+// error (the caller sends nothing).
 func (s *Store) BuildLabelledRelayListForWorkspace(ctx context.Context, workspaceID string) (*connectorpb.LabelledRelayList, error) {
+	if err := tenantstate.Check(ctx, s.pool, workspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return newLabelledRelayList(nil), nil
+		}
+		if !errors.Is(err, tenantstate.ErrNotFound) {
+			return nil, fmt.Errorf("list labelled relays for workspace: %w", err)
+		}
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+labelledRelayColumns+`
 		  FROM relays

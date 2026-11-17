@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // Relay workspace policy (Decision Record D-40; relay-pools PR 3).
@@ -51,6 +53,26 @@ func bumpPolicyVersions(ctx context.Context, tx pgx.Tx, poolIDs ...string) error
 	return nil
 }
 
+// BumpWorkspacePoolPoliciesTx gives every pool the workspace is assigned to
+// (primary, failover, previous) a new policy version, in the caller's
+// transaction. Suspend and resume (Sprint 23 S1, D-45) call it with the
+// workspace row locked, so residency relays drop or re-add the workspace at
+// their next heartbeat (D-40).
+func BumpWorkspacePoolPoliciesTx(ctx context.Context, tx pgx.Tx, workspaceID string) error {
+	var a PoolAssignment
+	err := tx.QueryRow(ctx, `
+		SELECT relay_pool_id::text, relay_failover_pool_id::text, relay_pool_previous_id::text, relay_pool_previous_until
+		  FROM workspaces WHERE id = $1`, workspaceID).
+		Scan(&a.PoolID, &a.FailoverPoolID, &a.PreviousPoolID, &a.PreviousPoolUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrWorkspaceNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read workspace pools: %w", err)
+	}
+	return bumpPolicyVersions(ctx, tx, assignmentPools(a)...)
+}
+
 // assignmentPools lists every pool an assignment authorizes.
 func assignmentPools(a PoolAssignment) []string {
 	out := []string{a.PoolID}
@@ -91,9 +113,10 @@ func (s *Store) RelayWorkspacePolicy(ctx context.Context, relayID string) (Works
 		return p, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text FROM workspaces
-		 WHERE relay_pool_id = $1 OR relay_failover_pool_id = $1 OR relay_pool_previous_id = $1
-		 ORDER BY id`, poolID)
+		SELECT w.id::text FROM workspaces w
+		 WHERE (w.relay_pool_id = $1 OR w.relay_failover_pool_id = $1 OR w.relay_pool_previous_id = $1)
+		   AND `+tenantstate.NotSuspended("w")+`
+		 ORDER BY w.id`, poolID)
 	if err != nil {
 		return WorkspacePolicy{}, fmt.Errorf("read relay policy workspaces: %w", err)
 	}

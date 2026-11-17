@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 const defaultRelayPort = "9093"
@@ -35,6 +36,18 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		return nil, fmt.Errorf("compile acl: invalid workspace id: %w", err)
 	}
 	now := time.Now()
+
+	// Sprint 23 S1 (D-45, D-08 preserved): a tenant suspended by the
+	// provider gets a deny-all snapshot. Its connectors and shields stay
+	// connected and keep their certificates; they just allow nothing, and
+	// cut the live sessions the new snapshot no longer allows. A lookup
+	// error returns no snapshot (callers default-deny).
+	if err := tenantstate.Check(ctx, store.pool, workspaceID); err != nil {
+		if !tenantstate.IsSuspended(err) {
+			return nil, fmt.Errorf("compile acl: workspace state: %w", err)
+		}
+		return &CompiledACL{Snapshot: DenyAllSnapshot(workspaceID, notifier.Version(workspaceID), now)}, nil
+	}
 
 	rules, err := store.ListEnabledRulesWithResources(ctx, workspaceID)
 	if err != nil {
@@ -326,6 +339,19 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		Snapshot:   snapshot,
 		ValidUntil: snapshotValidUntil,
 	}, nil
+}
+
+// DenyAllSnapshot is the snapshot of a suspended tenant (D-45): no entries,
+// no remote networks, no relay. Connectors allow nothing with it (a missing
+// entry is a deny) and end the sessions it no longer allows.
+func DenyAllSnapshot(workspaceID string, version uint64, now time.Time) *clientv1.ACLSnapshot {
+	return &clientv1.ACLSnapshot{
+		WorkspaceId:    workspaceID,
+		Version:        version,
+		GeneratedAt:    now.Unix(),
+		Entries:        []*clientv1.ACLEntry{},
+		RemoteNetworks: []*clientv1.ACLRemoteNetwork{},
+	}
 }
 
 // requiredProfiles maps each resource id to the device profiles its policy

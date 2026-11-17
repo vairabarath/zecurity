@@ -9,6 +9,7 @@ import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { StatusBadge } from '@/components/StatusBadge'
+import { SuspendedBadge } from '@/components/TenantSuspension'
 import { TenantAvatar } from '@/components/TenantAvatar'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -114,7 +115,11 @@ export function Tenants() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <StatusBadge status={t.status} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusBadge status={t.status} />
+                        {/* Sprint 23 S1 (D-45): status stays "active" while suspended. */}
+                        {t.suspension && <SuspendedBadge />}
+                      </div>
                     </TableCell>
                     <TableCell className="min-w-28 max-w-36 text-[13px] leading-snug text-subtle-foreground">
                       <WrappingSummary counts={t.counts.connectors} />

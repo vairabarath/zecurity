@@ -109,6 +109,9 @@ export const ErrorCode = {
   failoverSameAsPrimary: 'failover_same_as_primary',
   failoverRegionMismatch: 'failover_region_mismatch',
   failoverNeedsResidency: 'failover_needs_residency',
+  // tenant suspend/resume (Sprint 23 S1, D-45)
+  alreadySuspended: 'already_suspended',
+  notSuspended: 'not_suspended',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -431,6 +434,18 @@ export interface TenantSummary {
   created_at: string
   ca_not_after: string | null
   counts: TenantCounts
+  /**
+   * The provider suspension (Sprint 23 S1, D-45), or null. `status` stays
+   * "active" while a tenant is suspended; this is what says it is.
+   */
+  suspension: TenantSuspension | null
+}
+
+/** A tenant's provider suspension: when, by which operator (email), why. */
+export interface TenantSuspension {
+  suspended_at: string
+  by: string
+  reason: string
 }
 
 export interface TenantRemoteNetwork {
