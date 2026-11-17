@@ -30,11 +30,14 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
 - **Schema `062_tenant_plans.sql`:**
   - **`plans` table:**
     - `id`, `name` (unique), `description`;
-    - `limits JSONB`: keys `connectors`, `shields`, `users`, `client_devices`, each a non-negative integer; an absent key means unlimited;
+    - `limits JSONB` with **all six keys** of D-47 (`users`, `resources`, `remote_networks`, `connectors`, `shields`, `client_devices`), each a non-negative integer or an **explicit `null` = unlimited**. A CHECK (or a validation function) rejects a plan without all six keys: **a missing key never means unlimited**;
     - `is_default`: exactly one row, enforced by a partial unique index;
     - `created_at`, `updated_at`.
-  - Seed one default plan, `standard`, with no limits.
-  - **`workspaces.plan_id`:** FK, `NOT NULL`, default = the seeded default plan. Existing rows get the default.
+  - **Seeds:**
+    - **Free**, the default: users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25;
+    - **Legacy**: all six keys `null`, operator-assigned only, never advertised.
+  - **`workspaces.plan_id`:** FK, `NOT NULL`, **no column default**. A column default is a fixed value and can't follow a changed default plan.
+  - Backfill any existing workspaces to **Legacy**. In practice there are none: the DB is recreated after every schema change, so this is only a safety net.
   - Grants for the runtime role, as in `053_` / `059_`.
 - **Controller** (new `internal/plans` package, or under `internal/provider`; `providerquery` stays free of `net/http`, D-04):
   - **Reads:** `GET /provider/plans`, `GET /provider/plans/{id}`. Super-admin only (plans are commercial/tenant data, D-06).
@@ -49,11 +52,15 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
     - every write is audited with before/after (F17); assignment carries its reason.
   - Error codes: `invalid_limits`, `plan_name_taken`, `plan_not_found`.
   - **Shared interface for S3:** `EffectiveLimits(ctx, q, workspaceID) (map[string]*int64, error)`.
-    - It returns plan defaults, with a hook for S3's per-tenant overrides.
+    - It returns the plan's six values, with a hook for S3's per-tenant overrides.
     - Agree the signature with Sathiya on day 1.
-    - Missing key or nil means unlimited.
+    - `nil` = explicitly unlimited; **a missing key returns an error** (fail closed).
+  - **Every workspace insert sets `plan_id` explicitly** to the **current** default (`SELECT id FROM plans WHERE is_default`), in the same transaction:
+    - `internal/bootstrap/bootstrap.go` (self-signup);
+    - S2's provider create;
+    - test helpers that insert workspaces.
   - Tenant detail gains `plan {id, name, limits}`; update `TestTenantDTOSurface`.
-  - New workspaces (self-signup and S2) get the default plan: the column default does it, and a test asserts it.
+  - A test asserts that new workspaces (self-signup and S2) get the **current** default, including after the default is switched.
 - **Console:**
   - a **Plans** page: list, create, edit limits, set default, and delete with the refusals explained;
   - a tenant detail **Plan** section with a Change plan dialog (reason required);
@@ -66,13 +73,17 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
   - delete is refused while the plan is the default or assigned;
   - assignment is audited with before/after and takes effect immediately in `EffectiveLimits`;
   - a new workspace gets the default plan;
-  - limits validation: known keys only, non-negative integers.
+  - the seeded Free and Legacy values;
+  - limits validation: all six keys required, known keys only, non-negative integers or `null`;
+  - `EffectiveLimits` fails closed on a missing key.
 - **Authz:** every plan action is super-admin only; relay-ops get 403.
 - **Console:** the Plans page, the change-plan dialog (reason required), and the api-surface entries.
 - **Mutation checks:** the plan-in-use guard and the single-default invariant.
 
 ### Live check
-- Create two plans and set one as the default.
+- Check the seeded **Free** (default) and **Legacy** plans and their values.
+- Create a plan and set it as the default; a new signup gets it. Switch back to Free.
+- A plan without all six keys is refused.
 - Assign a plan to a tenant (with a reason): tenant detail shows the plan and its limits, and the audit row has before/after.
 - A new signup gets the default plan.
 - Deleting an assigned plan and deleting the default plan are both refused.
