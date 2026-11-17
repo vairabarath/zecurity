@@ -28,17 +28,11 @@ type memLimiter struct {
 	n  map[string]int
 }
 
-func (l *memLimiter) Blocked(_ context.Context, u string) (bool, time.Duration, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.n[u] >= mfa.FailMax, time.Minute, nil
-}
-
-func (l *memLimiter) RecordFailure(_ context.Context, u string) (bool, error) {
+func (l *memLimiter) Attempt(_ context.Context, u string) (int64, time.Duration, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.n[u]++
-	return l.n[u] == mfa.FailMax, nil
+	return int64(l.n[u]), time.Minute, nil
 }
 
 func (l *memLimiter) Reset(_ context.Context, u string) error {

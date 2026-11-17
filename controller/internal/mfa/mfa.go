@@ -72,12 +72,14 @@ type Repo interface {
 	Delete(ctx context.Context, workspaceID, userID string) (bool, error)
 }
 
-// Limiter counts wrong codes per user.
+// Limiter counts code attempts per user. An attempt is counted before its
+// code is checked, so parallel requests cannot all pass the limit before any
+// failure lands; a correct code resets the count.
 type Limiter interface {
-	Blocked(ctx context.Context, userID string) (blocked bool, retryAfter time.Duration, err error)
-	// RecordFailure counts one wrong code; tripped is true when this failure
-	// crossed the threshold (the start of a lockout).
-	RecordFailure(ctx context.Context, userID string) (tripped bool, err error)
+	// Attempt counts one attempt and returns the count in the current
+	// window. A count above FailMax is refused; retryAfter is then the time
+	// left in the window.
+	Attempt(ctx context.Context, userID string) (n int64, retryAfter time.Duration, err error)
 	Reset(ctx context.Context, userID string) error
 }
 
@@ -148,11 +150,11 @@ type Failure struct {
 // enrolment. On refusal the error is ErrInvalidCode, ErrRateLimited,
 // ErrNotEnrolled or ErrUnavailable.
 func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Failure, error) {
-	blocked, retry, err := s.limiter.Blocked(ctx, userID)
+	attempt, retry, err := s.limiter.Attempt(ctx, userID)
 	if err != nil {
 		return Result{}, Failure{}, ErrUnavailable
 	}
-	if blocked {
+	if attempt > FailMax {
 		return Result{}, Failure{RetryAfter: retry}, ErrRateLimited
 	}
 	rec, err := s.repo.Get(ctx, userID)
@@ -175,11 +177,9 @@ func (s *Service) Verify(ctx context.Context, userID, code string) (Result, Fail
 		}
 	}
 	if !ok {
-		tripped, lerr := s.limiter.RecordFailure(ctx, userID)
-		if lerr != nil {
-			return Result{}, Failure{}, ErrUnavailable
-		}
-		return Result{}, Failure{Tripped: tripped}, ErrInvalidCode
+		// The attempt is already counted; the FailMax-th wrong code starts
+		// the lockout.
+		return Result{}, Failure{Tripped: attempt == FailMax}, ErrInvalidCode
 	}
 	// Best effort: a stale failure counter only shortens the next window.
 	_ = s.limiter.Reset(ctx, userID)

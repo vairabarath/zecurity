@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
 // jwtClaims is the payload for JWTs issued by this controller.
@@ -321,6 +323,21 @@ func (s *serviceImpl) StampSessionMFA(ctx context.Context, claims *AccessTokenCl
 	}
 	if !found {
 		return "", 0, ErrSessionNotFound
+	}
+	// This mints a new access token, so it must not outlive a suspension or
+	// a session revocation: the same lifecycle and generation check as
+	// RefreshSession. Skipped only without a pool (unit tests).
+	if s.cfg.Pool != nil {
+		var status string
+		var currentGen int
+		if err := s.cfg.Pool.QueryRow(ctx,
+			`SELECT status, identity_generation FROM users WHERE id = $1`, claims.UserID,
+		).Scan(&status, &currentGen); err != nil {
+			return "", 0, ErrSessionNotFound
+		}
+		if identity.CheckLifecycle(status) != nil || identity.CheckGeneration(claims.Generation, currentGen) != nil {
+			return "", 0, ErrSessionNotFound
+		}
 	}
 	// The mark lives as long as the session can (its absolute cap).
 	ttl := s.refreshTTL()

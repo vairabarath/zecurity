@@ -21,11 +21,10 @@ func (dummySealer) DecryptSecret(string, string, string) ([]byte, error) { retur
 
 type dummyLimiter struct{}
 
-func (dummyLimiter) Blocked(context.Context, string) (bool, time.Duration, error) {
-	return false, 0, nil
+func (dummyLimiter) Attempt(context.Context, string) (int64, time.Duration, error) {
+	return 1, 0, nil
 }
-func (dummyLimiter) RecordFailure(context.Context, string) (bool, error) { return false, nil }
-func (dummyLimiter) Reset(context.Context, string) error                { return nil }
+func (dummyLimiter) Reset(context.Context, string) error { return nil }
 
 type fakeAuthServiceForResolver struct {
 	auth.Service
