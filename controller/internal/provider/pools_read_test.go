@@ -221,6 +221,44 @@ func TestRelayPoolReads_EmptyPoolHasNoRelayPath(t *testing.T) {
 	}
 }
 
+// F11-2: the tenant read uses the same effective-pool rule as the relay
+// lists. A recovering primary with an eligible relay and an empty failover
+// pool: the tenant is back on its primary (relay_path primary, not using
+// failover), although the pool still reads "recovering".
+func TestRelayPoolReads_EmptyFailoverOverride(t *testing.T) {
+	e := newReadEnv(t)
+	primary := scalar[string](t, e.pool, `INSERT INTO relay_pools (name) VALUES ('primary') RETURNING id::text`)
+	fo := scalar[string](t, e.pool, `INSERT INTO relay_pools (name) VALUES ('backup') RETURNING id::text`)
+	exec(t, e.pool, `INSERT INTO relays (name, status, pool_id, capacity_label, public_addr)
+	                  VALUES ('p-1', 'active', $1, 'high', '198.51.100.8:9093')`, primary)
+	exec(t, e.pool, `UPDATE workspaces SET relay_pool_id = $2, relay_failover_pool_id = $3 WHERE id = $1`, e.tenantID, primary, fo)
+	exec(t, e.pool, `UPDATE relay_pools SET exhausted_at = now() - interval '2 minutes',
+	                  eligible_since = now() - interval '1 minute' WHERE id = $1`, primary)
+	read := func() (string, bool) {
+		t.Helper()
+		r := e.get(t, "/provider/tenants/"+e.tenantID, e.superTok)
+		var d struct {
+			RelayPool struct {
+				RelayPath     string `json:"relay_path"`
+				UsingFailover bool   `json:"using_failover"`
+			} `json:"relay_pool"`
+		}
+		if err := json.Unmarshal([]byte(r.body), &d); err != nil || r.code != 200 {
+			t.Fatalf("tenant detail %d %s: %v", r.code, r.body, err)
+		}
+		return d.RelayPool.RelayPath, d.RelayPool.UsingFailover
+	}
+	if p, using := read(); p != relaypool.RelayPathPrimary || using {
+		t.Fatalf("empty failover pool, primary eligible again: relay_path %q using_failover %v, want primary/false", p, using)
+	}
+	// The failover pool gets an eligible relay: the hold-down applies again.
+	exec(t, e.pool, `INSERT INTO relays (name, status, pool_id, capacity_label, public_addr)
+	                  VALUES ('b-1', 'active', $1, 'high', '198.51.100.9:9093')`, fo)
+	if p, using := read(); p != relaypool.RelayPathFailover || !using {
+		t.Fatalf("healthy failover pool during the hold-down: relay_path %q using_failover %v, want failover/true", p, using)
+	}
+}
+
 func relayPath(t *testing.T, e *readEnv) string {
 	t.Helper()
 	r := e.get(t, "/provider/tenants/"+e.tenantID, e.superTok)

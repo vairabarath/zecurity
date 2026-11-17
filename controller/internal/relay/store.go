@@ -39,9 +39,11 @@ const supersededRenewalReason = "superseded by renewal retry"
 
 type Store struct {
 	pool *pgxpool.Pool
+	// overrides logs the per-tenant empty-failover override (F11-2).
+	overrides *overrideLog
 }
 
-func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool, overrides: newOverrideLog()} }
 
 // RelayRow mirrors the relays table.
 type RelayRow struct {
@@ -814,25 +816,43 @@ func (s *Store) BuildRelayLists(ctx context.Context) (*relaylist.Set, error) {
 	}
 
 	// Each workspace's effective pool (D-39): its failover pool while its
-	// primary is exhausted, otherwise its primary.
+	// primary is exhausted, otherwise its primary; F11-2: never an empty
+	// failover pool while the primary has an eligible relay. overridden marks
+	// a workspace that F11-2 sent back to its primary during the hold-down.
 	wsRows, err := s.pool.Query(ctx, `
-		SELECT w.id::text, `+relaypool.EffectivePool("p")+`::text
+		SELECT w.id::text, eff::text,
+		       (w.relay_failover_pool_id IS NOT NULL AND p.exhausted_at IS NOT NULL AND eff = w.relay_pool_id)
 		  FROM workspaces w
-		  JOIN relay_pools p ON p.id = w.relay_pool_id`)
+		  JOIN relay_pools p ON p.id = w.relay_pool_id
+		 CROSS JOIN LATERAL (SELECT `+relaypool.EffectivePool("p")+` AS eff) e`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspace relay pools: %w", err)
 	}
 	defer wsRows.Close()
 	workspacePools := map[string]string{}
+	overridden := map[string]bool{}
 	for wsRows.Next() {
 		var wsID, poolID string
-		if err := wsRows.Scan(&wsID, &poolID); err != nil {
+		var over bool
+		if err := wsRows.Scan(&wsID, &poolID, &over); err != nil {
 			return nil, fmt.Errorf("scan workspace relay pool: %w", err)
 		}
 		workspacePools[wsID] = poolID
+		if over {
+			overridden[wsID] = true
+		}
 	}
 	if err := wsRows.Err(); err != nil {
 		return nil, fmt.Errorf("list workspace relay pools: %w", err)
+	}
+	if s.overrides != nil {
+		entered, left := s.overrides.observe(overridden)
+		for _, ws := range entered {
+			log.Printf("relay pool failover: workspace %s back on its primary pool %s during the hold-down: its failover pool has no eligible relay (F11-2)", ws, workspacePools[ws])
+		}
+		for _, ws := range left {
+			log.Printf("relay pool failover: workspace %s no longer overridden to its primary pool (F11-2)", ws)
+		}
 	}
 	return relaylist.NewSet(lists, workspacePools, newLabelledRelayList(nil)), nil
 }

@@ -4,12 +4,15 @@
 // nothing but the standard library, so the relay store, the connector control
 // stream and providerquery (which must not depend on net/http, D-04, not even
 // through the gRPC-generated packages) share one definition. The per-pool
-// relay list set lives in package relaylist.
+// relay list set lives in package relaylist. Besides the standard library it
+// imports only package eligible (one SQL constant, no dependencies).
 package relaypool
 
 import (
 	"regexp"
 	"time"
+
+	"github.com/yourorg/ztna/controller/internal/relay/eligible"
 )
 
 // DefaultPoolID is the built-in default pool (migration 057): no region, never
@@ -50,8 +53,23 @@ func AuthorizedPools(poolExpr string) string {
 // primary is exhausted and a failover pool is set, otherwise the primary. An
 // exhausted primary without a failover pool stays the effective pool, so its
 // connectors get its empty list (fail closed, never an implicit fallback).
+//
+// F11-2 (D-39 refinement, 2026-11-17): a tenant is never kept on a failover
+// pool with no eligible relay while its primary has one. The rule is per
+// tenant (each has its own failover pool) and derived on every read: the
+// primary's stored failover state and hold-down are untouched, and tenants
+// of the same primary with a healthy failover pool still wait out the
+// hold-down. With both pools empty the failover pool stays effective (an
+// empty list either way, never another pool).
+//
+// This is the only definition of a tenant's effective pool: both relay-list
+// delivery paths (the broadcast set and the connect-time list) and the
+// tenant read use it, so the console can't report a path the connectors
+// don't get.
 func EffectivePool(primaryAlias string) string {
 	return `(CASE WHEN w.relay_failover_pool_id IS NOT NULL AND ` + primaryAlias + `.exhausted_at IS NOT NULL
+	               AND (EXISTS (SELECT 1 FROM relays WHERE pool_id = w.relay_failover_pool_id AND ` + eligible.Where + `)
+	                    OR NOT EXISTS (SELECT 1 FROM relays WHERE pool_id = w.relay_pool_id AND ` + eligible.Where + `))
 	              THEN w.relay_failover_pool_id ELSE w.relay_pool_id END)`
 }
 

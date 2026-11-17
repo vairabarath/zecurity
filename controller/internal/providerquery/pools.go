@@ -204,6 +204,7 @@ func tenantRelayPool(ctx context.Context, q Querier, workspaceID string) (Tenant
 	var foResidency *bool
 	var foEligible *int64
 	var exhaustedAt *time.Time
+	var effective string
 	err := q.QueryRow(ctx, `
 SELECT p.id::text, p.name, p.region, p.residency,
        (SELECT count(*) FROM relays WHERE pool_id = p.id AND `+eligible.Where+`),
@@ -211,14 +212,15 @@ SELECT p.id::text, p.name, p.region, p.residency,
        fo.id::text, fo.name, fo.region, fo.residency,
        CASE WHEN fo.id IS NULL THEN NULL
             ELSE (SELECT count(*) FROM relays WHERE pool_id = fo.id AND `+eligible.Where+`) END,
-       p.exhausted_at
+       p.exhausted_at,
+       `+relaypool.EffectivePool("p")+`::text
   FROM workspaces w
   JOIN relay_pools p ON p.id = w.relay_pool_id
   LEFT JOIN relay_pools pp ON pp.id = w.relay_pool_previous_id AND w.relay_pool_previous_until > NOW()
   LEFT JOIN relay_pools fo ON fo.id = w.relay_failover_pool_id
  WHERE w.id = $1`, workspaceID).Scan(&t.ID, &t.Name, &t.Region, &t.Residency, &t.EligibleRelays,
 		&prevID, &prevName, &prevRegion, &prevResidency, &prevUntil,
-		&foID, &foName, &foRegion, &foResidency, &foEligible, &exhaustedAt)
+		&foID, &foName, &foRegion, &foResidency, &foEligible, &exhaustedAt, &effective)
 	if err != nil {
 		return TenantRelayPool{}, fmt.Errorf("tenant relay pool: %w", err)
 	}
@@ -227,14 +229,14 @@ SELECT p.id::text, p.name, p.region, p.residency,
 			RelayPoolRef:   RelayPoolRef{ID: *foID, Name: *foName, Region: foRegion, Residency: *foResidency},
 			EligibleRelays: *foEligible,
 		}
-		// The same rule as relaypool.EffectivePool.
-		if exhaustedAt != nil {
+		// The effective pool comes from relaypool.EffectivePool, the rule
+		// both relay-list delivery paths use (F11-2: never re-derived here).
+		if effective == *foID {
 			t.UsingFailover = true
 			t.FailedOverSince = utcPtr(exhaustedAt)
 		}
 	}
-	// F11-1: the same effective pool as the relay lists, and whether it has
-	// an eligible relay.
+	// F11-1: the effective pool, and whether it has an eligible relay.
 	switch {
 	case t.UsingFailover && t.Failover.EligibleRelays > 0:
 		t.RelayPath = relaypool.RelayPathFailover
