@@ -252,6 +252,139 @@ func TestFailoverDB_FailoverReportsTenantsWithoutRelayPath(t *testing.T) {
 	}
 }
 
+// F11-2 (D-39 refinement, 2026-11-17): a tenant is never kept on a failover
+// pool with no eligible relay while its primary has one. The override is per
+// tenant and derived (no stored state, no audit event): the primary's failover
+// state and hold-down are unchanged, and tenants of the same primary whose
+// failover pool is healthy still wait out the hold-down. Both relay-list
+// delivery paths agree at every step.
+func TestFailoverDB_EmptyFailoverOverrideIsPerTenant(t *testing.T) {
+	e := newAdminEnv(t, false)
+	ctx := context.Background()
+	hold := 5 * time.Minute
+	primary := e.createPool(t, "primary", strPtr("in-south-1"), false)
+	fo1 := e.createPool(t, "failover-1", strPtr("in-south-1"), false)
+	fo2 := e.createPool(t, "failover-2", strPtr("in-south-1"), false)
+	p1, f1, f2 := e.eligibleRelay(t, "relay-p1"), e.eligibleRelay(t, "relay-f1"), e.eligibleRelay(t, "relay-f2")
+	_ = e.eligibleRelay(t, "relay-d1")
+	e.setRelayPool(t, p1, primary)
+	e.setRelayPool(t, f1, fo1)
+	e.setRelayPool(t, f2, fo2)
+	t1 := e.workspace(t, "tenant-1")
+	t2 := e.workspace(t, "tenant-2")
+	e.assign(t, t1, primary, &fo1)
+	e.assign(t, t2, primary, &fo2)
+	log := &switchLog{}
+	reconcile := func(at time.Time) {
+		t.Helper()
+		if _, err := e.store.ReconcilePools(ctx, at, hold, log.hook); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expect := func(step string, want1, want2 []string) {
+		t.Helper()
+		for _, c := range []struct {
+			ws   string
+			want []string
+		}{{t1, want1}, {t2, want2}} {
+			b, ct := relayIDsFor(t, e, c.ws)
+			if !sameIDs(b, ct) {
+				t.Fatalf("%s: broadcast %v and connect-time %v lists differ", step, b, ct)
+			}
+			if !sameIDs(b, c.want) {
+				t.Fatalf("%s: %s gets %v, want %v", step, c.ws, b, c.want)
+			}
+		}
+	}
+	none := []string(nil)
+	t0 := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+
+	reconcile(t0)
+	expect("healthy", []string{p1}, []string{p1})
+
+	// Primary down: both fail over to their own failover pools.
+	e.setActive(t, p1, false)
+	reconcile(t0)
+	expect("failed over", []string{f1}, []string{f2})
+
+	// Primary eligible again: both healthy failover pools respect the hold-down.
+	e.setActive(t, p1, true)
+	tRec := t0.Add(time.Minute)
+	reconcile(tRec)
+	if e.poolState(t, primary) != relaypool.StateRecovering {
+		t.Fatalf("state %s, want recovering", e.poolState(t, primary))
+	}
+	expect("recovering", []string{f1}, []string{f2})
+
+	// failover-1 goes empty: tenant-1 returns to the primary at once; tenant-2
+	// stays on its healthy failover pool. The primary's state is untouched.
+	e.setActive(t, f1, false)
+	reconcile(tRec.Add(30 * time.Second))
+	expect("failover-1 empty during hold-down", []string{p1}, []string{f2})
+	if e.poolState(t, primary) != relaypool.StateRecovering {
+		t.Fatalf("the override must not change the primary's state: %s", e.poolState(t, primary))
+	}
+	overriddenNow := func() []string {
+		e.store.overrides.mu.Lock()
+		defer e.store.overrides.mu.Unlock()
+		var out []string
+		for ws := range e.store.overrides.active {
+			out = append(out, ws)
+		}
+		return out
+	}
+	if got := overriddenNow(); !sameIDs(got, []string{t1}) {
+		t.Fatalf("override log tracks %v, want only tenant-1", got)
+	}
+
+	// A controller restart computes the same lists from the stored state.
+	restarted := NewStore(e.pool)
+	set, err := restarted.BuildRelayLists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := set.ForWorkspace(t1).GetRelays(); len(got) != 1 || got[0].RelayId != p1 {
+		t.Fatalf("after a restart tenant-1 must stay on the primary, got %v", got)
+	}
+
+	// failover-1 eligible again while the primary still recovers: the D-39
+	// rule applies again (back to failover until the hold-down ends).
+	e.setActive(t, f1, true)
+	expect("failover-1 back during hold-down", []string{f1}, []string{f2})
+	if got := overriddenNow(); len(got) != 0 {
+		t.Fatalf("override log still tracks %v after failover-1 came back", got)
+	}
+
+	// The primary fails again during the hold-down (timer resets), while
+	// failover-1 is empty: tenant-1 has no relay path (never another pool).
+	e.setActive(t, f1, false)
+	e.setActive(t, p1, false)
+	reconcile(tRec.Add(2 * time.Minute))
+	if e.poolState(t, primary) != relaypool.StateFailedOver {
+		t.Fatalf("a dip during the hold-down returns to failed_over, got %s", e.poolState(t, primary))
+	}
+	expect("both down for tenant-1", none, []string{f2})
+
+	// failover-1 eligible again while the primary is still down: tenant-1
+	// uses it automatically.
+	e.setActive(t, f1, true)
+	expect("primary down, failover-1 back", []string{f1}, []string{f2})
+
+	// Recovery and the full hold-down: both fail back together.
+	e.setActive(t, p1, true)
+	tRec2 := tRec.Add(3 * time.Minute)
+	reconcile(tRec2)
+	reconcile(tRec2.Add(hold - time.Second))
+	expect("second hold-down", []string{f1}, []string{f2})
+	reconcile(tRec2.Add(hold))
+	expect("failed back", []string{p1}, []string{p1})
+
+	// Only the pool-level switches are audited; the per-tenant override adds none.
+	if got := log.actions(); len(got) != 2 || got[0] != ActionPoolFailover || got[1] != ActionPoolFailback {
+		t.Fatalf("switches %v, want [failover failback]", got)
+	}
+}
+
 // D-39 assignment rules: different pools, same region, residency needs a
 // residency failover in the same region, and the failover pool must have an
 // eligible relay. Omitting the failover pool removes it.

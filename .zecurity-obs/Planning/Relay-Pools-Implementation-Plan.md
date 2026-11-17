@@ -465,3 +465,17 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 
 **Open (F11-2):** the hold-down keeps a tenant on an empty failover pool while its primary is eligible again (up to 5 minutes without a relay path). Display is honest now; the behaviour needs a D-39 refinement (decision pending).
 
+### Fix: never hold a tenant on an empty failover pool (F11-2, D-39 refinement, 2026-11-17)
+**Issue:** during a recovering primary's 5-minute hold-down, a tenant stayed on its failover pool even when that pool had no eligible relay, so it had no relay path although its primary was eligible again. Seen live: lt-a eligible again 07:14:03, the connector kept getting an empty list until failback at 07:19:04.
+
+**Decision:** D-39 refined (recorded in the Decision Record): never keep a tenant on a failover pool with no eligible relay while its primary has one. Per tenant, derived, no stored state, no audit event.
+
+**Fix applied:**
+- `relaypool.EffectivePool`: the failover pool is effective only while the primary is exhausted **and** (the failover pool has an eligible relay **or** the primary has none). The primary's `exhausted_at`/`eligible_since` and the hold-down are unchanged. `relaypool` now imports `eligible` (a dependency-free SQL constant; still no `net/http` for `providerquery`, D-04).
+- One source: both relay-list delivery paths (`BuildRelayLists`, `BuildLabelledRelayListForWorkspace`) and the tenant read (`providerquery.tenantRelayPool`, which no longer re-derives the rule in Go) select `EffectivePool`.
+- `BuildRelayLists` logs when a workspace enters or leaves the override (process-local `overrideLog`, D-02), not on every build.
+
+**Tests:** `TestFailoverDB_EmptyFailoverOverrideIsPerTenant` (two tenants on one primary with different failover pools; fixed clock; failover, recovery, one failover pool empty → only that tenant back on the primary, the other waits; controller restart; failover pool back; primary failing again during the hold-down with the failover pool empty → no path, then back on the failover pool; full hold-down failback; both delivery paths equal at every step; audit rows only failover + failback; override log tracks exactly the overridden tenant). Fails before the fix at the override step. `TestRelayPoolReads_EmptyFailoverOverride` (tenant read: primary/false with an empty failover pool, failover/true once it has a relay; mutation-checked against the old Go derivation). `TestOverrideLog_ReportsChangesOnly`.
+
+**Live test:** pending (next lab session on a reset DB, current `main` + PRs).
+
