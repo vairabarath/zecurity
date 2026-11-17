@@ -428,3 +428,24 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 - **Tests:**
   - controller: heartbeat policy on both paths; lookup failure sends version 0; lease bounds; DB-backed allowed set, bumps, window expiry, move monotonicity, acks; `residency_enforced` read;
   - relay: 18 new tests (policy rules with an explicit clock, persistence, revocation and lease over real QUIC, listener accept path); 145 relay tests pass, clippy has no new warnings.
+
+## Post-PR fixes
+
+### Fix: connector stranded after a refused migration (live test F10-1, 2026-11-17)
+**Issue:** moving a tenant into a residency pool left its connector with no relay path. The controller pushes the new relay list at once, but the residency relay only learns that the workspace is allowed at its next heartbeat (up to one heartbeat interval later). The connector's first dial was refused; `migrate()` gave up ("remaining on current relay") and nothing retried. The connector stayed on a relay that had left its list (its placement rejected by the controller) for 10+ minutes, through the 300 s background reprobe, because the unlisted active relay kept its old probe score. Reproduced three times on the lab (04:52:07, 05:04:15, ~05:12:50).
+
+**Root cause:** PR 3 is the first change that lets a relay refuse a connector it is listed for; the connector's migration path assumed a listed relay accepts. Relay and controller behaved as designed.
+
+**Fix applied (connector only, `connector/src/relay_selector.rs`; no proto, relay or controller change):**
+- `ActiveRelay.migration_retry`: when every migration target fails and the current relay is **no longer listed**, schedule a retry on the existing reconnect backoff (`RELAY_RECONNECT_BASE_SECS` 5 s, ×`RELAY_RECONNECT_BACKOFF_FACTOR` 2, capped at `RELAY_RECONNECT_MAX_SECS` 120 s). A list push still retries at once; the delay keeps growing either way, so a target that keeps refusing can't cause a tight loop. The connector keeps its current relay meanwhile (make-before-break unchanged).
+- The retry is cleared by a successful migration or when the current relay is listed again.
+- `reprobe_and_maybe_migrate`: an unlisted active relay drops its old score, so a re-probe always counts a listed relay as an improvement.
+- New selector event `MigrationRetryScheduled { delay_ms }` (test hook).
+
+**Tests:** `relay_selector::migration_retry_tests` over real QUIC against an in-process relay (`test_support::TestRelay`: Intermediate-signed identity, empty valid Relay CRL, closes connections while "not accepting", like a relay refusing a workspace):
+- the F10-1 race: on relay A, new list names only B, B refuses until its policy arrives (800 ms later), the connector stays on A and then moves to B with no restart, with a bounded number of refused dials. Fails before the fix ("timed out … moved to B without a restart"), passes after (10/10 runs);
+- the retry stops once A is listed again (mutation-checked: not clearing the retry fails it).
+
+**Live retest (2026-11-17, fixed connector `41d7acb0…` on the lab host, no restart in the test path):** `zero` moved into residency pool R at 05:40:19; the relay refused the connector at 05:40:19, 05:40:24 and 05:40:34 (retries at 5 s and 10 s); the relay applied the policy allowing `zero` at 05:40:49; the next retry (20 s step) registered at 05:40:54; placement `manoj-lt` and traffic 200 at 05:40:59.
+
+**Not covered here:** the controller could additionally hold a tenant's new list until the residency pool's relays have applied the policy; not done (it would couple policy propagation to list publication). With the fix, recovery takes at most one backoff step after the relay's next heartbeat.

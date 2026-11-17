@@ -19,9 +19,9 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F17 | Append-only audit log, before/after | #192 | ☑ 2026-11-12 |
 | F5 | Relay bandwidth | #193 | ☑ 2026-11-12 |
 | F14 | Daily certificate expiry email | #195 | ☑ 2026-11-12 |
-| F4 / F9 (+ F10 routing) | Relay pools PR 1: tenant pools, per-pool relay lists, per-pool guard (D-37 … D-41) | #200 | ☐ |
-| F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201 | ☐ |
-| F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | PR pending | ☐ |
+| F4 / F9 (+ F10 routing) | Relay pools PR 1: tenant pools, per-pool relay lists, per-pool guard (D-37 … D-41) | #200 | ☑ 2026-11-17 (step 7 skipped, covered by F10) |
+| F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201 | ☑ 2026-11-17 (finding F11-1 open, display/audit only) |
+| F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | #202 | ✗ 2026-11-17: step 1 **failed** (connector recovery defect F10-1); steps 2–7 pass with a restart workaround. Not complete until the connector fix is retested against the original race without a restart. |
 
 Add each Must-have item here as it merges.
 
@@ -98,6 +98,8 @@ Setup:
 - Recreate the local DB (schema reset), rebuild the controller and redo the provider first sign-in.
 - Two relays (e.g. manojinkyank and a local relay), one tenant with a connector, and a second tenant if available.
 - The connector forced onto the relay path (`LAN_ADDR` set to TEST-NET), as in the F5 run.
+- On a LAN lab, start the controller with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true` (honoured only with `ENV=development`). Without it, relays on private addresses get no published address and connectors receive an empty list.
+- The lab host must reach the controller (TCP 8080, 9090) and the local relays (UDP): open them with ufw rules tagged `zecurity-live-test` and remove them afterwards.
 
 1. **Default:** with no pools, every relay is in `default` and the connector picks one by latency. Relays and Relay pools pages show pool `default`.
 2. **Create pools:** create pool A (region `in-south-1`) and pool B. Move one relay into each (reason required; audit rows `relay.move`).
@@ -110,6 +112,7 @@ Setup:
 5. **Empty pool:** stop pool B's only relay. After eviction (about 1.5–2.5 minutes) tenant 1's relay path is gone (empty list), the direct path still works if reachable, and nothing falls back to another pool.
 6. **Roles:**
    - relay-ops: can create, rename and delete pools and move relays; cannot set region/residency or assign tenants (console hides it; API 403); sees tenant counts, never names.
+   - A relay-ops rename sends only `name`. PATCH is partial: a body that includes `region` (even `null`) or `residency` is a placement change and is super-admin only (403).
    - super-admin: all of it.
 7. **Residency placement check (optional):** make pool A a residency pool (only while unused), assign the tenant, and report a placement on another pool's relay. It is not recorded, the relay path is removed, and one `relay.placement_rejected` audit row appears.
 
@@ -124,7 +127,7 @@ Run together with PR 1 and PR 3 after all three are merged (one DB reset). Setup
    - Stop and start the relay again within 5 minutes: the hold-down restarts.
 4. **Failback:** 5 minutes after A is continuously eligible, the tenant returns to A make-before-break. Audit `relay_pool.failback`.
 5. **Restart:** restart the controller while failed over. The tenant stays on B, and the state is kept.
-6. **Guards:** draining A's last relay is refused even with a failover pool; drain or delete of B (used as failover) is refused.
+6. **Guards:** with A's relay **running**, draining A's last relay is refused even with a failover pool; drain or delete of B (used as failover) is refused. The guard protects the last *eligible* relay: draining a relay that is already down is allowed by design (it removes no availability), so run this check while A's relay is up.
 7. **No fallback:** with no failover pool, or both pools down, the relay path is gone and nothing falls back to `default`.
 
 ## F10: Relay pools PR 3, relay-side residency enforcement (migration `059_relay_pool_policy.sql`, relay change)
@@ -134,16 +137,25 @@ Needs the new relay build on every relay of the residency pool.
    - Within a heartbeat the relay reports policy support and the current version; pool R reads **Residency (enforced)**; relays show "Enforcing".
 2. **Refusal at the relay:** point a connector of tenant 2 (not assigned to R) at R's relay (manual list or old ranking). The relay refuses it ("workspace not allowed on this relay"); relay log and no placement.
 3. **Immediate revocation:** reassign tenant 1 away from R with `migration: immediate`. Within one heartbeat (≤ 30 s) R's relay ends tenant 1's connector and client sessions.
-4. **Graceful move:** reassign with `migration: graceful`. Traffic keeps flowing on R until the window ends (5 minutes), then the relay drops the tenant within ~1 minute (window close + heartbeat).
-5. **Lease:** block R's relay from the controller (firewall) for longer than `RELAY_POLICY_LEASE` (set it to 2m for the test).
+4. **Graceful move:** reassign with `migration: graceful`. R keeps the tenant authorized (no session is ended at the move) until the window ends (5 minutes), then the relay drops the tenant within ~1 minute (window close + heartbeat). The connector itself moves to the new pool at once and drains its old relay session for at most 120 s (D-32), so a single long stream on R lasts up to 120 s, not the whole window.
+5. **Lease:** block **only** R's relay from the controller for longer than `RELAY_POLICY_LEASE` (set it to 2m for the test). Don't pause the controller: the connector fails closed within ~15 s when it loses the controller (authorization deadline), which hides the relay lease. Run the relay with `CONTROLLER_ADDR=127.0.0.1:<port>` through a local TCP forwarder (the controller certificate covers 127.0.0.1) and stop the forwarder.
    - Before expiry the relay keeps serving; at expiry it ends tenant sessions and refuses new ones.
    - When the path is restored, service returns at the next heartbeat.
 6. **Restart:** restart the relay during an outage; the persisted policy keeps its original lease expiry. Restart with no state file: workspace peers are refused until the first heartbeat.
 7. **Mixed versions:** an old relay build in R makes the pool read **Residency (not enforced)** and the relay "Not supported".
 
+## Relay pools findings (live run 2026-11-17)
+- **F10-1 (defect, blocks F10): connector does not recover from a refused migration.** Moving a tenant into a residency pool, the controller pushes the new relay list at once, but the residency relay learns that the workspace is allowed only at its next heartbeat. The connector dialled `manoj-lt` at 04:52:07; the relay refused it ("refusing Relay peer: workspace policy") and applied policy v23 (workspace allowed) at 04:52:15. The connector's `migrate()` logged "Migration could not find a usable target; remaining on current relay" and never retried: it stayed on `local-a` (no longer listed; its placement rejected), with no relay path for 10+ minutes, through the 300 s background reprobe (the unlisted active relay keeps its old score, so no "meaningful improvement"). Reproduced twice more (05:04:15, ~05:12:50). Evidence: scratchpad `lt/evidence-f10-step1/` and on the lab host `~/zecurity-lt/connector-f10-*.log`, `relay-at-repro2.log`. Fix: separate connector PR (bounded retry while the active relay is unlisted; unlisted active relay never wins a score comparison); acceptance = reproduce the race with the connector left running and see it recover with no restart. **Fix retested live 2026-11-17 (branch `fix/connector-migration-retry`, not merged):** same race at 05:40:19, refused at :19/:24/:34, relay allowed the workspace at 05:40:49, connector registered on its own at 05:40:54 (no restart); details in `Relay-Pools-Implementation-Plan.md` → Post-PR fixes. F10 stays open until the fix is merged.
+- **O2 (same root cause, recovery delay):** after a relay comes back from a lease outage, the controller re-lists it at its first heartbeat, and a connector dialling in that same second is refused before the relay applies the renewed policy (05:23:34). The failover path does back off and retry, so it recovered, but only at the 2-minute backoff (05:25:34). The F10-1 fix should cover this too.
+- **O1 (pre-existing, not relay pools):** a relay process restart is noticed by the connector only after ~60–80 s (QUIC idle timeout), during which client streams fail.
+- **F11-1 (minor, display/audit):** with both the primary and the failover pool down, `lt-a` reads "failed_over", the tenant reads "using failover", `lt-b` reads "healthy" with 0 eligible relays, and a `relay_pool.failover` audit row is written for a failover onto an empty pool. Traffic was correct (empty list, no fallback). Fix: show "no relay path" when the failover pool has no eligible relay, never show a pool with 0 eligible relays as healthy, and say so in the audit row.
+
 ## Results log
 | Date | ID | Result | Notes |
 |---|---|---|---|
+| 2026-11-17 | F4 / F9 | Pass | Relays local-a, local-b (this host) and manoj-lt (lab). 1: default pool, connector picks by latency (local-b). 2: pools lt-a, lt-b (in-south-1), moves audited (relay.move before/after); move or drain of default's last relay → 409 last_eligible_relay. 3: zero → lt-a graceful: list → local-a only, placement local-a, 40/40 probes 200, tenant.relay_pool.assign with before/after. 4: zero → lt-b: 40/40 probes 200, console "Migrating from lt-a until 10:06:41 AM" (= API until). 5: manoj-lt stopped → inactive after ~90 s, list empty, placement cleared, no traffic via local-a/local-b. 6: relay-ops create/rename (name only)/move/delete OK; region (even null), residency, tenant assign → 403; pool reads counts only, no tenant names; super-admin sees tenant list. 7 skipped (F10 step 2 covers relay refusal). Tenant 2 checks skipped (one tenant). |
+| 2026-11-17 | F11 | Pass (F11-1 open) | Refusals: failover_region_mismatch, failover_needs_residency, failover_same_as_primary. Stop local-a 04:36:32 → failed_over 04:37:51 (81 s), tenant "using failover", connector on manoj-lt, audit relay_pool.failover by system:relay-pool-failover. Controller restart while failed over: state kept (same since). Restart local-a: pool "recovering", tenant stays on B; stop/start within the hold-down reset eligible_since (04:39:27 → 04:41:47); failback 04:47:03 (5 min 16 s after the new eligible_since), 163/163 probes 200, audit relay_pool.failback. Guards: drain of A's last relay refused while it runs (allowed while it is down, by design); drain/move of B's last relay → last_eligible_relay; delete A/B → pool_not_empty. Both pools down: list empty, no fallback to default (F11-1 display). |
+| 2026-11-17 | F10 | **Fail** (step 1, F10-1); steps 2–7 pass with workaround | 1: relay applied v21 (enforced) then v23 (zero allowed); pool "Residency (enforced)", relay "Enforcing" (console and API); but the connector got stuck (F10-1). Workaround: connector restarted on the lab host (05:02:50). 2: relay refusal "refusing Relay peer: workspace policy" observed at 04:52:07 (one tenant only). 3: immediate revoke 05:03:37 → relay v25 at 05:03:45 (8 s) ended both connector and client sessions; download cut; connector on local-a. 4: graceful: R kept zero allowed (v29), no session ended at the move; window end 05:10:58 → v30 applied 05:11:16, remaining session ended. 5: relay-only outage via a local forwarder: lease expired exactly at last ack + 120 s (05:21:57), sessions ended and peers refused; renewed when the path returned (05:23:34). 6: relay restarted mid-outage reloaded the original lease expiry; restart without workspace-policy.json refused peers until the first heartbeat applied v32. 7: pre-PR3 relay build (b93e3fd8) in R → "Residency (not enforced)", relay "Not supported". |
 | 2026-11-12 | F25 | Pass | Overview health card matches /provider/health; relay-ops view checked. |
 | 2026-11-12 | F17 | Pass | UPDATE/DELETE/TRUNCATE on provider_audit_logs refused with SQLSTATE 42501 (run inside BEGIN…ROLLBACK); role, disable/enable, reset rows carry before/after. |
 | 2026-11-12 | F38 | Pass | CSV and JSON export match the filtered page; formula cells prefixed with '. The 10,000-row cap was accepted from its unit test (Barath). |
