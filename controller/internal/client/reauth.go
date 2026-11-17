@@ -53,8 +53,9 @@ import (
 const (
 	ActionStepUp       = "auth.step_up"
 	ActionStepUpFailed = "auth.step_up_failed"
-	ActionMFAEnrolled  = "mfa.enrolled"
-	ActionMFALocked    = "mfa.locked"
+	// The same actions as the console's, so audit filters see both.
+	ActionMFAEnrolled = mfa.ActionEnrolled
+	ActionMFALocked   = mfa.ActionLocked
 )
 
 const (
