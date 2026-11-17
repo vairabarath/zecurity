@@ -488,6 +488,7 @@ func TestCompleteReauth_BoundToTheClient(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, `UPDATE client_devices SET session_auth_at = NOW() - INTERVAL '3 hours' WHERE id = $1`, f.deviceID); err != nil {
 		t.Fatal(err)
 	}
+	f.enrolTOTP()
 	stale := func() {
 		t.Helper()
 		if d := f.device(); time.Since(*d.authAt) < time.Hour {
@@ -600,5 +601,36 @@ func TestCancelUserStepUps(t *testing.T) {
 	stepUpGrantMu.Unlock()
 	if !ok {
 		t.Fatal("user-b grant was dropped")
+	}
+}
+
+// enrolTOTP gives the fixture user a confirmed authenticator, as a TOTP
+// step-up has.
+func (f *stepUpFixture) enrolTOTP() {
+	f.t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO user_totp (user_id, workspace_id, secret_ciphertext, secret_nonce, enabled_at)
+		 VALUES ($1, $2, 'ct', 'nonce', NOW())`, f.userID, f.wsID); err != nil {
+		f.t.Fatalf("enrol totp: %v", err)
+	}
+}
+
+// Review fix: a TOTP step-up redeemed after the user's authenticator was
+// reset does not stamp MFA (the reset won the race).
+func TestCompleteReauth_TOTPAfterResetStampsNoMFA(t *testing.T) {
+	f := newStepUpFixture(t)
+	ra := f.reauth()
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
+		t.Fatal("step-up not applied")
+	}
+	if d := f.device(); d.mfaAt != nil {
+		t.Fatalf("MFA stamped without an authenticator: %+v", d)
+	}
+	f.enrolTOTP()
+	if !f.svc.completeStepUp(f.ctx, f.wsID, &ra, true, "totp") {
+		t.Fatal("step-up not applied")
+	}
+	if d := f.device(); d.mfaAt == nil {
+		t.Fatalf("MFA not stamped with an authenticator: %+v", d)
 	}
 }

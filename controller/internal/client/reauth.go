@@ -461,7 +461,12 @@ func (s *Service) completeStepUp(ctx context.Context, workspaceID string, ra *re
 		        -- A step-up that answers a risk demand without a second factor
 		        -- must not leave an older MFA mark standing: the demand is
 		        -- cleared below, and the old mark would count again.
-		        session_mfa_at     = CASE WHEN $5 THEN NOW()
+		        -- A TOTP step-up counts only while the authenticator still
+		        -- exists: an MFA reset racing this redemption wins.
+		        session_mfa_at     = CASE WHEN $5 AND (NOT $6 OR EXISTS (
+		                                      SELECT 1 FROM user_totp
+		                                       WHERE user_id = $2 AND enabled_at IS NOT NULL))
+		                                  THEN NOW()
 		                                  WHEN reauth_required_at IS NOT NULL THEN NULL
 		                                  ELSE session_mfa_at END,
 		        risk_score         = 0,
@@ -469,7 +474,7 @@ func (s *Service) completeStepUp(ctx context.Context, workspaceID string, ra *re
 		        reauth_required_at = NULL
 		  WHERE id = $1 AND user_id = $2 AND workspace_id = $3
 		    AND session_id = $4 AND revoked_at IS NULL`,
-		ra.DeviceID, ra.UserID, workspaceID, ra.SID, withMFA)
+		ra.DeviceID, ra.UserID, workspaceID, ra.SID, withMFA, method == "totp")
 	if err != nil {
 		log.Printf("client reauth: stamp device %s: %v", ra.DeviceID, err)
 		return false
