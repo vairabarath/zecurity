@@ -143,8 +143,9 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Steps 8–9 — start a new login session: refresh token (httpOnly
 		// cookie) plus an access JWT stamped with the identity generation and
 		// bound to the session.
-		// PENDING-06 M-3: MFA proven by the IdP's verified amr marks the session.
-		sessionAuth := SessionAuthFromAMR(authCtx.AMR, time.Now())
+		// PENDING-06 M-3: MFA proven by the IdP's verified amr marks the
+		// session at the IdP's auth_time, never at now.
+		sessionAuth := SessionAuthFromAMR(authCtx.AMR, authCtx.AuthTime, time.Now())
 		accessToken, _, refreshToken, err := s.IssueSessionWithAuth(ctx, core.UserID, core.TenantID, core.Role, core.Email, core.Generation, sessionAuth)
 		if err != nil {
 			fail("token_issue_failed")

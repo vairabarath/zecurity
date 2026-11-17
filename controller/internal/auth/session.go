@@ -286,12 +286,27 @@ func MFAFromAMR(amr []string) bool {
 	return false
 }
 
-// SessionAuthFromAMR builds the SessionAuth for a sign-in at `now`.
-func SessionAuthFromAMR(amr []string, now time.Time) SessionAuth {
-	if MFAFromAMR(amr) {
-		return SessionAuth{MFAAt: now}
+// IdPMFAAt is when the IdP last performed MFA for this sign-in: its
+// auth_time, when the verified amr proves MFA. A silent sign-in on a live IdP
+// session can carry an amr from long ago, so the mark is never "now": a
+// missing auth_time (0) means the IdP's MFA does not count, and an auth_time
+// in the future (clock skew) is capped at `now`. The policy compiler's MFA
+// freshness window then judges the real age of the MFA.
+func IdPMFAAt(amr []string, authTime int64, now time.Time) time.Time {
+	if !MFAFromAMR(amr) || authTime <= 0 {
+		return time.Time{}
 	}
-	return SessionAuth{}
+	at := time.Unix(authTime, 0)
+	if at.After(now) {
+		at = now
+	}
+	return at
+}
+
+// SessionAuthFromAMR builds the SessionAuth for a sign-in at `now` from the
+// IdP's amr and auth_time (see IdPMFAAt).
+func SessionAuthFromAMR(amr []string, authTime int64, now time.Time) SessionAuth {
+	return SessionAuth{MFAAt: IdPMFAAt(amr, authTime, now)}
 }
 
 // StampSessionMFA records that the claims' session passed MFA at `at` and

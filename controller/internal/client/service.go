@@ -345,7 +345,7 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 			return
 		}
 
-		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, auth.MFAFromAMR(authCtx.AMR), ctrlCode, time.Now().Add(60*time.Second)) {
+		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, auth.IdPMFAAt(authCtx.AMR, authCtx.AuthTime, time.Now()), ctrlCode, time.Now().Add(60*time.Second)) {
 			http.Error(w, "auth session expired during callback", http.StatusBadRequest)
 			return
 		}
@@ -456,11 +456,9 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	// PENDING-06 M-3: MFA proven by the IdP's verified amr marks the session.
-	var sessionAuth auth.SessionAuth
-	if sess.IdpMFA {
-		sessionAuth.MFAAt = time.Now()
-	}
+	// PENDING-06 M-3: MFA proven by the IdP's verified amr marks the
+	// session at the IdP's auth_time, never at now.
+	sessionAuth := auth.SessionAuth{MFAAt: sess.IdpMFAAt}
 	accessToken, expiresIn, refreshToken, err := s.authSvc.IssueSessionWithAuth(ctx, user.ID, sess.WorkspaceID, user.Role, sess.Email, gen, sessionAuth)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue session: %v", err)

@@ -117,7 +117,7 @@ func TestSessionMFA_IdPProof(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	access, _, refresh, err := svc.IssueSessionWithAuth(ctx, "user-1", "tenant-1", "admin", "u@example.com", 1,
-		SessionAuthFromAMR([]string{"pwd", "mfa"}, now))
+		SessionAuthFromAMR([]string{"pwd", "mfa"}, now.Unix(), now))
 	if err != nil {
 		t.Fatalf("IssueSessionWithAuth: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSessionMFA_IdPProof(t *testing.T) {
 	if got := mfaOf(t, svc, access); !got.Equal(now) {
 		t.Fatalf("after refresh mfa_at = %v, want %v", got, now)
 	}
-	if SignInMFALabel(SessionAuthFromAMR([]string{"pwd"}, now)) != "none" || SignInMFALabel(SessionAuthFromAMR([]string{"otp"}, now)) != "idp" {
+	if SignInMFALabel(SessionAuthFromAMR([]string{"pwd"}, now.Unix(), now)) != "none" || SignInMFALabel(SessionAuthFromAMR([]string{"otp"}, now.Unix(), now)) != "idp" {
 		t.Fatal("sign-in audit label wrong")
 	}
 }
@@ -160,5 +160,33 @@ func TestSessionMFA_EndedSession(t *testing.T) {
 	// A token with no session can't be stamped either.
 	if _, _, err := svc.StampSessionMFA(ctx, &AccessTokenClaims{UserID: "user-1"}, time.Now()); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("stamp a session-less token: %v, want ErrSessionNotFound", err)
+	}
+}
+
+// M-3: the IdP's MFA is dated by its auth_time, never by the sign-in. A
+// silent sign-in on a live IdP session must not look like a fresh MFA.
+func TestIdPMFAAt(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	old := now.Add(-6 * time.Hour)
+	cases := []struct {
+		name     string
+		amr      []string
+		authTime int64
+		want     time.Time
+	}{
+		{"mfa with auth_time", []string{"mfa"}, now.Unix(), now},
+		{"old mfa keeps its time", []string{"pwd", "otp"}, old.Unix(), old},
+		{"missing auth_time is no mfa", []string{"mfa"}, 0, time.Time{}},
+		{"negative auth_time is no mfa", []string{"mfa"}, -5, time.Time{}},
+		{"future auth_time capped at now", []string{"mfa"}, now.Add(time.Hour).Unix(), now},
+		{"no mfa in amr", []string{"pwd"}, now.Unix(), time.Time{}},
+	}
+	for _, c := range cases {
+		if got := IdPMFAAt(c.amr, c.authTime, now); !got.Equal(c.want) {
+			t.Errorf("%s: IdPMFAAt = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if got := SessionAuthFromAMR([]string{"mfa"}, old.Unix(), now).MFAAt; !got.Equal(old) {
+		t.Errorf("SessionAuthFromAMR stamped %v, want the IdP auth_time %v", got, old)
 	}
 }
