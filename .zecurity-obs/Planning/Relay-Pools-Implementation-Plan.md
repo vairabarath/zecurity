@@ -463,9 +463,9 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 
 **Tests:** `TestFailoverDB_FailoverReportsTenantsWithoutRelayPath`; `TestRelayPoolReads_FailoverState` (it asserted the bug: an empty failover pool read `healthy`) and `TestRelayPoolReads_EmptyPoolHasNoRelayPath`; DTO surface pin updated for `relay_path`; console tests for the badge, both card wordings and the Overview item. Mutation-checked (restoring `State` in the read fails both read tests). Controller 1,892 tests pass (2 known skips); console 611 tests, lint and build pass. Live check: see `Pending-Live-Tests.md` → F11-1.
 
-**Open (F11-2):** the hold-down keeps a tenant on an empty failover pool while its primary is eligible again (up to 5 minutes without a relay path). Display is honest now; the behaviour needs a D-39 refinement (decision pending).
+**F11-2** (the hold-down kept a tenant on an empty failover pool) was decided as a D-39 refinement and fixed in PR #215 (below). F11-1 merged as PR #213 (`5b48bd75`).
 
-### Fix: never hold a tenant on an empty failover pool (F11-2, D-39 refinement, 2026-11-17)
+### Fix: never hold a tenant on an empty failover pool (F11-2, D-39 refinement, 2026-11-17; PR #215, merged `883fed1c`)
 **Issue:** during a recovering primary's 5-minute hold-down, a tenant stayed on its failover pool even when that pool had no eligible relay, so it had no relay path although its primary was eligible again. Seen live: lt-a eligible again 07:14:03, the connector kept getting an empty list until failback at 07:19:04.
 
 **Decision:** D-39 refined (recorded in the Decision Record): never keep a tenant on a failover pool with no eligible relay while its primary has one. Per tenant, derived, no stored state, no audit event.
@@ -477,5 +477,5 @@ Built on `docs/relay-pools-decision`. Controller changes; the console part is li
 
 **Tests:** `TestFailoverDB_EmptyFailoverOverrideIsPerTenant` (two tenants on one primary with different failover pools; fixed clock; failover, recovery, one failover pool empty → only that tenant back on the primary, the other waits; controller restart; failover pool back; primary failing again during the hold-down with the failover pool empty → no path, then back on the failover pool; full hold-down failback; both delivery paths equal at every step; audit rows only failover + failback; override log tracks exactly the overridden tenant). Fails before the fix at the override step. `TestRelayPoolReads_EmptyFailoverOverride` (tenant read: primary/false with an empty failover pool, failover/true once it has a relay; mutation-checked against the old Go derivation). `TestOverrideLog_ReportsChangesOnly`.
 
-**Live test:** pending (next lab session on a reset DB, current `main` + PRs).
+**Live test (run 2, 2026-11-17, reset DB, `main` 883fed1c, migration 061): PASS.** With the failover pool emptied during the hold-down the controller sent the tenant back to its primary at once (override 08:50:15, logged, not audited) while the primary stayed `recovering`; with both pools empty and then the primary back, traffic returned 3 s after the primary relay started (08:56:19 → 08:56:22) instead of after the 5-minute hold-down; a returning failover pool took the tenant back for the rest of the hold-down; failbacks after the full hold-down with 80/80 and 146/146 probes 200. F11-1's display and audit (`tenants_without_relay_path: 1`, "No relay path" card) passed in the same run. Details in `Pending-Live-Tests.md` → F11 (run 2).
 
