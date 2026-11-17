@@ -190,9 +190,23 @@ pub async fn run() -> Result<()> {
     // FU-8: the controller's wake-up hints. Only wakes the scheduler above;
     // the scheduler's own tick keeps running whether or not this is connected.
     tokio::spawn(crate::change_watch::run(Arc::clone(&state), conf.clone()));
+    // A service stop (SIGTERM) or Ctrl-C tears the tunnel down like
+    // `zecurity-client down`, so the nft table, the fwmark rule and the route
+    // table don't outlive the daemon.
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install SIGTERM handler")?;
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("install SIGINT handler")?;
     #[cfg(unix)]
     loop {
-        match listener.accept().await {
+        let accepted = tokio::select! {
+            r = listener.accept() => r,
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+        };
+        match accepted {
             Ok((stream, _)) => {
                 if !check_same_user(&stream) {
                     warn!("rejected IPC connection from a different user");
@@ -209,6 +223,12 @@ pub async fn run() -> Result<()> {
             }
             Err(e) => error!(error = %e, "IPC accept error"),
         }
+    }
+    #[cfg(unix)]
+    {
+        info!("daemon stopping: taking the tunnel down");
+        let _ = handle_down(&state, &tun_slot).await;
+        return Ok(());
     }
 
     // Windows: the pipe's security descriptor (SYSTEM, Administrators and the
