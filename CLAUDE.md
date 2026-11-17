@@ -126,7 +126,7 @@ Sprint 22 specific:
 - Build gate passes before proceeding to the next phase (DB-backed tests must run, not skip; a skipped DB test is a failed case).
 - The Decision Record (2026-09-23, amendments 2026-09-26 and 2026-10-26) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
 - **Order:** T → A → {E, X} → D. Don't start a phase before its dependencies are merged. No console relay mutation ships before TOTP (D-33; T is merged).
-- **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `043_`, reserved for Phase D `043_relay_drain.sql`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
+- **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `062_` as of 2026-11-17; check with `ls controller/migrations | tail -3`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - **Console writes (D-30):** auth calls (incl. the TOTP steps), operator management (incl. reset-totp), and relay create / revoke / delete / drain / resume. Everything else stays read-only. Every new write goes into `api-surface.test.ts` on purpose. Don't modify `admin/`.
 - **Relay roles (D-31):** relay-ops may create, drain and resume relays; **revoke and delete are super-admin only**, enforced server-side in `decide()`. Console visibility is never the authorization control.
 - **D-17:** relay revoke/delete need a mandatory reason (in the body, never the URL; stored in the audit) and a typed relay-name confirmation, checked by the server.
