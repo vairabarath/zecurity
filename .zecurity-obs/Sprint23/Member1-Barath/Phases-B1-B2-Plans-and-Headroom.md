@@ -36,7 +36,7 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
   - **Seeds:**
     - **Free**, the default: users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25;
     - **Legacy**: all six keys `null`, operator-assigned only, never advertised.
-  - **`workspaces.plan_id`:** FK, `NOT NULL`, **no column default**. A column default is a fixed value and can't follow a changed default plan.
+  - **`workspaces.plan_id`:** FK, `NOT NULL`, **no fixed column default** (it couldn't follow a changed default plan). Instead, a **`BEFORE INSERT` trigger** sets `plan_id` to the **current** default plan (`SELECT id FROM plans WHERE is_default`) when an insert doesn't give one. This also covers the ~70 workspace inserts in tests and fixtures without touching them.
   - Backfill any existing workspaces to **Legacy**. In practice there are none: the DB is recreated after every schema change, so this is only a safety net.
   - Grants for the runtime role, as in `053_` / `059_`.
 - **Controller** (new `internal/plans` package, or under `internal/provider`; `providerquery` stays free of `net/http`, D-04):
@@ -55,10 +55,7 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
     - It returns the plan's six values, with a hook for S3's per-tenant overrides.
     - Agree the signature with Sathiya on day 1.
     - `nil` = explicitly unlimited; **a missing key returns an error** (fail closed).
-  - **Every workspace insert sets `plan_id` explicitly** to the **current** default (`SELECT id FROM plans WHERE is_default`), in the same transaction:
-    - `internal/bootstrap/bootstrap.go` (self-signup);
-    - S2's provider create;
-    - test helpers that insert workspaces.
+  - **New workspaces get the current default plan** through the trigger. S2's provider create passes its chosen `plan_id` explicitly (the trigger only fills a missing one).
   - Tenant detail gains `plan {id, name, limits}`; update `TestTenantDTOSurface`.
   - A test asserts that new workspaces (self-signup and S2) get the **current** default, including after the default is switched.
 - **Console:**
