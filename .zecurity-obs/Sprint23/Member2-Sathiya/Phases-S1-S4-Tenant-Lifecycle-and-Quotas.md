@@ -95,18 +95,23 @@ Then resume: traffic returns with no re-enrollment.
 **Needs Barath's B1 merged** (plans, `EffectiveLimits`). Rebase on S2 if it's merged, and cover its new creation paths.
 
 ### Build
-- **Schema `065_tenant_quotas.sql`:** `workspace_quota_overrides (workspace_id, key, limit BIGINT NULL, reason, set_by, set_at)`, with keys `connectors`, `shields`, `users`, `client_devices`.
-- **`EffectiveLimits`** (from B1) = plan defaults overlaid with overrides; unset means unlimited.
+- **Schema `065_tenant_quotas.sql`:** `workspace_quota_overrides (workspace_id, key, limit BIGINT NULL, reason, set_by, set_at)`, with the **six keys** of D-47: `users`, `resources`, `remote_networks`, `connectors`, `shields`, `client_devices`. A `NULL` override means explicitly unlimited; no row means "use the plan value".
+- **`EffectiveLimits`** (from B1) = the plan's six values overlaid with the overrides. `nil` = unlimited; a missing key fails closed.
+- **Free plan values** (seeded by B1, configurable): users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25. **Legacy** is unlimited.
 - **Counting (D-47):**
 
 | Resource | Counts | Doesn't count |
 |---|---|---|
+| Users | active members, **pending invitations**, SCIM-suspended users (each identity once) | removed members, expired or revoked invitations |
+| Resources | **every defined resource in any state except `deleting`** (un-protecting doesn't free a slot) | `deleting`; **discovered services** (`shield_discovered_services`, `connector_scan_results`) |
+| Remote networks | every provisioned network, including unavailable ones | deleted |
 | Connectors, shields | pending (token issued), active, inactive | revoked, deleted |
-| Users | active members, **pending invitations**, SCIM-suspended users | removed members, expired or revoked invitations |
-| Client devices | enrolled, not revoked | revoked |
+| Client devices | enrolled, not revoked | revoked, historical records |
 
   A suspended tenant's counts are unchanged.
 - **Enforcement on every creation path**, server-side and **atomic with the creation**: inside the creating transaction, serialised per workspace (e.g. `SELECT … FROM workspaces WHERE id = $1 FOR UPDATE` before counting).
+  - Remote networks: `CreateRemoteNetwork` (`graph/resolvers/connector.resolvers.go:24`).
+  - Resources: `CreateResource` (`graph/resolvers/resource.resolvers.go:21`). **Discovery is never limited**: scans and discovered services keep working at the limit; only creating (adopting) a resource is refused.
   - Connectors: `GenerateConnectorToken` (`graph/resolvers/connector.resolvers.go`) and REST token regeneration if it creates a slot.
   - Shields: `GenerateShieldToken` (`graph/resolvers/shield.resolvers.go`).
   - Users:
@@ -127,13 +132,16 @@ Then resume: traffic returns with no re-enrollment.
 ### Tests
 - **Every creation path:** refuses at the limit, allows below it, and creates nothing when refused.
 - **Concurrency:** N parallel creations with one slot left → exactly one succeeds (DB-backed; mutation check by removing the lock).
-- **Pending invitations count:** mass-inviting can't get around the limit.
+- **Pending invitations count:** mass-inviting can't get around the limit; an identity that is both a member and invited counts once.
+- **Resources:** un-protecting a resource doesn't free a slot; resource discovery keeps working at the resource limit.
+- **Remote networks and resources:** creation is refused at their limits.
 - **Lowered limits:** resources are kept and `over` is reported.
 - **Unset limits** are unlimited; a plan change takes effect immediately.
 - **Fail closed** on a lookup error.
 - **Authz and audit** with before/after.
 
 ### Live check
+- On the Free plan, create up to 3 remote networks; the 4th is refused. Create resources up to the limit (use a test plan with a small resource limit to keep it quick); discovery still runs.
 - Plan limit 2 connectors; override 3 for one tenant.
 - Create up to the limit; the next is refused in the admin UI and over the API with `quota_exceeded`.
 - SCIM provisioning over the user limit is refused.
