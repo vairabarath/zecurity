@@ -4036,28 +4036,28 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     s.tunnel_wanted = stored.tunnel_wanted;
 }
 
-/// How long a deliberate shutdown waits for the tunnel teardown.
-const SHUTDOWN_TEARDOWN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a deliberate shutdown waits for the tunnel intent lock, then for
+/// the teardown itself.
+const SHUTDOWN_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const SHUTDOWN_TEARDOWN_LIMIT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Tears the tunnel down (like `zecurity-client down`) and exits the process.
-/// The tunnel intent lock is held until exit, so a restore or IPC `up` cannot
-/// bring the tunnel back in between. The final routing flush also covers a
-/// restart pass that was part-way through bringing the tunnel up.
+/// It takes the tunnel intent lock when it can get it quickly, so a restore or
+/// IPC `up` waiting on that lock cannot bring the tunnel back in between; a
+/// slow `up` holding the lock does not stop the teardown from running. On
+/// Linux the final routing flush also covers a restart pass caught part-way
+/// through bringing the tunnel up (restart passes don't take the intent lock).
 async fn shutdown_and_exit(state: &SharedState, tun_slot: &TunSlot) -> ! {
     #[cfg(unix)]
     sd_notify(b"STOPPING=1\n");
     let intent_lock = state.read().await.tunnel_intent_lock.clone();
-    let guard = tokio::time::timeout(SHUTDOWN_TEARDOWN_LIMIT, async {
-        let guard = intent_lock.lock_owned().await;
-        let down = handle_down(state, tun_slot).await;
-        if !down.ok {
-            warn!(error = ?down.error, "tunnel teardown at shutdown failed");
-        }
-        guard
-    })
-    .await;
-    if guard.is_err() {
-        warn!("tunnel teardown at shutdown timed out");
+    let _intent = tokio::time::timeout(SHUTDOWN_LOCK_WAIT, intent_lock.lock_owned())
+        .await
+        .ok();
+    match tokio::time::timeout(SHUTDOWN_TEARDOWN_LIMIT, handle_down(state, tun_slot)).await {
+        Ok(down) if !down.ok => warn!(error = ?down.error, "tunnel teardown at shutdown failed"),
+        Ok(_) => {}
+        Err(_) => warn!("tunnel teardown at shutdown timed out"),
     }
     #[cfg(target_os = "linux")]
     crate::tun::cleanup_policy_routes();
@@ -4087,7 +4087,9 @@ fn spawn_stop_signal_handler(state: SharedState, tun_slot: TunSlot) -> Result<()
         warn!("second stop signal — exiting without waiting for the teardown");
         #[cfg(target_os = "linux")]
         crate::tun::cleanup_policy_routes();
-        crate::exit_daemon(1);
+        // 0, not 1: a stop the user asked for must not look like a crash
+        // to Restart=on-failure, which would bring the tunnel back.
+        crate::exit_daemon(0);
     });
     Ok(())
 }
@@ -4102,11 +4104,7 @@ fn sd_notify(msg: &[u8]) {
 
 #[cfg(unix)]
 fn sd_notify_ready() {
-    let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
-        return;
-    };
-    let _ =
-        std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(b"READY=1\n", &path));
+    sd_notify(b"READY=1\n");
 }
 
 #[cfg(unix)]
