@@ -199,5 +199,5 @@ Isolated stack: the controller built from `e8641069` on a copy of the shared dat
 Not run live: MFA reset during a step-up (the copied database has one admin; covered by DB tests); IdP MFA with an old `auth_time` (would need the shared test IdP's config changed).
 
 Observations (not bugs in the fixes):
-- A stopped system client left its `fwmark 0x5a lookup main` rule (priority 49) behind; the test client's `ip rule add` then failed. Worth checking that `systemctl stop` cleans it up (it may be left from an earlier crash).
+- A stopped system client left its `fwmark 0x5a lookup main` rule (priority 49) behind; the test client's `ip rule add` then failed. That form of the rule comes from client code removed on 2026-07-06 (17d677d6), so it was an old leftover. But the daemon had no SIGTERM handler at all, so `systemctl stop` never removed the current rule, nft table or route table either. Fixed in #214: SIGTERM/SIGINT now run the `down` teardown (checked live: 1 rule, table and 2 routes → 0 after SIGTERM).
 - A dev client can't run its tunnel without root: iproute2's `ip` drops file capabilities for non-root users, so `setcap` on a copy of `ip` does not help. The test daemon ran as root for the data path.
