@@ -380,8 +380,8 @@ func TestRelayBandwidth(t *testing.T) {
 
 func TestRelayDTOSurface(t *testing.T) {
 	summary := []string{"address_scope", "attached_connectors", "bandwidth", "capacity_label", "cert_not_after", "cert_serial",
-		"connection_count", "created_at", "drain_state", "draining_since", "hostname", "id", "last_heartbeat_at",
-		"max_connections", "name", "policy", "pool", "public_addr", "status", "version"}
+		"connection_count", "created_at", "drain_state", "draining_since", "headroom", "hostname", "id", "last_heartbeat_at",
+		"link_capacity_bps", "max_connections", "name", "policy", "pool", "public_addr", "status", "version"}
 	detail := append(append([]string{}, summary...), "attachments", "attachments_truncated", "certificates",
 		"certificates_truncated", "dns_allowlist", "eligible_relay_count", "in_relay_list", "ip_allowlist")
 	sort.Strings(detail)
@@ -390,6 +390,7 @@ func TestRelayDTOSurface(t *testing.T) {
 		want []string
 	}{
 		"RelaySummary":     {RelaySummary{}, summary},
+		"RelayHeadroom":    {RelayHeadroom{}, []string{"headroom_bytes_per_sec", "over_capacity", "used_bytes_per_sec", "utilization"}},
 		"RelayDetail":      {RelayDetail{}, detail},
 		"RelayCertificate": {RelayCertificate{}, []string{"is_current", "issued_at", "not_after", "revocation_reason", "revoked_at", "serial"}},
 		"RelayAttachment":  {RelayAttachment{}, []string{"attached_at", "connector_id", "last_confirmed", "source", "tenant_id"}},

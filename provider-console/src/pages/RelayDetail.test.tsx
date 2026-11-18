@@ -33,6 +33,8 @@ function detail(over: Partial<RelayDetail> = {}): RelayDetail {
     draining_since: null,
     drain_state: null,
     bandwidth: null,
+    link_capacity_bps: null,
+    headroom: null,
     in_relay_list: true,
     eligible_relay_count: 2,
     dns_allowlist: ['relay.example.com'],
@@ -170,13 +172,13 @@ describe('Relay detail', () => {
   })
 
   // Phase D (D-31): relay-ops may drain and resume, nothing else.
-  it('relay-ops sees only Refresh, Move to pool and Drain relay, no other mutating controls; loading sends GETs only', async () => {
+  it('relay-ops sees only Refresh, Set link capacity, Move to pool and Drain relay, no other mutating controls; loading sends GETs only', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Move to pool', 'Drain relay'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Set link capacity', 'Move to pool', 'Drain relay'])
     expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })
@@ -185,13 +187,13 @@ describe('Relay detail', () => {
   // controls on this page are Move to pool and Drain (both roles) and a
   // super-admin's Revoke and Delete;
   // opening the page sends GETs only.
-  it('a super-admin sees exactly Refresh, Move to pool, Drain relay, Revoke relay and Delete relay; loading sends GETs only', async () => {
+  it('a super-admin sees exactly Refresh, Set link capacity, Move to pool, Drain relay, Revoke relay and Delete relay; loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     await screen.findByRole('heading', { name: 'relay-a', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Move to pool', 'Drain relay', 'Revoke relay', 'Delete relay'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh', 'Set link capacity', 'Move to pool', 'Drain relay', 'Revoke relay', 'Delete relay'])
     expect(within(main).queryByText(/\b(edit|create|suspend)\b/i)).not.toBeInTheDocument()
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
   })

@@ -20,7 +20,8 @@ import * as tenantsApi from './tenants'
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
 // update / delete / set default and a tenant's plan assignment, plus the two plan reads. Sprint 23 S1 (D-45
 // amends D-30) adds tenant suspend and resume; S2 (D-44) adds POST /provider/tenants and the first-admin
-// re-invite. Every exported API function is called here; a new write must be
+// re-invite. Relay link capacity (Sprint 23 B2, D-42) adds PUT /provider/relays/{id}/link-capacity. Every
+// exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -53,6 +54,7 @@ const ALLOWED_WRITES = [
   'POST /provider/users/{id}/enable',
   'POST /provider/users/{id}/reset-password',
   'POST /provider/users/{id}/reset-totp',
+  'PUT /provider/relays/{id}/link-capacity',
   'PUT /provider/tenants/{id}/plan',
   'PUT /provider/tenants/{id}/quotas/{key}',
   'PUT /provider/tenants/{id}/relay-pool',
@@ -125,6 +127,7 @@ describe('API surface', () => {
       [`DELETE /provider/relays/${ID}`]: { status: 204 },
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
       [`POST /provider/relays/${ID}/pool`]: { status: 204 },
+      [`PUT /provider/relays/${ID}/link-capacity`]: { status: 204 },
       'GET /provider/relay-pools': { status: 200, body: { items: [] } },
       [`GET /provider/relay-pools/${ID}`]: { status: 200, body: {} },
       'POST /provider/relay-pools': { status: 201, body: { id: ID, name: 'a', region: null, residency: false } },

@@ -47,6 +47,12 @@ type RelaySummary struct {
 	// Bandwidth (F5) is null when the relay doesn't report byte counters (an
 	// older relay, or none received yet) and for revoked or deleted relays.
 	Bandwidth *RelayBandwidth `json:"bandwidth"`
+	// LinkCapacityBps (F5 headroom, D-42) is the operator-set usable link
+	// throughput in bytes per second, in the link's tighter direction; null
+	// = not configured. Headroom is derived from it and Bandwidth, and is
+	// null whenever either is unknown (never zero or unlimited by default).
+	LinkCapacityBps *int64         `json:"link_capacity_bps"`
+	Headroom        *RelayHeadroom `json:"headroom"`
 	// Pool is the relay pool the relay belongs to (D-37).
 	Pool RelayPoolRef `json:"pool"`
 	// Policy is what the relay reports about its workspace policy (D-40,
@@ -87,6 +93,34 @@ type RelayBandwidth struct {
 	WindowSeconds          *float64  `json:"window_seconds"`
 	ToConnectorBytesPerSec *float64  `json:"to_connector_bytes_per_sec"`
 	ToClientBytesPerSec    *float64  `json:"to_client_bytes_per_sec"`
+}
+
+// RelayHeadroom is how much more the relay's link can carry (D-42, refined
+// 2026-11-18). A relay forwards every byte it receives, so both measured
+// flows leave through the same link: Used is their sum. Headroom is
+// LinkCapacityBps − Used, clamped at 0 (OverCapacity marks Used above the
+// capacity); Utilization is Used / capacity. It is an operational estimate
+// over the bandwidth window, not guaranteed free bandwidth.
+type RelayHeadroom struct {
+	UsedBytesPerSec     float64 `json:"used_bytes_per_sec"`
+	HeadroomBytesPerSec float64 `json:"headroom_bytes_per_sec"`
+	Utilization         float64 `json:"utilization"`
+	OverCapacity        bool    `json:"over_capacity"`
+}
+
+// relayHeadroom derives the headroom; nil when the capacity is not
+// configured or either rate is unknown (not reported, measuring, revoked).
+func relayHeadroom(capacity *int64, bw *RelayBandwidth) *RelayHeadroom {
+	if capacity == nil || *capacity <= 0 || bw == nil || bw.ToClientBytesPerSec == nil || bw.ToConnectorBytesPerSec == nil {
+		return nil
+	}
+	c := float64(*capacity)
+	used := *bw.ToClientBytesPerSec + *bw.ToConnectorBytesPerSec
+	h := &RelayHeadroom{UsedBytesPerSec: used, Utilization: used / c, OverCapacity: used > c}
+	if !h.OverCapacity {
+		h.HeadroomBytesPerSec = c - used
+	}
+	return h
 }
 
 // Drain progress (Sprint 22 Phase D, P4), decided here and never by the
@@ -190,7 +224,8 @@ const relaySummaryColumns = `
        r.created_at, r.drain_started_at, r.connection_count_at,
        r.bytes_sampled_at, r.bytes_rate_window_seconds, r.bytes_to_connector_per_sec, r.bytes_to_client_per_sec,
        rp.id::text, rp.name, rp.region, rp.residency,
-       r.policy_supported, r.policy_version_acked, rp.policy_version`
+       r.policy_supported, r.policy_version_acked, rp.policy_version,
+       r.link_capacity_bps`
 
 // relayFrom joins each relay to its pool; every query using
 // relaySummaryColumns selects FROM it.
@@ -210,6 +245,7 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 		&bwAt, &bwWindow, &bwToConnector, &bwToClient,
 		&s.Pool.ID, &s.Pool.Name, &s.Pool.Region, &s.Pool.Residency,
 		&s.Policy.Supported, &s.Policy.AppliedVersion, &poolPolicyVersion,
+		&s.LinkCapacityBps,
 	}, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return RelaySummary{}, err
@@ -225,6 +261,7 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 			ToConnectorBytesPerSec: bwToConnector, ToClientBytesPerSec: bwToClient,
 		}
 	}
+	s.Headroom = relayHeadroom(s.LinkCapacityBps, s.Bandwidth)
 	return s, nil
 }
 
