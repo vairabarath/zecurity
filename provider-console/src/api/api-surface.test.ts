@@ -17,7 +17,7 @@ import * as tenantsApi from './tenants'
 // the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
 // create/rename/region-residency/delete, moving a relay between pools and a
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
-// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Tenant creation (Sprint 23 S2, D-44) adds POST /provider/tenants. Every exported API function is called here; a new write must be
+// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Tenant creation (Sprint 23 S2, D-44) adds POST /provider/tenants and the first-admin re-invite. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -42,6 +42,7 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
   'POST /provider/tenants',
+  'POST /provider/tenants/{id}/first-admin-invitation',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -128,6 +129,7 @@ describe('API surface', () => {
       [`POST /provider/plans/${ID}/default`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/plan`]: { status: 204 },
       'GET /provider/tenants': page,
+      [`POST /provider/tenants/${ID}/first-admin-invitation`]: { status: 201, body: { tenant_id: ID, invitation: { id: 'i', email: 'b', expires_at: '' } } },
       'POST /provider/tenants': { status: 201, body: { id: ID, slug: 'a', name: 'a', invitation: { id: 'i', email: 'b', expires_at: '' } } },
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,

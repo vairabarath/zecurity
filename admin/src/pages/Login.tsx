@@ -44,6 +44,9 @@ const isEnterprise = (connection: IdpConnection) => connection.tier !== 'bootstr
 const CALLBACK_ERRORS: Record<string, string> = {
   not_invited:
     'Your identity provider signed you in, but this network has not granted you access. Ask an administrator to invite you.',
+  // Sprint 23 S2 (D-44): the first-admin invitation expired or was replaced.
+  invitation_expired:
+    'Your invitation to administer this workspace has expired. Ask your provider to send a new invitation, then use the link in that email.',
   authentication_failed: 'Sign-in with your identity provider failed. Please try again.',
   missing_params: 'The sign-in response was incomplete. Please start again.',
   state_expired: 'This sign-in attempt expired. Please start again.',

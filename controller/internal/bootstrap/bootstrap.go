@@ -120,6 +120,19 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 		return nil, fmt.Errorf("lookup pending invite: %w", err)
 	}
 
+	// S2 (D-44): the email holds a provider first-admin seat whose invitation
+	// expired (or was replaced). Refuse instead of falling through to
+	// self-signup: a new workspace would bind this identity elsewhere for
+	// good, and the provider could never hand it the seat. The provider
+	// re-issues the invitation (tenantcreate Reinvite).
+	expired, err := s.hasExpiredFirstAdminSeat(ctx, email, in.ConnectionTenantID)
+	if err != nil {
+		return nil, err
+	}
+	if expired {
+		return nil, identity.ErrInvitationExpired
+	}
+
 	// No invite. An ENTERPRISE connection must never create a workspace here:
 	// it already belongs to one, so provisioning would hand a brand-new
 	// workspace (with ADMIN) to anyone in the customer's directory who signs in.
@@ -401,6 +414,30 @@ func (s *Service) runInvitedUserTransaction(
 		Status:     "active",
 		Generation: 1,
 	}, nil
+}
+
+// hasExpiredFirstAdminSeat reports whether email holds an unclaimed
+// first-admin seat (an 'invited' admin membership with a provider invitation)
+// whose invitation is no longer usable. Called only after the usable-invite
+// lookup found nothing, so any such seat is expired or replaced. On an
+// enterprise connection it is scoped to that connection's workspace.
+func (s *Service) hasExpiredFirstAdminSeat(ctx context.Context, email string, workspaceID *string) (bool, error) {
+	var found bool
+	err := s.Pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM workspace_members wm
+		    WHERE wm.email = $1
+		      AND ($2::uuid IS NULL OR wm.workspace_id = $2::uuid)
+		      AND wm.role = 'admin'
+		      AND wm.status = 'invited'
+		      AND wm.user_id IS NULL
+		      AND `+firstAdminInviteSQL+`)`,
+		email, workspaceID,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("lookup expired first-admin invitation: %w", err)
+	}
+	return found, nil
 }
 
 // firstAdminInviteSQL reports whether the membership row "wm" belongs to a

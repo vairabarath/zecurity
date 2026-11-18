@@ -14,7 +14,11 @@ const TENANT_ERRORS: Record<string, string> = {
   plan_not_found: 'That plan no longer exists. Choose another plan.',
   reason_required: 'Enter a reason.',
   reason_too_long: 'Keep the reason to 500 characters or fewer.',
-  forbidden: 'Only super-admins can create tenants.',
+  forbidden: 'Only super-admins can create tenants or send invitations.',
+  first_admin_exists: 'This tenant already has an admin. Its admins invite people themselves.',
+  email_has_account: 'That email already has an account in this tenant. Use another address.',
+  tenant_not_active: 'This tenant isn’t active.',
+  not_found: 'This tenant no longer exists.',
 }
 
 export function tenantCreateErrorMessage(err: unknown): string {

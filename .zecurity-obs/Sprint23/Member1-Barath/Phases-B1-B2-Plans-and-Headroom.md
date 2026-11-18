@@ -252,7 +252,7 @@ Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` af
   - `api-surface.test.ts`: `POST /provider/tenants` added on purpose.
 - **Admin UI:** unchanged. `/invite/:token` signs in with Google; the sign-in takes the invitation; the callback's later accept call gets "already used", which it already ignores.
 - **Known constraint (agreed 2026-11-18, not a bug):** the first admin's email must not already belong to another Zecurity workspace. A platform identity that already has a user resolves to its own workspace and never reaches the invitation (single-workspace login, ADR-024). The dialog says so.
-- **Expired first-admin invitation:** the email signs in as a normal first-time user (self-signup). The provider re-creates or re-invites (no re-invite endpoint in S2).
+- **Expired first-admin invitation:** sign-in is refused with `invitation_expired`, and the provider re-issues the invitation. See "Post-Phase Fixes" below (this replaced the first build's fall-through to self-signup).
 - **Tests:**
   - `internal/bootstrap/tenant_create_test.go` (9):
     - equivalence with self-signup (status, trust domain, CA and keys row, Default policy, plan, `workspace.create`), and a chosen plan is honoured;
@@ -277,6 +277,40 @@ Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` af
   - Client on the dev box, signed in as the first admin through the tenant's connection (`Logged in … Workspace: acme-live-s2`, SPIFFE `ws-acme-live-s2`, ACL 1 rule): tunnel up → `curl 192.168.1.53:8000` returns the page (connector: `access allowed`, `tunnel_opened ok` to the shield); tunnel down → times out; up again → works. **Live check PASS; no S2 defect found.**
   - Not live-tested: the client CLI admin-invitation guard (the shipped CLI never sends an invite token; unit-tested).
   - Lab notes: private-address relays need `ENV=development RELAY_DEV_ALLOW_PRIVATE_ADDR=true` on the controller; after a DB reset the client must be rebuilt with the new platform root (`ZECURITY_PLATFORM_ROOT_PEM_FILE`), since the root is compiled in.
+
+
+### S2 Post-Phase Fixes
+
+### Fix: Expired first-admin invitation locked the first admin out for good
+**Issue:** found in the post-live review (2026-11-18). After the first-admin invitation expired, the invitee's first sign-in fell through to self-signup and created a workspace of their own. Their identity was then bound to that workspace (single-workspace login, ADR-024), so they could never take the tenant's admin seat. S2 had no way to issue a new invitation either, which left the tenant with no admin until someone edited the database.
+
+**Root cause:** `bootstrap.Provision` treated "no usable invitation" the same as "never invited", and S2 had no re-issue path.
+
+**Fix applied (decided by Sathiya, 2026-11-18):**
+- `identity.ErrInvitationExpired` wraps `ErrNotInvited`, so audit and the client path treat it as "not invited". `Provision` returns it when the email still holds an unclaimed provider first-admin seat (an `invited` admin membership with an admin invitation) but no usable invitation (`hasExpiredFirstAdminSeat`; scoped to the workspace on an enterprise connection). No workspace is created.
+- `auth/callback.go` redirects to `/login?error=invitation_expired`. The admin UI login page shows: "Your invitation to administer this workspace has expired. Ask your provider to send a new invitation, then use the link in that email." (no "Deploy one" link).
+- **Re-issue:** `POST /provider/tenants/{id}/first-admin-invitation {admin_email?, reason}` → 201 `{tenant_id, invitation {id, email, expires_at}}`, with no token. It needs a reason. Code: `tenantcreate.Handler.Reinvite` → `bootstrap.ReissueFirstAdminInvitation`.
+  - Action `tenant.first_admin.reinvite`, super-admin only (`decide()`).
+  - Locks the workspace row. Marks every still-`pending` admin invitation `expired`, so earlier links stop working.
+  - Then refuses if the tenant has an admin account (`first_admin_exists`). This check runs after the revoke on purpose: it sees a first sign-in that committed concurrently.
+  - `admin_email` omitted re-sends to the previous invitee. Another address moves the seat; the old unclaimed seat row is deleted.
+  - Issues a new 7-day invitation and refreshes the seat row (never one that belongs to an account: `email_has_account`).
+  - Audits `invitation.create` (reissued) on the tenant stream and `tenant.first_admin.reinvite` (before/after, reason, never the token), then emails the link.
+  - Errors: `not_found`, `tenant_not_active`, `first_admin_exists`, `email_has_account`, `invalid_email`, `reason_required`.
+- **Tenant detail read:** `first_admin_invitation {status: pending|expired, expires_at}` while the seat is unclaimed, otherwise null. No email (OQ-2), no token. The statement-count pins moved from 6 to 7.
+- **Console:** a tenant-detail "First admin" card (pending / expired) with **Send new invitation** (optional new email, reason). `api-surface.test.ts` adds the write.
+
+**Tests:**
+- `bootstrap`: an expired invitation → `ErrInvitationExpired` with nothing created; re-issue to the same email (the old link is revoked, the new one grants the seat once, refused after); re-issue revokes a still-pending link; re-issue to a new email moves the seat; refusals (admin exists, unknown, bad email, an account's email, inactive tenant).
+- `tenantcreate`: HTTP re-issue (relay-ops 403, errors, no token in the body or audit, email sent, detail state pending → expired → pending → null).
+- Admin `Login.test.tsx`; console `TenantDetailFirstAdmin.test.tsx` (5).
+- Mutation checks, all caught: the expired refusal, revoking earlier links, dropping the old seat, the admin-exists check, the seat-upsert account guard, re-issue authz, the active-tenant check.
+
+**Live (2026-11-18):** `expiry-co` with a backdated invitation → sign-in refused with the new message, nothing created. Console card "Invitation expired" → Send new invitation → old link "Invalid Invitation" (GET 404), new link valid, sign-in → Admin. Then the card is hidden and the API returns 409 `first_admin_exists`. Token absent from the audits and the log.
+
+**Related files:** `internal/identity/linker.go`, `internal/bootstrap/{bootstrap,tenant_create}.go`, `internal/auth/callback.go`, `internal/tenantcreate/handler.go`, `internal/provider/authz.go`, `internal/providerquery/tenants.go`, `cmd/server/main.go`, `admin/src/pages/Login.tsx`, `provider-console/src/{api/tenants.ts,api/types.ts,components/TenantFirstAdmin.tsx,pages/TenantDetail.tsx,lib/tenant-format.ts}`.
+
+**Still open from the same review (not fixed, by choice):** Google sign-in picks the first pending invitation by email with no ordering, so a pending member invitation elsewhere can win over the admin seat. The no-SMTP dev emailer prints the invite link with its token.
 
 ---
 

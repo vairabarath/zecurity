@@ -31,6 +31,11 @@ var (
 	ErrInvalidEmail = errors.New("invalid email")
 	ErrSlugTaken    = errors.New("slug taken")
 	ErrPlanNotFound = errors.New("plan not found")
+
+	ErrTenantNotFound   = errors.New("tenant not found")
+	ErrTenantNotActive  = errors.New("tenant not active")
+	ErrFirstAdminExists = errors.New("tenant already has an admin")
+	ErrEmailHasAccount  = errors.New("email already has an account in this tenant")
 )
 
 // FirstAdminInvitationTTL is how long the first-admin invitation is valid
@@ -190,14 +195,154 @@ func insertFirstAdminInvitation(ctx context.Context, tx pgx.Tx, workspaceID, ema
 	}
 	inv.Role = "admin"
 
-	if _, err := tx.Exec(ctx,
+	// A re-issue to the same email refreshes the unclaimed seat; a row that
+	// belongs to an account (user_id set) is never turned into the seat.
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO workspace_members (workspace_id, email, role, status)
-		 VALUES ($1, $2, 'admin', 'invited')`,
+		 VALUES ($1, $2, 'admin', 'invited')
+		 ON CONFLICT (workspace_id, email) DO UPDATE
+		    SET role = 'admin', status = 'invited', invited_at = NOW()
+		  WHERE workspace_members.user_id IS NULL`,
 		workspaceID, email,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, fmt.Errorf("insert first-admin workspace_member: %w", err)
 	}
+	if tag.RowsAffected() != 1 {
+		return nil, ErrEmailHasAccount
+	}
 	return &inv, nil
+}
+
+// ReissuedInvitation is a re-issued first-admin invitation. As for
+// CreatedTenant, Invitation.Token is for the email only.
+type ReissuedInvitation struct {
+	WorkspaceID   string
+	WorkspaceName string
+	PreviousEmail string   // "" when there was no earlier invitation
+	RevokedIDs    []string // earlier invitations that were still pending
+	Invitation    *invitation.Invitation
+}
+
+// ReissueAudit is called inside the re-issue transaction, as the last write.
+type ReissueAudit func(ctx context.Context, tx pgx.Tx, r *ReissuedInvitation) error
+
+// ReissueFirstAdminInvitation gives a provider-created tenant whose first
+// admin never signed in a new single-use, 7-day first-admin invitation
+// (S2, D-44). Every earlier first-admin invitation stops working (pending
+// ones are marked 'expired'). adminEmail "" re-sends to the previous
+// invitee; another address moves the seat to it. Refused once the tenant
+// has an admin account: from then on its admins invite people themselves.
+func (s *Service) ReissueFirstAdminInvitation(ctx context.Context, workspaceID, adminEmail string, auditFn ReissueAudit) (*ReissuedInvitation, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	r := &ReissuedInvitation{WorkspaceID: workspaceID}
+	// The workspace row lock serialises re-issues (and a concurrent first
+	// sign-in's seat check below) per tenant.
+	var status string
+	err = tx.QueryRow(ctx, `SELECT name, status FROM workspaces WHERE id = $1 FOR UPDATE`, workspaceID).Scan(&r.WorkspaceName, &status)
+	if isNoRows(err) {
+		return nil, ErrTenantNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock workspace: %w", err)
+	}
+	if status != "active" {
+		return nil, ErrTenantNotActive
+	}
+
+	err = tx.QueryRow(ctx,
+		`SELECT email FROM invitations
+		  WHERE workspace_id = $1 AND role = 'admin'
+		  ORDER BY created_at DESC, id DESC LIMIT 1`, workspaceID).Scan(&r.PreviousEmail)
+	if err != nil && !isNoRows(err) {
+		return nil, fmt.Errorf("lookup previous invitation: %w", err)
+	}
+	email := r.PreviousEmail
+	if strings.TrimSpace(adminEmail) != "" {
+		in, err := NormalizeTenantInput(CreateTenantInput{Slug: "x", Name: "x", AdminEmail: adminEmail})
+		if err != nil {
+			return nil, err
+		}
+		email = in.AdminEmail
+	}
+	if email == "" {
+		return nil, ErrInvalidEmail
+	}
+
+	rows, err := tx.Query(ctx,
+		`UPDATE invitations SET status = 'expired'
+		  WHERE workspace_id = $1 AND role = 'admin' AND status = 'pending'
+		RETURNING id::text`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("revoke earlier invitations: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		r.RevokedIDs = append(r.RevokedIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revoke earlier invitations: %w", err)
+	}
+	// The admin check runs after the revoke on purpose: a first sign-in that
+	// consumed an earlier invitation held its row lock, so the UPDATE above
+	// waited for it, and this statement (READ COMMITTED) sees its committed
+	// admin. A tenant with an admin account has nothing to re-issue.
+	var hasAdmin bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM users WHERE tenant_id = $1 AND role = 'admin' AND status <> 'deleted')`,
+		workspaceID).Scan(&hasAdmin); err != nil {
+		return nil, fmt.Errorf("check admins: %w", err)
+	}
+	if hasAdmin {
+		return nil, ErrFirstAdminExists
+	}
+	// A seat moved to another email: drop the old unclaimed seat.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM workspace_members
+		  WHERE workspace_id = $1 AND role = 'admin' AND status = 'invited'
+		    AND user_id IS NULL AND email <> $2`, workspaceID, email); err != nil {
+		return nil, fmt.Errorf("drop earlier first-admin seat: %w", err)
+	}
+
+	inv, err := insertFirstAdminInvitation(ctx, tx, workspaceID, email)
+	if err != nil {
+		return nil, err
+	}
+	inv.WorkspaceName = r.WorkspaceName
+	r.Invitation = inv
+
+	if err := audit.RecordTx(ctx, tx, audit.Entry{
+		TenantID:   workspaceID,
+		ActorEmail: "provider",
+		Action:     "invitation.create",
+		TargetType: "invitation",
+		TargetID:   inv.ID,
+		Details: map[string]any{
+			"role": "admin", "first_admin": true, "reissued": true, "email": email,
+			"previous_email": r.PreviousEmail, "revoked_invitation_ids": r.RevokedIDs,
+		},
+	}); err != nil {
+		return nil, err
+	}
+	if auditFn != nil {
+		if err := auditFn(ctx, tx, r); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit re-issue: %w", err)
+	}
+	return r, nil
 }
 
 func isSlugViolation(err error) bool {

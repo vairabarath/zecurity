@@ -131,6 +131,12 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			// The IdP proved who they are; this workspace just has not granted
 			// them access. That is a distinct, actionable outcome for the user —
 			// not a generic auth failure.
+			// S2 (D-44): a first-admin invitation that expired or was
+			// replaced; the provider must send a new one.
+			if errors.Is(err, identity.ErrInvitationExpired) {
+				fail("invitation_expired")
+				return
+			}
 			if errors.Is(err, identity.ErrNotInvited) {
 				fail("not_invited")
 				return

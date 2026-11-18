@@ -17,7 +17,7 @@ describe('tenant-format', () => {
   })
 
   it('maps every controller error code', () => {
-    for (const code of ['slug_taken', 'invalid_slug', 'invalid_name', 'invalid_email', 'plan_not_found', 'forbidden']) {
+    for (const code of ['slug_taken', 'invalid_slug', 'invalid_name', 'invalid_email', 'plan_not_found', 'forbidden', 'first_admin_exists', 'email_has_account', 'tenant_not_active', 'not_found']) {
       expect(tenantCreateErrorMessage(new ApiError({ status: 400, code }))).not.toMatch(/Something went wrong/)
     }
     expect(tenantCreateErrorMessage(new TypeError('x'))).toMatch(/Couldn’t reach/)

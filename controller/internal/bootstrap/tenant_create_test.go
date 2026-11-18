@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -293,7 +294,10 @@ func TestFirstAdminInvitation_ConcurrentSingleUse(t *testing.T) {
 	}
 }
 
-// An expired first-admin invitation is not honoured at sign-in.
+// An expired first-admin invitation is not honoured at sign-in, and the
+// sign-in is refused with ErrInvitationExpired (which is also an
+// ErrNotInvited) instead of creating a workspace for that email: a new
+// workspace would bind the identity elsewhere for good.
 func TestFirstAdminInvitation_Expires(t *testing.T) {
 	e := newTenantEnv(t)
 	ct := e.create(t, "acme", "first@acme.test", nil)
@@ -301,15 +305,161 @@ func TestFirstAdminInvitation_Expires(t *testing.T) {
 		`UPDATE invitations SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`, ct.Invitation.ID); err != nil {
 		t.Fatal(err)
 	}
-	p, err := e.signIn("first@acme.test", "late", true)
+	_, err := e.signIn("first@acme.test", "late", true)
+	if !errors.Is(err, identity.ErrInvitationExpired) || !errors.Is(err, identity.ErrNotInvited) {
+		t.Fatalf("sign-in after expiry: err = %v, want ErrInvitationExpired (an ErrNotInvited)", err)
+	}
+	if got := e.scalar(t, `SELECT (SELECT count(*) FROM workspaces)::text || '|' || (SELECT count(*) FROM users)::text || '|' ||
+		(SELECT status FROM workspace_members WHERE workspace_id = $1) || '|' ||
+		(SELECT status FROM invitations WHERE id = $2)`, ct.WorkspaceID, ct.Invitation.ID); got != "1|0|invited|pending" {
+		t.Fatalf("after refused expired sign-in workspaces|users|seat|invitation = %s, want 1|0|invited|pending", got)
+	}
+	// Other emails still self-sign-up as before.
+	if p, err := e.signIn("someone@else.test", "else", true); err != nil || p.TenantID == ct.WorkspaceID {
+		t.Fatalf("unrelated self-signup: %v", err)
+	}
+}
+
+// Re-issue (same email): earlier links stop working, the new one grants the
+// seat once; the tenant and provider streams record it without the token.
+func TestReissueFirstAdminInvitation_SameEmail(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "first@acme.test", nil)
+	if _, err := e.pool.Exec(ctx, `UPDATE invitations SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`, ct.Invitation.ID); err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "", nil)
 	if err != nil {
-		t.Fatalf("sign-in after expiry: %v", err)
+		t.Fatalf("reissue: %v", err)
 	}
-	if p.TenantID == ct.WorkspaceID {
-		t.Fatal("an expired first-admin invitation was honoured")
+	if r.PreviousEmail != "first@acme.test" || r.Invitation.Email != "first@acme.test" || r.Invitation.Token == ct.Invitation.Token ||
+		r.Invitation.ExpiresAt.Before(time.Now().Add(6*24*time.Hour)) || r.WorkspaceName != ct.Name {
+		t.Fatalf("reissued = %+v", r)
 	}
-	if got := e.scalar(t, `SELECT status FROM workspace_members WHERE workspace_id = $1`, ct.WorkspaceID); got != "invited" {
-		t.Fatalf("membership after expired sign-in = %s, want invited", got)
+	if got := e.scalar(t, `SELECT string_agg(status, ',' ORDER BY created_at) FROM invitations WHERE workspace_id = $1`, ct.WorkspaceID); got != "expired,pending" {
+		t.Fatalf("invitation statuses = %s, want expired,pending", got)
+	}
+	// The old link no longer works anywhere: its row is not the latest
+	// usable one, and the accept endpoint never takes admin invitations.
+	if st := e.scalar(t, `SELECT status FROM invitations WHERE id = $1`, ct.Invitation.ID); st != "expired" {
+		t.Fatalf("old invitation status = %s, want expired (revoked by the re-issue)", st)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM workspace_members WHERE workspace_id = $1`, ct.WorkspaceID); n != "1" {
+		t.Fatalf("seats = %s, want 1", n)
+	}
+	p, err := e.signIn("first@acme.test", "first", true)
+	if err != nil || p.TenantID != ct.WorkspaceID || p.Role != "admin" {
+		t.Fatalf("sign-in with the re-issued invitation: %+v, %v", p, err)
+	}
+	if st := e.scalar(t, `SELECT status FROM invitations WHERE id = $1`, r.Invitation.ID); st != "accepted" {
+		t.Fatalf("new invitation = %s, want accepted", st)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM audit_logs WHERE tenant_id = $1 AND action = 'invitation.create'
+		AND (details->>'reissued')::boolean AND position($2 in details::text) = 0`, ct.WorkspaceID, r.Invitation.Token); n != "1" {
+		t.Fatalf("invitation.create (reissued, no token) audits = %s", n)
+	}
+	// Once the seat is taken there is nothing to re-issue.
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "", nil); !errors.Is(err, bootstrap.ErrFirstAdminExists) {
+		t.Fatalf("reissue after the admin signed in: err = %v, want ErrFirstAdminExists", err)
+	}
+}
+
+// Re-issue while the first link is still pending revokes it at once.
+func TestReissueFirstAdminInvitation_RevokesPendingLink(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "first@acme.test", nil)
+	r, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.RevokedIDs) != 1 || r.RevokedIDs[0] != ct.Invitation.ID {
+		t.Fatalf("revoked = %v, want [%s]", r.RevokedIDs, ct.Invitation.ID)
+	}
+	// The join consumes the newest usable invitation, never the revoked one.
+	if _, err := e.signIn("first@acme.test", "first", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.scalar(t, `SELECT (SELECT status FROM invitations WHERE id = $1) || '|' || (SELECT status FROM invitations WHERE id = $2)`,
+		ct.Invitation.ID, r.Invitation.ID); got != "expired|accepted" {
+		t.Fatalf("old|new = %s, want expired|accepted", got)
+	}
+}
+
+// Re-issue to another email moves the seat: the old email no longer has one
+// (it self-signs-up as anyone would), the new email takes it.
+func TestReissueFirstAdminInvitation_NewEmail(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "typo@acme.test", nil)
+	r, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, " Right@Acme.Test ", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Invitation.Email != "right@acme.test" || r.PreviousEmail != "typo@acme.test" {
+		t.Fatalf("reissued = %+v", r)
+	}
+	if got := e.scalar(t, `SELECT string_agg(email || ':' || role || ':' || status, ',') FROM workspace_members WHERE workspace_id = $1`, ct.WorkspaceID); got != "right@acme.test:admin:invited" {
+		t.Fatalf("seats = %s", got)
+	}
+	if p, err := e.signIn("typo@acme.test", "typo", true); err != nil || p.TenantID == ct.WorkspaceID {
+		t.Fatalf("old email after the seat moved: %+v, %v", p, err)
+	}
+	if p, err := e.signIn("right@acme.test", "right", true); err != nil || p.TenantID != ct.WorkspaceID || p.Role != "admin" {
+		t.Fatalf("new email: %+v, %v", p, err)
+	}
+}
+
+func TestReissueFirstAdminInvitation_Refusals(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	self, err := e.signIn("owner@self.test", "owner", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, ws, email string
+		want            error
+	}{
+		{"self-signup tenant has an admin", self.TenantID, "x@y.test", bootstrap.ErrFirstAdminExists},
+		{"unknown tenant", "11111111-1111-1111-1111-111111111111", "x@y.test", bootstrap.ErrTenantNotFound},
+	}
+	ct := e.create(t, "acme", "first@acme.test", nil)
+	cases = append(cases, struct {
+		name, ws, email string
+		want            error
+	}{"bad email", ct.WorkspaceID, "not an email", bootstrap.ErrInvalidEmail})
+	for _, c := range cases {
+		if _, err := e.svc.ReissueFirstAdminInvitation(ctx, c.ws, c.email, nil); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+	}
+	// An email that already has a (non-admin) account in the tenant is never
+	// turned into the invited admin seat; nothing changes.
+	var uid string
+	if err := e.pool.QueryRow(ctx, `INSERT INTO users (tenant_id, email, provider, provider_sub, role, status)
+		VALUES ($1, 'member@acme.test', 'scim', 's1', 'member', 'active') RETURNING id::text`, ct.WorkspaceID).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `INSERT INTO workspace_members (workspace_id, user_id, email, role, status, joined_at)
+		VALUES ($1, $2, 'member@acme.test', 'member', 'active', NOW())`, ct.WorkspaceID, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "member@acme.test", nil); !errors.Is(err, bootstrap.ErrEmailHasAccount) {
+		t.Fatalf("re-issue to an account's email: err = %v, want ErrEmailHasAccount", err)
+	}
+	if got := e.scalar(t, `SELECT role || '|' || status FROM workspace_members WHERE workspace_id = $1 AND email = 'member@acme.test'`, ct.WorkspaceID); got != "member|active" {
+		t.Fatalf("member row after refused re-issue = %s", got)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE workspaces SET status = 'provisioning' WHERE id = $1`, ct.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "", nil); !errors.Is(err, bootstrap.ErrTenantNotActive) {
+		t.Fatalf("inactive tenant: %v", err)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM invitations WHERE workspace_id = $1`, ct.WorkspaceID); n != "1" {
+		t.Fatalf("refused re-issues wrote invitations: %s", n)
 	}
 }
 

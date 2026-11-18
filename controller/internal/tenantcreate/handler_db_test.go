@@ -24,6 +24,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/providerquery"
 )
 
 type sentMail struct {
@@ -103,6 +104,7 @@ func newEnv(t *testing.T) *env {
 	}
 	e.mux = http.NewServeMux()
 	e.mux.HandleFunc("POST /provider/tenants", h.Create)
+	e.mux.HandleFunc("POST /provider/tenants/{id}/first-admin-invitation", h.Reinvite)
 	return e
 }
 
@@ -113,8 +115,13 @@ type resp struct {
 
 func (e *env) post(t *testing.T, role string, body any) resp {
 	t.Helper()
+	return e.postTo(t, role, "/provider/tenants", body)
+}
+
+func (e *env) postTo(t *testing.T, role, path string, body any) resp {
+	t.Helper()
 	raw, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/provider/tenants", strings.NewReader(string(raw)))
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(raw)))
 	req.RemoteAddr = "192.0.2.10:54321"
 	actor := provider.Actor{UserID: e.superID, Email: "admin@provider.test", Role: provider.RoleSuperAdmin}
 	if role == provider.RoleRelayOps {
@@ -277,5 +284,94 @@ func TestCreateTenantHTTP_Errors(t *testing.T) {
 	r := e.post(t, provider.RoleSuperAdmin, b)
 	if r.code != http.StatusCreated || !strings.Contains(r.body, `"plan_name":"Legacy"`) {
 		t.Fatalf("create on Legacy: %d %s", r.code, r.body)
+	}
+}
+
+// Re-issue (S2, D-44): super-admin only; a new link whose token is never
+// returned or audited; the tenant detail shows the seat's state (no email);
+// refused once an admin exists.
+func TestReinviteHTTP(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	r := e.post(t, provider.RoleSuperAdmin, valid())
+	if r.code != http.StatusCreated {
+		t.Fatalf("create: %d %s", r.code, r.body)
+	}
+	<-e.mail.done
+	var created TenantCreatedJSON
+	_ = json.Unmarshal([]byte(r.body), &created)
+	path := "/provider/tenants/" + created.ID + "/first-admin-invitation"
+
+	d, err := providerquery.GetTenant(ctx, e.pool, created.ID)
+	if err != nil || d.FirstAdminInvitation == nil || d.FirstAdminInvitation.Status != "pending" {
+		t.Fatalf("detail before expiry: %+v, %v", d.FirstAdminInvitation, err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE invitations SET expires_at = NOW() - INTERVAL '1 second' WHERE workspace_id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ = providerquery.GetTenant(ctx, e.pool, created.ID); d.FirstAdminInvitation == nil || d.FirstAdminInvitation.Status != "expired" {
+		t.Fatalf("detail after expiry: %+v", d.FirstAdminInvitation)
+	}
+	raw, _ := json.Marshal(d)
+	if strings.Contains(string(raw), "first@acme.test") {
+		t.Fatalf("tenant detail carries the invitee email: %s", raw)
+	}
+
+	if r := e.postTo(t, provider.RoleRelayOps, path, map[string]any{"reason": "r"}); r.code != http.StatusForbidden {
+		t.Fatalf("relay-ops: %d %s", r.code, r.body)
+	}
+	if r := e.postTo(t, provider.RoleSuperAdmin, path, map[string]any{}); errCode(r) != "reason_required" {
+		t.Fatalf("no reason: %d %s", r.code, r.body)
+	}
+	if r := e.postTo(t, provider.RoleSuperAdmin, "/provider/tenants/11111111-1111-1111-1111-111111111111/first-admin-invitation", map[string]any{"reason": "r"}); r.code != http.StatusNotFound {
+		t.Fatalf("unknown tenant: %d %s", r.code, r.body)
+	}
+	if r := e.postTo(t, provider.RoleSuperAdmin, path, map[string]any{"reason": "r", "admin_email": "nope"}); errCode(r) != "invalid_email" {
+		t.Fatalf("bad email: %d %s", r.code, r.body)
+	}
+
+	r = e.postTo(t, provider.RoleSuperAdmin, path, map[string]any{"reason": "link expired"})
+	if r.code != http.StatusCreated {
+		t.Fatalf("reinvite: %d %s", r.code, r.body)
+	}
+	var got ReinviteJSON
+	_ = json.Unmarshal([]byte(r.body), &got)
+	var token string
+	if err := e.pool.QueryRow(ctx, `SELECT token FROM invitations WHERE id = $1`, got.Invitation.ID).Scan(&token); err != nil {
+		t.Fatal(err)
+	}
+	if got.Invitation.Email != "first@acme.test" || strings.Contains(r.body, token) || strings.Contains(strings.ToLower(r.body), "token") {
+		t.Fatalf("reinvite body = %s", r.body)
+	}
+	var details []byte
+	if err := e.pool.QueryRow(ctx, `SELECT details FROM provider_audit_logs WHERE action = 'tenant.first_admin.reinvite'`).Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(details), token) || !strings.Contains(string(details), `"reason": "link expired"`) && !strings.Contains(string(details), `"reason":"link expired"`) {
+		t.Fatalf("reinvite audit = %s", details)
+	}
+	select {
+	case <-e.mail.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no invitation email")
+	}
+	if d, _ = providerquery.GetTenant(ctx, e.pool, created.ID); d.FirstAdminInvitation == nil || d.FirstAdminInvitation.Status != "pending" {
+		t.Fatalf("detail after reinvite: %+v", d.FirstAdminInvitation)
+	}
+
+	// Once an admin account exists: 409 first_admin_exists, and the detail
+	// shows no seat.
+	if _, err := e.pool.Exec(ctx, `INSERT INTO users (tenant_id, email, provider, provider_sub, role, status)
+		VALUES ($1, 'first@acme.test', 'google', 'g1', 'admin', 'active')`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE workspace_members SET status = 'active', user_id = (SELECT id FROM users WHERE tenant_id = $1) WHERE workspace_id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.postTo(t, provider.RoleSuperAdmin, path, map[string]any{"reason": "r"}); r.code != http.StatusConflict || errCode(r) != "first_admin_exists" {
+		t.Fatalf("after admin exists: %d %s", r.code, r.body)
+	}
+	if d, _ = providerquery.GetTenant(ctx, e.pool, created.ID); d.FirstAdminInvitation != nil {
+		t.Fatalf("detail with an admin: %+v", d.FirstAdminInvitation)
 	}
 }

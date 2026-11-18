@@ -717,6 +717,7 @@ func main() {
 	// same workspace bootstrap as self-signup plus a first-admin invitation.
 	tenantCreateHandler := &tenantcreate.Handler{Creator: bootstrapSvc, Authz: providerAuthz, ProviderStore: providerStore, Sender: inviteEmailer}
 	mux.Handle("POST /provider/tenants", requireProvider(http.HandlerFunc(tenantCreateHandler.Create)))
+	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProvider(http.HandlerFunc(tenantCreateHandler.Reinvite)))
 
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {

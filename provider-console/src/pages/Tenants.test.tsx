@@ -102,7 +102,7 @@ describe('Tenants list', () => {
 
   it('hovering a row link makes no tenant detail request; a click makes exactly one', async () => {
     signedInAs(superAdminMe)
-    const detail: TenantDetail = { ...A, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false, relay_pool: TENANT_DEFAULT_POOL, plan: TENANT_FREE_PLAN }
+    const detail: TenantDetail = { ...A, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false, relay_pool: TENANT_DEFAULT_POOL, plan: TENANT_FREE_PLAN, first_admin_invitation: null }
     const { calls } = mockFetch({
       'GET /provider/tenants': { status: 200, body: { items: [A], next_cursor: null } },
       [`GET /provider/tenants/${ID_A}`]: { status: 200, body: detail },

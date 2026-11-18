@@ -2,6 +2,7 @@
 // D-44):
 //
 //	POST /provider/tenants {slug, name, plan_id?, admin_email, reason} → 201
+//	POST /provider/tenants/{id}/first-admin-invitation {admin_email?, reason} → 201
 //
 // Super-admin only (tenant.create, D-06, checked in decide()). The workspace
 // is created through the same bootstrap as self-signup (bootstrap.CreateTenant)
@@ -32,6 +33,7 @@ const maxReasonRunes = 500
 // Creator is bootstrap.Service's tenant creation.
 type Creator interface {
 	CreateTenant(ctx context.Context, in bootstrap.CreateTenantInput, auditFn bootstrap.CreateTenantAudit) (*bootstrap.CreatedTenant, error)
+	ReissueFirstAdminInvitation(ctx context.Context, workspaceID, adminEmail string, auditFn bootstrap.ReissueAudit) (*bootstrap.ReissuedInvitation, error)
 }
 
 // InvitationSender emails the invitation link (invitation.Emailer).
@@ -72,6 +74,109 @@ type TenantCreatedJSON struct {
 	Invitation  invitationJSON `json:"invitation"`
 }
 
+func reasonFrom(w http.ResponseWriter, raw string) (string, bool) {
+	reason := strings.TrimSpace(raw)
+	if reason == "" {
+		provider.WriteError(w, http.StatusBadRequest, "reason_required")
+		return "", false
+	}
+	if utf8.RuneCountInString(reason) > maxReasonRunes {
+		provider.WriteError(w, http.StatusBadRequest, "reason_too_long")
+		return "", false
+	}
+	return reason, true
+}
+
+func (h *Handler) send(inv *invitation.Invitation, workspaceID, name string) {
+	if h.Sender == nil {
+		return
+	}
+	c := *inv
+	go func() {
+		if err := h.Sender.SendInvitation(&c, name); err != nil {
+			log.Printf("tenantcreate: first-admin invitation email for workspace %s: %v", workspaceID, err)
+		}
+	}()
+}
+
+type reinviteRequest struct {
+	AdminEmail string `json:"admin_email"`
+	Reason     string `json:"reason"`
+}
+
+// ReinviteJSON is the 201 body of a re-issue. It carries no token.
+type ReinviteJSON struct {
+	TenantID   string         `json:"tenant_id"`
+	Invitation invitationJSON `json:"invitation"`
+}
+
+// Reinvite: POST /provider/tenants/{id}/first-admin-invitation
+// {admin_email?, reason}. A new single-use, 7-day first-admin invitation for
+// a tenant whose first admin never signed in; earlier links stop working.
+// admin_email omitted re-sends to the previous invitee.
+func (h *Handler) Reinvite(w http.ResponseWriter, r *http.Request) {
+	actor, ok := provider.ActorFromContext(r.Context())
+	if !ok {
+		log.Printf("tenantcreate: request without provider actor (wiring bug)")
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err := h.Authz.CanReinviteFirstAdmin(actor, provider.Target{Type: "tenant", ID: id}); err != nil {
+		provider.WriteError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	var req reinviteRequest
+	if !provider.DecodeJSON(w, r, &req) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reason, ok := reasonFrom(w, req.Reason)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	res, err := h.Creator.ReissueFirstAdminInvitation(ctx, id, req.AdminEmail, func(ctx context.Context, tx pgx.Tx, ri *bootstrap.ReissuedInvitation) error {
+		before := map[string]any{"invitee_email": ri.PreviousEmail, "revoked_invitation_ids": ri.RevokedIDs}
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionTenantFirstAdminReinvite,
+			TargetType:     "tenant",
+			TargetID:       id,
+			Details: provider.WithChange(
+				map[string]any{
+					"reason": reason,
+					// The invitation operation, never its token (D-44).
+					"invitation": map[string]any{
+						"operation":  "first_admin.reinvite",
+						"id":         ri.Invitation.ID,
+						"email":      ri.Invitation.Email,
+						"role":       "admin",
+						"expires_at": ri.Invitation.ExpiresAt.UTC().Format(time.RFC3339),
+					},
+				},
+				before,
+				map[string]any{"invitee_email": ri.Invitation.Email, "invitation_id": ri.Invitation.ID}),
+			IPAddress: provider.ClientIP(r),
+		})
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h.send(res.Invitation, id, res.WorkspaceName)
+	provider.WriteJSON(w, http.StatusCreated, ReinviteJSON{
+		TenantID:   id,
+		Invitation: invitationJSON{ID: res.Invitation.ID, Email: res.Invitation.Email, ExpiresAt: res.Invitation.ExpiresAt.UTC()},
+	})
+}
+
 // Create: POST /provider/tenants.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	actor, ok := provider.ActorFromContext(r.Context())
@@ -89,13 +194,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	reason := strings.TrimSpace(req.Reason)
-	if reason == "" {
-		provider.WriteError(w, http.StatusBadRequest, "reason_required")
-		return
-	}
-	if utf8.RuneCountInString(reason) > maxReasonRunes {
-		provider.WriteError(w, http.StatusBadRequest, "reason_too_long")
+	reason, ok := reasonFrom(w, req.Reason)
+	if !ok {
 		return
 	}
 	if req.PlanID != nil {
@@ -142,14 +242,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort, after commit (as for a tenant admin's invitation): the
 	// invitee can also simply sign in with the invited email.
-	if h.Sender != nil {
-		inv := *t.Invitation
-		go func() {
-			if err := h.Sender.SendInvitation(&inv, t.Name); err != nil {
-				log.Printf("tenantcreate: first-admin invitation email for workspace %s: %v", t.WorkspaceID, err)
-			}
-		}()
-	}
+	h.send(t.Invitation, t.WorkspaceID, t.Name)
 
 	provider.WriteJSON(w, http.StatusCreated, TenantCreatedJSON{
 		ID: t.WorkspaceID, Slug: t.Slug, Name: t.Name, TrustDomain: t.TrustDomain,
@@ -170,6 +263,14 @@ func writeError(w http.ResponseWriter, err error) {
 		provider.WriteError(w, http.StatusBadRequest, "plan_not_found")
 	case errors.Is(err, bootstrap.ErrSlugTaken):
 		provider.WriteError(w, http.StatusConflict, "slug_taken")
+	case errors.Is(err, bootstrap.ErrTenantNotFound):
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, bootstrap.ErrTenantNotActive):
+		provider.WriteError(w, http.StatusConflict, "tenant_not_active")
+	case errors.Is(err, bootstrap.ErrFirstAdminExists):
+		provider.WriteError(w, http.StatusConflict, "first_admin_exists")
+	case errors.Is(err, bootstrap.ErrEmailHasAccount):
+		provider.WriteError(w, http.StatusConflict, "email_has_account")
 	default:
 		log.Printf("tenantcreate: create: %v", err)
 		provider.WriteError(w, http.StatusInternalServerError, "server_error")
