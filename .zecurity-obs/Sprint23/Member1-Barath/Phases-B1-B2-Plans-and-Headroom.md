@@ -308,6 +308,13 @@ Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` af
 
 **Live (2026-11-18):** `expiry-co` with a backdated invitation → sign-in refused with the new message, nothing created. Console card "Invitation expired" → Send new invitation → old link "Invalid Invitation" (GET 404), new link valid, sign-in → Admin. Then the card is hidden and the API returns 409 `first_admin_exists`. Token absent from the audits and the log.
 
+**Live re-run on `2426ed7e` (2026-11-18, also after a host restart), tenants `fix1-live` and `fix1-rerun`, Orca embedded browser:**
+- Expired sign-in → `/login?error=invitation_expired` with the message; nothing created; invitation untouched.
+- Console card "Invitation expired" → Send new invitation (reason) → card "Invitation pending"; old link GET 404, new link 200; reason and revoked id audited; token absent from both audits and the controller log.
+- Sign-in with the new link → Admin, invitation `accepted`; card hidden; a further re-invite → 409 `first_admin_exists`.
+
+PASS both runs.
+
 **Related files:** `internal/identity/linker.go`, `internal/bootstrap/{bootstrap,tenant_create}.go`, `internal/auth/callback.go`, `internal/tenantcreate/handler.go`, `internal/provider/authz.go`, `internal/providerquery/tenants.go`, `cmd/server/main.go`, `admin/src/pages/Login.tsx`, `provider-console/src/{api/tenants.ts,api/types.ts,components/TenantFirstAdmin.tsx,pages/TenantDetail.tsx,lib/tenant-format.ts}`.
 
 ### Fix: Google sign-in could pick the wrong pending invitation
