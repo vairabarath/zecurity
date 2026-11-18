@@ -602,3 +602,13 @@ query GetConsoleSecurity {
     requireMfa
   }
 }
+
+# Sprint 23 S3 (D-47): the workspace's limits and usage (read-only).
+query GetWorkspaceQuotas {
+  workspaceQuotas {
+    key
+    limit
+    used
+    over
+  }
+}

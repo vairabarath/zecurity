@@ -1,4 +1,4 @@
-import type { PlanSummary, TenantPlan } from '@/api/types'
+import type { PlanSummary, TenantPlan, TenantQuota } from '@/api/types'
 
 // Plan fixtures shared by the page tests (Sprint 23 B1, D-43).
 
@@ -30,3 +30,12 @@ export const PLANS: PlanSummary[] = [
   planSummary({ id: LEGACY_PLAN_ID, name: 'Legacy', description: 'Unlimited compatibility plan.', limits: UNLIMITED, is_default: false, tenants: 0 }),
   planSummary({ id: PRO_PLAN_ID, name: 'Pro', description: 'Paid', limits: { ...FREE_LIMITS, users: 50 }, is_default: false, tenants: 1 }),
 ]
+
+/** Tenant detail quotas on the Free plan, nothing in use (Sprint 23 S3, D-47). */
+export const FREE_QUOTAS: TenantQuota[] = (Object.keys(FREE_LIMITS) as (keyof typeof FREE_LIMITS)[]).map((key) => ({
+  key,
+  limit: FREE_LIMITS[key],
+  source: 'plan' as const,
+  used: 0,
+  over: false,
+}))

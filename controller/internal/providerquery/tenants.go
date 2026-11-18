@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 // Tenant reads (Phase R, D-15 cross-tenant reads; super-admin only).
@@ -123,6 +125,21 @@ type TenantDetail struct {
 	RelayPool TenantRelayPool `json:"relay_pool"`
 	// Plan is the tenant's plan (Sprint 23 B1, D-43).
 	Plan TenantPlan `json:"plan"`
+	// Quotas is the tenant's limit and usage per quota key (Sprint 23 S3,
+	// D-47), in display order.
+	Quotas []TenantQuota `json:"quotas"`
+}
+
+// TenantQuota is one quota key of tenant detail: the effective limit (null =
+// unlimited), where it comes from (plan, override or unlimited), the usage
+// counted with the D-47 rules, and whether usage is above the limit (a
+// lowered limit; nothing is deleted).
+type TenantQuota struct {
+	Key    string `json:"key"`
+	Limit  *int64 `json:"limit"`
+	Source string `json:"source"`
+	Used   int64  `json:"used"`
+	Over   bool   `json:"over"`
 }
 
 // TenantFilter narrows ListTenants. Status "" means every status except
@@ -321,6 +338,15 @@ SELECT id::text, name, status, connector_id::text, remote_network_id::text, cert
 	}
 	if d.Plan, err = tenantPlan(ctx, q, id); err != nil {
 		return TenantDetail{}, err
+	}
+	// quota.AllUsage is the same definition every creation check uses.
+	usage, err := quota.AllUsage(ctx, q, id)
+	if err != nil {
+		return TenantDetail{}, fmt.Errorf("tenant quotas: %w", err)
+	}
+	d.Quotas = make([]TenantQuota, 0, len(usage))
+	for _, u := range usage {
+		d.Quotas = append(d.Quotas, TenantQuota{Key: u.Key, Limit: u.Limit, Source: u.Source, Used: u.Used, Over: u.Over})
 	}
 	return d, nil
 }

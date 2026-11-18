@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -63,6 +64,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	inv, err := h.store.CreateInvitation(r.Context(), body.Email, tc.TenantID, tc.UserID)
+	if qe, ok := quota.AsExceeded(err); ok {
+		writeQuotaExceeded(w, qe)
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create invitation")
 		return
@@ -125,6 +130,10 @@ func (h *Handler) Accept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID, tc.Email); err != nil {
+		if qe, ok := quota.AsExceeded(err); ok {
+			writeQuotaExceeded(w, qe)
+			return
+		}
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "invitation not found, already used, or expired")
 			return
@@ -140,4 +149,12 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck
+}
+
+// writeQuotaExceeded writes the D-47 refusal: 409 quota_exceeded {key,
+// limit, used} (Sprint 23 S3).
+func writeQuotaExceeded(w http.ResponseWriter, qe *quota.Exceeded) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(quota.HTTPStatus)
+	json.NewEncoder(w).Encode(qe.Body()) //nolint:errcheck
 }

@@ -73,6 +73,22 @@ extend type Query {
   consoleSecurity: ConsoleSecurity! @requires(capability: CONSOLE_READ)
 }
 
+# Sprint 23 S3 (D-47): the workspace's quota limits and usage, read-only (the
+# provider sets the limits). key is one of users, resources, remote_networks,
+# connectors, shields, client_devices; limit null = unlimited; over = more in
+# use than the limit (a lowered limit: nothing was deleted, but nothing more
+# can be created).
+type WorkspaceQuota {
+  key:   String!
+  limit: Int
+  used:  Int!
+  over:  Boolean!
+}
+
+extend type Query {
+  workspaceQuotas: [WorkspaceQuota!]! @requires(capability: CONSOLE_READ)
+}
+
 type AuthInitPayload {
   # The full Google OAuth URL React should redirect the browser to.
   redirectUrl: String!

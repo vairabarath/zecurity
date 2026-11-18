@@ -23,6 +23,8 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201, #213, #215 | ☑ 2026-11-17 (run 2: reset DB, `main` 883fed1c, migration 061; all scenarios incl. F11-1 and F11-2 PASS with traffic probes) |
 | F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | #202, #210 | ☑ 2026-11-17 (step 1 first failed on F10-1; connector fix #210 retested live against the same race, no restart) |
 
+| F12 (S3) | Per-tenant quotas (D-47, migration `065_tenant_quotas.sql`) | not yet (local branch `feat/s3-tenant-quotas`) | ☐ |
+
 Add each Must-have item here as it merges.
 
 ## F8: Tenant detail policy counts
@@ -143,6 +145,16 @@ Needs the new relay build on every relay of the residency pool.
    - When the path is restored, service returns at the next heartbeat.
 6. **Restart:** restart the relay during an outage; the persisted policy keeps its original lease expiry. Restart with no state file: workspace peers are refused until the first heartbeat.
 7. **Mixed versions:** an old relay build in R makes the pool read **Residency (not enforced)** and the relay "Not supported".
+
+## F12 (S3): Per-tenant quotas (migration `065_tenant_quotas.sql`)
+Reset DB (schema change). A lab tenant on the Free plan (3 remote networks, 10 connectors, 5 users …) and a second plan with small limits for speed.
+1. Remote networks: create up to 3; the 4th is refused in the admin UI ("Limit reached") and over GraphQL with `QUOTA_EXCEEDED {remote_networks, 3, 3}`.
+2. Resources: on a test plan with resources 2, create 2; the 3rd is refused; discovery scans and discovered services keep working; un-protecting a resource doesn't free a slot.
+3. Connectors: plan limit 2, override 3 for one tenant (console Quotas → Change, reason) → `tenant.quota.set` audit row with before/after; create up to 3, the 4th is refused (a pending connector counts).
+4. Users: pending invitations count (inviting past the limit is refused); SCIM provisioning over the limit gets 403 with the quota text; an invited user can still sign in at the limit.
+5. Client devices: enroll up to the limit; the next `zecurity login` prints the quota message.
+6. Lower a limit below usage → console "Over quota", admin Settings "Over limit", nothing removed, the next creation refused.
+7. Two parallel creations with one slot left → exactly one succeeds.
 
 ## Relay pools findings (live run 2026-11-17)
 - **F10-1 (defect, blocks F10): connector does not recover from a refused migration.** Moving a tenant into a residency pool, the controller pushes the new relay list at once, but the residency relay learns that the workspace is allowed only at its next heartbeat. The connector dialled `manoj-lt` at 04:52:07; the relay refused it ("refusing Relay peer: workspace policy") and applied policy v23 (workspace allowed) at 04:52:15. The connector's `migrate()` logged "Migration could not find a usable target; remaining on current relay" and never retried: it stayed on `local-a` (no longer listed; its placement rejected), with no relay path for 10+ minutes, through the 300 s background reprobe (the unlisted active relay keeps its old score, so no "meaningful improvement"). Reproduced twice more (05:04:15, ~05:12:50). Evidence: scratchpad `lt/evidence-f10-step1/` and on the lab host `~/zecurity-lt/connector-f10-*.log`, `relay-at-repro2.log`. Fix: separate connector PR (bounded retry while the active relay is unlisted; unlisted active relay never wins a score comparison); acceptance = reproduce the race with the connector left running and see it recover with no restart. **Fixed in PR #210 (merged 2026-11-17), retested live:** same race at 05:40:19, refused at :19/:24/:34, relay allowed the workspace at 05:40:49, connector registered on its own at 05:40:54 (no restart); details in `Relay-Pools-Implementation-Plan.md` → Post-PR fixes. F10 closed.

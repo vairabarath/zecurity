@@ -52,6 +52,9 @@ const CALLBACK_ERRORS: Record<string, string> = {
   token_issue_failed: 'Signed in, but no session could be issued. Please try again.',
   refresh_issue_failed: 'Signed in, but the session could not be persisted. Please try again.',
   server_error: 'The server could not complete sign-in. Please try again shortly.',
+  // Sprint 23 S3 (D-47): signing in would create a user over the limit.
+  user_limit_reached:
+    'This network has reached its user limit, so no new account can be created. Ask an administrator to free a seat or contact the provider.',
 }
 
 const callbackErrorMessage = (reason: string | null): string | null => {

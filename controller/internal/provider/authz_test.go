@@ -138,3 +138,17 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		t.Errorf("relay-ops relay.read: %v", err)
 	}
 }
+
+// Sprint 23 S3 (D-47, D-06): a tenant quota override is super-admin only.
+func TestDecide_TenantQuotaSet(t *testing.T) {
+	a := NewAuthz()
+	target := Target{Type: "tenant", ID: "w1"}
+	if err := a.CanSetTenantQuota(Actor{Role: RoleSuperAdmin}, target); err != nil {
+		t.Fatalf("super-admin: %v", err)
+	}
+	for _, role := range []string{RoleRelayOps, "", "Super-Admin"} {
+		if err := a.CanSetTenantQuota(Actor{Role: role}, target); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("role %q: %v, want ErrForbidden", role, err)
+		}
+	}
+}

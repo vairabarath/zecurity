@@ -301,8 +301,8 @@ func TestTenantQueries_FixedStatementCount(t *testing.T) {
 	if _, err := GetTenant(context.Background(), cq, first); err != nil {
 		t.Fatal(err)
 	}
-	if cq.n != 6 {
-		t.Fatalf("GetTenant ran %d statements, want 6 (tenant+counts, networks, connectors, shields, relay pool, plan)", cq.n)
+	if cq.n != 7 {
+		t.Fatalf("GetTenant ran %d statements, want 7 (tenant+counts, networks, connectors, shields, relay pool, plan, quotas)", cq.n)
 	}
 }
 
@@ -533,7 +533,7 @@ func jsonKeys(t *testing.T, v any) []string {
 func TestTenantDTOSurface(t *testing.T) {
 	summary := []string{"ca_not_after", "counts", "created_at", "id", "name", "slug", "status", "trust_domain"}
 	detail := append(append([]string{}, summary...), "connectors", "connectors_truncated", "remote_networks",
-		"plan", "relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
+		"plan", "quotas", "relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
 	sort.Strings(detail)
 	agent := []string{"active", "disconnected", "pending", "revoked"}
 	for name, c := range map[string]struct {
@@ -542,6 +542,7 @@ func TestTenantDTOSurface(t *testing.T) {
 	}{
 		"TenantSummary":       {TenantSummary{}, summary},
 		"TenantDetail":        {TenantDetail{}, detail},
+		"TenantQuota":         {TenantQuota{}, []string{"key", "limit", "over", "source", "used"}},
 		"TenantCounts":        {TenantCounts{}, []string{"client_devices", "connectors", "policies", "remote_networks", "shields", "users"}},
 		"PolicyCounts":        {PolicyCounts{}, []string{"access_rules", "groups", "resource_policies", "resources"}},
 		"AgentCounts":         {AgentCounts{}, agent},

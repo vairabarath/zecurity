@@ -5,6 +5,7 @@ import * as authApi from './auth'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
 import * as poolsApi from './pools'
+import * as quotasApi from './quotas'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
 
@@ -46,6 +47,7 @@ const ALLOWED_WRITES = [
   'POST /provider/users/{id}/reset-password',
   'POST /provider/users/{id}/reset-totp',
   'PUT /provider/tenants/{id}/plan',
+  'PUT /provider/tenants/{id}/quotas/{key}',
   'PUT /provider/tenants/{id}/relay-pool',
 ]
 
@@ -71,6 +73,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   operators: operatorsApi,
   plans: plansApi,
   pools: poolsApi,
+  quotas: quotasApi,
   reads: readsApi,
   relays: relaysApi,
 }
@@ -78,7 +81,10 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 // Every function is called with ('a', 'b'): an id is always "a" (list
 // wrappers ignore the non-object argument).
 const ID = 'a'
-const normalize = (path: string) => path.replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans))/${ID}(?=/|$)`), '$1/{id}')
+const normalize = (path: string) =>
+  path
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
 
 describe('API surface', () => {
   it('writes are exactly the allowed writes, reads exactly the allowed reads, all under /provider/', async () => {
@@ -124,6 +130,7 @@ describe('API surface', () => {
       [`DELETE /provider/plans/${ID}`]: { status: 204 },
       [`POST /provider/plans/${ID}/default`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/plan`]: { status: 204 },
+      [`PUT /provider/tenants/${ID}/quotas/b`]: { status: 204 },
       'GET /provider/tenants': page,
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,

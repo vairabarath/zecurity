@@ -109,6 +109,10 @@ export const ErrorCode = {
   failoverSameAsPrimary: 'failover_same_as_primary',
   failoverRegionMismatch: 'failover_region_mismatch',
   failoverNeedsResidency: 'failover_needs_residency',
+  // quota overrides (Sprint 23 S3, D-47)
+  unknownKey: 'unknown_key',
+  invalidLimit: 'invalid_limit',
+  limitRequired: 'limit_required',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -475,6 +479,23 @@ export interface TenantDetail extends TenantSummary {
   relay_pool: TenantRelayPool
   /** The tenant's plan (Sprint 23 B1, D-43). */
   plan: TenantPlan
+  /** Limit and usage per quota key (Sprint 23 S3, D-47), in display order. */
+  quotas: TenantQuota[]
+}
+
+/** Where a tenant's limit for a key comes from (D-47). */
+export type QuotaSource = 'plan' | 'override' | 'unlimited'
+
+/**
+ * One quota key of tenant detail. `limit` null is unlimited; `over` is true
+ * when a lowered limit is below what is in use (nothing is deleted).
+ */
+export interface TenantQuota {
+  key: PlanLimitKey
+  limit: number | null
+  source: QuotaSource
+  used: number
+  over: boolean
 }
 
 // ── plans (Sprint 23 B1, D-43; quota keys of D-47) ─────────────────────────────

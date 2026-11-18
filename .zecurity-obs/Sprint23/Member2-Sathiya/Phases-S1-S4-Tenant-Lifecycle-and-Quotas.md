@@ -140,6 +140,40 @@ Then resume: traffic returns with no re-enrollment.
 - **Fail closed** on a lookup error.
 - **Authz and audit** with before/after.
 
+### Implementation status (2026-11-18)
+Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged). **Not committed**: commit, push, PR and merge wait for the product owner's go. S2 merges first; then S3 rebases and adds the check to S2's first-admin invitation. Live check not run yet.
+- **Schema** `065_tenant_quotas.sql`: `workspace_quota_overrides (workspace_id, key, limit_value, reason, set_by, set_at)`. The column is `limit_value` because `LIMIT` is a reserved word. A NULL limit is explicitly unlimited; no row means the plan's value.
+- **`internal/quota`** (pgx only, so `providerquery` can use it, D-04) is the one definition:
+  - `Effective`: plan values overlaid with the overrides; a missing key fails closed. `plans.EffectiveLimits` delegates to it, and `plans.Keys` aliases `quota.Keys`.
+  - `Count` / `AllUsage` (one statement): the D-47 counting rules.
+  - `Reserve(key)` / `ReserveUser(email)`: `SELECT … FROM workspaces … FOR UPDATE`, then count, then `*Exceeded {key, limit, used}`. An identity already counted (a user, or a pending unexpired invitation, by lowercased email) takes no new slot.
+  - `SetOverride`.
+- **Checked inside the creating transaction:**
+  - `CreateRemoteNetwork`, `GenerateConnectorToken`, `GenerateShieldToken` (now transactional);
+  - `resource.Create`, which also covers discovery adoption (discovery itself is never limited);
+  - users: `invitation.CreateInvitation` and `AcceptInvitation`, `bootstrap` (invited join and first signup), SCIM `scimProvisioner`, client JIT `upsertUser`;
+  - client devices: `insertClientDevice` (now transactional).
+  - REST token regeneration inserts no row, so it takes no slot.
+- **Refusals:**
+  - GraphQL: the presenter sets `extensions {code: QUOTA_EXCEEDED, key, limit, used}`;
+  - REST invitations: 409 `{"error":"quota_exceeded", key, limit, used, message}`;
+  - SCIM: 403 with the quota text as detail (RFC 7644 has no quota scimType);
+  - client gRPC: `ResourceExhausted`;
+  - admin sign-in: `/login?error=user_limit_reached`.
+- **Provider API:** `PUT /provider/tenants/{id}/quotas/{key}` takes `{limit: n|null, reason}` or `{inherit: true, reason}` (removes the override). The action is `tenant.quota.set` (super-admin only), audited with before/after `{limit, source}`. The tenant detail DTO gets `quotas [{key, limit, source, used, over}]` (one more statement: 7).
+- **Provider console:** Quotas section (used, limit, source, "Over quota" badge, a Change dialog with a below-usage warning); `api-surface.test.ts`.
+- **Admin UI:** GraphQL `workspaceQuotas` (CONSOLE_READ) and a Settings → Limits card (read-only); a "Limit reached" toast for `QUOTA_EXCEEDED`; the login message `user_limit_reached`.
+- **Gates:**
+  - controller: build, vet, full `go test -count=1 ./...` with the DB env (only the two known skips);
+  - provider console: 627 tests, lint, build;
+  - admin: 347 tests, build; lint shows the 17 problems already on `main`, none in S3 files.
+- **Mutation checks:** all 18 caught: the lock (race), every creation path, the counting rules (deleting, identity once, expired invitations), off-by-one at the limit, the presenter, and relay-ops authz.
+- **Test fixture changes:**
+  - The SCIM test `seedWorkspace` now puts its workspace on the Legacy plan. A new workspace gets the default Free plan (5 users), and `TestGroups_Integration` provisions more than 5.
+  - `schema_authz_test.go` registers `workspaceQuotas` and marks `WorkspaceQuota.key` as read-safe.
+  - The tenant detail statement counts went from 6 to 7.
+
+
 ### Live check
 - On the Free plan, create up to 3 remote networks; the 4th is refused. Create resources up to the limit (use a test plan with a small resource limit to keep it quick); discovery still runs.
 - Plan limit 2 connectors; override 3 for one tenant.

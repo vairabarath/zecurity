@@ -67,6 +67,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/quotaadmin"
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
@@ -711,6 +712,10 @@ func main() {
 	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
 	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
 	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
+	// Per-tenant quota overrides (Sprint 23 S3, D-47): super-admin only,
+	// reason required, audited with before/after.
+	quotaAdmin := &quotaadmin.Handler{Pool: db.Pool, Authz: providerAuthz, ProviderStore: providerStore}
+	mux.Handle("PUT /provider/tenants/{id}/quotas/{key}", requireProvider(http.HandlerFunc(quotaAdmin.Set)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)

@@ -16,6 +16,7 @@ import (
 	"github.com/yourorg/ztna/controller/graph/model"
 	"github.com/yourorg/ztna/controller/internal/discoverylimit"
 	"github.com/yourorg/ztna/controller/internal/models"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -200,6 +201,27 @@ func (r *queryResolver) ConsoleSecurity(ctx context.Context) (*graph.ConsoleSecu
 		return nil, fmt.Errorf("consoleSecurity: %w", err)
 	}
 	return &graph.ConsoleSecurity{RequireMfa: required}, nil
+}
+
+// WorkspaceQuotas is the resolver for the workspaceQuotas field.
+func (r *queryResolver) WorkspaceQuotas(ctx context.Context) ([]*graph.WorkspaceQuota, error) {
+	tc := tenant.MustGet(ctx)
+	// Sprint 23 S3 (D-47): the same limits and counts every creation check
+	// uses (quota.AllUsage), one statement.
+	usage, err := quota.AllUsage(ctx, r.Pool, tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("workspaceQuotas: %w", err)
+	}
+	out := make([]*graph.WorkspaceQuota, 0, len(usage))
+	for _, u := range usage {
+		q := &graph.WorkspaceQuota{Key: u.Key, Used: int(u.Used), Over: u.Over}
+		if u.Limit != nil {
+			l := int(*u.Limit)
+			q.Limit = &l
+		}
+		out = append(out, q)
+	}
+	return out, nil
 }
 
 // Role is the resolver for the role field.

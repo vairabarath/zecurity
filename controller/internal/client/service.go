@@ -38,6 +38,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -437,6 +438,10 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		if errors.Is(err, identity.ErrUserNotActive) {
 			return nil, status.Error(codes.PermissionDenied, "account is not active")
 		}
+		if qe, ok := quota.AsExceeded(err); ok {
+			// Sprint 23 S3 (D-47): at the workspace's user limit.
+			return nil, status.Error(codes.ResourceExhausted, qe.Error())
+		}
 		return nil, status.Errorf(codes.Internal, "upsert user: %v", err)
 	}
 
@@ -542,6 +547,10 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 
 	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs(),
 		deviceSession{id: tokenClaims.SessionID, deadlines: deadlines})
+	if qe, ok := quota.AsExceeded(err); ok {
+		// Sprint 23 S3 (D-47): at the workspace's device limit.
+		return nil, status.Error(codes.ResourceExhausted, qe.Error())
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "insert client device: %v", err)
 	}

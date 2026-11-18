@@ -26,20 +26,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
-// The six quota keys of D-47, in display order.
+// The six quota keys of D-47, in display order. Defined in internal/quota
+// (Sprint 23 S3), which must stay free of net/http for providerquery.
 const (
-	KeyUsers          = "users"
-	KeyResources      = "resources"
-	KeyRemoteNetworks = "remote_networks"
-	KeyConnectors     = "connectors"
-	KeyShields        = "shields"
-	KeyClientDevices  = "client_devices"
+	KeyUsers          = quota.KeyUsers
+	KeyResources      = quota.KeyResources
+	KeyRemoteNetworks = quota.KeyRemoteNetworks
+	KeyConnectors     = quota.KeyConnectors
+	KeyShields        = quota.KeyShields
+	KeyClientDevices  = quota.KeyClientDevices
 )
 
 // Keys lists every quota key. A plan defines all of them.
-var Keys = []string{KeyUsers, KeyResources, KeyRemoteNetworks, KeyConnectors, KeyShields, KeyClientDevices}
+var Keys = quota.Keys
 
 // Seeded plans (migration 062).
 const (
@@ -434,19 +437,20 @@ func Get(ctx context.Context, q Querier, id string) (Plan, error) {
 	return scanPlan(q.QueryRow(ctx, `SELECT `+planColumns+` FROM plans WHERE id = $1`, id))
 }
 
-// EffectiveLimits returns a workspace's limits: its plan's values (D-43).
-// S3 overlays per-tenant overrides here (D-47). Run it inside the creating
+// EffectiveLimits returns a workspace's limits: its plan's values (D-43)
+// overlaid with its per-tenant overrides (S3, D-47). The definition is
+// quota.Effective, which every quota check uses. Run it inside the creating
 // transaction (q = tx) so the check is atomic with the creation. A missing
 // workspace or key is an error: callers refuse the creation (fail closed).
-func EffectiveLimits(ctx context.Context, q Querier, workspaceID string) (Limits, error) {
-	var raw []byte
-	err := q.QueryRow(ctx,
-		`SELECT p.limits FROM workspaces w JOIN plans p ON p.id = w.plan_id WHERE w.id = $1`, workspaceID).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
+func EffectiveLimits(ctx context.Context, q quota.Querier, workspaceID string) (Limits, error) {
+	l, err := quota.Effective(ctx, q, workspaceID)
+	switch {
+	case errors.Is(err, quota.ErrWorkspaceNotFound):
 		return nil, ErrWorkspaceNotFound
+	case errors.Is(err, quota.ErrIncompleteLimits):
+		return nil, ErrIncompleteLimits
+	case err != nil:
+		return nil, err
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read workspace plan limits: %w", err)
-	}
-	return parseLimits(raw)
+	return Limits(quota.Values(l)), nil
 }

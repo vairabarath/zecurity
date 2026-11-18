@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 // Service is the workspace-creating provisioner for the identity pipeline
@@ -162,6 +163,12 @@ func (s *Service) runBootstrapTransaction(
 		return nil, fmt.Errorf("insert workspace: %w", err)
 	}
 
+	// Sprint 23 S3 (D-47): the first admin takes the new workspace's first
+	// user slot (its plan is the current default, set by the 062 trigger).
+	if err := quota.ReserveUser(ctx, tx, tenantID, email); err != nil {
+		return nil, quotaErr(err)
+	}
+
 	var userID string
 	err = tx.QueryRow(
 		ctx,
@@ -274,6 +281,13 @@ func (s *Service) runInvitedUserTransaction(
 	}
 	defer tx.Rollback(ctx)
 
+	// Sprint 23 S3 (D-47): the invited join takes no new slot (the pending
+	// invitation already counts the identity), but it goes through the user
+	// quota like every user-creating path.
+	if err := quota.ReserveUser(ctx, tx, workspaceID, email); err != nil {
+		return nil, quotaErr(err)
+	}
+
 	var userID string
 	err = tx.QueryRow(ctx,
 		`INSERT INTO users
@@ -376,4 +390,13 @@ func slugify(name string) string {
 
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// quotaErr keeps a *quota.Exceeded as it is (the sign-in shows it) and wraps
+// any other quota error (the sign-in fails closed).
+func quotaErr(err error) error {
+	if _, ok := quota.AsExceeded(err); ok {
+		return err
+	}
+	return fmt.Errorf("quota check: %w", err)
 }

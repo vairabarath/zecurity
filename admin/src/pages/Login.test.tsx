@@ -529,6 +529,14 @@ describe('Login', () => {
     expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
   })
 
+  // Sprint 23 S3 (D-47): a sign-in that would create a user over the limit.
+  it('says the network has reached its user limit', async () => {
+    render(renderLoginAt([], '/login?error=user_limit_reached'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/reached its user limit/i)).toBeInTheDocument()
+  })
+
   // An unrecognised (or crafted) reason must not paint arbitrary text onto the
   // login page.
   it('does not echo an unknown error code back to the page', async () => {

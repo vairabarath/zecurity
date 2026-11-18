@@ -61,6 +61,10 @@ const (
 	ActionPlanDelete       = "plan.delete"
 	ActionPlanSetDefault   = "plan.set_default"
 	ActionTenantPlanAssign = "tenant.plan.assign"
+
+	// Quotas (Sprint 23 S3, D-47): a per-tenant quota override. A tenant.*
+	// action, so super-admin only (D-06).
+	ActionTenantQuotaSet = "tenant.quota.set"
 )
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
@@ -169,6 +173,12 @@ func (a *Authz) CanReadPlans(actor Actor) error {
 // or ActionTenantPlanAssign).
 func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
+}
+
+// CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}
+// (super-admin only: tenant.*, D-06, D-47).
+func (a *Authz) CanSetTenantQuota(actor Actor, target Target) error {
+	return decide(actor, ActionTenantQuotaSet, target)
 }
 
 func (a *Authz) CanReadRelays(actor Actor, target Target) error {

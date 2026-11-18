@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"log"
 	"strings"
@@ -257,6 +258,12 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 		ConnectionID: sc.connectionID,
 		Issuer:       sc.issuer,
 	})
+	if qe, ok := quota.AsExceeded(err); ok {
+		// Sprint 23 S3 (D-47): the workspace is at its user limit. RFC 7644
+		// has no quota scimType; 403 ("operation not permitted") with the
+		// quota_exceeded text, so the IdP shows why. Nothing was created.
+		return nil, newSCIMError(403, "", qe.Error())
+	}
 	if err != nil {
 		return nil, newSCIMError(500, "", "provision identity: "+err.Error())
 	}

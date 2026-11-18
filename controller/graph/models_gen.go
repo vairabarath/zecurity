@@ -495,6 +495,13 @@ type WorkspacePublic struct {
 	Slug string `json:"slug"`
 }
 
+type WorkspaceQuota struct {
+	Key   string `json:"key"`
+	Limit *int   `json:"limit,omitempty"`
+	Used  int    `json:"used"`
+	Over  bool   `json:"over"`
+}
+
 type AuditExportSinkKind string
 
 const (

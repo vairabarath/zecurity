@@ -48,7 +48,7 @@ var expectedCapability = func() map[string]rbac.Capability {
 			m[n] = c
 		}
 	}
-	put(rbac.ConsoleRead, `consoleSecurity clientDevices remoteNetworks remoteNetwork connectors connector
+	put(rbac.ConsoleRead, `consoleSecurity workspaceQuotas clientDevices remoteNetworks remoteNetwork connectors connector
 		shields shield resources allResources getDiscoveredServices getScanResults groups group
 		supportedPostureChecks deviceProfiles devicePostureVisibility idpConnections
 		platformLoginEnabled scimTokens scimConflicts scimProviderProfiles connectorLogs users auditLogs
@@ -185,7 +185,7 @@ func TestAllFieldsAuthorized(t *testing.T) {
 	// 73 console operations + setMemberRole (PENDING-19 §4.1)
 	// + updateProfileRequirementCountries (PENDING-20 G-10). A drop below
 	// means schema collection broke and a pass would be meaningless.
-	const wantGated = 93 // PENDING-06: +4 (consoleSecurity, setResourcePolicyAuthentication, setConsoleRequireMfa, resetUserMfa); ADR-031: +1 (setProfilePlatforms), +1 (updateProfileRequirementMinVersion); PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
+	const wantGated = 94 // Sprint 23 S3: +1 (workspaceQuotas); PENDING-06: +4 (consoleSecurity, setResourcePolicyAuthentication, setConsoleRequireMfa, resetUserMfa); ADR-031: +1 (setProfilePlatforms), +1 (updateProfileRequirementMinVersion); PENDING-16: -3 (mode, bind, unbind), +8 (resource policies); PENDING-11: +7 (auditLogs, sinks)
 	if gated != wantGated {
 		t.Fatalf("authz check found %d gated operations, want %d — schema collection broken or "+
 			"an operation was added/removed without updating expectedCapability", gated, wantGated)
@@ -288,6 +288,7 @@ var secretFieldName = regexp.MustCompile(`(?i)(secret|password|privatekey|privat
 // secrets. Each entry is a deliberate decision.
 var readSafeFields = map[string]bool{
 	"ScimProviderProfile.key": true, // provider name: "okta" | "entra" | …
+	"WorkspaceQuota.key":      true, // quota name: "users" | "resources" | … (Sprint 23 S3)
 }
 
 // TestConsoleReadReturnsNoSecrets (PENDING-19 §6): no type reachable from a

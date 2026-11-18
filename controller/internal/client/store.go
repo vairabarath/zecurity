@@ -16,6 +16,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 // ── Sentinel errors ─────────────────────────────────────────────────────────
@@ -126,6 +127,15 @@ func upsertUser(
 		return nil, 0, false, fmt.Errorf("begin user tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Sprint 23 S3 (D-47): a JIT-created member takes a user slot unless the
+	// identity is already counted (its pending invitation).
+	if err := quota.ReserveUser(ctx, tx, tenantID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, 0, false, err
+		}
+		return nil, 0, false, fmt.Errorf("quota check: %w", err)
+	}
 
 	var u userRow
 	if err := tx.QueryRow(ctx,
@@ -243,7 +253,20 @@ func insertClientDevice(
 	if !session.deadlines.MFAAt.IsZero() {
 		mfaAt = &session.deadlines.MFAAt
 	}
-	err := db.QueryRow(ctx,
+	// Sprint 23 S3 (D-47): the device quota is checked in the inserting
+	// transaction, under the workspace lock.
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("insert client_device: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := quota.Reserve(ctx, tx, workspaceID, quota.KeyClientDevices); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return "", err
+		}
+		return "", fmt.Errorf("insert client_device: quota check: %w", err)
+	}
+	err = tx.QueryRow(ctx,
 		`INSERT INTO client_devices (user_id, workspace_id, name, os,
 		        session_id, session_idle_until, session_max_until,
 		        session_auth_at, session_mfa_at)
@@ -255,6 +278,9 @@ func insertClientDevice(
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert client_device: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("insert client_device: commit: %w", err)
 	}
 	return id, nil
 }
