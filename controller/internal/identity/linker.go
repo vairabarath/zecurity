@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ProvisionInput carries what a Provisioner needs to JIT-create a canonical
@@ -45,6 +46,14 @@ type ProvisionInput struct {
 // pending invite. The IdP vouched for who they are; it does not follow that
 // this workspace has granted them access.
 var ErrNotInvited = errors.New("identity is not a member of this workspace and has no pending invitation")
+
+// ErrInvitationExpired is the ErrNotInvited case where the identity's email
+// holds a provider-issued first-admin seat whose invitation has expired or
+// was replaced (Sprint 23 S2, D-44). Sign-in is refused instead of creating a
+// new workspace for that email; the provider re-issues the invitation. It
+// wraps ErrNotInvited, so every caller that handles "not invited" (audit,
+// client path) treats it the same; the web callback shows its own message.
+var ErrInvitationExpired = fmt.Errorf("%w: the first-admin invitation has expired", ErrNotInvited)
 
 // Provisioner JIT-creates a canonical user (and its external_identities link, in
 // one transaction) for an identity the Resolver did not find. Implemented by

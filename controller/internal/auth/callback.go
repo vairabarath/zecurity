@@ -129,9 +129,6 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 					Details:    map[string]any{"client": false, "reason": SignInFailedReasonNotPermitted},
 				})
 			}
-			// The IdP proved who they are; this workspace just has not granted
-			// them access. That is a distinct, actionable outcome for the user —
-			// not a generic auth failure.
 			// Sprint 23 S1 (D-45): an invited join into a suspended tenant
 			// is refused inside the provisioning transaction, before
 			// anything is written.
@@ -140,6 +137,15 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 				fail("workspace_suspended")
 				return
 			}
+			// S2 (D-44): a first-admin invitation that expired or was
+			// replaced; the provider must send a new one.
+			if errors.Is(err, identity.ErrInvitationExpired) {
+				fail("invitation_expired")
+				return
+			}
+			// The IdP proved who they are; this workspace just has not granted
+			// them access. That is a distinct, actionable outcome for the user —
+			// not a generic auth failure.
 			if errors.Is(err, identity.ErrNotInvited) {
 				fail("not_invited")
 				return

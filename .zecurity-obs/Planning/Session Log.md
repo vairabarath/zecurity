@@ -3879,3 +3879,29 @@ serves on `127.0.0.1:9102`.
 - Decide whether SCIM provisioning is refused while suspended.
 - Reset the local DB and run the S1 live check (`Pending-Live-Tests.md`).
 
+
+## 2026-11-18 — M1 (Sathiya): S2 provider tenant creation (handed over by Barath)
+
+**What was done:**
+- Branch `feat/s2-tenant-creation` from `main` (after B1 #222). Schema `067_tenant_first_admin_invite` (nullable invitation sender, `invitations.role`, DB rule: only a provider invitation grants admin).
+- `bootstrap.createWorkspaceTx` shared by self-signup and the new `CreateTenant` (no first user, single-use 7-day first-admin invitation). `POST /provider/tenants` (`internal/tenantcreate`, super-admin, reason, audited without the token). Console Create tenant dialog on the Tenants page.
+- First-admin invitation hardening: expiry and verified email checked at sign-in, consumed exactly once under a row lock; the accept endpoint and the client CLI refuse admin invitations.
+- Tests: 9 bootstrap DB tests (equivalence, slug race, email binding, concurrent single use, expiry, guards), 3 HTTP DB tests, client and authz unit tests, console tests; mutation checks all caught.
+
+**Key decisions:**
+- The user approved `067_` and the admin-only fixes; a first admin's email must not already belong to another workspace (recorded as a constraint).
+
+**What's next:**
+- Product owner's go for commit / push / PR (`[schema: reset DB]`); live check after reset DB. S3 (#224) then rebases onto S2 and adds the quota check to the first-admin path.
+
+## 2026-11-18 — M1 (Sathiya): S2 committed and live-checked
+
+**What was done:**
+- Committed S2 locally on `feat/s2-tenant-creation` (`35efd8b4`) at Sathiya's request (the sprint rule asks for the product owner's go; not pushed).
+- Live check on a reset DB in Orca's embedded browser: tenant creation, first-admin invitation (wrong email, unverified email, matching email, reuse, used link, expiry), API probes and a 6-way slug race. Then, as the new tenant admin: relay (archlinux), connector (luffy), shield + protected resource (omarchy), client on the dev box: access only through the tunnel. All PASS; no S2 defect.
+
+**Key decisions:**
+- First-admin sign-ins used a local test IdP registered as the tenant's connection (the Google invite button was not driven).
+
+**What's next:**
+- Barath's go to push and open the PR (`[schema: reset DB]`); then S3 (#224) merges main and adds the quota check to the first-admin path.

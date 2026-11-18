@@ -490,6 +490,22 @@ export interface TenantDetail extends TenantSummary {
   relay_pool: TenantRelayPool
   /** The tenant's plan (Sprint 23 B1, D-43). */
   plan: TenantPlan
+  /**
+   * The provider-issued first-admin invitation while its seat is unclaimed
+   * (Sprint 23 S2, D-44); null once an admin signed in. No email, no token.
+   */
+  first_admin_invitation: TenantFirstAdminInvitation | null
+}
+
+export interface TenantFirstAdminInvitation {
+  status: 'pending' | 'expired'
+  expires_at: string
+}
+
+/** POST /provider/tenants/{id}/first-admin-invitation. No token, ever. */
+export interface ReinviteResponse {
+  tenant_id: string
+  invitation: { id: string; email: string; expires_at: string }
 }
 
 // ── plans (Sprint 23 B1, D-43; quota keys of D-47) ─────────────────────────────
@@ -521,6 +537,17 @@ export interface CreatePlanResponse {
   description: string
   limits: PlanLimits
   is_default: boolean
+}
+
+/** POST /provider/tenants (Sprint 23 S2). No invitation token, ever. */
+export interface CreateTenantResponse {
+  id: string
+  slug: string
+  name: string
+  trust_domain: string
+  plan_id: string
+  plan_name: string
+  invitation: { id: string; email: string; expires_at: string }
 }
 
 /** The plan section of GET /provider/tenants/{id}. */

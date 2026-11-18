@@ -134,6 +134,17 @@ type TenantDetail struct {
 	RelayPool TenantRelayPool `json:"relay_pool"`
 	// Plan is the tenant's plan (Sprint 23 B1, D-43).
 	Plan TenantPlan `json:"plan"`
+	// FirstAdminInvitation is the provider-issued first-admin invitation
+	// while its seat is unclaimed (S2, D-44); null once an admin signed in,
+	// and for self-signup tenants. Status and expiry only: no email (users
+	// appear only as counts, OQ-2) and never the token.
+	FirstAdminInvitation *TenantFirstAdminInvitation `json:"first_admin_invitation"`
+}
+
+// TenantFirstAdminInvitation is the state of an unclaimed first-admin seat.
+type TenantFirstAdminInvitation struct {
+	Status    string    `json:"status"` // "pending" or "expired" (expired or replaced)
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // TenantFilter narrows ListTenants. Status "" means every status except
@@ -346,7 +357,33 @@ SELECT id::text, name, status, connector_id::text, remote_network_id::text, cert
 	if d.Plan, err = tenantPlan(ctx, q, id); err != nil {
 		return TenantDetail{}, err
 	}
+	if d.FirstAdminInvitation, err = tenantFirstAdminInvitation(ctx, q, id); err != nil {
+		return TenantDetail{}, err
+	}
 	return d, nil
+}
+
+// tenantFirstAdminInvitation reads the latest first-admin invitation of an
+// unclaimed seat (an 'invited' admin membership without an account).
+func tenantFirstAdminInvitation(ctx context.Context, q Querier, id string) (*TenantFirstAdminInvitation, error) {
+	var f TenantFirstAdminInvitation
+	err := q.QueryRow(ctx, `
+SELECT CASE WHEN i.status = 'pending' AND i.expires_at > NOW() THEN 'pending' ELSE 'expired' END, i.expires_at
+  FROM invitations i
+  JOIN workspace_members wm
+    ON wm.workspace_id = i.workspace_id AND wm.email = i.email
+   AND wm.role = 'admin' AND wm.status = 'invited' AND wm.user_id IS NULL
+ WHERE i.workspace_id = $1 AND i.role = 'admin' AND i.status IN ('pending', 'expired')
+ ORDER BY i.created_at DESC, i.id DESC
+ LIMIT 1`, id).Scan(&f.Status, &f.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant first-admin invitation: %w", err)
+	}
+	f.ExpiresAt = f.ExpiresAt.UTC()
+	return &f, nil
 }
 
 // collect runs a capped detail query (LIMIT DetailCap+1) and reports whether

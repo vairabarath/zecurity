@@ -62,28 +62,42 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 	// let someone signing in through workspace A's IdP join B — the invite is
 	// matched on email, which is not an identity key and not workspace proof.
 	var pendingWorkspaceID, pendingRole string
+	var firstAdmin bool
 	var err error
 	if in.ConnectionTenantID != nil {
 		err = s.Pool.QueryRow(ctx,
-			`SELECT workspace_id, role
-			   FROM workspace_members
-			  WHERE email = $1
-			    AND workspace_id = $2
-			    AND status = 'invited'
-			    AND user_id IS NULL
+			`SELECT wm.workspace_id, wm.role, `+firstAdminInviteSQL+`
+			   FROM workspace_members wm
+			  WHERE wm.email = $1
+			    AND wm.workspace_id = $2
+			    AND wm.status = 'invited'
+			    AND wm.user_id IS NULL
+			    AND `+usableInviteSQL+`
 			  LIMIT 1`,
 			email, *in.ConnectionTenantID,
-		).Scan(&pendingWorkspaceID, &pendingRole)
+		).Scan(&pendingWorkspaceID, &pendingRole, &firstAdmin)
 	} else {
+		// Platform login is not workspace-scoped, so the email may hold
+		// pending invitations in several workspaces, and this first sign-in
+		// binds the identity to exactly one of them (ADR-024). Choose
+		// deterministically (S2 post-phase fix): the workspace the person
+		// signed in for (the invite link and the login page pass its name),
+		// then a provider first-admin seat (it has no other way in), then
+		// the oldest invitation.
 		err = s.Pool.QueryRow(ctx,
-			`SELECT workspace_id, role
-			   FROM workspace_members
-			  WHERE email = $1
-			    AND status = 'invited'
-			    AND user_id IS NULL
+			`SELECT wm.workspace_id, wm.role, `+firstAdminInviteSQL+`
+			   FROM workspace_members wm
+			   JOIN workspaces w ON w.id = wm.workspace_id
+			  WHERE wm.email = $1
+			    AND wm.status = 'invited'
+			    AND wm.user_id IS NULL
+			    AND `+usableInviteSQL+`
+			  ORDER BY ($2 <> '' AND (lower(w.name) = $2 OR w.slug = $2)) DESC,
+			           `+firstAdminInviteSQL+` DESC,
+			           wm.invited_at, wm.workspace_id
 			  LIMIT 1`,
-			email,
-		).Scan(&pendingWorkspaceID, &pendingRole)
+			email, strings.ToLower(strings.TrimSpace(in.WorkspaceName)),
+		).Scan(&pendingWorkspaceID, &pendingRole, &firstAdmin)
 	}
 
 	if err == nil {
@@ -105,10 +119,30 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 			log.Printf("bootstrap: invited join on an email the IdP did not assert as verified: workspace=%s role=%s email=%q provider=%s subject=%q",
 				pendingWorkspaceID, pendingRole, email, in.Provider, in.Subject)
 		}
-		return s.runInvitedUserTransaction(ctx, email, in, pendingWorkspaceID, pendingRole)
+		// S2 (D-44): the provider-issued first-admin invitation grants admin,
+		// so it is accepted only for an email the IdP asserted as verified.
+		if firstAdmin && !in.EmailVerified {
+			log.Printf("bootstrap: first-admin invitation refused: email not verified by the IdP: workspace=%s provider=%s",
+				pendingWorkspaceID, in.Provider)
+			return nil, identity.ErrNotInvited
+		}
+		return s.runInvitedUserTransaction(ctx, email, in, pendingWorkspaceID, pendingRole, firstAdmin)
 	}
 	if !isNoRows(err) {
 		return nil, fmt.Errorf("lookup pending invite: %w", err)
+	}
+
+	// S2 (D-44): the email holds a provider first-admin seat whose invitation
+	// expired (or was replaced). Refuse instead of falling through to
+	// self-signup: a new workspace would bind this identity elsewhere for
+	// good, and the provider could never hand it the seat. The provider
+	// re-issues the invitation (tenantcreate Reinvite).
+	expired, err := s.hasExpiredFirstAdminSeat(ctx, email, in.ConnectionTenantID)
+	if err != nil {
+		return nil, err
+	}
+	if expired {
+		return nil, identity.ErrInvitationExpired
 	}
 
 	// No invite. An ENTERPRISE connection must never create a workspace here:
@@ -145,22 +179,9 @@ func (s *Service) runBootstrapTransaction(
 	}
 	slug := slugify(displayName)
 
-	// SPIFFE trust domain derived from workspace slug.
-	// Required since migration 002 makes trust_domain NOT NULL.
-	trustDomain := appmeta.WorkspaceTrustDomain(slug)
-
-	var tenantID string
-	err = tx.QueryRow(
-		ctx,
-		`INSERT INTO workspaces (slug, name, status, trust_domain)
-		 VALUES ($1, $2, 'provisioning', $3)
-		 RETURNING id`,
-		slug,
-		displayName,
-		trustDomain,
-	).Scan(&tenantID)
+	tenantID, err := s.createWorkspaceTx(ctx, tx, slug, displayName, nil)
 	if err != nil {
-		return nil, fmt.Errorf("insert workspace: %w", err)
+		return nil, err
 	}
 
 	var userID string
@@ -181,43 +202,6 @@ func (s *Service) runBootstrapTransaction(
 
 	if err := insertExternalIdentity(ctx, tx, tenantID, userID, in); err != nil {
 		return nil, err
-	}
-
-	caResult, err := s.PKIService.GenerateWorkspaceCA(ctx, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("generate workspace CA: %w", err)
-	}
-
-	_, err = tx.Exec(
-		ctx,
-		`INSERT INTO workspace_ca_keys
-		 (tenant_id, encrypted_private_key, nonce, key_algorithm,
-		  certificate_pem, not_before, not_after)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		tenantID,
-		caResult.EncryptedPrivateKey,
-		caResult.Nonce,
-		caResult.KeyAlgorithm,
-		caResult.CertificatePEM,
-		caResult.NotBefore,
-		caResult.NotAfter,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert workspace_ca_keys: %w", err)
-	}
-
-	_, err = tx.Exec(
-		ctx,
-		`UPDATE workspaces
-		 SET status = 'active',
-		     ca_cert_pem = $1,
-		     updated_at = NOW()
-		 WHERE id = $2`,
-		caResult.CertificatePEM,
-		tenantID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("activate workspace: %w", err)
 	}
 
 	// Insert the admin into workspace_members so the table is the complete
@@ -260,6 +244,72 @@ func (s *Service) runBootstrapTransaction(
 	}, nil
 }
 
+// createWorkspaceTx is the workspace half of bootstrap, shared by self-signup
+// (runBootstrapTransaction) and provider tenant creation (CreateTenant, D-44)
+// so both produce the same workspace: the row with its SPIFFE trust domain,
+// the workspace CA (key sealed, certificate on the row) and status 'active'.
+// The Default resource policy (049_), the audit chain heads (053_) and the
+// plan (062_: the current default unless planID is given) come from the
+// workspaces INSERT triggers, so they match on both paths too.
+func (s *Service) createWorkspaceTx(ctx context.Context, tx pgx.Tx, slug, name string, planID *string) (string, error) {
+	// SPIFFE trust domain derived from workspace slug.
+	// Required since migration 002 makes trust_domain NOT NULL.
+	trustDomain := appmeta.WorkspaceTrustDomain(slug)
+
+	var tenantID string
+	err := tx.QueryRow(
+		ctx,
+		`INSERT INTO workspaces (slug, name, status, trust_domain, plan_id)
+		 VALUES ($1, $2, 'provisioning', $3, $4)
+		 RETURNING id`,
+		slug,
+		name,
+		trustDomain,
+		planID,
+	).Scan(&tenantID)
+	if err != nil {
+		return "", fmt.Errorf("insert workspace: %w", err)
+	}
+
+	caResult, err := s.PKIService.GenerateWorkspaceCA(ctx, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("generate workspace CA: %w", err)
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`INSERT INTO workspace_ca_keys
+		 (tenant_id, encrypted_private_key, nonce, key_algorithm,
+		  certificate_pem, not_before, not_after)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		tenantID,
+		caResult.EncryptedPrivateKey,
+		caResult.Nonce,
+		caResult.KeyAlgorithm,
+		caResult.CertificatePEM,
+		caResult.NotBefore,
+		caResult.NotAfter,
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert workspace_ca_keys: %w", err)
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`UPDATE workspaces
+		 SET status = 'active',
+		     ca_cert_pem = $1,
+		     updated_at = NOW()
+		 WHERE id = $2`,
+		caResult.CertificatePEM,
+		tenantID,
+	)
+	if err != nil {
+		return "", fmt.Errorf("activate workspace: %w", err)
+	}
+	return tenantID, nil
+}
+
 // runInvitedUserTransaction creates a user record for an invited person and
 // links them to the existing workspace they were invited to. No new workspace
 // is created — the invite already assigned them a workspace and role.
@@ -268,6 +318,7 @@ func (s *Service) runInvitedUserTransaction(
 	email string,
 	in identity.ProvisionInput,
 	workspaceID, role string,
+	firstAdmin bool,
 ) (*identity.PrincipalCore, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -281,6 +332,31 @@ func (s *Service) runInvitedUserTransaction(
 	// suspension it didn't see. The callback maps it to workspace_suspended.
 	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
 		return nil, err
+	}
+
+	// S2 (D-44): consume the first-admin invitation before any write,
+	// under its row lock. Only a pending, unexpired invitation for this email is taken; a
+	// concurrent sign-in blocks here, then finds it accepted and is refused,
+	// so the invitation grants admin exactly once.
+	var firstAdminInvitationID string
+	if firstAdmin {
+		err := tx.QueryRow(ctx,
+			`UPDATE invitations
+			    SET status = 'accepted'
+			  WHERE workspace_id = $1
+			    AND email = $2
+			    AND role = 'admin'
+			    AND status = 'pending'
+			    AND expires_at > NOW()
+			RETURNING id::text`,
+			workspaceID, email,
+		).Scan(&firstAdminInvitationID)
+		if isNoRows(err) {
+			return nil, identity.ErrNotInvited
+		}
+		if err != nil {
+			return nil, fmt.Errorf("accept first-admin invitation: %w", err)
+		}
 	}
 
 	var userID string
@@ -306,7 +382,7 @@ func (s *Service) runInvitedUserTransaction(
 	// through the workspace's IdP) shown as invited forever. A later accept of
 	// the same link finds nothing pending and returns its usual "already used";
 	// the login callback ignores that.
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`UPDATE workspace_members
 		    SET user_id = $1, status = 'active', joined_at = NOW()
 		  WHERE workspace_id = $2
@@ -316,6 +392,24 @@ func (s *Service) runInvitedUserTransaction(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("activate invited workspace_members: %w", err)
+	}
+	if firstAdmin {
+		if tag.RowsAffected() != 1 {
+			return nil, identity.ErrNotInvited
+		}
+		// PENDING-11 P-9: the tenant's admin stream records who took the
+		// first-admin seat (never the token).
+		if err := audit.RecordTx(ctx, tx, audit.Entry{
+			TenantID:    workspaceID,
+			ActorUserID: userID,
+			ActorEmail:  email,
+			Action:      "invitation.accept",
+			TargetType:  "invitation",
+			TargetID:    firstAdminInvitationID,
+			Details:     map[string]any{"role": "admin", "first_admin": true, "provider": in.Provider},
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE invitations
@@ -341,6 +435,55 @@ func (s *Service) runInvitedUserTransaction(
 		Generation: 1,
 	}, nil
 }
+
+// hasExpiredFirstAdminSeat reports whether email holds an unclaimed
+// first-admin seat (an 'invited' admin membership with a provider invitation)
+// whose invitation is no longer usable. Called only after the usable-invite
+// lookup found nothing, so any such seat is expired or replaced. On an
+// enterprise connection it is scoped to that connection's workspace.
+func (s *Service) hasExpiredFirstAdminSeat(ctx context.Context, email string, workspaceID *string) (bool, error) {
+	var found bool
+	err := s.Pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM workspace_members wm
+		    WHERE wm.email = $1
+		      AND ($2::uuid IS NULL OR wm.workspace_id = $2::uuid)
+		      AND wm.role = 'admin'
+		      AND wm.status = 'invited'
+		      AND wm.user_id IS NULL
+		      AND `+firstAdminInviteSQL+`)`,
+		email, workspaceID,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("lookup expired first-admin invitation: %w", err)
+	}
+	return found, nil
+}
+
+// firstAdminInviteSQL reports whether the membership row "wm" IS a
+// provider-issued first-admin seat: the row's own role is admin and an admin
+// invitation (067_: only without a tenant sender) exists for it. Checking
+// the row's role matters: an old, revoked admin invitation must not turn a
+// later ordinary invitation for the same email into a "seat" (PR #225
+// review: such a member was refused, then self-signed-up elsewhere).
+const firstAdminInviteSQL = `(wm.role = 'admin' AND EXISTS (
+	SELECT 1 FROM invitations i
+	 WHERE i.workspace_id = wm.workspace_id
+	   AND i.email = wm.email
+	   AND i.role = 'admin'))`
+
+// usableInviteSQL keeps a membership row usable for an invited join. Rows of a
+// tenant-sent invitation behave as before; a first-admin row is usable only
+// while its invitation is pending and unexpired (D-44: single-use,
+// time-limited).
+const usableInviteSQL = `(NOT ` + firstAdminInviteSQL + `
+	OR EXISTS (
+	SELECT 1 FROM invitations i
+	 WHERE i.workspace_id = wm.workspace_id
+	   AND i.email = wm.email
+	   AND i.role = 'admin'
+	   AND i.status = 'pending'
+	   AND i.expires_at > NOW()))`
 
 // insertExternalIdentity writes the ADR-024 identity link inside the caller's
 // provisioning transaction, so the users row and its identity key commit

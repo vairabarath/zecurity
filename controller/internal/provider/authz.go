@@ -65,6 +65,13 @@ const (
 	ActionPlanDelete       = "plan.delete"
 	ActionPlanSetDefault   = "plan.set_default"
 	ActionTenantPlanAssign = "tenant.plan.assign"
+
+	// Tenant creation (Sprint 23 S2, D-44): create a workspace and invite
+	// its first admin. tenant.* is super-admin only (D-06).
+	ActionTenantCreate = "tenant.create"
+	// Re-issue the first-admin invitation of a tenant whose first admin
+	// never signed in (S2, D-44).
+	ActionTenantFirstAdminReinvite = "tenant.first_admin.reinvite"
 )
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
@@ -184,6 +191,18 @@ func (a *Authz) CanReadPlans(actor Actor) error {
 // or ActionTenantPlanAssign).
 func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
+}
+
+// CanCreateTenant gates POST /provider/tenants (super-admin only: tenant.*,
+// D-06, D-44).
+func (a *Authz) CanCreateTenant(actor Actor) error {
+	return decide(actor, ActionTenantCreate, Target{Type: "tenant"})
+}
+
+// CanReinviteFirstAdmin gates POST /provider/tenants/{id}/first-admin-invitation
+// (super-admin only: tenant.*).
+func (a *Authz) CanReinviteFirstAdmin(actor Actor, target Target) error {
+	return decide(actor, ActionTenantFirstAdminReinvite, target)
 }
 
 func (a *Authz) CanReadRelays(actor Actor, target Target) error {

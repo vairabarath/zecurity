@@ -74,6 +74,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/telemetry"
+	"github.com/yourorg/ztna/controller/internal/tenantcreate"
 	"github.com/yourorg/ztna/controller/internal/tenantlifecycle"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
@@ -732,6 +733,13 @@ func main() {
 	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
 	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
 	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
+
+	// Tenant creation (Sprint 23 S2, D-44): super-admin only, audited; the
+	// same workspace bootstrap as self-signup plus a first-admin invitation.
+	tenantCreateHandler := &tenantcreate.Handler{Creator: bootstrapSvc, Authz: providerAuthz, ProviderStore: providerStore, Sender: inviteEmailer}
+	mux.Handle("POST /provider/tenants", requireProvider(http.HandlerFunc(tenantCreateHandler.Create)))
+	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProvider(http.HandlerFunc(tenantCreateHandler.Reinvite)))
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)

@@ -301,8 +301,8 @@ func TestTenantQueries_FixedStatementCount(t *testing.T) {
 	if _, err := GetTenant(context.Background(), cq, first); err != nil {
 		t.Fatal(err)
 	}
-	if cq.n != 6 {
-		t.Fatalf("GetTenant ran %d statements, want 6 (tenant+counts, networks, connectors, shields, relay pool, plan)", cq.n)
+	if cq.n != 7 {
+		t.Fatalf("GetTenant ran %d statements, want 7 (tenant+counts, networks, connectors, shields, relay pool, plan, first-admin invitation)", cq.n)
 	}
 }
 
@@ -533,7 +533,7 @@ func jsonKeys(t *testing.T, v any) []string {
 func TestTenantDTOSurface(t *testing.T) {
 	summary := []string{"ca_not_after", "counts", "created_at", "id", "name", "slug", "status", "suspension", "trust_domain"}
 	detail := append(append([]string{}, summary...), "connectors", "connectors_truncated", "remote_networks",
-		"plan", "relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
+		"first_admin_invitation", "plan", "relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
 	sort.Strings(detail)
 	agent := []string{"active", "disconnected", "pending", "revoked"}
 	for name, c := range map[string]struct {
@@ -551,10 +551,11 @@ func TestTenantDTOSurface(t *testing.T) {
 		"TenantSuspension":    {TenantSuspension{}, []string{"by", "reason", "suspended_at"}},
 		"TenantRelayPool": {TenantRelayPool{}, []string{"eligible_relays", "failed_over_since", "failover", "id", "name",
 			"previous", "region", "relay_path", "residency", "using_failover"}},
-		"TenantFailoverPool":      {TenantFailoverPool{}, []string{"eligible_relays", "id", "name", "region", "residency"}},
-		"TenantPlan":              {TenantPlan{}, []string{"id", "is_default", "limits", "name"}},
-		"PlanSummary":             {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "tenants", "updated_at"}},
-		"TenantRelayPoolPrevious": {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
+		"TenantFailoverPool":         {TenantFailoverPool{}, []string{"eligible_relays", "id", "name", "region", "residency"}},
+		"TenantPlan":                 {TenantPlan{}, []string{"id", "is_default", "limits", "name"}},
+		"TenantFirstAdminInvitation": {TenantFirstAdminInvitation{}, []string{"expires_at", "status"}},
+		"PlanSummary":                {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "tenants", "updated_at"}},
+		"TenantRelayPoolPrevious":    {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
 		"TenantConnector": {TenantConnector{}, []string{"cert_not_after", "id", "last_heartbeat_at", "name",
 			"remote_network_id", "revoked_at", "status", "version"}},
 		"TenantShield": {TenantShield{}, []string{"cert_not_after", "connector_id", "id", "last_heartbeat_at", "name",

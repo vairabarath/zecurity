@@ -51,6 +51,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
     relay_pool: TENANT_DEFAULT_POOL,
     suspension: null,
     plan: TENANT_FREE_PLAN,
+    first_admin_invitation: null,
     ...over,
   }
 }
