@@ -17,7 +17,7 @@ function summary(over: Partial<RelaySummary>): RelaySummary {
     public_addr: '203.0.113.5:9093', address_scope: 'public', capacity_label: 'high',
     connection_count: 12, max_connections: 500, cert_serial: 'abc', cert_not_after: null,
     last_heartbeat_at: null, attached_connectors: 1, created_at: '2026-10-01T00:00:00Z',
-    draining_since: null, drain_state: null, bandwidth: null, pool: DEFAULT_POOL, policy: RELAY_POLICY, ...over,
+    draining_since: null, drain_state: null, bandwidth: null, link_capacity_bps: null, headroom: null, pool: DEFAULT_POOL, policy: RELAY_POLICY, ...over,
   }
 }
 

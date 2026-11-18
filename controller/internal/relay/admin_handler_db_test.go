@@ -133,6 +133,7 @@ func newAdminEnv(t *testing.T, withValkey bool) *adminEnv {
 	e.mux.HandleFunc("PATCH /provider/relay-pools/{id}", e.handler.UpdatePool)
 	e.mux.HandleFunc("DELETE /provider/relay-pools/{id}", e.handler.DeletePool)
 	e.mux.HandleFunc("POST /provider/relays/{id}/pool", e.handler.MoveRelay)
+	e.mux.HandleFunc("PUT /provider/relays/{id}/link-capacity", e.handler.SetLinkCapacity)
 	e.mux.HandleFunc("PUT /provider/tenants/{id}/relay-pool", e.handler.AssignTenantPool)
 	return e
 }

@@ -44,3 +44,13 @@ export function drainRelay(id: string, reason: string): Promise<void> {
 export function resumeRelay(id: string): Promise<void> {
   return request<void>('POST', `${relayPath(id)}/resume`, { body: {} })
 }
+
+/**
+ * A relay's usable link throughput in bytes per second, in its tighter
+ * direction (Sprint 23 B2, D-42); null clears it ("Not configured").
+ * Super-admin and relay-ops; the reason is required and audited.
+ */
+export function setRelayLinkCapacity(id: string, bps: number | null, reason: string): Promise<void> {
+  return request<void>('PUT', `${relayPath(id)}/link-capacity`, { body: { bps, reason } })
+}
+
