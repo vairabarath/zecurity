@@ -613,3 +613,52 @@ func TestPlatformInvitedJoin_ChoosesInvitationDeterministically(t *testing.T) {
 		t.Fatalf("oldest: joined %s, want beta (older invitation)", p.TenantID)
 	}
 }
+
+// PR #225 review: the seat moved from X to Y; Y (now admin) later invites X
+// as a member. X's revoked admin invitation must not make that member row
+// look like a seat: X joins W as a member (it was refused, then
+// self-signed-up elsewhere).
+func TestReissue_MovedSeatThenMemberInvite(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "x@acme.test", nil)
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "y@acme.test", nil); err != nil {
+		t.Fatal(err)
+	}
+	y, err := e.signIn("y@acme.test", "y", true)
+	if err != nil || y.TenantID != ct.WorkspaceID || y.Role != "admin" {
+		t.Fatalf("y: %+v %v", y, err)
+	}
+	if _, err := invitation.NewStore(e.pool).CreateInvitation(ctx, "x@acme.test", ct.WorkspaceID, y.UserID); err != nil {
+		t.Fatal(err)
+	}
+	x, err := e.signIn("x@acme.test", "x", true)
+	if err != nil || x.TenantID != ct.WorkspaceID || x.Role != "member" {
+		t.Fatalf("x after the member invitation: %+v %v, want member of acme", x, err)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM workspaces`); n != "1" {
+		t.Fatalf("workspaces = %s, want 1 (no self-signup for x)", n)
+	}
+}
+
+// PR #225 review: re-issue only for a provider-created tenant whose first
+// admin never signed in. Once the seat was claimed, deleting every admin
+// does not reopen it.
+func TestReissue_RefusedAfterSeatWasClaimed(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "first@acme.test", nil)
+	p, err := e.signIn("first@acme.test", "first", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE users SET status = 'deleted' WHERE id = $1`, p.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "new@acme.test", nil); !errors.Is(err, bootstrap.ErrFirstAdminExists) {
+		t.Fatalf("re-issue after the seat was claimed and the admin deleted: err = %v, want ErrFirstAdminExists", err)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM invitations WHERE workspace_id = $1 AND status = 'pending'`, ct.WorkspaceID); n != "0" {
+		t.Fatalf("pending invitations = %s, want 0", n)
+	}
+}

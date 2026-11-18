@@ -337,6 +337,20 @@ The enterprise branch is already scoped to one workspace and is unchanged.
 
 PASS.
 
+### Fix: An old revoked admin invitation turned a later ordinary invitation into a "seat" (PR #225 review)
+**Issue:** `firstAdminInviteSQL` treated any membership row with an admin invitation for the same (workspace, email) as a first-admin seat, ignoring the row's own role. After the seat moved from X to Y and Y later invited X as a member, X's member row was judged "seat, no pending admin invitation". It was skipped as unusable, and the expired-seat check didn't apply because the row's role was member. X then fell through to self-signup, got a workspace of their own, and could never join.
+
+**Fix applied:** `firstAdminInviteSQL` = `wm.role = 'admin' AND EXISTS (admin invitation)`.
+
+**Test:** `TestReissue_MovedSeatThenMemberInvite`. X joins as a member with no extra workspace. Mutation caught.
+
+### Fix: Re-issue reopened the admin seat of any tenant whose admins were all deleted (PR #225 review)
+**Issue:** re-issue only checked "no admin account other than deleted". A self-signup or established tenant whose admins were all deleted could get an admin invitation minted by the provider. D-44 covers only the first admin of a provider-created tenant. The same state allowed a narrow race that could upgrade a pending member row into the seat.
+
+**Fix applied:** `ReissueFirstAdminInvitation` also requires that the tenant has a provider admin invitation and that none was ever accepted. Otherwise it returns `ErrFirstAdminExists` (409 `first_admin_exists`).
+
+**Test:** `TestReissue_RefusedAfterSeatWasClaimed` (the admin signed in, was deleted, then re-issue is refused); the self-signup refusal was already tested. Mutation caught.
+
 **Security review note (automated, 2026-11-18, "ambiguous name matching"): acknowledged, no change.**
 - The hint only orders the pending, unexpired invitations of the Google-verified email that is signing in, so it can't reach an invitation that person doesn't already hold.
 - It is the signer's own choice, stored server-side with the sign-in state.

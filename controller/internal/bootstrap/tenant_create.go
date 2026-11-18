@@ -293,6 +293,22 @@ func (s *Service) ReissueFirstAdminInvitation(ctx context.Context, workspaceID, 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("revoke earlier invitations: %w", err)
 	}
+	// Only a provider-created tenant whose first admin never signed in has
+	// a seat to re-issue (D-44 covers the FIRST admin). A tenant without
+	// any provider admin invitation (self-signup), or whose admin
+	// invitation was ever accepted, is refused even if all its admins were
+	// later deleted (PR #225 review).
+	var providerCreated, claimed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM invitations WHERE workspace_id = $1 AND role = 'admin'),
+		        EXISTS (SELECT 1 FROM invitations WHERE workspace_id = $1 AND role = 'admin' AND status = 'accepted')`,
+		workspaceID).Scan(&providerCreated, &claimed); err != nil {
+		return nil, fmt.Errorf("check first-admin seat: %w", err)
+	}
+	if !providerCreated || claimed {
+		return nil, ErrFirstAdminExists
+	}
+
 	// The admin check runs after the revoke on purpose: a first sign-in that
 	// consumed an earlier invitation held its row lock, so the UPDATE above
 	// waited for it, and this statement (READ COMMITTED) sees its committed

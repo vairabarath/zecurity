@@ -451,14 +451,17 @@ func (s *Service) hasExpiredFirstAdminSeat(ctx context.Context, email string, wo
 	return found, nil
 }
 
-// firstAdminInviteSQL reports whether the membership row "wm" belongs to a
-// provider-issued first-admin invitation (invitations.role = 'admin', which
-// 067_ allows only without a tenant sender).
-const firstAdminInviteSQL = `EXISTS (
+// firstAdminInviteSQL reports whether the membership row "wm" IS a
+// provider-issued first-admin seat: the row's own role is admin and an admin
+// invitation (067_: only without a tenant sender) exists for it. Checking
+// the row's role matters: an old, revoked admin invitation must not turn a
+// later ordinary invitation for the same email into a "seat" (PR #225
+// review: such a member was refused, then self-signed-up elsewhere).
+const firstAdminInviteSQL = `(wm.role = 'admin' AND EXISTS (
 	SELECT 1 FROM invitations i
 	 WHERE i.workspace_id = wm.workspace_id
 	   AND i.email = wm.email
-	   AND i.role = 'admin')`
+	   AND i.role = 'admin'))`
 
 // usableInviteSQL keeps a membership row usable for an invited join. Rows of a
 // tenant-sent invitation behave as before; a first-admin row is usable only
