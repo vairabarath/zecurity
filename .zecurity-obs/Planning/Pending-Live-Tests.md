@@ -3,7 +3,7 @@
 Merged features whose tracker box stays unticked until a live check on the lab passes. Run them in one session once the Must-have work is done, then tick each box in `Provider-Dashboard-Features.md`.
 
 **Before the session**
-- `main` pulled; local DB recreated (`cd controller && docker compose down -v && docker compose up -d`); migration `061_` is the latest one (2026-11-17; check with `ls controller/migrations | tail -3`). This wipes local data, so bootstrap the super-admin again and enrol TOTP.
+- `main` pulled; local DB recreated (`cd controller && docker compose down -v && docker compose up -d`); for the Sprint 23 session the latest migrations are `062_` … `065_` and `067_` (`066_` is S4, not merged yet; check with `ls controller/migrations | tail -6`). This wipes local data, so bootstrap the super-admin again and enrol TOTP.
 - Controller and provider console running; a super-admin signed in (TOTP); a relay-ops operator for the role checks.
 - At least one tenant with resources and policies, and at least one relay enrolled (lab: `inkyank` 192.168.1.75, `manojinkyank` 192.168.1.53).
 - Lab cautions: don't touch inkyank's `zecurity-relay` service (restart loop, missing config). Don't re-enable manoj's connector until `/etc/zecurity/ca.crt` is restored.
@@ -23,8 +23,12 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F11 | Relay pools PR 2: controller-driven failover pool (D-39) | #201, #213, #215 | ☑ 2026-11-17 (run 2: reset DB, `main` 883fed1c, migration 061; all scenarios incl. F11-1 and F11-2 PASS with traffic probes) |
 | F10 | Relay pools PR 3: relay-side residency enforcement (D-40) | #202, #210 | ☑ 2026-11-17 (step 1 first failed on F10-1; connector fix #210 retested live against the same race, no restart) |
 
-| F7 (S1) | Tenant suspend / resume (D-45, migration `064_tenant_suspension.sql`) | not yet (local branch `feat/s1-tenant-suspension`) | ☐ |
-| F12 (S3) | Per-tenant quotas (D-47, migration `065_tenant_quotas.sql`) | not yet (local branch `feat/s3-tenant-quotas`) | ☐ |
+| F8 (B1) | Plans and the tenant's plan (D-43, migration `062_tenant_plans.sql`) | #222 | ☐ |
+| F5 (B2) | Relay link capacity and headroom (D-42, migration `063_relay_link_capacity.sql`) | #226 | ☐ |
+| F7 (S1) | Tenant suspend / resume (D-45, migration `064_tenant_suspension.sql`) | #223 | ☐ |
+| F7 (S2) | Provider tenant creation (D-44, migration `067_tenant_first_admin_invite.sql`) | #225 | ☑ 2026-11-18 on the branch (`35efd8b4`, fixes `2426ed7e`, Sathiya); short recheck on merged `main` below |
+| F12 (S3) | Per-tenant quotas (D-47, migration `065_tenant_quotas.sql`) | #224 | ☐ |
+| Sprint 23 | Cross-feature checks on merged `main` (B1 × S3, S2 × S3, S1 × S2) | — | ☐ |
 
 Add each Must-have item here as it merges.
 
@@ -147,6 +151,44 @@ Needs the new relay build on every relay of the residency pool.
 6. **Restart:** restart the relay during an outage; the persisted policy keeps its original lease expiry. Restart with no state file: workspace peers are refused until the first heartbeat.
 7. **Mixed versions:** an old relay build in R makes the pool read **Residency (not enforced)** and the relay "Not supported".
 
+## Sprint 23 live session (B1, B2, S1, S2 recheck, S3)
+
+One session on a **reset DB** and current `main` (B1 #222, B2 #226, S1 #223, S2 #225, S3 #224 merged, last merge `18e4edd5` or later). Record the Git SHA and `ls controller/migrations | tail -6` in the results log. F7 is ticked only after S4 too; F5, F8 and F12 can be ticked when their sections pass.
+
+**Setup**
+1. `git pull` on `main`; rebuild the controller, provider console, admin UI, connector, shield, relay and client from the same SHA.
+2. Recreate the DB; check the controller log applied `062_` … `065_`, `067_` without errors. Bootstrap the super-admin, enrol TOTP; create a relay-ops operator (TOTP too).
+3. Controller env: `ENV=development RELAY_DEV_ALLOW_PRIVATE_ADDR=true` (private-address relays) and `RELAY_HEARTBEAT_DB_WRITE_INTERVAL=1m` (shorter bandwidth window for B2).
+4. Rebuild the client with the new platform root (`ZECURITY_PLATFORM_ROOT_PEM_FILE`): the root is compiled in and changes with the reset.
+5. Lab (as in the S2 run): relay on archlinux (.75), connector on luffy (.37), shield on omarchy (.53) protecting `192.168.1.53:8000`. Open ufw rules tagged `zecurity-live-test` for 8080/9090 and the relay UDP port; remove them afterwards.
+6. Tenants: **T1** by self-signup (the main lab tenant: connector, shield, resource, group, client, probes); **T2** created in the console (S2 recheck, quota checks); **T3** a throwaway for suspend if T1 must stay up.
+
+**Order:** B1 → S2 recheck → B2 → S3 → S1 → cross-feature. B1 first because every later tenant needs a plan; S1 last because suspending T1 stops its traffic.
+
+## F8 (B1): Plans and the tenant's plan (#222, migration `062_tenant_plans.sql`)
+1. Plans page: **Free** is the default with users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25; **Legacy** is unlimited on all six. **Pass:** values match `SELECT name, limits, is_default FROM plans` (read-only).
+2. T1 (self-signup) shows plan **Free** on its detail page and the six limits.
+3. Create plan **Test-small** (users 2, resources 2, remote_networks 1, connectors 2, shields 2, client_devices 2; reason). **Pass:** `plan.create` audit row. Over the API, a body missing a key or with `-1` / `1.5` → `invalid_limits`; a duplicate name → `plan_name_taken`.
+4. Set Test-small as the default (reason). Self-sign-up a new tenant (or create one, step S2.1) → it gets **Test-small**. Set **Free** back as the default. **Pass:** two `plan.set_default` rows with before/after; exactly one default at all times.
+5. Assign **Legacy** to T1 (Change plan, reason) → detail shows Legacy and "Unlimited". **Pass:** `tenant.plan.assign` with before/after plan. Assign Free back.
+6. Refusals: delete an assigned plan → `plan_in_use`; delete the default plan → `plan_is_default`.
+7. Roles: relay-ops has no Plans nav; `GET /provider/plans` and every plan write → 403.
+
+## F7 (S2): Provider tenant creation, recheck on merged `main` (#225)
+Already live-checked on the branch; this confirms it after the merge with S1 and S3.
+1. Create **T2** (name, suggested slug, default plan, first admin's email, reason). **Pass:** 201; `tenant.create` audit row with the invitation (no token anywhere: response, audits, controller log); the email arrives.
+2. The first admin signs in from the invitation link → Admin dashboard; reusing the link → refused.
+3. Duplicate slug → `slug_taken`.
+
+## F5 (B2): Relay link capacity and headroom (#226, migration `063_relay_link_capacity.sql`)
+1. Relays page: the lab relay's Headroom column reads **Not configured**; detail card "Link capacity" says Not configured.
+2. As **relay-ops**, Set link capacity to **100 Mbps** (reason). **Pass:** `relay.capacity.set` audit row, `before` null, `after` 12,500,000 (bytes/s); the list shows "… free of 100 Mbps".
+3. Push known traffic through the relay (as in the F5 run: `curl` a large file from `192.168.1.53:8000` via T1's client while placed on the relay; `iperf3` if the resource allows). After the next stored sample: **Pass:** detail shows Link capacity, In use (both directions) = to clients + to connectors, Headroom = capacity − in use, and Utilization; the list agrees.
+4. Lower the capacity under the measured rate (e.g. 10 Mbps while traffic runs). **Pass:** headroom 0, "Over capacity" on the list and detail; Overview lists "<relay> is at N % of its link capacity" with an Over capacity tag. At ≥ 90 % (not over) the tag is "Near capacity".
+5. Refusals over the API: `bps` 0, negative, fractional, a string, or above 50,000,000,000 → `invalid_capacity`; no reason → `reason_required`; on a revoked relay → `already_revoked` (console hides the button).
+6. Clear capacity (reason) → "Not configured"; audit `after` null. Idle relay with a capacity → headroom = capacity, 0 %.
+7. Relay and connector logs: nothing changed (no relay/proto change in B2).
+
 ## F7 (S1): Tenant suspend / resume (migration `064_tenant_suspension.sql`)
 Reset DB (schema change). A lab tenant with a connector, a shield, a protected resource, an enrolled client and traffic probes running; a residency pool assigned to it for the allowlist step.
 1. Suspend in the console (reason + typed slug). **Pass:** one `tenant.suspend` provider audit row with before/after and the reason; tenant detail and list show "Suspended"; `workspaces.status` is still `active`.
@@ -166,6 +208,12 @@ Reset DB (schema change). A lab tenant on the Free plan (3 remote networks, 10 c
 5. Client devices: enroll up to the limit; the next `zecurity login` prints the quota message.
 6. Lower a limit below usage → console "Over quota", admin Settings "Over limit", nothing removed, the next creation refused.
 7. Two parallel creations with one slot left → exactly one succeeds.
+
+## Sprint 23 cross-feature checks (merged `main`)
+1. **B1 × S3:** assign T2 a plan with lower limits than its usage → console Quotas shows "Over quota", nothing removed, the next creation refused; assign a bigger plan → creation works again, no restart.
+2. **S2 × S3:** a tenant whose plan allows users 1 and that already has a pending first-admin invitation → re-issuing the invitation still works (it frees its own slot); a provider create on a plan with users 0 → refused with `quota_exceeded`.
+3. **S1 × S2:** suspend T2 → re-issuing its first-admin invitation is refused (`tenant_not_active`) and a pending first-admin sign-in is refused with the suspended message; resume → re-issue works.
+4. **S1 × B2:** suspending T1 empties its relay list; the relay's measured rate falls and headroom rises at the next sample; nothing else changes on the relay.
 
 ## Relay pools findings (live run 2026-11-17)
 - **F10-1 (defect, blocks F10): connector does not recover from a refused migration.** Moving a tenant into a residency pool, the controller pushes the new relay list at once, but the residency relay learns that the workspace is allowed only at its next heartbeat. The connector dialled `manoj-lt` at 04:52:07; the relay refused it ("refusing Relay peer: workspace policy") and applied policy v23 (workspace allowed) at 04:52:15. The connector's `migrate()` logged "Migration could not find a usable target; remaining on current relay" and never retried: it stayed on `local-a` (no longer listed; its placement rejected), with no relay path for 10+ minutes, through the 300 s background reprobe (the unlisted active relay keeps its old score, so no "meaningful improvement"). Reproduced twice more (05:04:15, ~05:12:50). Evidence: scratchpad `lt/evidence-f10-step1/` and on the lab host `~/zecurity-lt/connector-f10-*.log`, `relay-at-repro2.log`. Fix: separate connector PR (bounded retry while the active relay is unlisted; unlisted active relay never wins a score comparison); acceptance = reproduce the race with the connector left running and see it recover with no restart. **Fixed in PR #210 (merged 2026-11-17), retested live:** same race at 05:40:19, refused at :19/:24/:34, relay allowed the workspace at 05:40:49, connector registered on its own at 05:40:54 (no restart); details in `Relay-Pools-Implementation-Plan.md` → Post-PR fixes. F10 closed.
