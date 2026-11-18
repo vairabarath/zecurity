@@ -65,6 +65,8 @@ A suspended tenant's counts are unchanged.
 **Person 1 — Barath (M2):** B1 plans → B2 headroom → S2 tenant creation. Phase file: `Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md` (also holds S2).
 **Person 2 — Sathiya (M1):** S1 suspend/resume → S3 quotas → S4 deletion. Phase file: `Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md`.
 
+**2026-11-18:** Barath handed **S2** to Sathiya (branch `feat/s2-tenant-creation`; record in Barath's phase file, S2 section). It still merges before S3; migration `067_tenant_first_admin_invite` is used.
+
 Both: review each other's PRs; the sprint acceptance run (live, on a reset lab DB, current `main`).
 
 ### Phases and order

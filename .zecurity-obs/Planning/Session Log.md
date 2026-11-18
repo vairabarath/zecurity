@@ -3859,3 +3859,17 @@ serves on `127.0.0.1:9102`.
   - 07b and 21 moved to `finished/`;
   - the README has a new scorecard and an "Open follow-ups" table;
   - the moved PENDING-21's links were updated.
+
+## 2026-11-18 — M1 (Sathiya): S2 provider tenant creation (handed over by Barath)
+
+**What was done:**
+- Branch `feat/s2-tenant-creation` from `main` (after B1 #222). Schema `067_tenant_first_admin_invite` (nullable invitation sender, `invitations.role`, DB rule: only a provider invitation grants admin).
+- `bootstrap.createWorkspaceTx` shared by self-signup and the new `CreateTenant` (no first user, single-use 7-day first-admin invitation). `POST /provider/tenants` (`internal/tenantcreate`, super-admin, reason, audited without the token). Console Create tenant dialog on the Tenants page.
+- First-admin invitation hardening: expiry and verified email checked at sign-in, consumed exactly once under a row lock; the accept endpoint and the client CLI refuse admin invitations.
+- Tests: 9 bootstrap DB tests (equivalence, slug race, email binding, concurrent single use, expiry, guards), 3 HTTP DB tests, client and authz unit tests, console tests; mutation checks all caught.
+
+**Key decisions:**
+- The user approved `067_` and the admin-only fixes; a first admin's email must not already belong to another workspace (recorded as a constraint).
+
+**What's next:**
+- Product owner's go for commit / push / PR (`[schema: reset DB]`); live check after reset DB. S3 (#224) then rebases onto S2 and adds the quota check to the first-admin path.

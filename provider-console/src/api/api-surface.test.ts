@@ -7,6 +7,7 @@ import * as plansApi from './plans'
 import * as poolsApi from './pools'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
+import * as tenantsApi from './tenants'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
@@ -16,7 +17,7 @@ import * as relaysApi from './relays'
 // the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
 // create/rename/region-residency/delete, moving a relay between pools and a
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
-// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Every exported API function is called here; a new write must be
+// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Tenant creation (Sprint 23 S2, D-44) adds POST /provider/tenants. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -40,6 +41,7 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/pool',
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
+  'POST /provider/tenants',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -73,6 +75,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   pools: poolsApi,
   reads: readsApi,
   relays: relaysApi,
+  tenants: tenantsApi,
 }
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
@@ -125,6 +128,7 @@ describe('API surface', () => {
       [`POST /provider/plans/${ID}/default`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/plan`]: { status: 204 },
       'GET /provider/tenants': page,
+      'POST /provider/tenants': { status: 201, body: { id: ID, slug: 'a', name: 'a', invitation: { id: 'i', email: 'b', expires_at: '' } } },
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
       'GET /provider/certificates': { status: 200, body: { summary: {}, items: [], next_cursor: null } },

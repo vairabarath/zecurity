@@ -391,14 +391,8 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 			}
 			return nil, status.Errorf(codes.Internal, "lookup invitation: %v", err)
 		}
-		if inv.WorkspaceID != sess.WorkspaceID {
-			return nil, status.Error(codes.PermissionDenied, "invitation does not belong to this workspace")
-		}
-		if inv.Status != "pending" {
-			return nil, status.Errorf(codes.FailedPrecondition, "invitation already %s", inv.Status)
-		}
-		if time.Now().After(inv.ExpiresAt) {
-			return nil, status.Error(codes.FailedPrecondition, "invitation expired")
+		if err := checkClientInvitation(inv, sess.WorkspaceID, time.Now()); err != nil {
+			return nil, err
 		}
 		inviteRow = inv
 	}

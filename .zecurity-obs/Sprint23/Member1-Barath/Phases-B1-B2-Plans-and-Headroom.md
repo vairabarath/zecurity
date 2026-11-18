@@ -214,6 +214,63 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
 - Reusing the invitation is refused.
 - A non-matching account is refused.
 
+### S2 implementation record (branch `feat/s2-tenant-creation`, built by Sathiya)
+Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` after B1 (#222), before S3 (#224), which rebases onto it.
+
+- **Schema `067_tenant_first_admin_invite.sql`** (the reserved slot was needed):
+  - `invitations.invited_by` is now nullable. NULL means issued by the provider; the operator is in `provider_audit_logs`, not here.
+  - New `invitations.role` (`member` | `admin`, default `member`).
+  - CHECK `invitations_admin_only_from_provider`: `role = 'member' OR invited_by IS NULL`. An invitation a tenant user sends can never grant admin.
+  - CHECK `invitations_sender_required_for_member`: a sender-less invitation is always the admin one.
+- **`internal/bootstrap`:**
+  - `createWorkspaceTx` is the workspace half of bootstrap (workspace row with trust domain, workspace CA, `active`). Self-signup (`runBootstrapTransaction`) and `CreateTenant` both call it; self-signup is otherwise unchanged. The Default policy (049_), audit heads (053_) and plan (062_) come from the `workspaces` triggers on both paths.
+  - `CreateTenant` (`tenant_create.go`) runs in one transaction:
+    - validates the slug (one DNS label, ≤ 60 so `ws-<slug>` fits) and the name, and normalises the email;
+    - locks the plan `FOR SHARE`;
+    - creates the workspace with **no first user**;
+    - writes the first-admin invitation (`role='admin'`, no sender, 7 days) and an `invited` membership row with role `admin`;
+    - writes the tenant-stream `workspace.create` (`source: provider`) and the caller's provider audit.
+  - A slug race is the UNIQUE index; the loser gets `ErrSlugTaken`.
+  - **Invited join (`Provision`)** for a first-admin row:
+    - usable only while its invitation is `pending` and unexpired (the expiry was not checked at sign-in before);
+    - refused with `ErrNotInvited` if the IdP did not assert `email_verified`;
+    - the transaction **consumes the invitation first** (`UPDATE … status='pending' AND expires_at > NOW() RETURNING`), then requires exactly one `invited` membership row, so a concurrent second sign-in is refused;
+    - audited as `invitation.accept` (role admin, never the token).
+  - Rows from invitations sent by tenant users behave exactly as before.
+- **`internal/invitation`:** `Invitation.Role`; `GetByToken` reads a NULL sender as `""`. `AcceptInvitation` (`/api/invitations/{token}/accept`) accepts **member invitations only**; the admin seat is taken only at the invitee's first sign-in.
+- **`internal/client`:** `checkClientInvitation` refuses an admin invitation (`FailedPrecondition`, "accept in the admin console"). Before this, a client CLI sign-in with the token would have consumed it as a member join. `markInvitationAccepted` only marks member invitations.
+- **API `internal/tenantcreate`:** `POST /provider/tenants {slug, name, plan_id?, admin_email, reason}` → 201 `{id, slug, name, trust_domain, plan_id, plan_name, invitation {id, email, expires_at}}`.
+  - Action `tenant.create` (`CanCreateTenant`, super-admin only through `decide()`).
+  - Reason required (≤ 500).
+  - Errors: `slug_taken` (409), `invalid_slug`, `invalid_name`, `invalid_email`, `plan_not_found`, `reason_required`, `reason_too_long`, `invalid_request`, `forbidden`.
+  - Provider audit details: `reason`, `invitation {operation: first_admin.invite, id, email, role, expires_at}`, `after {slug, name, trust_domain, plan_id, plan_name}`.
+  - The token is never returned, logged or audited. It goes only to the invitation email, sent after commit with the existing `invitation.Emailer`.
+  - Separate package from S1's `internal/tenantlifecycle`, so the two don't collide.
+- **Console:**
+  - Tenants page: **Create tenant** button (super-admin) and `CreateTenantDialog` with name, slug (suggested from the name, live `ws-<slug>.zecurity.in` preview), plan ("Default plan (Free)" sends no `plan_id`), first admin's email and reason. The success notice links the tenant and shows the invitee and expiry.
+  - `api/tenants.ts`, `lib/tenant-format.ts`.
+  - `api-surface.test.ts`: `POST /provider/tenants` added on purpose.
+- **Admin UI:** unchanged. `/invite/:token` signs in with Google; the sign-in takes the invitation; the callback's later accept call gets "already used", which it already ignores.
+- **Known constraint (agreed 2026-11-18, not a bug):** the first admin's email must not already belong to another Zecurity workspace. A platform identity that already has a user resolves to its own workspace and never reaches the invitation (single-workspace login, ADR-024). The dialog says so.
+- **Expired first-admin invitation:** the email signs in as a normal first-time user (self-signup). The provider re-creates or re-invites (no re-invite endpoint in S2).
+- **Tests:**
+  - `internal/bootstrap/tenant_create_test.go` (9):
+    - equivalence with self-signup (status, trust domain, CA and keys row, Default policy, plan, `workspace.create`), and a chosen plan is honoured;
+    - validation, with no partial writes;
+    - **6 concurrent same-slug creates → exactly 1**;
+    - email binding (a non-matching email doesn't join; an unverified matching email is refused) and single use;
+    - **6 concurrent first sign-ins → exactly 1 admin**;
+    - expiry;
+    - only the provider invitation grants admin (DB CHECKs, tenant invites are `member`);
+    - each single-use guard on its own (`export_test.go` `RunInvitedJoin`);
+    - the accept endpoint refuses a pending admin invitation.
+  - `internal/tenantcreate/handler_db_test.go` (3): relay-ops 403 with nothing written; 201 with audit actor, reason and invitation operation, and no token in the response, provider audit or tenant audit; the token only in the email; every error code.
+  - `internal/client/invite_role_test.go`; `authz_test.go` pins `tenant.create` to super-admin.
+  - Console: `Tenants.test.tsx` (create flow, default plan sends no `plan_id`, invalid slug, `slug_taken`), `tenant-format.test.ts`.
+  - **Mutation checks, all caught:** verified-email check, expiry in the lookup, `pending` in the consume UPDATE, the membership row-count check, the accept-endpoint role guard, the client admin guard, the admin membership role, the token in the audit, and the authz check.
+- **Gates (2026-11-18):** controller `go build ./...` and `go vet ./...` clean. Full `go test -count=1 ./...` with the DB and Valkey env: every package passes, 0 failures, only the 2 known skips. `graph/resolvers` and `internal/connector` were re-run with `-timeout 40m` because the host was under heavy load (load average ~10), and `certalert` needs `AUTH_TEST_VALKEY_URL` with a `/N` database. Provider console: 626 tests, lint and build clean.
+- **Live check:** pending (reset DB on this branch; migration `067_`).
+
 ---
 
 ## Done when

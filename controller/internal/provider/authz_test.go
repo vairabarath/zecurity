@@ -109,10 +109,13 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		{ActionRelayPoolDelete, func(x Actor) error { return a.CanDeleteRelayPool(x, poolTarget) }},
 		{ActionRelayMove, func(x Actor) error { return a.CanMoveRelay(x, target) }},
 		{ActionTenantRelayPoolAssign, func(x Actor) error { return a.CanAssignTenantRelayPool(x, Target{Type: "tenant", ID: "w1"}) }},
+		// Tenant creation (S2, D-44): super-admin only.
+		{ActionTenantCreate, func(x Actor) error { return a.CanCreateTenant(x) }},
 	}
 	allowed := map[string]map[string]bool{
 		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true, ActionRelayDrain: true, ActionRelayResume: true,
-			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolSetPlacement: true, ActionRelayPoolDelete: true, ActionRelayMove: true, ActionTenantRelayPoolAssign: true},
+			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolSetPlacement: true, ActionRelayPoolDelete: true, ActionRelayMove: true, ActionTenantRelayPoolAssign: true,
+			ActionTenantCreate: true},
 		// relay-ops: pools and relay moves, never region/residency or tenant assignment.
 		RoleRelayOps: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayDrain: true, ActionRelayResume: true,
 			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolDelete: true, ActionRelayMove: true},

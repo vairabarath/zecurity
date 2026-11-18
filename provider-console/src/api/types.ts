@@ -508,6 +508,17 @@ export interface CreatePlanResponse {
   is_default: boolean
 }
 
+/** POST /provider/tenants (Sprint 23 S2). No invitation token, ever. */
+export interface CreateTenantResponse {
+  id: string
+  slug: string
+  name: string
+  trust_domain: string
+  plan_id: string
+  plan_name: string
+  invitation: { id: string; email: string; expires_at: string }
+}
+
 /** The plan section of GET /provider/tenants/{id}. */
 export interface TenantPlan {
   id: string
