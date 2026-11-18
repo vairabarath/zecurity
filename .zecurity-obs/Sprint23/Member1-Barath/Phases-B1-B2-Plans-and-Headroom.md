@@ -322,6 +322,12 @@ The enterprise branch is already scoped to one workspace and is unchanged.
 
 **Tests:** `TestPlatformInvitedJoin_ChoosesInvitationDeterministically`: with no hint, the seat wins over an older member invitation; with a hint naming the member workspace, that workspace wins; with two member invitations, the oldest wins. Mutation checks on each of the three keys are caught. Not live-checked: only Google reaches this branch (the local test login uses workspace connections).
 
+**Security review note (automated, 2026-11-18, "ambiguous name matching"): acknowledged, no change.**
+- The hint only orders the pending, unexpired invitations of the Google-verified email that is signing in, so it can't reach an invitation that person doesn't already hold.
+- It is the signer's own choice, stored server-side with the sign-in state.
+- Ranking the first-admin seat above the hint would send someone who deliberately opened another workspace's invite link to the seat instead.
+- **Follow-up (design change, not S2):** carry the invitation id or token through `initiateAuth` so the invite link names the invitation exactly, instead of a name hint.
+
 **Still open (not fixed, by choice):** the no-SMTP dev emailer prints the invite link with its token.
 
 ---
