@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -46,8 +47,18 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 		return nil, fmt.Errorf("generate shield token: lookup connector: %w", err)
 	}
 
+	// Sprint 23 S3 (D-47): a pending shield takes a slot; the quota check and
+	// the insert commit together.
+	tx, err := r.TenantDB.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("generate shield token: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := quota.Reserve(ctx, tx, tc.TenantID, quota.KeyShields); err != nil {
+		return nil, quotaError("generate shield token", err)
+	}
 	var shieldID string
-	err = r.TenantDB.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')
 		 RETURNING id`,
@@ -59,6 +70,9 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 			return nil, apperr.UserErrorf("a shield named %q already exists", name)
 		}
 		return nil, fmt.Errorf("generate shield token: insert shield: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("generate shield token: commit: %w", err)
 	}
 
 	r.auditAdmin(ctx, "shield.create", "shield", shieldID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})

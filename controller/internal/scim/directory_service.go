@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"log"
 	"strings"
@@ -257,6 +258,12 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 		ConnectionID: sc.connectionID,
 		Issuer:       sc.issuer,
 	})
+	if qe, ok := quota.AsExceeded(err); ok {
+		// Sprint 23 S3 (D-47): the workspace is at its user limit. RFC 7644
+		// has no quota scimType; 403 ("operation not permitted") with the
+		// quota_exceeded text, so the IdP shows why. Nothing was created.
+		return nil, newSCIMError(403, "", qe.Error())
+	}
 	if err != nil {
 		return nil, newSCIMError(500, "", "provision identity: "+err.Error())
 	}
@@ -559,10 +566,33 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 	}
 	defer tx.Rollback(ctx)
 
+	// Sprint 23 S3 (D-47): a removed (status 'deleted') user isn't counted;
+	// reactivating it takes a user slot again, checked here under the
+	// workspace lock. Suspended users are counted, so lifting a suspension
+	// takes none. The UPDATE only applies to the status read, so a
+	// concurrent change can't slip past the check.
+	var prevStatus, email string
+	if err := tx.QueryRow(ctx,
+		`SELECT status, email FROM users WHERE id = $1 AND tenant_id = $2`,
+		userID, sc.workspaceID,
+	).Scan(&prevStatus, &email); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return newSCIMError(404, "", "user not found")
+		}
+		return newSCIMError(500, "", "reactivate user: "+err.Error())
+	}
+	if prevStatus == "deleted" {
+		if err := quota.ReserveUser(ctx, tx, sc.workspaceID, email); err != nil {
+			if qe, ok := quota.AsExceeded(err); ok {
+				return newSCIMError(403, "", qe.Error())
+			}
+			return newSCIMError(500, "", "reactivate user: quota check: "+err.Error())
+		}
+	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = 'active', updated_at = NOW()
-		 WHERE id = $1 AND tenant_id = $2`,
-		userID, sc.workspaceID,
+		 WHERE id = $1 AND tenant_id = $2 AND status = $3`,
+		userID, sc.workspaceID, prevStatus,
 	)
 	if err != nil {
 		return newSCIMError(500, "", "reactivate user: "+err.Error())

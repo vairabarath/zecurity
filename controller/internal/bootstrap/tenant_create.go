@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
@@ -121,7 +122,7 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, auditF
 	// Same-slug creates race on the UNIQUE index: the loser's insert waits
 	// for the winner's commit and then fails with a unique violation, mapped
 	// to ErrSlugTaken (the transaction is abandoned, nothing is written).
-	tenantID, err := s.createWorkspaceTx(ctx, tx, in.Slug, in.Name, in.PlanID)
+	tenantID, err := s.createWorkspaceTx(ctx, tx, in.Slug, in.Name, in.PlanID, nil)
 	if err != nil {
 		if isSlugViolation(err) {
 			return nil, ErrSlugTaken
@@ -178,6 +179,12 @@ func (s *Service) CreateTenant(ctx context.Context, in CreateTenantInput, auditF
 // insertFirstAdminInvitation writes the provider-issued invitation (no tenant
 // sender, role admin; 067_) and its 'invited' membership row with role admin.
 func insertFirstAdminInvitation(ctx context.Context, tx pgx.Tx, workspaceID, email string) (*invitation.Invitation, error) {
+	// Sprint 23 S3 (D-47): the first-admin invitation takes a user slot like
+	// any invitation (CreateTenant and re-issue). Same transaction, workspace
+	// row locked; a refusal keeps its *quota.Exceeded.
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
+		return nil, err
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)

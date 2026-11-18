@@ -375,3 +375,23 @@ func TestReinviteHTTP(t *testing.T) {
 		t.Fatalf("detail with an admin: %+v", d.FirstAdminInvitation)
 	}
 }
+
+// S3 x S2 (D-47): a create whose first-admin invitation is over the plan's
+// user limit is 409 quota_exceeded with nothing created.
+func TestCreateTenantHTTP_QuotaExceeded(t *testing.T) {
+	e := newEnv(t)
+	var zero string
+	if err := e.pool.QueryRow(context.Background(), `INSERT INTO plans (name, limits) VALUES ('zero-users', jsonb_build_object(
+		'users', 0, 'resources', 50, 'remote_networks', 3, 'connectors', 10, 'shields', 10, 'client_devices', 25)) RETURNING id::text`).Scan(&zero); err != nil {
+		t.Fatal(err)
+	}
+	b := valid()
+	b["plan_id"] = zero
+	r := e.post(t, provider.RoleSuperAdmin, b)
+	if r.code != http.StatusConflict || errCode(r) != "quota_exceeded" || !strings.Contains(r.body, `"key":"users"`) {
+		t.Fatalf("create over the user quota: %d %s", r.code, r.body)
+	}
+	if n := e.count(t, `SELECT count(*) FROM workspaces`); n != 0 {
+		t.Fatalf("refused create left %d workspaces", n)
+	}
+}

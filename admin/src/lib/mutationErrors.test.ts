@@ -24,6 +24,16 @@ describe('toastMutationError', () => {
     expect(toastError).not.toHaveBeenCalled()
   })
 
+  it('a creation refused at a limit is toasted as "Limit reached" (Sprint 23 S3)', () => {
+    const err = new CombinedGraphQLErrors({
+      errors: [{ message: 'quota exceeded', extensions: { code: 'QUOTA_EXCEEDED', key: 'shields', limit: 10, used: 10 } }],
+    })
+    toastMutationError(err)
+    expect(toastError).toHaveBeenCalledWith('Limit reached', {
+      description: 'Shields limit reached (10 of 10 in use). Remove some, or ask your provider to raise the limit.',
+    })
+  })
+
   it('reports network failures', () => {
     expect(mutationErrorMessage(new TypeError('Failed to fetch'))).toBe('Failed to fetch')
   })

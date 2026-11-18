@@ -540,6 +540,14 @@ describe('Login', () => {
     expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
   })
 
+  // Sprint 23 S3 (D-47): a sign-in that would create a user over the limit.
+  it('says the network has reached its user limit', async () => {
+    render(renderLoginAt([], '/login?error=user_limit_reached'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/reached its user limit/i)).toBeInTheDocument()
+  })
+
   // Sprint 23 S1 (D-45): a workspace suspended by the provider gets a clear
   // message, not a generic failure, and no deploy CTA.
   it('says the workspace is suspended by the provider', async () => {

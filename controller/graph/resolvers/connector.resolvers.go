@@ -16,6 +16,7 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -24,7 +25,17 @@ import (
 func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string, location graph.NetworkLocation) (*graph.RemoteNetwork, error) {
 	tc := tenant.MustGet(ctx)
 
-	rn, err := scanRemoteNetwork(r.TenantDB.QueryRow(ctx,
+	// Sprint 23 S3 (D-47): the quota check and the insert commit together;
+	// the check serialises creations in the workspace.
+	tx, err := r.TenantDB.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create remote network: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := quota.Reserve(ctx, tx, tc.TenantID, quota.KeyRemoteNetworks); err != nil {
+		return nil, quotaError("create remote network", err)
+	}
+	rn, err := scanRemoteNetwork(tx.QueryRow(ctx,
 		`INSERT INTO remote_networks (tenant_id, name, location)
 		 VALUES ($1, $2, $3)
 		 RETURNING id, name, location, status, created_at`,
@@ -32,6 +43,9 @@ func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("create remote network: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("create remote network: commit: %w", err)
 	}
 
 	r.auditAdmin(ctx, "remote_network.create", "remote_network", rn.ID, map[string]any{"name": rn.Name, "location": strings.ToLower(string(location))})
@@ -90,8 +104,18 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 		return nil, apperr.UserErrorf("remote network is %q, expected active", rnStatus)
 	}
 
+	// Sprint 23 S3 (D-47): a pending connector takes a slot; the quota check
+	// and the insert commit together.
+	tx, err := r.TenantDB.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := quota.Reserve(ctx, tx, tc.TenantID, quota.KeyConnectors); err != nil {
+		return nil, quotaError("generate connector token", err)
+	}
 	var connectorID string
-	err = r.TenantDB.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO connectors (tenant_id, remote_network_id, name)
 		 VALUES ($1, $2, $3)
 		 RETURNING id`,
@@ -103,6 +127,9 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 			return nil, apperr.UserErrorf("a connector named %q already exists", name)
 		}
 		return nil, fmt.Errorf("generate connector token: insert connector: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("generate connector token: commit: %w", err)
 	}
 
 	r.auditAdmin(ctx, "connector.create", "connector", connectorID, map[string]any{"name": name, "remote_network_id": remoteNetworkID})

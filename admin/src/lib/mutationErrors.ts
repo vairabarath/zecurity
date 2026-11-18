@@ -1,12 +1,16 @@
 import { toast } from 'sonner'
 import { CombinedGraphQLErrors, ServerError } from '@apollo/client/errors'
 import { isCapabilityRefusal } from '@/apollo/links/refusal'
+import { quotaExceeded, quotaExceededMessage } from '@/lib/quota'
 
 // mutationErrorMessage is the text to show for a failed mutation, or null when
 // it is shown elsewhere: capability refusals are toasted by the error link
 // (PENDING-19) and a 401 is the error link's refresh/login flow.
 export function mutationErrorMessage(error: unknown): string | null {
   if (isCapabilityRefusal(error)) return null
+  // Sprint 23 S3 (D-47): a creation refused at the workspace's limit.
+  const q = quotaExceeded(error)
+  if (q) return quotaExceededMessage(q)
   if (ServerError.is(error) && error.statusCode === 401) return null
   if (CombinedGraphQLErrors.is(error)) {
     return error.errors.map((e) => e.message).find((m) => typeof m === 'string' && m.trim()) ?? 'The request failed.'
@@ -20,5 +24,5 @@ export function mutationErrorMessage(error: unknown): string | null {
 // display of its own, so a failed action is never silent.
 export function toastMutationError(error: unknown): void {
   const message = mutationErrorMessage(error)
-  if (message !== null) toast.error('Action failed', { description: message })
+  if (message !== null) toast.error(quotaExceeded(error) ? 'Limit reached' : 'Action failed', { description: message })
 }

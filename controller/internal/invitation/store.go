@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 var ErrNotFound = errors.New("invitation not found")
@@ -58,6 +59,17 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Sprint 23 S3 (D-47): a pending invitation takes a user slot (each
+	// identity once: re-inviting a counted identity takes none). Checked in
+	// this transaction, under the workspace lock, so mass-inviting can't get
+	// past the limit. A *quota.Exceeded is returned as is.
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, err
+		}
+		return nil, fmt.Errorf("quota check: %w", err)
+	}
 
 	var inv Invitation
 	err = tx.QueryRow(ctx,
@@ -134,6 +146,16 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Sprint 23 S3 (D-47): accepting a pending invitation takes no new slot
+	// (the identity is already counted), so this passes even over a lowered
+	// limit; it is checked so every user path goes through the quota.
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return err
+		}
+		return fmt.Errorf("quota check: %w", err)
+	}
 
 	var invitationID string
 	err = tx.QueryRow(ctx,

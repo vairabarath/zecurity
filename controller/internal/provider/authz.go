@@ -66,6 +66,9 @@ const (
 	ActionPlanSetDefault   = "plan.set_default"
 	ActionTenantPlanAssign = "tenant.plan.assign"
 
+	// Quotas (Sprint 23 S3, D-47): a per-tenant quota override. A tenant.*
+	// action, so super-admin only (D-06).
+	ActionTenantQuotaSet = "tenant.quota.set"
 	// Tenant creation (Sprint 23 S2, D-44): create a workspace and invite
 	// its first admin. tenant.* is super-admin only (D-06).
 	ActionTenantCreate = "tenant.create"
@@ -191,6 +194,12 @@ func (a *Authz) CanReadPlans(actor Actor) error {
 // or ActionTenantPlanAssign).
 func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
+}
+
+// CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}
+// (super-admin only: tenant.*, D-06, D-47).
+func (a *Authz) CanSetTenantQuota(actor Actor, target Target) error {
+	return decide(actor, ActionTenantQuotaSet, target)
 }
 
 // CanCreateTenant gates POST /provider/tenants (super-admin only: tenant.*,

@@ -9,6 +9,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
@@ -148,6 +149,12 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			// not a generic auth failure.
 			if errors.Is(err, identity.ErrNotInvited) {
 				fail("not_invited")
+				return
+			}
+			// Sprint 23 S3 (D-47): the workspace is at its user limit.
+			if _, ok := quota.AsExceeded(err); ok {
+				log.Printf("auth callback: user limit reached: conn=%s: %v", conn.ID, err)
+				fail("user_limit_reached")
 				return
 			}
 			failErr("authentication_failed", conn.ID, err)

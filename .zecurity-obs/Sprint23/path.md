@@ -183,6 +183,7 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 - **S1 (PR #223 review, 2026-11-18):** an invited join into a suspended tenant is refused before any write; refresh reports "suspended" ahead of the generation check. Details: Sathiya's phase file, "S1 Post-Phase Fixes".
 - **S2: expired first-admin invitation (2026-11-18).** Sign-in is now refused with `invitation_expired` instead of self-signing up the invitee, and super-admins re-issue the invitation with `POST /provider/tenants/{id}/first-admin-invitation` (`tenant.first_admin.reinvite`), from the console's tenant-detail "First admin" card. Details: Barath's phase file, "S2 Post-Phase Fixes".
 - **S2: Google sign-in invitation choice (2026-11-18).** With pending invitations in several workspaces, the first Google sign-in now joins, in order: the workspace it signed in for, then a provider first-admin seat, then the oldest invitation (it was arbitrary).
+- **S3, user slots keyed on email (2026-11-18):** a second account with an email already in use took no slot, and SCIM reactivation of a removed user wasn't checked. Users now count per row (plus invitations without a user); `ReserveInvitation` is new; reactivation is checked. Details are in the S3 phase file, "Post-Phase Fixes".
 
 ## Out of scope
 

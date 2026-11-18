@@ -244,8 +244,11 @@ func seedWorkspace(ctx context.Context, t *testing.T, pool *pgxpool.Pool, slug s
 	t.Helper()
 	id := uuid.NewString()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO workspaces (id, slug, name, status, trust_domain)
-		 VALUES ($1,$2,$3,'active',$4)`,
+		// The Legacy plan (unlimited): these tests are not about quotas
+		// (Sprint 23 S3); a new workspace would otherwise get the default
+		// Free plan and its 5-user limit.
+		`INSERT INTO workspaces (id, slug, name, status, trust_domain, plan_id)
+		 VALUES ($1,$2,$3,'active',$4,'00000000-0000-0000-0001-000000000002')`,
 		id, slug, slug+" Corp", "td-"+slug,
 	); err != nil {
 		t.Fatalf("seed workspace %s: %v", slug, err)

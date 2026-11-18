@@ -3905,3 +3905,20 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Barath's go to push and open the PR (`[schema: reset DB]`); then S3 (#224) merges main and adds the quota check to the first-admin path.
+
+## 2026-11-17/18 — Sprint 23 S3: per-tenant quotas (Sathiya, Claude Code)
+
+**What was done:**
+- Built S3 (F12, D-47) on the local branch `feat/s3-tenant-quotas`, from `main` 28694918 (B1 #222 merged). Details are in the S3 "Implementation status" in the phase file.
+- The full gate is green; 18 mutation checks were caught. The override API tests found a real bug before commit: a limit sent as a JSON string `"3"` was accepted. Fixed: only a bare integer is valid.
+
+**Key decisions:**
+- `internal/quota` holds the definition and imports pgx only, so `providerquery` can use it (D-04); `plans.EffectiveLimits` delegates to it.
+- Users count once per lowercased email, across non-deleted users and pending unexpired invitations. An invited join or accept takes no new slot, so it works even over a lowered limit.
+- Clearing an override is `{inherit: true}` on the same PUT; the plan named only one route.
+- A SCIM refusal is 403 with the quota text; a REST refusal is 409.
+
+**What's next:**
+- Committed and pushed to `feat/s3-tenant-quotas` and a PR opened, on Sathiya's explicit instruction, without a recorded go from Barath (the Sprint 23 rule asks for one). Per the conflict zones, S2 merges first; then S3 rebases and adds the check to S2's first-admin invitation.
+- Reset the DB and run the S3 live check (`Pending-Live-Tests.md`).
+

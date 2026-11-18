@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
@@ -179,7 +180,15 @@ func (s *Service) runBootstrapTransaction(
 	}
 	slug := slugify(displayName)
 
-	tenantID, err := s.createWorkspaceTx(ctx, tx, slug, displayName, nil)
+	// Sprint 23 S3 (D-47): the first admin takes the new workspace's first
+	// user slot (its plan is the current default, set by the 062 trigger).
+	// Checked once the workspace row exists and before its CA is generated.
+	tenantID, err := s.createWorkspaceTx(ctx, tx, slug, displayName, nil, func(tenantID string) error {
+		if err := quota.ReserveUser(ctx, tx, tenantID, email); err != nil {
+			return quotaErr(err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +260,9 @@ func (s *Service) runBootstrapTransaction(
 // The Default resource policy (049_), the audit chain heads (053_) and the
 // plan (062_: the current default unless planID is given) come from the
 // workspaces INSERT triggers, so they match on both paths too.
-func (s *Service) createWorkspaceTx(ctx context.Context, tx pgx.Tx, slug, name string, planID *string) (string, error) {
+// beforeCA, when set, runs once the workspace row exists and before the CA
+// is generated (S3: a quota refusal costs no key generation).
+func (s *Service) createWorkspaceTx(ctx context.Context, tx pgx.Tx, slug, name string, planID *string, beforeCA func(tenantID string) error) (string, error) {
 	// SPIFFE trust domain derived from workspace slug.
 	// Required since migration 002 makes trust_domain NOT NULL.
 	trustDomain := appmeta.WorkspaceTrustDomain(slug)
@@ -269,6 +280,12 @@ func (s *Service) createWorkspaceTx(ctx context.Context, tx pgx.Tx, slug, name s
 	).Scan(&tenantID)
 	if err != nil {
 		return "", fmt.Errorf("insert workspace: %w", err)
+	}
+
+	if beforeCA != nil {
+		if err := beforeCA(tenantID); err != nil {
+			return "", err
+		}
 	}
 
 	caResult, err := s.PKIService.GenerateWorkspaceCA(ctx, tenantID)
@@ -326,10 +343,25 @@ func (s *Service) runInvitedUserTransaction(
 	}
 	defer tx.Rollback(ctx)
 
-	// Sprint 23 S1 (D-45): a suspended tenant gets no new members. Checked
-	// first, under a share lock, so a refused join writes nothing (no user,
-	// no identity link, invitation not consumed) and can't commit after a
-	// suspension it didn't see. The callback maps it to workspace_suspended.
+	// Sprint 23 S1 (D-45): a suspended tenant gets no new members; checked
+	// before anything else so a refusal says "suspended" and writes
+	// nothing (no user, no identity link, invitation not consumed).
+	if err := tenantstate.Check(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+
+	// Sprint 23 S3 (D-47): the invited join takes no new slot (the pending
+	// invitation already counts the identity), but it goes through the user
+	// quota like every user-creating path. It runs BEFORE the first-admin
+	// invitation is consumed (a consumed invitation no longer counts), and
+	// it locks the workspace row (FOR NO KEY UPDATE), which serialises joins
+	// and a concurrent suspension.
+	if err := quota.ReserveUser(ctx, tx, workspaceID, email); err != nil {
+		return nil, quotaErr(err)
+	}
+	// S1 again, under that lock: a suspension that committed after the
+	// first check is seen now (lock order: workspace row first, no share
+	// lock taken before the quota lock, so no upgrade deadlock).
 	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
 		return nil, err
 	}
@@ -528,4 +560,13 @@ func slugify(name string) string {
 
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// quotaErr keeps a *quota.Exceeded as it is (the sign-in shows it) and wraps
+// any other quota error (the sign-in fails closed).
+func quotaErr(err error) error {
+	if _, ok := quota.AsExceeded(err); ok {
+		return err
+	}
+	return fmt.Errorf("quota check: %w", err)
 }

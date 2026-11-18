@@ -370,6 +370,7 @@ type ComplexityRoot struct {
 		SupportedPostureChecks  func(childComplexity int) int
 		Users                   func(childComplexity int) int
 		Workspace               func(childComplexity int) int
+		WorkspaceQuotas         func(childComplexity int) int
 	}
 
 	RemoteNetwork struct {
@@ -558,6 +559,13 @@ type ComplexityRoot struct {
 		Name func(childComplexity int) int
 		Slug func(childComplexity int) int
 	}
+
+	WorkspaceQuota struct {
+		Key   func(childComplexity int) int
+		Limit func(childComplexity int) int
+		Over  func(childComplexity int) int
+		Used  func(childComplexity int) int
+	}
 }
 
 type DeviceProfileResolver interface {
@@ -639,6 +647,7 @@ type QueryResolver interface {
 	LookupWorkspace(ctx context.Context, slug string) (*WorkspaceLookupResult, error)
 	LookupWorkspacesByEmail(ctx context.Context, email string) (*WorkspaceListResult, error)
 	ConsoleSecurity(ctx context.Context) (*ConsoleSecurity, error)
+	WorkspaceQuotas(ctx context.Context) ([]*WorkspaceQuota, error)
 	RemoteNetworks(ctx context.Context) ([]*RemoteNetwork, error)
 	RemoteNetwork(ctx context.Context, id string) (*RemoteNetwork, error)
 	Connectors(ctx context.Context, remoteNetworkID string) ([]*Connector, error)
@@ -2649,6 +2658,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Workspace(childComplexity), true
+	case "Query.workspaceQuotas":
+		if e.ComplexityRoot.Query.WorkspaceQuotas == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.WorkspaceQuotas(childComplexity), true
 
 	case "RemoteNetwork.connectors":
 		if e.ComplexityRoot.RemoteNetwork.Connectors == nil {
@@ -3448,6 +3463,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.WorkspacePublic.Slug(childComplexity), true
+
+	case "WorkspaceQuota.key":
+		if e.ComplexityRoot.WorkspaceQuota.Key == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceQuota.Key(childComplexity), true
+	case "WorkspaceQuota.limit":
+		if e.ComplexityRoot.WorkspaceQuota.Limit == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceQuota.Limit(childComplexity), true
+	case "WorkspaceQuota.over":
+		if e.ComplexityRoot.WorkspaceQuota.Over == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceQuota.Over(childComplexity), true
+	case "WorkspaceQuota.used":
+		if e.ComplexityRoot.WorkspaceQuota.Used == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceQuota.Used(childComplexity), true
 
 	}
 	return 0, false
@@ -4385,6 +4425,20 @@ func (ec *executionContext) childFields_WorkspacePublic(ctx context.Context, fie
 		return ec.fieldContext_WorkspacePublic_slug(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type WorkspacePublic", field.Name)
+}
+
+func (ec *executionContext) childFields_WorkspaceQuota(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "key":
+		return ec.fieldContext_WorkspaceQuota_key(ctx, field)
+	case "limit":
+		return ec.fieldContext_WorkspaceQuota_limit(ctx, field)
+	case "used":
+		return ec.fieldContext_WorkspaceQuota_used(ctx, field)
+	case "over":
+		return ec.fieldContext_WorkspaceQuota_over(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type WorkspaceQuota", field.Name)
 }
 
 func (ec *executionContext) childFields___Directive(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -14040,6 +14094,56 @@ func (ec *executionContext) fieldContext_Query_consoleSecurity(_ context.Context
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_workspaceQuotas(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_workspaceQuotas(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().WorkspaceQuotas(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				capability, err := ec.unmarshalNCapability2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCapability(ctx, "CONSOLE_READ")
+				if err != nil {
+					var zeroVal []*WorkspaceQuota
+					return zeroVal, err
+				}
+				if ec.Directives.Requires == nil {
+					var zeroVal []*WorkspaceQuota
+					return zeroVal, errors.New("directive requires is not implemented")
+				}
+				return ec.Directives.Requires(ctx, nil, directive0, capability)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*WorkspaceQuota) graphql.Marshaler {
+			return ec.marshalNWorkspaceQuota2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceQuotaᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_workspaceQuotas(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceQuota(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_remoteNetworks(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -18858,6 +18962,98 @@ func (ec *executionContext) fieldContext_WorkspacePublic_slug(_ context.Context,
 	return graphql.NewScalarFieldContext("WorkspacePublic", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _WorkspaceQuota_key(ctx context.Context, field graphql.CollectedField, obj *WorkspaceQuota) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceQuota_key(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Key, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceQuota_key(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceQuota", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceQuota_limit(ctx context.Context, field graphql.CollectedField, obj *WorkspaceQuota) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceQuota_limit(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Limit, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *int) graphql.Marshaler {
+			return ec.marshalOInt2ᚖint(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceQuota_limit(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceQuota", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceQuota_used(ctx context.Context, field graphql.CollectedField, obj *WorkspaceQuota) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceQuota_used(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Used, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v int) graphql.Marshaler {
+			return ec.marshalNInt2int(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceQuota_used(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceQuota", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceQuota_over(ctx context.Context, field graphql.CollectedField, obj *WorkspaceQuota) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceQuota_over(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Over, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceQuota_over(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceQuota", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
 func (ec *executionContext) ___Directive_name(ctx context.Context, field graphql.CollectedField, obj *introspection.Directive) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -22740,6 +22936,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "workspaceQuotas":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_workspaceQuotas(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "remoteNetworks":
 			field := field
 
@@ -24901,6 +25119,57 @@ func (ec *executionContext) _WorkspacePublic(ctx context.Context, sel ast.Select
 	return out
 }
 
+var workspaceQuotaImplementors = []string{"WorkspaceQuota"}
+
+func (ec *executionContext) _WorkspaceQuota(ctx context.Context, sel ast.SelectionSet, obj *WorkspaceQuota) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, workspaceQuotaImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("WorkspaceQuota")
+		case "key":
+			out.Values[i] = ec._WorkspaceQuota_key(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "limit":
+			out.Values[i] = ec._WorkspaceQuota_limit(ctx, field, obj)
+		case "used":
+			out.Values[i] = ec._WorkspaceQuota_used(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "over":
+			out.Values[i] = ec._WorkspaceQuota_over(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var __DirectiveImplementors = []string{"__Directive"}
 
 func (ec *executionContext) ___Directive(ctx context.Context, sel ast.SelectionSet, obj *introspection.Directive) graphql.Marshaler {
@@ -26552,6 +26821,32 @@ func (ec *executionContext) marshalNWorkspacePublic2ᚖgithubᚗcomᚋyourorgᚋ
 		return graphql.Null
 	}
 	return ec._WorkspacePublic(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNWorkspaceQuota2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceQuotaᚄ(ctx context.Context, sel ast.SelectionSet, v []*WorkspaceQuota) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNWorkspaceQuota2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceQuota(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNWorkspaceQuota2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceQuota(ctx context.Context, sel ast.SelectionSet, v *WorkspaceQuota) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._WorkspaceQuota(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNWorkspaceStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceStatus(ctx context.Context, v any) (WorkspaceStatus, error) {

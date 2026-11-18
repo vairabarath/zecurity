@@ -17,6 +17,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
@@ -689,5 +690,31 @@ func TestFirstAdmin_SuspendedTenant(t *testing.T) {
 	}
 	if p, err := e.signIn("first@acme.test", "first", true); err != nil || p.TenantID != ct.WorkspaceID || p.Role != "admin" {
 		t.Fatalf("first admin after resume: %+v %v", p, err)
+	}
+}
+
+// S3 x S2 (D-47): the first-admin invitation takes a user slot. On a plan
+// with users = 0 the tenant create is refused with *quota.Exceeded and
+// nothing is written; a re-issue frees the revoked invitation's slot first,
+// so on users = 1 it is not refused.
+func TestFirstAdminInvitation_UserQuota(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	mk := func(name string, users int) string {
+		return e.scalar(t, `INSERT INTO plans (name, limits) VALUES ($1, jsonb_build_object(
+			'users', $2::int, 'resources', 50, 'remote_networks', 3, 'connectors', 10, 'shields', 10, 'client_devices', 25))
+			RETURNING id::text`, name, users)
+	}
+	zero, one := mk("zero-users", 0), mk("one-user", 1)
+	_, err := e.svc.CreateTenant(ctx, bootstrap.CreateTenantInput{Slug: "full", Name: "Full", PlanID: &zero, AdminEmail: "a@full.test"}, nil)
+	if qe, ok := quota.AsExceeded(err); !ok || qe.Key != quota.KeyUsers || qe.Limit != 0 {
+		t.Fatalf("create on users=0: err = %v, want quota exceeded on users", err)
+	}
+	if n := e.scalar(t, `SELECT count(*)::text FROM workspaces WHERE slug = 'full'`); n != "0" {
+		t.Fatalf("a refused create left %s workspaces", n)
+	}
+	ct := e.create(t, "single", "a@single.test", &one)
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "b@single.test", nil); err != nil {
+		t.Fatalf("re-issue on users=1 (old invitation revoked first): %v", err)
 	}
 }

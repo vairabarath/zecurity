@@ -26,6 +26,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 const maxReasonRunes = 500
@@ -252,6 +253,12 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	// Sprint 23 S3 (D-47): the first-admin invitation is over the users
+	// quota (409 quota_exceeded {key, limit, used}).
+	if e, ok := quota.AsExceeded(err); ok {
+		provider.WriteJSON(w, quota.HTTPStatus, e.Body())
+		return
+	}
 	switch {
 	case errors.Is(err, bootstrap.ErrInvalidSlug):
 		provider.WriteError(w, http.StatusBadRequest, "invalid_slug")
