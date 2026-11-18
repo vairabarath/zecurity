@@ -73,4 +73,37 @@ func TestSCIMProvision_Quota(t *testing.T) {
 	if serr := provision("cara@quota.test", "ext-cara"); serr != nil {
 		t.Fatalf("invited identity at the limit: %v", serr)
 	}
+
+	// Reactivating a removed (deleted) user takes a slot again: refused at
+	// the limit, allowed once there is room. Lifting a suspension takes none.
+	var annID string
+	if err := pool.QueryRow(ctx, `SELECT id::text FROM users WHERE tenant_id = $1 AND email = 'ann@quota.test'`, ws).Scan(&annID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET status = 'deleted' WHERE id = $1`, annID); err != nil {
+		t.Fatal(err)
+	}
+	if serr := provision("dan@quota.test", "ext-dan"); serr != nil { // takes ann's freed slot
+		t.Fatalf("provision into the freed slot: %v", serr)
+	}
+	serr = ds.Reactivate(ctx, sc, annID, "")
+	if serr == nil || serr.Status != 403 || !strings.Contains(serr.Detail, "quota exceeded: users") {
+		t.Fatalf("reactivating a removed user at the limit: %+v, want 403 quota exceeded", serr)
+	}
+	var st string
+	if err := pool.QueryRow(ctx, `SELECT status FROM users WHERE id = $1`, annID).Scan(&st); err != nil || st != "deleted" {
+		t.Fatalf("refused reactivation changed the status to %q (err %v)", st, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workspace_quota_overrides SET limit_value = 3 WHERE workspace_id = $1`, ws); err != nil {
+		t.Fatal(err)
+	}
+	if serr := ds.Reactivate(ctx, sc, annID, ""); serr != nil {
+		t.Fatalf("reactivation with room: %v", serr)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET status = 'suspended' WHERE id = $1`, annID); err != nil {
+		t.Fatal(err)
+	}
+	if serr := ds.Reactivate(ctx, sc, annID, ""); serr != nil {
+		t.Fatalf("lifting a suspension at the limit: %v", serr)
+	}
 }

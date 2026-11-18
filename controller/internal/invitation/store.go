@@ -63,7 +63,7 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 	// identity once: re-inviting a counted identity takes none). Checked in
 	// this transaction, under the workspace lock, so mass-inviting can't get
 	// past the limit. A *quota.Exceeded is returned as is.
-	if err := quota.ReserveUser(ctx, tx, workspaceID, email); err != nil {
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
 		if _, ok := quota.AsExceeded(err); ok {
 			return nil, err
 		}
@@ -144,7 +144,7 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 	// Sprint 23 S3 (D-47): accepting a pending invitation takes no new slot
 	// (the identity is already counted), so this passes even over a lowered
 	// limit; it is checked so every user path goes through the quota.
-	if err := quota.ReserveUser(ctx, tx, workspaceID, email); err != nil {
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
 		if _, ok := quota.AsExceeded(err); ok {
 			return err
 		}

@@ -232,5 +232,22 @@ On a throwaway lab tenant:
 
 ---
 
+## Post-Phase Fixes
+
+### Fix: S3 user slots keyed on email (quota bypass)
+**Issue:** a user record created with an email the tenant already had took no user slot. A second SCIM or IdP account with a new subject but the same email, or many of them, got past the user limit. Separately, SCIM `Reactivate` set a removed (`deleted`) user back to active with no quota check.
+
+**Root cause:** `quota.ReserveUser` skipped the check for any "counted identity" (an email held by a live user or a pending invitation), and the count de-duplicated by email.
+
+**Fix applied** (`controller/internal/quota/quota.go`, `internal/invitation/store.go`, `internal/scim/directory_service.go`):
+- **Count:** every live user row counts on its own; a pending, unexpired invitation counts once per email, and only while no live user has that email.
+- **`ReserveUser`** (a user row is created or reactivated): free only when it uses the person's own pending invitation; otherwise it takes a slot.
+- **`ReserveInvitation`** (new; invitation create and accept, no row created): free when the person is already counted.
+- **SCIM `Reactivate`:** when the user was `deleted`, it runs `ReserveUser` in the transaction (403 at the limit); the UPDATE is conditional on the status it read.
+
+**Tests:** a second account with the same email takes a slot; reactivating a removed user at the limit is refused; lifting a suspension isn't. Mutation checks (email-only skip, no reactivation check, invitation of a member counted twice) are all caught.
+
+---
+
 ## Done when
 S1, S3 and S4 are merged and live-checked; F12 is ticked; F7 is ticked together with Barath's S2.

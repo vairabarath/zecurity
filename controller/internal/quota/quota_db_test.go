@@ -260,6 +260,14 @@ func TestQuotaDB_CountingRules(t *testing.T) {
 		t.Fatalf("client devices = %d, want 2 (revoked doesn't count)", n)
 	}
 
+	// Two accounts with the same email are two users (and the invitation
+	// for that email still isn't counted on top).
+	e.exec(`INSERT INTO users (tenant_id, email, provider, provider_sub, status) VALUES ($1, 'admin@acme.test', 'oidc', 's9', 'active')`, ws)
+	if n := e.count(ws, KeyUsers); n != 5 {
+		t.Fatalf("users = %d, want 5 (a second account with the same email counts)", n)
+	}
+	e.exec(`DELETE FROM users WHERE provider_sub = 's9'`)
+
 	// AllUsage reports the same counts in key order, one statement.
 	usage, err := AllUsage(e.ctx, e.pool, ws)
 	if err != nil {
@@ -321,7 +329,7 @@ func TestQuotaDB_ReserveUserCountsIdentitiesOnce(t *testing.T) {
 			return err
 		}
 		defer tx.Rollback(e.ctx)
-		if err := ReserveUser(e.ctx, tx, ws, email); err != nil {
+		if err := ReserveInvitation(e.ctx, tx, ws, email); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(e.ctx, `INSERT INTO invitations (email, workspace_id, invited_by, token) VALUES (lower($1), $2, $3, gen_random_uuid()::text)`, email, ws, inviter); err != nil {
@@ -343,8 +351,22 @@ func TestQuotaDB_ReserveUserCountsIdentitiesOnce(t *testing.T) {
 	// An existing member's identity is always allowed, even over a lowered limit.
 	e.exec(`INSERT INTO workspace_quota_overrides (workspace_id, key, limit_value, reason, set_by) VALUES ($1, 'users', 0, 'r', 'op')`, ws)
 	tx, _ := e.pool.Begin(e.ctx)
-	if err := ReserveUser(e.ctx, tx, ws, "admin@acme.test"); err != nil {
-		t.Fatalf("counted identity over a lowered limit: %v", err)
+	if err := ReserveInvitation(e.ctx, tx, ws, "admin@acme.test"); err != nil {
+		t.Fatalf("re-inviting a member over a lowered limit: %v", err)
+	}
+	tx.Rollback(e.ctx)
+	// Signing in on a pending invitation uses its slot (no new one), even
+	// over a lowered limit.
+	tx, _ = e.pool.Begin(e.ctx)
+	if err := ReserveUser(e.ctx, tx, ws, "a@acme.test"); err != nil {
+		t.Fatalf("join on a pending invitation over a lowered limit: %v", err)
+	}
+	tx.Rollback(e.ctx)
+	// A second account with an email already in use is a new user: it takes
+	// a slot (the slot is the user row, never the email alone).
+	tx, _ = e.pool.Begin(e.ctx)
+	if _, ok := AsExceeded(ReserveUser(e.ctx, tx, ws, "admin@acme.test")); !ok {
+		t.Fatal("a second account with an existing email took no slot")
 	}
 	tx.Rollback(e.ctx)
 	// An expired invitation frees the slot.

@@ -182,20 +182,23 @@ func Values(l map[string]Limit) map[string]*int64 {
 	return out
 }
 
-// identitiesSQL is the D-47 user count: every identity once (lowercased
-// email) among the tenant's users that aren't removed (active, locked and
-// SCIM-suspended users count; status 'deleted' doesn't) and its pending,
-// unexpired invitations. Expired or accepted invitations don't count.
-const identitiesSQL = `
-SELECT lower(email) AS identity FROM users
- WHERE tenant_id = $1::uuid AND status <> 'deleted'
-UNION
-SELECT lower(email) FROM invitations
- WHERE workspace_id = $1::uuid AND status = 'pending' AND expires_at > NOW()`
+// liveUserSQL / pendingInviteSQL are the two parts of the D-47 user count.
+// Every user row that isn't removed counts (active, locked and SCIM-
+// suspended users; status 'deleted' doesn't), each on its own: two accounts
+// with the same email are two users. A pending, unexpired invitation counts
+// once per email, and only while no such user has that email (the person is
+// then counted by the user row, D-47: an invited member counts once).
+// Expired or accepted invitations don't count. $1 is the workspace id.
+const liveUserSQL = `SELECT 1 FROM users u WHERE u.tenant_id = $1::uuid AND u.status <> 'deleted'`
+
+const pendingInviteSQL = `SELECT DISTINCT lower(i.email) AS email FROM invitations i
+ WHERE i.workspace_id = $1::uuid AND i.status = 'pending' AND i.expires_at > NOW()
+   AND NOT EXISTS (SELECT 1 FROM users u WHERE u.tenant_id = $1::uuid AND u.status <> 'deleted'
+                                         AND lower(u.email) = lower(i.email))`
 
 // countSQL counts a key's usage with the D-47 rules. $1 is the workspace id.
 var countSQL = map[string]string{
-	KeyUsers: `SELECT count(*) FROM (` + identitiesSQL + `) ids`,
+	KeyUsers: `SELECT (SELECT count(*) FROM (` + liveUserSQL + `) u) + (SELECT count(*) FROM (` + pendingInviteSQL + `) i)`,
 	// Every defined resource in any state except deleting (un-protecting
 	// doesn't free a slot). Discovered services are other tables and never
 	// count.
@@ -307,7 +310,7 @@ func check(ctx context.Context, tx pgx.Tx, workspaceID, key string) error {
 // error: refuse (fail closed).
 func Reserve(ctx context.Context, tx pgx.Tx, workspaceID, key string) error {
 	if key == KeyUsers {
-		return fmt.Errorf("quota: users are reserved by identity (ReserveUser)")
+		return fmt.Errorf("quota: users go through ReserveUser or ReserveInvitation")
 	}
 	if !ValidKey(key) {
 		return ErrUnknownKey
@@ -318,20 +321,47 @@ func Reserve(ctx context.Context, tx pgx.Tx, workspaceID, key string) error {
 	return check(ctx, tx, workspaceID, key)
 }
 
-// ReserveUser is Reserve for the users key: email is the identity being
-// invited, provisioned or signed in. An identity the tenant already counts
-// (an existing user or a pending invitation, D-47: each identity once) takes
-// no new slot and is always allowed, so accepting an invitation or signing in
-// on one never fails even when a lowered limit is below usage.
+// ReserveUser is Reserve for the users key when a user row is created (sign-
+// in, SCIM provisioning, first signup) or a removed user is reactivated.
+// It takes no new slot only when it uses the person's own pending
+// invitation: an unexpired pending invitation for email exists and no live
+// user has that email yet (the invitation's slot becomes the user's). So an
+// invited join works even over a lowered limit, but a second account with an
+// email already in use takes a slot like any other (the slot is the user
+// row, never the email alone).
 func ReserveUser(ctx context.Context, tx pgx.Tx, workspaceID, email string) error {
 	if err := lock(ctx, tx, workspaceID); err != nil {
 		return err
 	}
-	identity := strings.ToLower(strings.TrimSpace(email))
-	if identity != "" {
-		var counted bool
+	if identity := strings.ToLower(strings.TrimSpace(email)); identity != "" {
+		var invited bool
 		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM (`+identitiesSQL+`) ids WHERE identity = $2)`,
+			`SELECT EXISTS (SELECT 1 FROM (`+pendingInviteSQL+`) p WHERE p.email = $2)`,
+			workspaceID, identity).Scan(&invited); err != nil {
+			return fmt.Errorf("quota: look up invitation: %w", err)
+		}
+		if invited {
+			return nil
+		}
+	}
+	return check(ctx, tx, workspaceID, KeyUsers)
+}
+
+// ReserveInvitation is Reserve for the users key when an invitation is
+// created or accepted (no user row is created). A person the tenant already
+// counts (a live user or a pending invitation with that email) takes no new
+// slot: re-inviting a member or accepting an invitation never fails, even
+// over a lowered limit. Anyone else takes a slot, so pending invitations
+// count and mass-inviting can't get past the limit.
+func ReserveInvitation(ctx context.Context, tx pgx.Tx, workspaceID, email string) error {
+	if err := lock(ctx, tx, workspaceID); err != nil {
+		return err
+	}
+	if identity := strings.ToLower(strings.TrimSpace(email)); identity != "" {
+		var counted bool
+		if err := tx.QueryRow(ctx, `SELECT
+			EXISTS (SELECT 1 FROM users u WHERE u.tenant_id = $1::uuid AND u.status <> 'deleted' AND lower(u.email) = $2)
+			OR EXISTS (SELECT 1 FROM (`+pendingInviteSQL+`) p WHERE p.email = $2)`,
 			workspaceID, identity).Scan(&counted); err != nil {
 			return fmt.Errorf("quota: look up identity: %w", err)
 		}
