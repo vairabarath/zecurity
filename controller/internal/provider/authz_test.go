@@ -138,3 +138,29 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		t.Errorf("relay-ops relay.read: %v", err)
 	}
 }
+
+// Sprint 23 S1 (D-45, D-06): tenant suspend and resume are super-admin only,
+// enforced in decide(); relay-ops and unknown roles are refused.
+func TestDecide_TenantLifecycleMatrix(t *testing.T) {
+	a := NewAuthz()
+	target := Target{Type: "tenant", ID: "w1"}
+	checks := []struct {
+		name  string
+		check func(Actor) error
+	}{
+		{ActionTenantSuspend, func(x Actor) error { return a.CanSuspendTenant(x, target) }},
+		{ActionTenantResume, func(x Actor) error { return a.CanResumeTenant(x, target) }},
+	}
+	for _, role := range []string{RoleSuperAdmin, RoleRelayOps, "", "Super-Admin", "super-admin "} {
+		for _, c := range checks {
+			err := c.check(Actor{UserID: "u", Email: "e@x", Role: role})
+			if role == RoleSuperAdmin {
+				if err != nil {
+					t.Errorf("role %q, %s: want allow, got %v", role, c.name, err)
+				}
+			} else if !errors.Is(err, ErrForbidden) {
+				t.Errorf("role %q, %s: want ErrForbidden, got %v", role, c.name, err)
+			}
+		}
+	}
+}

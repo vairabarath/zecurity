@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // Service is the workspace-creating provisioner for the identity pipeline
@@ -273,6 +274,14 @@ func (s *Service) runInvitedUserTransaction(
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Sprint 23 S1 (D-45): a suspended tenant gets no new members. Checked
+	// first, under a share lock, so a refused join writes nothing (no user,
+	// no identity link, invitation not consumed) and can't commit after a
+	// suspension it didn't see. The callback maps it to workspace_suspended.
+	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
 
 	var userID string
 	err = tx.QueryRow(ctx,

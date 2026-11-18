@@ -49,6 +49,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
     shields: [{ id: '12121212-1111-2222-3333-444444444444', name: 'db-1', status: 'active', connector_id: CONN, remote_network_id: NET, cert_not_after: iso(40 * DAY), last_heartbeat_at: iso(-120_000) }],
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
+    suspension: null,
     plan: TENANT_FREE_PLAN,
     ...over,
   }
@@ -239,14 +240,14 @@ describe('Tenant detail: content', () => {
     expect(screen.getAllByText('Showing the first 200 entries.')).toHaveLength(3)
   })
 
-  it('the only buttons are Refresh, Change plan (D-43) and Change pool (D-41); loading sends GETs only', async () => {
+  it('the only buttons are Refresh, Suspend tenant (Sprint 23 S1, D-45), Change plan (D-43) and Change pool (D-41); loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/tenants/${ID}`]: ok() })
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Change plan', 'Change pool'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Change plan', 'Change pool'])
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
-    expect(within(main).queryByText(/\b(revoke|delete|edit|create|suspend)\b/i)).not.toBeInTheDocument()
+    expect(within(main).queryByText(/\b(revoke|delete|edit|create)\b/i)).not.toBeInTheDocument()
   })
 })

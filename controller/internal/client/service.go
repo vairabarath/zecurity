@@ -32,12 +32,13 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/identity"
-	"github.com/yourorg/ztna/controller/internal/mfa"
-	"github.com/yourorg/ztna/controller/internal/risk"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/risk"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -379,6 +380,16 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	// code_challenge that was registered in InitiateAuth.
 	if sha256b64url([]byte(req.GetCodeVerifier())) != sess.CliCodeChallenge {
 		return nil, status.Error(codes.Unauthenticated, "pkce verification failed")
+	}
+
+	// Sprint 23 S1 (D-45): no new session while the tenant is suspended by
+	// the provider. A lookup error refuses (fail closed). Before anything is
+	// written (user, invitation, session).
+	if err := tenantstate.Check(ctx, s.pool, sess.WorkspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return nil, status.Error(codes.PermissionDenied, tenantstate.Message)
+		}
+		return nil, status.Error(codes.Internal, "check workspace state")
 	}
 
 	// Validate invite token if provided.
@@ -874,7 +885,7 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
 	// policy change is not cached as stale (ADR-013).
 	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*policy.CompiledACL, error) {
-		return policy.CompileACLSnapshot(ctx, s.policyStore,s.postureStore, s.policyNotifier, workspaceID)
+		return policy.CompileACLSnapshot(ctx, s.policyStore, s.postureStore, s.policyNotifier, workspaceID)
 	})
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.

@@ -529,6 +529,16 @@ describe('Login', () => {
     expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
   })
 
+  // Sprint 23 S1 (D-45): a workspace suspended by the provider gets a clear
+  // message, not a generic failure, and no deploy CTA.
+  it('says the workspace is suspended by the provider', async () => {
+    render(renderLoginAt([], '/login?error=workspace_suspended'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/suspended by the provider/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
+  })
+
   // An unrecognised (or crafted) reason must not paint arbitrary text onto the
   // login page.
   it('does not echo an unknown error code back to the page', async () => {

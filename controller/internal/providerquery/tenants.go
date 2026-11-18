@@ -78,6 +78,17 @@ type TenantSummary struct {
 	CreatedAt   time.Time    `json:"created_at"`
 	CANotAfter  *time.Time   `json:"ca_not_after"`
 	Counts      TenantCounts `json:"counts"`
+	// Suspension is the provider suspension (Sprint 23 S1, D-45); null when
+	// the tenant isn't suspended. Status stays "active" while suspended.
+	Suspension *TenantSuspension `json:"suspension"`
+}
+
+// TenantSuspension is a tenant's provider suspension: when, by which
+// provider operator (email) and why.
+type TenantSuspension struct {
+	SuspendedAt time.Time `json:"suspended_at"`
+	By          string    `json:"by"`
+	Reason      string    `json:"reason"`
 }
 
 // TenantRemoteNetwork is one remote network in tenant detail.
@@ -149,7 +160,8 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
        rn.active,
        uc.active, uc.suspended, uc.locked, uc.deleted,
        dc.active, dc.re_enroll_required, dc.renew_pending, dc.revoked,
-       COALESCE(rc.n, 0), gc.n, ar.n, rp.n
+       COALESCE(rc.n, 0), gc.n, ar.n, rp.n,
+       w.suspended_at, w.suspended_by, w.suspension_reason
   FROM workspaces w
   LEFT JOIN workspace_ca_keys k ON k.tenant_id = w.id
   LEFT JOIN LATERAL (
@@ -191,6 +203,8 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
 func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 	var s TenantSummary
 	c := &s.Counts
+	var suspendedAt *time.Time
+	var suspendedBy, suspensionReason *string
 	if err := row.Scan(
 		&s.ID, &s.Slug, &s.Name, &s.Status, &s.TrustDomain, &s.CreatedAt, &s.CANotAfter,
 		&c.Connectors.Pending, &c.Connectors.Active, &c.Connectors.Disconnected, &c.Connectors.Revoked,
@@ -199,11 +213,21 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		&c.Users.Active, &c.Users.Suspended, &c.Users.Locked, &c.Users.Deleted,
 		&c.ClientDevices.Active, &c.ClientDevices.ReEnrollRequired, &c.ClientDevices.RenewPending, &c.ClientDevices.Revoked,
 		&c.Policies.Resources, &c.Policies.Groups, &c.Policies.AccessRules, &c.Policies.ResourcePolicies,
+		&suspendedAt, &suspendedBy, &suspensionReason,
 	); err != nil {
 		return TenantSummary{}, err
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.CANotAfter = utcPtr(s.CANotAfter)
+	if suspendedAt != nil {
+		s.Suspension = &TenantSuspension{SuspendedAt: suspendedAt.UTC()}
+		if suspendedBy != nil {
+			s.Suspension.By = *suspendedBy
+		}
+		if suspensionReason != nil {
+			s.Suspension.Reason = *suspensionReason
+		}
+	}
 	return s, nil
 }
 

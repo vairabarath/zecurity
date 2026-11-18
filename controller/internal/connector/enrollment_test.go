@@ -349,6 +349,10 @@ func TestEnroll_FullFlow(t *testing.T) {
 	if err := applyEnrollmentMigration(ctx, testPool, "002_connector_schema.sql"); err != nil {
 		t.Fatalf("apply 002 migration: %v", err)
 	}
+	// Sprint 23 S1: enrollment reads workspaces.suspended_at (D-45).
+	if err := applyEnrollmentMigration(ctx, testPool, "064_tenant_suspension.sql"); err != nil {
+		t.Fatalf("apply 064 migration: %v", err)
+	}
 
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")
 
@@ -561,6 +565,10 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 	if err := applyEnrollmentMigration(ctx, testPool, "002_connector_schema.sql"); err != nil {
 		t.Fatalf("apply 002 migration: %v", err)
 	}
+	// Sprint 23 S1: enrollment reads workspaces.suspended_at (D-45).
+	if err := applyEnrollmentMigration(ctx, testPool, "064_tenant_suspension.sql"); err != nil {
+		t.Fatalf("apply 064 migration: %v", err)
+	}
 
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")
 
@@ -721,6 +729,10 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 	if err := applyEnrollmentMigration(ctx, testPool, "002_connector_schema.sql"); err != nil {
 		t.Fatalf("apply 002 migration: %v", err)
 	}
+	// Sprint 23 S1: enrollment reads workspaces.suspended_at (D-45).
+	if err := applyEnrollmentMigration(ctx, testPool, "064_tenant_suspension.sql"); err != nil {
+		t.Fatalf("apply 064 migration: %v", err)
+	}
 
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")
 
@@ -863,6 +875,10 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 	if err := applyEnrollmentMigration(ctx, testPool, "002_connector_schema.sql"); err != nil {
 		t.Fatalf("apply 002 migration: %v", err)
 	}
+	// Sprint 23 S1: enrollment reads workspaces.suspended_at (D-45).
+	if err := applyEnrollmentMigration(ctx, testPool, "064_tenant_suspension.sql"); err != nil {
+		t.Fatalf("apply 064 migration: %v", err)
+	}
 
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")
 
@@ -1003,6 +1019,10 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 	}
 	if err := applyEnrollmentMigration(ctx, testPool, "002_connector_schema.sql"); err != nil {
 		t.Fatalf("apply 002 migration: %v", err)
+	}
+	// Sprint 23 S1: enrollment reads workspaces.suspended_at (D-45).
+	if err := applyEnrollmentMigration(ctx, testPool, "064_tenant_suspension.sql"); err != nil {
+		t.Fatalf("apply 064 migration: %v", err)
 	}
 
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")

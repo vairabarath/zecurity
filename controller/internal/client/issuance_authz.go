@@ -10,6 +10,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // errIssuanceNotAuthorized means the token's user may not be issued a device
@@ -48,6 +49,14 @@ func authorizeDeviceIssuance(ctx context.Context, db *pgxpool.Pool, claims *auth
 	if err := identity.CheckGeneration(claims.Generation, generation); err != nil {
 		return fmt.Errorf("%w: %v", errIssuanceNotAuthorized, err)
 	}
+	// Sprint 23 S1 (D-45): no device certificate (enrollment or renewal)
+	// while the tenant is suspended. A lookup error refuses (fail closed).
+	if err := tenantstate.Check(ctx, db, claims.TenantID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return fmt.Errorf("%w: %v", errIssuanceNotAuthorized, err)
+		}
+		return fmt.Errorf("read workspace state: %w", err)
+	}
 	var inactiveMembership bool
 	if err := db.QueryRow(ctx,
 		`SELECT EXISTS (
@@ -65,9 +74,10 @@ func authorizeDeviceIssuance(ctx context.Context, db *pgxpool.Pool, claims *auth
 
 // deviceOwnerActiveSQL re-checks, inside the final conditional write on
 // client_devices, that the device's user is still active and has no
-// non-active membership — so a suspension that lands while a certificate is
+// non-active membership, and that the tenant isn't suspended by the provider
+// (Sprint 23 S1, D-45) — so a suspension that lands while a certificate is
 // being issued means no certificate is returned.
-const deviceOwnerActiveSQL = `
+var deviceOwnerActiveSQL = `
 		    AND EXISTS (SELECT 1 FROM users u
 		                 WHERE u.id = client_devices.user_id
 		                   AND u.tenant_id = client_devices.workspace_id
@@ -75,4 +85,7 @@ const deviceOwnerActiveSQL = `
 		    AND NOT EXISTS (SELECT 1 FROM workspace_members wm
 		                     WHERE wm.workspace_id = client_devices.workspace_id
 		                       AND wm.user_id = client_devices.user_id
-		                       AND wm.status <> 'active')`
+		                       AND wm.status <> 'active')
+		    AND EXISTS (SELECT 1 FROM workspaces w
+		                 WHERE w.id = client_devices.workspace_id
+		                   AND ` + tenantstate.NotSuspended("w") + `)`

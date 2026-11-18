@@ -7,6 +7,7 @@ import * as plansApi from './plans'
 import * as poolsApi from './pools'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
+import * as tenantsApi from './tenants'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
@@ -16,7 +17,8 @@ import * as relaysApi from './relays'
 // the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
 // create/rename/region-residency/delete, moving a relay between pools and a
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
-// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Every exported API function is called here; a new write must be
+// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Sprint 23 S1 (D-45
+// amends D-30) adds tenant suspend and resume. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -40,6 +42,8 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/pool',
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
+  'POST /provider/tenants/{id}/resume',
+  'POST /provider/tenants/{id}/suspend',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -73,6 +77,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   pools: poolsApi,
   reads: readsApi,
   relays: relaysApi,
+  tenants: tenantsApi,
 }
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
@@ -117,6 +122,8 @@ describe('API surface', () => {
       [`PATCH /provider/relay-pools/${ID}`]: { status: 204 },
       [`DELETE /provider/relay-pools/${ID}`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/relay-pool`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/suspend`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/resume`]: { status: 204 },
       'GET /provider/plans': { status: 200, body: { items: [] } },
       [`GET /provider/plans/${ID}`]: { status: 200, body: {} },
       'POST /provider/plans': { status: 201, body: { id: ID, name: 'a', description: '', limits: {}, is_default: false } },
