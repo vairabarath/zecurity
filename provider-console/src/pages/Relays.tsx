@@ -8,6 +8,7 @@ import { hasRole } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { AddRelayDialog, type NewRelay } from '@/components/AddRelayDialog'
 import { BandwidthCell } from '@/components/Bandwidth'
+import { HeadroomCell } from '@/components/Headroom'
 import { CapacityTier, ConnectionsBar } from '@/components/Capacity'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
@@ -167,6 +168,7 @@ export function Relays() {
                   <TableHead>Version</TableHead>
                   <TableHead>Connections</TableHead>
                   <TableHead>Bandwidth</TableHead>
+                  <TableHead>Headroom</TableHead>
                   <TableHead>Capacity tier</TableHead>
                   <TableHead className="text-right">Connectors</TableHead>
                   <TableHead>Last heartbeat</TableHead>
@@ -212,6 +214,9 @@ export function Relays() {
                     </TableCell>
                     <TableCell>
                       <BandwidthCell bandwidth={r.bandwidth} />
+                    </TableCell>
+                    <TableCell>
+                      <HeadroomCell relay={r} />
                     </TableCell>
                     <TableCell>
                       <CapacityTier label={r.capacity_label} />

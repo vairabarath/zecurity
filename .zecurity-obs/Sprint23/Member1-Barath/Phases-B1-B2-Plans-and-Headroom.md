@@ -147,7 +147,7 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
     - audited with before/after.
   - **Relay reads gain:**
     - `link_capacity_bps` (null = not configured);
-    - `headroom {to_clients_bps, to_connectors_bps, over_capacity}`, where headroom per direction = capacity − measured rate, clamped at 0, with `over_capacity` true when the rate exceeds capacity;
+    - `headroom {used_bytes_per_sec, headroom_bytes_per_sec, utilization, over_capacity}`, where **used = rate to clients + rate to connectors** (both flows leave through the same link: a relay forwards every byte it receives), **headroom = capacity − used**, clamped at 0, `utilization = used / capacity`, and `over_capacity` is true when used exceeds capacity. The capacity is the link's usable throughput in its **tighter direction** (D-42, refined 2026-11-18);
     - `headroom` is **null when the capacity is unset, or when bandwidth is not reported or still being measured**. Never zero or unlimited by default.
 - **Console:**
   - Show **measured rate, configured capacity and remaining headroom separately**:
@@ -160,17 +160,48 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
 - **No relay, proto or connector change.**
 
 ### Tests
-- **Headroom maths:** per direction, the clamp, `over_capacity`, unset capacity, still measuring, and revoked/not reported → null.
+- **Headroom maths:** the sum of both flows, the clamp, `utilization`, `over_capacity`, unset capacity, one or both rates still measuring, and revoked/not reported → null.
 - **Authz:** relay-ops and super-admin allowed, others refused.
 - **Audit:** before/after rows.
 - **Console:** formatting and units, the "Not configured" label, the estimate wording, and the attention threshold.
 
 ### Live check
 - Set the capacity on a lab relay (as relay-ops).
-- Push known traffic (as in the F5 run: `curl` a large file through the relay): rate, capacity and headroom per direction appear separately on the list, the detail and the Overview.
+- Push known traffic (as in the F5 run: `curl` a large file through the relay): the two measured flows, the capacity and the headroom (capacity − both flows) appear separately on the list, the detail and the Overview.
 - A rate above capacity shows headroom 0 and "over capacity".
 - Clear the capacity: it shows "Not configured".
 - The capacity change is audited.
+
+
+### B2 implementation record (branch `feat/sprint23-b2-headroom`)
+- **D-42 refined (2026-11-18, approved by Barath):** **one capacity per relay**, the link's usable throughput in its **tighter direction**; **headroom = capacity − (to clients + to connectors)**. A relay forwards every byte it receives, so both flows share its link; a per-direction headroom would understate how full it is (e.g. 60 + 50 MB/s on a 125 MB/s link reads 65 and 75 MB/s free per direction, but only 15 MB/s is really left). Updated in the Decision Record, `path.md`, this file and `CLAUDE.md`.
+- **Schema `063_relay_link_capacity.sql`:** `relays.link_capacity_bps BIGINT NULL CHECK (> 0)`, in bytes per second like F5's bandwidth.
+- **Controller:**
+  - `internal/relay/capacity.go`:
+    - `Store.SetLinkCapacity`: row lock; revoked/deleted → `already_revoked` / `already_deleted`; the same value is a no-op (not audited); audit in the same transaction;
+    - `PUT /provider/relays/{id}/link-capacity` `{bps | null, reason}`: `null` clears; a missing `bps` → `invalid_request`; ≤ 0, fractional, a string, or above **400 Gbit/s** (`MaxLinkCapacityBps` = 5×10¹⁰ B/s, which catches bit/byte unit slips) → `invalid_capacity`; the reason is required;
+    - audited as `relay.capacity.set` with before/after.
+  - Action `relay.capacity.set` (under `relay.*`, so relay-ops and super-admin) and `Authz.CanSetRelayCapacity`.
+  - `providerquery/relays.go`: relay reads gain `link_capacity_bps` and a derived **`headroom {used_bytes_per_sec, headroom_bytes_per_sec, utilization, over_capacity}`**. It's computed on read, never stored, and `null` unless the capacity and both rates are known.
+- **Console:**
+  - `lib/capacity.ts`: Mbps/Gbps ⇄ bytes/s (1 Gbps = 125,000,000 B/s), link-speed formatting, `NEAR_CAPACITY = 0.9`.
+  - `components/Headroom.tsx`:
+    - `HeadroomCell`: "Not configured", "N free of 1 Gbps", a warning at ≥ 90 %, "Over capacity";
+    - `HeadroomDetail`: link capacity, use of both directions, headroom and utilization, shown separately, with the estimate note;
+    - `RelayCapacityCard` with `SetLinkCapacityDialog`: "enter the slower direction", Mbps/Gbps, reason, and Clear capacity; hidden for revoked and deleted relays.
+  - A Relays list Headroom column, a relay detail **Link capacity** card, and an Overview attention item ("Near capacity" at ≥ 90 %, "Over capacity" above 100 %).
+  - `api/relays.ts` `setRelayLinkCapacity`; `api-surface.test.ts` adds the one write.
+  - The relay detail button pins include "Set link capacity" for both roles.
+- **Tests:**
+  - Controller:
+    - `TestRelayHeadroom`: the summed flows (60 + 50 of 125 MB/s → 15 free, 88 %), the clamp and `over_capacity`, exactly full, idle, and every unknown → nil;
+    - `TestLinkCapacity_*`: relay-ops sets, audit before/after, an unchanged value not audited, `null` clears, validation, terminal and unknown relays;
+    - `TestRelayReads_LinkCapacityAndHeadroom`: list and detail;
+    - the DTO pin for `link_capacity_bps`, `headroom` and `RelayHeadroom`;
+    - **mutation-checked**: counting one direction only fails both headroom tests.
+  - Console: `capacity.test.ts` (5), `Headroom.test.tsx` (9), Overview near/over capacity.
+- **Gates (2026-11-18):** controller `go vet ./...` clean; full `go test ./...` **1,911 passed, 0 failed** (2 known skips); provider console **636** tests, lint and build clean.
+- **Live check:** pending (reset DB; set a capacity on a lab relay; push known traffic; headroom = capacity − both flows).
 
 ---
 

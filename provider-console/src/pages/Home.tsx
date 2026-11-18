@@ -15,7 +15,8 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { bucketFor, formatRelative } from '@/lib/expiry'
-import { formatDateTime } from '@/lib/format'
+import { formatLinkSpeed, formatUtilization, NEAR_CAPACITY } from '@/lib/capacity'
+import { formatDateTime, formatRate } from '@/lib/format'
 import { fetchFleet, MAX_RELAY_PAGES, RELAY_PAGE_LIMIT, type Fleet } from '@/lib/fleet'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
 import { cn } from '@/lib/utils'
@@ -310,6 +311,16 @@ function relayItems(relays: RelaySummary[]): AttentionItem[] {
         tag: <Badge variant="destructive">Low tier</Badge>,
         title: `${r.name} is in the low capacity tier`,
         note: `${r.connection_count.toLocaleString()} / ${r.max_connections.toLocaleString()} connections`,
+      })
+    }
+    // F5 headroom (Sprint 23 B2): the controller's derived figure, never computed here.
+    if (r.status === 'active' && r.headroom && r.link_capacity_bps !== null && (r.headroom.over_capacity || r.headroom.utilization >= NEAR_CAPACITY)) {
+      items.push({
+        key: `${r.id}:capacity`,
+        to,
+        tag: <Badge variant={r.headroom.over_capacity ? 'destructive' : 'warning'}>{r.headroom.over_capacity ? 'Over capacity' : 'Near capacity'}</Badge>,
+        title: `${r.name} is at ${formatUtilization(r.headroom.utilization)} of its link capacity`,
+        note: `${formatRate(r.headroom.used_bytes_per_sec)} in use of ${formatLinkSpeed(r.link_capacity_bps)}; ${formatRate(r.headroom.headroom_bytes_per_sec)} free (estimate)`,
       })
     }
     const b = r.cert_not_after && r.status !== 'revoked' ? bucketFor(r.cert_not_after) : null

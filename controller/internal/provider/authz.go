@@ -52,6 +52,10 @@ const (
 	// a residency tenant's connector reported a relay outside its pools.
 	ActionRelayPlacementRejected = "relay.placement_rejected"
 
+	// Relay link capacity (Sprint 23 B2, D-42; D-31 amended): under relay.*,
+	// so relay-ops and super-admins may set it.
+	ActionRelayCapacitySet = "relay.capacity.set"
+
 	// Plans (Sprint 23 B1, D-43). Plans are commercial/tenant data: not
 	// under relay.*, so decide() keeps them super-admin only (D-06), and
 	// assigning a tenant's plan is a tenant.* action.
@@ -159,6 +163,12 @@ func (a *Authz) CanAssignTenantRelayPool(actor Actor, target Target) error {
 }
 
 // CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
+// CanSetRelayCapacity reports whether actor may set a relay's link capacity
+// (relay.capacity.set: relay-ops and super-admin).
+func (a *Authz) CanSetRelayCapacity(actor Actor, target Target) error {
+	return decide(actor, ActionRelayCapacitySet, target)
+}
+
 // CanReadPlans reports whether actor may read plans (plan.read).
 func (a *Authz) CanReadPlans(actor Actor) error {
 	return decide(actor, ActionPlanRead, Target{Type: "plan"})

@@ -206,6 +206,14 @@ export interface RelaySummary {
   drain_state: DrainState | null
   /** F5: null when the relay doesn't report byte counters, and for revoked/deleted relays. */
   bandwidth: RelayBandwidth | null
+  /**
+   * F5 headroom (Sprint 23 B2, D-42): the operator-set usable link throughput
+   * in bytes per second, in the link's tighter direction; null = not
+   * configured. `headroom` is null whenever the capacity or either measured
+   * rate is unknown (never shown as zero or unlimited).
+   */
+  link_capacity_bps: number | null
+  headroom: RelayHeadroom | null
   /** The relay pool it belongs to (D-37); every relay has exactly one. */
   pool: RelayPoolRef
   /** Workspace-policy enforcement on this relay (D-40). */
@@ -234,6 +242,20 @@ export interface RelayBandwidth {
   window_seconds: number | null
   to_connector_bytes_per_sec: number | null
   to_client_bytes_per_sec: number | null
+}
+
+/**
+ * How much more a relay's link can carry (D-42, refined 2026-11-18). A relay
+ * forwards every byte it receives, so both flows share the link:
+ * used = to clients + to connectors; headroom = capacity − used (0 when over).
+ * An estimate over the bandwidth window, not guaranteed free bandwidth.
+ */
+export interface RelayHeadroom {
+  used_bytes_per_sec: number
+  headroom_bytes_per_sec: number
+  /** used / capacity; above 1 when over capacity. */
+  utilization: number
+  over_capacity: boolean
 }
 
 /**

@@ -30,6 +30,8 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     draining_since: null,
     drain_state: null,
     bandwidth: null,
+    link_capacity_bps: null,
+    headroom: null,
     pool: DEFAULT_POOL, policy: RELAY_POLICY,
     ...over,
   }
@@ -265,5 +267,34 @@ describe('Overview: failed-over relay pools', () => {
     await screen.findByText('relay-low is in the low capacity tier')
     expect(screen.getByText(/Couldn’t load everything/)).toBeInTheDocument()
     expect(screen.queryByText('Nothing needs attention right now.')).not.toBeInTheDocument()
+  })
+})
+
+// Sprint 23 B2 (F5 headroom): a relay at ≥ 90 % of its configured link
+// capacity, or over it, needs attention; one without a capacity doesn't.
+describe('Overview: relays near their link capacity', () => {
+  it('lists a near-full and an over-capacity relay, not one without a capacity', async () => {
+    signedInAs(relayOpsMe)
+    const near = relay({
+      id: '33333333-3333-3333-3333-333333333333', name: 'relay-near', link_capacity_bps: 125_000_000,
+      headroom: { used_bytes_per_sec: 115_000_000, headroom_bytes_per_sec: 10_000_000, utilization: 0.92, over_capacity: false },
+    })
+    const over = relay({
+      id: '44444444-4444-4444-4444-444444444444', name: 'relay-over', link_capacity_bps: 12_500_000,
+      headroom: { used_bytes_per_sec: 15_000_000, headroom_bytes_per_sec: 0, utilization: 1.2, over_capacity: true },
+    })
+    const calm = relay({
+      id: '55555555-5555-5555-5555-555555555555', name: 'relay-calm', link_capacity_bps: 125_000_000,
+      headroom: { used_bytes_per_sec: 12_500_000, headroom_bytes_per_sec: 112_500_000, utilization: 0.1, over_capacity: false },
+    })
+    const unset = relay({ id: '66666666-6666-6666-6666-666666666666', name: 'relay-unset' })
+    mockFetch({ ...routes, 'GET /provider/relays': { status: 200, body: { items: [near, over, calm, unset], next_cursor: null } } })
+    renderApp('/')
+    const link = await screen.findByRole('link', { name: /relay-near is at 92 % of its link capacity/ })
+    expect(link).toHaveTextContent('Near capacity')
+    expect(link).toHaveTextContent('115 MB/s in use of 1 Gbps; 10.0 MB/s free (estimate)')
+    expect(screen.getByRole('link', { name: /relay-over is at 120 % of its link capacity/ })).toHaveTextContent('Over capacity')
+    expect(screen.queryByText(/relay-calm is at/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/relay-unset is at/)).not.toBeInTheDocument()
   })
 })
