@@ -3873,3 +3873,15 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Product owner's go for commit / push / PR (`[schema: reset DB]`); live check after reset DB. S3 (#224) then rebases onto S2 and adds the quota check to the first-admin path.
+
+## 2026-11-18 — M1 (Sathiya): S2 committed and live-checked
+
+**What was done:**
+- Committed S2 locally on `feat/s2-tenant-creation` (`35efd8b4`) at Sathiya's request (the sprint rule asks for the product owner's go; not pushed).
+- Live check on a reset DB in Orca's embedded browser: tenant creation, first-admin invitation (wrong email, unverified email, matching email, reuse, used link, expiry), API probes and a 6-way slug race. Then, as the new tenant admin: relay (archlinux), connector (luffy), shield + protected resource (omarchy), client on the dev box: access only through the tunnel. All PASS; no S2 defect.
+
+**Key decisions:**
+- First-admin sign-ins used a local test IdP registered as the tenant's connection (the Google invite button was not driven).
+
+**What's next:**
+- Barath's go to push and open the PR (`[schema: reset DB]`); then S3 (#224) merges main and adds the quota check to the first-admin path.
