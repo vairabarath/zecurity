@@ -32,12 +32,14 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/identity"
-	"github.com/yourorg/ztna/controller/internal/mfa"
-	"github.com/yourorg/ztna/controller/internal/risk"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/quota"
+	"github.com/yourorg/ztna/controller/internal/risk"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -381,6 +383,16 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		return nil, status.Error(codes.Unauthenticated, "pkce verification failed")
 	}
 
+	// Sprint 23 S1 (D-45): no new session while the tenant is suspended by
+	// the provider. A lookup error refuses (fail closed). Before anything is
+	// written (user, invitation, session).
+	if err := tenantstate.Check(ctx, s.pool, sess.WorkspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return nil, status.Error(codes.PermissionDenied, tenantstate.Message)
+		}
+		return nil, status.Error(codes.Internal, "check workspace state")
+	}
+
 	// Validate invite token if provided.
 	var inviteRow *invitation
 	if req.GetInviteToken() != "" {
@@ -391,14 +403,8 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 			}
 			return nil, status.Errorf(codes.Internal, "lookup invitation: %v", err)
 		}
-		if inv.WorkspaceID != sess.WorkspaceID {
-			return nil, status.Error(codes.PermissionDenied, "invitation does not belong to this workspace")
-		}
-		if inv.Status != "pending" {
-			return nil, status.Errorf(codes.FailedPrecondition, "invitation already %s", inv.Status)
-		}
-		if time.Now().After(inv.ExpiresAt) {
-			return nil, status.Error(codes.FailedPrecondition, "invitation expired")
+		if err := checkClientInvitation(inv, sess.WorkspaceID, time.Now()); err != nil {
+			return nil, err
 		}
 		inviteRow = inv
 	}
@@ -436,6 +442,10 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		}
 		if errors.Is(err, identity.ErrUserNotActive) {
 			return nil, status.Error(codes.PermissionDenied, "account is not active")
+		}
+		if qe, ok := quota.AsExceeded(err); ok {
+			// Sprint 23 S3 (D-47): at the workspace's user limit.
+			return nil, status.Error(codes.ResourceExhausted, qe.Error())
 		}
 		return nil, status.Errorf(codes.Internal, "upsert user: %v", err)
 	}
@@ -542,6 +552,10 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 
 	deviceID, err := insertClientDevice(ctx, s.pool, tokenClaims.UserID, tokenClaims.TenantID, req.GetDeviceName(), req.GetOs(),
 		deviceSession{id: tokenClaims.SessionID, deadlines: deadlines})
+	if qe, ok := quota.AsExceeded(err); ok {
+		// Sprint 23 S3 (D-47): at the workspace's device limit.
+		return nil, status.Error(codes.ResourceExhausted, qe.Error())
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "insert client device: %v", err)
 	}
@@ -874,7 +888,7 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
 	// policy change is not cached as stale (ADR-013).
 	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*policy.CompiledACL, error) {
-		return policy.CompileACLSnapshot(ctx, s.policyStore,s.postureStore, s.policyNotifier, workspaceID)
+		return policy.CompileACLSnapshot(ctx, s.policyStore, s.postureStore, s.policyNotifier, workspaceID)
 	})
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.

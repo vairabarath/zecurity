@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 // scimProvisioner satisfies identity.Provisioner for the directory-provisioning
@@ -63,6 +64,15 @@ func (p *scimProvisioner) Provision(ctx context.Context, in identity.ProvisionIn
 		return nil, fmt.Errorf("scim provision begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+
+	// Sprint 23 S3 (D-47): a provisioned user takes a user slot (each
+	// identity once), checked under the workspace lock in this transaction.
+	if err := quota.ReserveUser(ctx, tx, p.tenantID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, err
+		}
+		return nil, fmt.Errorf("scim provision quota check: %w", err)
+	}
 
 	var userID string
 	err = tx.QueryRow(ctx,

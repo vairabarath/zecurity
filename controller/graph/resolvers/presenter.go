@@ -3,11 +3,13 @@ package resolvers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/quota"
 	"github.com/yourorg/ztna/controller/internal/scim"
 )
 
@@ -29,6 +31,16 @@ import (
 // logged server-side and replaced with a generic message, so internals (Postgres
 // constraint names, wrapped driver errors, file paths) never leak to clients.
 func ErrorPresenter(ctx context.Context, err error) *gqlerror.Error {
+	// Sprint 23 S3 (D-47): a creation refused at the tenant's limit. The
+	// message is a fixed, user-safe text; the extension carries
+	// quota_exceeded {key, limit, used} for the admin UI.
+	if qe, ok := quota.AsExceeded(err); ok {
+		gerr := graphql.DefaultErrorPresenter(ctx, err)
+		gerr.Message = qe.Error()
+		gerr.Extensions = map[string]any{"code": quota.Code, "key": qe.Key, "limit": qe.Limit, "used": qe.Used}
+		return gerr
+	}
+
 	var ue *apperr.UserError
 	if errors.As(err, &ue) {
 		gerr := graphql.DefaultErrorPresenter(ctx, err)
@@ -127,4 +139,15 @@ func intendedGQLError(err error) bool {
 		}
 	}
 	return false
+}
+
+// quotaError keeps a quota refusal (*quota.Exceeded) as it is, so the
+// presenter shows it, and wraps any other quota lookup error with the
+// operation name (it is masked as internal: the creation is refused, fail
+// closed).
+func quotaError(op string, err error) error {
+	if _, ok := quota.AsExceeded(err); ok {
+		return err
+	}
+	return fmt.Errorf("%s: quota check: %w", op, err)
 }

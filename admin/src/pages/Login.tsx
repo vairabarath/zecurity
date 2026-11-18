@@ -44,6 +44,9 @@ const isEnterprise = (connection: IdpConnection) => connection.tier !== 'bootstr
 const CALLBACK_ERRORS: Record<string, string> = {
   not_invited:
     'Your identity provider signed you in, but this network has not granted you access. Ask an administrator to invite you.',
+  // Sprint 23 S2 (D-44): the first-admin invitation expired or was replaced.
+  invitation_expired:
+    'Your invitation to administer this workspace has expired. Ask your provider to send a new invitation, then use the link in that email.',
   authentication_failed: 'Sign-in with your identity provider failed. Please try again.',
   missing_params: 'The sign-in response was incomplete. Please start again.',
   state_expired: 'This sign-in attempt expired. Please start again.',
@@ -52,6 +55,13 @@ const CALLBACK_ERRORS: Record<string, string> = {
   token_issue_failed: 'Signed in, but no session could be issued. Please try again.',
   refresh_issue_failed: 'Signed in, but the session could not be persisted. Please try again.',
   server_error: 'The server could not complete sign-in. Please try again shortly.',
+  // Sprint 23 S3 (D-47): signing in would create a user over the limit.
+  user_limit_reached:
+    'This network has reached its user limit, so no new account can be created. Ask an administrator to free a seat or contact the provider.',
+  // Sprint 23 S1 (D-45): refused sign-in, refresh or request of a workspace
+  // suspended by the provider (see lib/suspension.ts).
+  workspace_suspended:
+    'This workspace is suspended by the provider. Sign-in is unavailable until it is resumed; contact your provider.',
 }
 
 const callbackErrorMessage = (reason: string | null): string | null => {

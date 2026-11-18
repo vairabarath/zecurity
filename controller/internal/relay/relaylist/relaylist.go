@@ -11,6 +11,11 @@ import (
 
 // Set is the relay list of every pool plus each workspace's pool, built in one
 // pass for a broadcast. ForWorkspace is what one connector receives.
+// NoPool is the pool of a workspace that gets no relays at all (a tenant
+// suspended by the provider, Sprint 23 S1, D-45): ForWorkspace returns the
+// empty list for it, never the default pool's.
+const NoPool = ""
+
 type Set struct {
 	lists map[string]*pb.LabelledRelayList // pool id → list (pools with eligible relays)
 	pools map[string]string                // workspace id → pool id

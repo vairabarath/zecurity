@@ -16,6 +16,9 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/quota"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ── Sentinel errors ─────────────────────────────────────────────────────────
@@ -127,6 +130,15 @@ func upsertUser(
 	}
 	defer tx.Rollback(ctx)
 
+	// Sprint 23 S3 (D-47): a JIT-created member takes a user slot unless the
+	// identity is already counted (its pending invitation).
+	if err := quota.ReserveUser(ctx, tx, tenantID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, 0, false, err
+		}
+		return nil, 0, false, fmt.Errorf("quota check: %w", err)
+	}
+
 	var u userRow
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO users
@@ -159,17 +171,18 @@ type invitation struct {
 	Email       string
 	WorkspaceID string
 	Status      string
+	Role        string
 	ExpiresAt   time.Time
 }
 
 func getInvitationByToken(ctx context.Context, db *pgxpool.Pool, token string) (*invitation, error) {
 	var inv invitation
 	err := db.QueryRow(ctx,
-		`SELECT id, email, workspace_id, status, expires_at
+		`SELECT id, email, workspace_id, status, role, expires_at
 		   FROM invitations
 		  WHERE token = $1`,
 		token,
-	).Scan(&inv.ID, &inv.Email, &inv.WorkspaceID, &inv.Status, &inv.ExpiresAt)
+	).Scan(&inv.ID, &inv.Email, &inv.WorkspaceID, &inv.Status, &inv.Role, &inv.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errInvitationNotFound
 	}
@@ -179,11 +192,32 @@ func getInvitationByToken(ctx context.Context, db *pgxpool.Pool, token string) (
 	return &inv, nil
 }
 
+// checkClientInvitation decides whether a client sign-in may use inv to join
+// workspaceID. A provider first-admin invitation (role 'admin', S2/D-44) grants
+// admin and is taken only by an admin-console sign-in (bootstrap.Provision);
+// the client path creates members, so it must never consume one.
+func checkClientInvitation(inv *invitation, workspaceID string, now time.Time) error {
+	if inv.WorkspaceID != workspaceID {
+		return status.Error(codes.PermissionDenied, "invitation does not belong to this workspace")
+	}
+	if inv.Role != "member" {
+		return status.Error(codes.FailedPrecondition, "this invitation must be accepted in the admin console")
+	}
+	if inv.Status != "pending" {
+		return status.Errorf(codes.FailedPrecondition, "invitation already %s", inv.Status)
+	}
+	if now.After(inv.ExpiresAt) {
+		return status.Error(codes.FailedPrecondition, "invitation expired")
+	}
+	return nil
+}
+
 func markInvitationAccepted(ctx context.Context, db *pgxpool.Pool, invitationID string) error {
 	tag, err := db.Exec(ctx,
 		`UPDATE invitations
 		    SET status = 'accepted'
 		  WHERE id = $1
+		    AND role = 'member'
 		    AND status = 'pending'
 		    AND expires_at > NOW()`,
 		invitationID,
@@ -243,7 +277,20 @@ func insertClientDevice(
 	if !session.deadlines.MFAAt.IsZero() {
 		mfaAt = &session.deadlines.MFAAt
 	}
-	err := db.QueryRow(ctx,
+	// Sprint 23 S3 (D-47): the device quota is checked in the inserting
+	// transaction, under the workspace lock.
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("insert client_device: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := quota.Reserve(ctx, tx, workspaceID, quota.KeyClientDevices); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return "", err
+		}
+		return "", fmt.Errorf("insert client_device: quota check: %w", err)
+	}
+	err = tx.QueryRow(ctx,
 		`INSERT INTO client_devices (user_id, workspace_id, name, os,
 		        session_id, session_idle_until, session_max_until,
 		        session_auth_at, session_mfa_at)
@@ -255,6 +302,9 @@ func insertClientDevice(
 	).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert client_device: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("insert client_device: commit: %w", err)
 	}
 	return id, nil
 }

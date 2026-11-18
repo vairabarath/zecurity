@@ -56,6 +56,10 @@ const (
 	// so relay-ops and super-admins may set it.
 	ActionRelayCapacitySet = "relay.capacity.set"
 
+	// Tenant lifecycle (Sprint 23 S1, D-45): suspend and resume a tenant.
+	// tenant.* is super-admin only (D-06); decide() denies it to relay-ops.
+	ActionTenantSuspend = "tenant.suspend"
+	ActionTenantResume  = "tenant.resume"
 	// Plans (Sprint 23 B1, D-43). Plans are commercial/tenant data: not
 	// under relay.*, so decide() keeps them super-admin only (D-06), and
 	// assigning a tenant's plan is a tenant.* action.
@@ -65,6 +69,16 @@ const (
 	ActionPlanDelete       = "plan.delete"
 	ActionPlanSetDefault   = "plan.set_default"
 	ActionTenantPlanAssign = "tenant.plan.assign"
+
+	// Quotas (Sprint 23 S3, D-47): a per-tenant quota override. A tenant.*
+	// action, so super-admin only (D-06).
+	ActionTenantQuotaSet = "tenant.quota.set"
+	// Tenant creation (Sprint 23 S2, D-44): create a workspace and invite
+	// its first admin. tenant.* is super-admin only (D-06).
+	ActionTenantCreate = "tenant.create"
+	// Re-issue the first-admin invitation of a tenant whose first admin
+	// never signed in (S2, D-44).
+	ActionTenantFirstAdminReinvite = "tenant.first_admin.reinvite"
 )
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
@@ -162,6 +176,17 @@ func (a *Authz) CanAssignTenantRelayPool(actor Actor, target Target) error {
 	return decide(actor, ActionTenantRelayPoolAssign, target)
 }
 
+// CanSuspendTenant gates POST /provider/tenants/{id}/suspend (super-admin
+// only: tenant.*, D-06, D-45).
+func (a *Authz) CanSuspendTenant(actor Actor, target Target) error {
+	return decide(actor, ActionTenantSuspend, target)
+}
+
+// CanResumeTenant gates POST /provider/tenants/{id}/resume (super-admin only).
+func (a *Authz) CanResumeTenant(actor Actor, target Target) error {
+	return decide(actor, ActionTenantResume, target)
+}
+
 // CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
 // CanSetRelayCapacity reports whether actor may set a relay's link capacity
 // (relay.capacity.set: relay-ops and super-admin).
@@ -179,6 +204,24 @@ func (a *Authz) CanReadPlans(actor Actor) error {
 // or ActionTenantPlanAssign).
 func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
+}
+
+// CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}
+// (super-admin only: tenant.*, D-06, D-47).
+func (a *Authz) CanSetTenantQuota(actor Actor, target Target) error {
+	return decide(actor, ActionTenantQuotaSet, target)
+}
+
+// CanCreateTenant gates POST /provider/tenants (super-admin only: tenant.*,
+// D-06, D-44).
+func (a *Authz) CanCreateTenant(actor Actor) error {
+	return decide(actor, ActionTenantCreate, Target{Type: "tenant"})
+}
+
+// CanReinviteFirstAdmin gates POST /provider/tenants/{id}/first-admin-invitation
+// (super-admin only: tenant.*).
+func (a *Authz) CanReinviteFirstAdmin(actor Actor, target Target) error {
+	return decide(actor, ActionTenantFirstAdminReinvite, target)
 }
 
 func (a *Authz) CanReadRelays(actor Actor, target Target) error {

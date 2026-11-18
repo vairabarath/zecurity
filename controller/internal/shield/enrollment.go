@@ -9,6 +9,7 @@ import (
 	pgx "github.com/jackc/pgx/v5"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -115,6 +116,17 @@ func (s *service) Enroll(ctx context.Context, req *shieldpb.EnrollRequest) (*shi
 	}
 	if workspaceStatus != "active" {
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace status is %q, expected active", workspaceStatus)
+	}
+
+	// Sprint 23 S1 (D-45): no enrollment of a new shield while the tenant is
+	// suspended by the provider. Separate from the status='active' check
+	// above, which stays unchanged (D-34). Existing agents are never gated
+	// here (D-08). The share lock orders this with a concurrent suspension.
+	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return nil, status.Error(codes.FailedPrecondition, tenantstate.Message)
+		}
+		return nil, status.Errorf(codes.Internal, "load workspace state: %v", err)
 	}
 
 	var connectorStatus string

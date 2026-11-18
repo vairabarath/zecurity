@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { TenantDetail } from '@/api/types'
 import { TenantPlanSection } from '@/components/TenantPlan'
 import { mockFetch, relayOpsMe, superAdminMe, type RecordedCall } from '@/test/fetch'
-import { LEGACY_PLAN_ID, PLANS, TENANT_FREE_PLAN } from '@/test/plans'
+import { FREE_QUOTAS, LEGACY_PLAN_ID, PLANS, TENANT_FREE_PLAN } from '@/test/plans'
 import { TENANT_DEFAULT_POOL } from '@/test/pools'
 import { renderApp, signedInAs } from '@/test/render'
 
@@ -39,6 +39,9 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
     plan: TENANT_FREE_PLAN,
+    quotas: FREE_QUOTAS,
+    first_admin_invitation: null,
+    suspension: null,
     ...over,
   }
 }

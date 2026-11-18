@@ -245,6 +245,156 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
 - Reusing the invitation is refused.
 - A non-matching account is refused.
 
+### S2 implementation record (branch `feat/s2-tenant-creation`, built by Sathiya)
+Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` after B1 (#222), before S3 (#224), which rebases onto it.
+
+- **Schema `067_tenant_first_admin_invite.sql`** (the reserved slot was needed):
+  - `invitations.invited_by` is now nullable. NULL means issued by the provider; the operator is in `provider_audit_logs`, not here.
+  - New `invitations.role` (`member` | `admin`, default `member`).
+  - CHECK `invitations_admin_only_from_provider`: `role = 'member' OR invited_by IS NULL`. An invitation a tenant user sends can never grant admin.
+  - CHECK `invitations_sender_required_for_member`: a sender-less invitation is always the admin one.
+- **`internal/bootstrap`:**
+  - `createWorkspaceTx` is the workspace half of bootstrap (workspace row with trust domain, workspace CA, `active`). Self-signup (`runBootstrapTransaction`) and `CreateTenant` both call it; self-signup is otherwise unchanged. The Default policy (049_), audit heads (053_) and plan (062_) come from the `workspaces` triggers on both paths.
+  - `CreateTenant` (`tenant_create.go`) runs in one transaction:
+    - validates the slug (one DNS label, ≤ 60 so `ws-<slug>` fits) and the name, and normalises the email;
+    - locks the plan `FOR SHARE`;
+    - creates the workspace with **no first user**;
+    - writes the first-admin invitation (`role='admin'`, no sender, 7 days) and an `invited` membership row with role `admin`;
+    - writes the tenant-stream `workspace.create` (`source: provider`) and the caller's provider audit.
+  - A slug race is the UNIQUE index; the loser gets `ErrSlugTaken`.
+  - **Invited join (`Provision`)** for a first-admin row:
+    - usable only while its invitation is `pending` and unexpired (the expiry was not checked at sign-in before);
+    - refused with `ErrNotInvited` if the IdP did not assert `email_verified`;
+    - the transaction **consumes the invitation first** (`UPDATE … status='pending' AND expires_at > NOW() RETURNING`), then requires exactly one `invited` membership row, so a concurrent second sign-in is refused;
+    - audited as `invitation.accept` (role admin, never the token).
+  - Rows from invitations sent by tenant users behave exactly as before.
+- **`internal/invitation`:** `Invitation.Role`; `GetByToken` reads a NULL sender as `""`. `AcceptInvitation` (`/api/invitations/{token}/accept`) accepts **member invitations only**; the admin seat is taken only at the invitee's first sign-in.
+- **`internal/client`:** `checkClientInvitation` refuses an admin invitation (`FailedPrecondition`, "accept in the admin console"). Before this, a client CLI sign-in with the token would have consumed it as a member join. `markInvitationAccepted` only marks member invitations.
+- **API `internal/tenantcreate`:** `POST /provider/tenants {slug, name, plan_id?, admin_email, reason}` → 201 `{id, slug, name, trust_domain, plan_id, plan_name, invitation {id, email, expires_at}}`.
+  - Action `tenant.create` (`CanCreateTenant`, super-admin only through `decide()`).
+  - Reason required (≤ 500).
+  - Errors: `slug_taken` (409), `invalid_slug`, `invalid_name`, `invalid_email`, `plan_not_found`, `reason_required`, `reason_too_long`, `invalid_request`, `forbidden`.
+  - Provider audit details: `reason`, `invitation {operation: first_admin.invite, id, email, role, expires_at}`, `after {slug, name, trust_domain, plan_id, plan_name}`.
+  - The token is never returned, logged or audited. It goes only to the invitation email, sent after commit with the existing `invitation.Emailer`.
+  - Separate package from S1's `internal/tenantlifecycle`, so the two don't collide.
+- **Console:**
+  - Tenants page: **Create tenant** button (super-admin) and `CreateTenantDialog` with name, slug (suggested from the name, live `ws-<slug>.zecurity.in` preview), plan ("Default plan (Free)" sends no `plan_id`), first admin's email and reason. The success notice links the tenant and shows the invitee and expiry.
+  - `api/tenants.ts`, `lib/tenant-format.ts`.
+  - `api-surface.test.ts`: `POST /provider/tenants` added on purpose.
+- **Admin UI:** unchanged. `/invite/:token` signs in with Google; the sign-in takes the invitation; the callback's later accept call gets "already used", which it already ignores.
+- **Known constraint (agreed 2026-11-18, not a bug):** the first admin's email must not already belong to another Zecurity workspace. A platform identity that already has a user resolves to its own workspace and never reaches the invitation (single-workspace login, ADR-024). The dialog says so.
+- **Expired first-admin invitation:** sign-in is refused with `invitation_expired`, and the provider re-issues the invitation. See "Post-Phase Fixes" below (this replaced the first build's fall-through to self-signup).
+- **Tests:**
+  - `internal/bootstrap/tenant_create_test.go` (9):
+    - equivalence with self-signup (status, trust domain, CA and keys row, Default policy, plan, `workspace.create`), and a chosen plan is honoured;
+    - validation, with no partial writes;
+    - **6 concurrent same-slug creates → exactly 1**;
+    - email binding (a non-matching email doesn't join; an unverified matching email is refused) and single use;
+    - **6 concurrent first sign-ins → exactly 1 admin**;
+    - expiry;
+    - only the provider invitation grants admin (DB CHECKs, tenant invites are `member`);
+    - each single-use guard on its own (`export_test.go` `RunInvitedJoin`);
+    - the accept endpoint refuses a pending admin invitation.
+  - `internal/tenantcreate/handler_db_test.go` (3): relay-ops 403 with nothing written; 201 with audit actor, reason and invitation operation, and no token in the response, provider audit or tenant audit; the token only in the email; every error code.
+  - `internal/client/invite_role_test.go`; `authz_test.go` pins `tenant.create` to super-admin.
+  - Console: `Tenants.test.tsx` (create flow, default plan sends no `plan_id`, invalid slug, `slug_taken`), `tenant-format.test.ts`.
+  - **Mutation checks, all caught:** verified-email check, expiry in the lookup, `pending` in the consume UPDATE, the membership row-count check, the accept-endpoint role guard, the client admin guard, the admin membership role, the token in the audit, and the authz check.
+- **Gates (2026-11-18):** controller `go build ./...` and `go vet ./...` clean. Full `go test -count=1 ./...` with the DB and Valkey env: every package passes, 0 failures, only the 2 known skips. `graph/resolvers` and `internal/connector` were re-run with `-timeout 40m` because the host was under heavy load (load average ~10), and `certalert` needs `AUTH_TEST_VALKEY_URL` with a `/N` database. Provider console: 626 tests, lint and build clean.
+- **Live check (2026-11-18, commit `35efd8b4`, reset DB, Orca embedded browser + lab):**
+  - Console: Create tenant `acme-live-s2` (slug suggested, mixed-case email normalised, Free plan) → workspace active with trust domain, CA, Default policy, plan; no users; `admin`/`invited` membership; 7-day `admin` invitation. Token absent from the 201 body (`Cache-Control: no-store`), provider and tenant audit, controller log. The invitation email went out over the configured SMTP.
+  - First-admin sign-in, through a local test IdP registered as the tenant's connection (the enterprise branch of `Provision`; the Google button on `/invite/:token` was not driven): non-matching email → `not_invited` (audited); same email without `email_verified` → refused, invitation still pending; matching verified email → Admin dashboard, invitation `accepted`, `invitation.accept` audited; a second account with the same email → refused; the used `/invite/:token` → "Invalid Invitation"; an expired invitation (second tenant, expiry backdated) → refused, nothing consumed.
+  - API probes: `slug_taken` 409, 61-char slug, CRLF in email or name, reason only in the URL, no auth → refused; 6 parallel same-slug creates → 1×201 + 5×409, one workspace, invitation and audit row, no orphan CA key.
+  - Lab, as the new tenant admin: relay on archlinux (.75), connector on luffy (.37) enrolled with the admin's token, shield on omarchy (.53) protecting `192.168.1.53:8000` (direct access from the dev box times out: `tcp dport 8000 drop`), group with the admin and the resource.
+  - Client on the dev box, signed in as the first admin through the tenant's connection (`Logged in … Workspace: acme-live-s2`, SPIFFE `ws-acme-live-s2`, ACL 1 rule): tunnel up → `curl 192.168.1.53:8000` returns the page (connector: `access allowed`, `tunnel_opened ok` to the shield); tunnel down → times out; up again → works. **Live check PASS; no S2 defect found.**
+  - Not live-tested: the client CLI admin-invitation guard (the shipped CLI never sends an invite token; unit-tested).
+  - Lab notes: private-address relays need `ENV=development RELAY_DEV_ALLOW_PRIVATE_ADDR=true` on the controller; after a DB reset the client must be rebuilt with the new platform root (`ZECURITY_PLATFORM_ROOT_PEM_FILE`), since the root is compiled in.
+
+
+### S2 Post-Phase Fixes
+
+### Fix: Expired first-admin invitation locked the first admin out for good
+**Issue:** found in the post-live review (2026-11-18). After the first-admin invitation expired, the invitee's first sign-in fell through to self-signup and created a workspace of their own. Their identity was then bound to that workspace (single-workspace login, ADR-024), so they could never take the tenant's admin seat. S2 had no way to issue a new invitation either, which left the tenant with no admin until someone edited the database.
+
+**Root cause:** `bootstrap.Provision` treated "no usable invitation" the same as "never invited", and S2 had no re-issue path.
+
+**Fix applied (decided by Sathiya, 2026-11-18):**
+- `identity.ErrInvitationExpired` wraps `ErrNotInvited`, so audit and the client path treat it as "not invited". `Provision` returns it when the email still holds an unclaimed provider first-admin seat (an `invited` admin membership with an admin invitation) but no usable invitation (`hasExpiredFirstAdminSeat`; scoped to the workspace on an enterprise connection). No workspace is created.
+- `auth/callback.go` redirects to `/login?error=invitation_expired`. The admin UI login page shows: "Your invitation to administer this workspace has expired. Ask your provider to send a new invitation, then use the link in that email." (no "Deploy one" link).
+- **Re-issue:** `POST /provider/tenants/{id}/first-admin-invitation {admin_email?, reason}` → 201 `{tenant_id, invitation {id, email, expires_at}}`, with no token. It needs a reason. Code: `tenantcreate.Handler.Reinvite` → `bootstrap.ReissueFirstAdminInvitation`.
+  - Action `tenant.first_admin.reinvite`, super-admin only (`decide()`).
+  - Locks the workspace row. Marks every still-`pending` admin invitation `expired`, so earlier links stop working.
+  - Then refuses if the tenant has an admin account (`first_admin_exists`). This check runs after the revoke on purpose: it sees a first sign-in that committed concurrently.
+  - `admin_email` omitted re-sends to the previous invitee. Another address moves the seat; the old unclaimed seat row is deleted.
+  - Issues a new 7-day invitation and refreshes the seat row (never one that belongs to an account: `email_has_account`).
+  - Audits `invitation.create` (reissued) on the tenant stream and `tenant.first_admin.reinvite` (before/after, reason, never the token), then emails the link.
+  - Errors: `not_found`, `tenant_not_active`, `first_admin_exists`, `email_has_account`, `invalid_email`, `reason_required`.
+- **Tenant detail read:** `first_admin_invitation {status: pending|expired, expires_at}` while the seat is unclaimed, otherwise null. No email (OQ-2), no token. The statement-count pins moved from 6 to 7.
+- **Console:** a tenant-detail "First admin" card (pending / expired) with **Send new invitation** (optional new email, reason). `api-surface.test.ts` adds the write.
+
+**Tests:**
+- `bootstrap`: an expired invitation → `ErrInvitationExpired` with nothing created; re-issue to the same email (the old link is revoked, the new one grants the seat once, refused after); re-issue revokes a still-pending link; re-issue to a new email moves the seat; refusals (admin exists, unknown, bad email, an account's email, inactive tenant).
+- `tenantcreate`: HTTP re-issue (relay-ops 403, errors, no token in the body or audit, email sent, detail state pending → expired → pending → null).
+- Admin `Login.test.tsx`; console `TenantDetailFirstAdmin.test.tsx` (5).
+- Mutation checks, all caught: the expired refusal, revoking earlier links, dropping the old seat, the admin-exists check, the seat-upsert account guard, re-issue authz, the active-tenant check.
+
+**Live (2026-11-18):** `expiry-co` with a backdated invitation → sign-in refused with the new message, nothing created. Console card "Invitation expired" → Send new invitation → old link "Invalid Invitation" (GET 404), new link valid, sign-in → Admin. Then the card is hidden and the API returns 409 `first_admin_exists`. Token absent from the audits and the log.
+
+**Live re-run on `2426ed7e` (2026-11-18, also after a host restart), tenants `fix1-live` and `fix1-rerun`, Orca embedded browser:**
+- Expired sign-in → `/login?error=invitation_expired` with the message; nothing created; invitation untouched.
+- Console card "Invitation expired" → Send new invitation (reason) → card "Invitation pending"; old link GET 404, new link 200; reason and revoked id audited; token absent from both audits and the controller log.
+- Sign-in with the new link → Admin, invitation `accepted`; card hidden; a further re-invite → 409 `first_admin_exists`.
+
+PASS both runs.
+
+**Related files:** `internal/identity/linker.go`, `internal/bootstrap/{bootstrap,tenant_create}.go`, `internal/auth/callback.go`, `internal/tenantcreate/handler.go`, `internal/provider/authz.go`, `internal/providerquery/tenants.go`, `cmd/server/main.go`, `admin/src/pages/Login.tsx`, `provider-console/src/{api/tenants.ts,api/types.ts,components/TenantFirstAdmin.tsx,pages/TenantDetail.tsx,lib/tenant-format.ts}`.
+
+### Fix: Google sign-in could pick the wrong pending invitation
+**Issue:** found in the same review. Platform (Google) login isn't scoped to a workspace. The invited-join lookup took `LIMIT 1` with no ordering, so an email with pending invitations in several workspaces joined an arbitrary one, and that first sign-in binds the identity to it for good (ADR-024). A first admin who also had a member invitation elsewhere could lose the admin seat.
+
+**Fix applied (`bootstrap.Provision`, platform branch):** a deterministic order:
+1. the workspace the person signed in for (`in.WorkspaceName`, which the invite link and the login page pass; matched on lower-cased name or slug);
+2. a provider first-admin seat;
+3. the oldest invitation (`invited_at`, then the workspace id).
+
+The enterprise branch is already scoped to one workspace and is unchanged.
+
+**Tests:** `TestPlatformInvitedJoin_ChoosesInvitationDeterministically`: with no hint, the seat wins over an older member invitation; with a hint naming the member workspace, that workspace wins; with two member invitations, the oldest wins. Mutation checks on each of the three keys are caught. Live-checked with a real Google sign-in (below).
+
+**Live (2026-11-18, `2426ed7e`, real Google sign-in by Sathiya; the Orca browser and Firefox):**
+- Setup: `alpha-live` (first-admin seat for the Google email) and `beta-live` (its admin invited the same email as a member). No Google identity in the DB.
+- **B1 (fix 1 on the Google path):** alpha's invitation backdated, no other usable invitation → Google sign-in refused with `invitation_expired`; nothing created (0 Google identities, no workspace, no user).
+- **Hint wins:** both invitations usable, beta's the older (10:01:58 vs 10:02:18). Signing in from the login page with workspace `beta-live` → joined beta as member. That is rule 1, the workspace the person chose. The local test DB was then reset for that one join (the user deleted, beta's invitation set back to pending).
+- **B2 (the seat is not lost to an older member invitation):** same state; Google sign-in from alpha-live's invite link → one Google identity, a user in `alpha-live` as admin/active; alpha's invitation `accepted` (`invitation.accept`: role admin, provider google, first_admin); beta's member invitation still pending.
+
+PASS.
+
+### Fix: An old revoked admin invitation turned a later ordinary invitation into a "seat" (PR #225 review)
+**Issue:** `firstAdminInviteSQL` treated any membership row with an admin invitation for the same (workspace, email) as a first-admin seat, ignoring the row's own role. After the seat moved from X to Y and Y later invited X as a member, X's member row was judged "seat, no pending admin invitation". It was skipped as unusable, and the expired-seat check didn't apply because the row's role was member. X then fell through to self-signup, got a workspace of their own, and could never join.
+
+**Fix applied:** `firstAdminInviteSQL` = `wm.role = 'admin' AND EXISTS (admin invitation)`.
+
+**Test:** `TestReissue_MovedSeatThenMemberInvite`. X joins as a member with no extra workspace. Mutation caught.
+
+### Fix: Re-issue reopened the admin seat of any tenant whose admins were all deleted (PR #225 review)
+**Issue:** re-issue only checked "no admin account other than deleted". A self-signup or established tenant whose admins were all deleted could get an admin invitation minted by the provider. D-44 covers only the first admin of a provider-created tenant. The same state allowed a narrow race that could upgrade a pending member row into the seat.
+
+**Fix applied:** `ReissueFirstAdminInvitation` also requires that the tenant has a provider admin invitation and that none was ever accepted. Otherwise it returns `ErrFirstAdminExists` (409 `first_admin_exists`).
+
+**Test:** `TestReissue_RefusedAfterSeatWasClaimed` (the admin signed in, was deleted, then re-issue is refused); the self-signup refusal was already tested. Mutation caught.
+
+### Merge with S1 (2026-11-18, after #223)
+- The invited join checks suspension (S1, share lock) **before** consuming the first-admin invitation. A suspended provider-created tenant's first admin is refused with `workspace_suspended`, and the invitation stays pending.
+- `ReissueFirstAdminInvitation` refuses while the tenant is suspended (`tenant_not_active`). Suspension keeps `status='active'` (D-34), so the status check alone didn't catch it.
+- Test: `TestFirstAdmin_SuspendedTenant` (mutation caught).
+
+**Security review note (automated, 2026-11-18, "ambiguous name matching"): acknowledged, no change.**
+- The hint only orders the pending, unexpired invitations of the Google-verified email that is signing in, so it can't reach an invitation that person doesn't already hold.
+- It is the signer's own choice, stored server-side with the sign-in state.
+- Ranking the first-admin seat above the hint would send someone who deliberately opened another workspace's invite link to the seat instead.
+- **Follow-up (design change, not S2):** carry the invitation id or token through `initiateAuth` so the invite link names the invitation exactly, instead of a name hint.
+
+**Still open (not fixed, by choice):** the no-SMTP dev emailer prints the invite link with its token.
+
 ---
 
 ## Done when

@@ -37,6 +37,13 @@ pub struct RefreshedTokens {
 /// The caller acts differently in each case: a dead session clears local
 /// state and prompts login; a transient failure keeps existing state and
 /// tries again on the next tick.
+/// The controller's refusal of a refresh while the workspace is suspended
+/// by the provider (Sprint 23 S1, D-45; auth.ErrMsgWorkspaceSuspended).
+pub const REFRESH_WORKSPACE_SUSPENDED: &str = "workspace suspended";
+/// The controller's refusal of a sign-in while the workspace is suspended
+/// (tenantstate.Message).
+pub const WORKSPACE_SUSPENDED_MESSAGE: &str = "this workspace is suspended by the provider";
+
 #[derive(Debug, thiserror::Error)]
 pub enum RefreshError {
     #[error("refresh session dead — user must sign in again")]
@@ -71,7 +78,14 @@ pub async fn refresh_access_token(
     {
         Ok(response) => response.into_inner(),
         Err(status) if status.code() == tonic::Code::Unauthenticated => {
-            return Err(RefreshError::SessionDead)
+            // The session is dead either way; say why when the provider
+            // suspended the workspace (D-45), instead of a generic expiry.
+            if status.message() == REFRESH_WORKSPACE_SUSPENDED {
+                tracing::warn!(
+                    "{WORKSPACE_SUSPENDED_MESSAGE}: the session has ended; sign in again once it is resumed"
+                );
+            }
+            return Err(RefreshError::SessionDead);
         }
         Err(status) => {
             return Err(RefreshError::Transient(anyhow!(

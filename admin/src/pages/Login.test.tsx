@@ -519,6 +519,17 @@ describe('Login', () => {
     expect(within(alert).getByRole('link', { name: /Deploy one/i })).toBeInTheDocument()
   })
 
+  // Sprint 23 S2: an expired first-admin invitation is refused with its own
+  // message (no deploy CTA: they are meant to administer this workspace).
+  it('explains an expired first-admin invitation', async () => {
+    render(renderLoginAt([], '/login?error=invitation_expired'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/invitation to administer this workspace has expired/i)).toBeInTheDocument()
+    expect(within(alert).getByText(/Ask your provider to send a new invitation/i)).toBeInTheDocument()
+    expect(within(alert).queryByRole('link', { name: /Deploy one/i })).not.toBeInTheDocument()
+  })
+
   // A generic failure must NOT offer the deploy path — nothing suggests this
   // person lacks access; the attempt simply broke.
   it('shows a generic message without the deploy CTA for an auth failure', async () => {
@@ -526,6 +537,24 @@ describe('Login', () => {
 
     expect(await screen.findByRole('alert')).toBeInTheDocument()
     expect(screen.getByText(/identity provider failed/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
+  })
+
+  // Sprint 23 S3 (D-47): a sign-in that would create a user over the limit.
+  it('says the network has reached its user limit', async () => {
+    render(renderLoginAt([], '/login?error=user_limit_reached'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/reached its user limit/i)).toBeInTheDocument()
+  })
+
+  // Sprint 23 S1 (D-45): a workspace suspended by the provider gets a clear
+  // message, not a generic failure, and no deploy CTA.
+  it('says the workspace is suspended by the provider', async () => {
+    render(renderLoginAt([], '/login?error=workspace_suspended'))
+
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByText(/suspended by the provider/i)).toBeInTheDocument()
     expect(screen.queryByText(/Need your own network instead/i)).not.toBeInTheDocument()
   })
 

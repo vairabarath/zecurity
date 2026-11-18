@@ -65,6 +65,8 @@ A suspended tenant's counts are unchanged.
 **Person 1 — Barath (M2):** B1 plans → B2 headroom → S2 tenant creation. Phase file: `Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md` (also holds S2).
 **Person 2 — Sathiya (M1):** S1 suspend/resume → S3 quotas → S4 deletion. Phase file: `Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md`.
 
+**2026-11-18:** Barath handed **S2** to Sathiya (branch `feat/s2-tenant-creation`; record in Barath's phase file, S2 section). It still merges before S3; migration `067_tenant_first_admin_invite` is used.
+
 Both: review each other's PRs; the sprint acceptance run (live, on a reset lab DB, current `main`).
 
 ### Phases and order
@@ -175,6 +177,13 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 - [ ] S3 — Quotas (Sathiya) — merged — live-checked
 - [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — merged — live-checked
 - [ ] Sprint acceptance run (both); tracker 18 / 18
+
+## Post-Sprint Fixes
+
+- **S1 (PR #223 review, 2026-11-18):** an invited join into a suspended tenant is refused before any write; refresh reports "suspended" ahead of the generation check. Details: Sathiya's phase file, "S1 Post-Phase Fixes".
+- **S2: expired first-admin invitation (2026-11-18).** Sign-in is now refused with `invitation_expired` instead of self-signing up the invitee, and super-admins re-issue the invitation with `POST /provider/tenants/{id}/first-admin-invitation` (`tenant.first_admin.reinvite`), from the console's tenant-detail "First admin" card. Details: Barath's phase file, "S2 Post-Phase Fixes".
+- **S2: Google sign-in invitation choice (2026-11-18).** With pending invitations in several workspaces, the first Google sign-in now joins, in order: the workspace it signed in for, then a provider first-admin seat, then the oldest invitation (it was arbitrary).
+- **S3, user slots keyed on email (2026-11-18):** a second account with an email already in use took no slot, and SCIM reactivation of a removed user wasn't checked. Users now count per row (plus invitations without a user); `ReserveInvitation` is new; reactivation is checked. Details are in the S3 phase file, "Post-Phase Fixes".
 
 ## Out of scope
 

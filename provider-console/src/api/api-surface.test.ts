@@ -5,8 +5,10 @@ import * as authApi from './auth'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
 import * as poolsApi from './pools'
+import * as quotasApi from './quotas'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
+import * as tenantsApi from './tenants'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
@@ -16,8 +18,10 @@ import * as relaysApi from './relays'
 // the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
 // create/rename/region-residency/delete, moving a relay between pools and a
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
-// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Relay link capacity
-// (Sprint 23 B2, D-42) adds PUT /provider/relays/{id}/link-capacity. Every exported API function is called here; a new write must be
+// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Sprint 23 S1 (D-45
+// amends D-30) adds tenant suspend and resume; S2 (D-44) adds POST /provider/tenants and the first-admin
+// re-invite. Relay link capacity (Sprint 23 B2, D-42) adds PUT /provider/relays/{id}/link-capacity. Every
+// exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -41,6 +45,10 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/pool',
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
+  'POST /provider/tenants',
+  'POST /provider/tenants/{id}/first-admin-invitation',
+  'POST /provider/tenants/{id}/resume',
+  'POST /provider/tenants/{id}/suspend',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -48,6 +56,7 @@ const ALLOWED_WRITES = [
   'POST /provider/users/{id}/reset-totp',
   'PUT /provider/relays/{id}/link-capacity',
   'PUT /provider/tenants/{id}/plan',
+  'PUT /provider/tenants/{id}/quotas/{key}',
   'PUT /provider/tenants/{id}/relay-pool',
 ]
 
@@ -73,14 +82,19 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   operators: operatorsApi,
   plans: plansApi,
   pools: poolsApi,
+  quotas: quotasApi,
   reads: readsApi,
   relays: relaysApi,
+  tenants: tenantsApi,
 }
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
 // wrappers ignore the non-object argument).
 const ID = 'a'
-const normalize = (path: string) => path.replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans))/${ID}(?=/|$)`), '$1/{id}')
+const normalize = (path: string) =>
+  path
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
 
 describe('API surface', () => {
   it('writes are exactly the allowed writes, reads exactly the allowed reads, all under /provider/', async () => {
@@ -120,6 +134,8 @@ describe('API surface', () => {
       [`PATCH /provider/relay-pools/${ID}`]: { status: 204 },
       [`DELETE /provider/relay-pools/${ID}`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/relay-pool`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/suspend`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/resume`]: { status: 204 },
       'GET /provider/plans': { status: 200, body: { items: [] } },
       [`GET /provider/plans/${ID}`]: { status: 200, body: {} },
       'POST /provider/plans': { status: 201, body: { id: ID, name: 'a', description: '', limits: {}, is_default: false } },
@@ -127,7 +143,10 @@ describe('API surface', () => {
       [`DELETE /provider/plans/${ID}`]: { status: 204 },
       [`POST /provider/plans/${ID}/default`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/plan`]: { status: 204 },
+      [`PUT /provider/tenants/${ID}/quotas/b`]: { status: 204 },
       'GET /provider/tenants': page,
+      [`POST /provider/tenants/${ID}/first-admin-invitation`]: { status: 201, body: { tenant_id: ID, invitation: { id: 'i', email: 'b', expires_at: '' } } },
+      'POST /provider/tenants': { status: 201, body: { id: ID, slug: 'a', name: 'a', invitation: { id: 'i', email: 'b', expires_at: '' } } },
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },
       'GET /provider/audit': page,
       'GET /provider/certificates': { status: 200, body: { summary: {}, items: [], next_cursor: null } },

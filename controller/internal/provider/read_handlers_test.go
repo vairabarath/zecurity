@@ -718,9 +718,10 @@ func TestTenantDetail_OneRepeatableReadSnapshot(t *testing.T) {
 	if e.db.begins != 1 || e.db.iso != pgx.RepeatableRead {
 		t.Fatalf("begins=%d iso=%v, want one REPEATABLE READ transaction", e.db.begins, e.db.iso)
 	}
-	// tenant+counts, networks, connectors, shields, relay pool (D-38), plan (D-43).
-	if e.db.txReads != 6 || e.db.poolReads != 0 {
-		t.Fatalf("reads: %d in the transaction, %d on the pool; want 6 and 0", e.db.txReads, e.db.poolReads)
+	// tenant+counts, networks, connectors, shields, relay pool (D-38), plan (D-43),
+	// quotas (D-47, one statement), first-admin invitation (S2, D-44).
+	if e.db.txReads != 8 || e.db.poolReads != 0 {
+		t.Fatalf("reads: %d in the transaction, %d on the pool; want 8 and 0", e.db.txReads, e.db.poolReads)
 	}
 }
 

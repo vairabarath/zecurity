@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 var ErrNotFound = errors.New("invitation not found")
@@ -22,7 +23,8 @@ type Invitation struct {
 	Email         string
 	WorkspaceID   string
 	WorkspaceName string // populated by joins in Get queries
-	InvitedBy     string
+	InvitedBy     string // "" for a provider-issued first-admin invitation (067_)
+	Role          string // role granted on accept: 'member', or 'admin' (provider-issued only)
 	Token         string
 	Status        string
 	ExpiresAt     time.Time
@@ -58,15 +60,26 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 	}
 	defer tx.Rollback(ctx)
 
+	// Sprint 23 S3 (D-47): a pending invitation takes a user slot (each
+	// identity once: re-inviting a counted identity takes none). Checked in
+	// this transaction, under the workspace lock, so mass-inviting can't get
+	// past the limit. A *quota.Exceeded is returned as is.
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, err
+		}
+		return nil, fmt.Errorf("quota check: %w", err)
+	}
+
 	var inv Invitation
 	err = tx.QueryRow(ctx,
 		`INSERT INTO invitations (email, workspace_id, invited_by, token)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, email, workspace_id, invited_by, token, status, expires_at, created_at`,
+		 RETURNING id, email, workspace_id, invited_by, token, status, role, expires_at, created_at`,
 		email, workspaceID, invitedBy, token,
 	).Scan(
 		&inv.ID, &inv.Email, &inv.WorkspaceID, &inv.InvitedBy,
-		&inv.Token, &inv.Status, &inv.ExpiresAt, &inv.CreatedAt,
+		&inv.Token, &inv.Status, &inv.Role, &inv.ExpiresAt, &inv.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert invitation: %w", err)
@@ -95,15 +108,15 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, error) {
 	var inv Invitation
 	err := s.db.QueryRow(ctx,
-		`SELECT i.id, i.email, i.workspace_id, w.name, i.invited_by,
-		        i.token, i.status, i.expires_at, i.created_at
+		`SELECT i.id, i.email, i.workspace_id, w.name, COALESCE(i.invited_by::text, ''),
+		        i.token, i.status, i.role, i.expires_at, i.created_at
 		   FROM invitations i
 		   JOIN workspaces w ON w.id = i.workspace_id
 		  WHERE i.token = $1`,
 		token,
 	).Scan(
 		&inv.ID, &inv.Email, &inv.WorkspaceID, &inv.WorkspaceName, &inv.InvitedBy,
-		&inv.Token, &inv.Status, &inv.ExpiresAt, &inv.CreatedAt,
+		&inv.Token, &inv.Status, &inv.Role, &inv.ExpiresAt, &inv.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -114,12 +127,17 @@ func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, erro
 	return &inv, nil
 }
 
-// AcceptInvitation marks the invitation as accepted and activates the
+// AcceptInvitation marks a member invitation as accepted and activates the
 // workspace_members row: sets user_id, status='active', and joined_at.
 // The caller must already be authenticated to the invited workspace
 // (JWT tenant_id == invitation workspace_id — enforced in handler).
 //
 // Email is normalized for consistency with CreateInvitation (ADR-005).
+//
+// A provider-issued first-admin invitation (role 'admin', S2/D-44) is never
+// accepted here: it is taken at the invitee's first sign-in, which creates
+// their admin account (bootstrap.Provision). This endpoint only activates an
+// existing account's membership, so it must not move an admin seat.
 func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID, email string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 
@@ -129,6 +147,16 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 	}
 	defer tx.Rollback(ctx)
 
+	// Sprint 23 S3 (D-47): accepting a pending invitation takes no new slot
+	// (the identity is already counted), so this passes even over a lowered
+	// limit; it is checked so every user path goes through the quota.
+	if err := quota.ReserveInvitation(ctx, tx, workspaceID, email); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return err
+		}
+		return fmt.Errorf("quota check: %w", err)
+	}
+
 	var invitationID string
 	err = tx.QueryRow(ctx,
 		`UPDATE invitations
@@ -136,6 +164,7 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 		  WHERE token = $1
 		    AND workspace_id = $2
 		    AND email = $3
+		    AND role = 'member'
 		    AND status = 'pending'
 		    AND expires_at > NOW()
 		RETURNING id::text`,

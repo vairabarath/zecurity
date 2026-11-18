@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AuditExportSection } from '@/components/audit/AuditExportSection'
 import { ConsoleSecurityCard } from '@/components/settings/ConsoleSecurityCard'
+import { QuotasCard } from '@/components/settings/QuotasCard'
 import { Capability, useCan } from '@/lib/capabilities'
 
 export default function Settings() {
@@ -47,6 +48,8 @@ export default function Settings() {
           )}
         </CardContent>
       </Card>
+
+      <QuotasCard />
 
       <ConsoleSecurityCard />
 

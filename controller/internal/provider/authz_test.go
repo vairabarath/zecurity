@@ -109,10 +109,14 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 		{ActionRelayPoolDelete, func(x Actor) error { return a.CanDeleteRelayPool(x, poolTarget) }},
 		{ActionRelayMove, func(x Actor) error { return a.CanMoveRelay(x, target) }},
 		{ActionTenantRelayPoolAssign, func(x Actor) error { return a.CanAssignTenantRelayPool(x, Target{Type: "tenant", ID: "w1"}) }},
+		// Tenant creation (S2, D-44): super-admin only.
+		{ActionTenantCreate, func(x Actor) error { return a.CanCreateTenant(x) }},
+		{ActionTenantFirstAdminReinvite, func(x Actor) error { return a.CanReinviteFirstAdmin(x, Target{Type: "tenant", ID: "w1"}) }},
 	}
 	allowed := map[string]map[string]bool{
 		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true, ActionRelayDrain: true, ActionRelayResume: true,
-			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolSetPlacement: true, ActionRelayPoolDelete: true, ActionRelayMove: true, ActionTenantRelayPoolAssign: true},
+			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolSetPlacement: true, ActionRelayPoolDelete: true, ActionRelayMove: true, ActionTenantRelayPoolAssign: true,
+			ActionTenantCreate: true, ActionTenantFirstAdminReinvite: true},
 		// relay-ops: pools and relay moves, never region/residency or tenant assignment.
 		RoleRelayOps: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayDrain: true, ActionRelayResume: true,
 			ActionRelayPoolCreate: true, ActionRelayPoolUpdate: true, ActionRelayPoolDelete: true, ActionRelayMove: true},
@@ -136,5 +140,45 @@ func TestDecide_RelayMutationMatrix(t *testing.T) {
 	// the two destructive verbs.
 	if err := a.CanReadRelays(Actor{Role: RoleRelayOps}, target); err != nil {
 		t.Errorf("relay-ops relay.read: %v", err)
+	}
+}
+
+// Sprint 23 S3 (D-47, D-06): a tenant quota override is super-admin only.
+func TestDecide_TenantQuotaSet(t *testing.T) {
+	a := NewAuthz()
+	target := Target{Type: "tenant", ID: "w1"}
+	if err := a.CanSetTenantQuota(Actor{Role: RoleSuperAdmin}, target); err != nil {
+		t.Fatalf("super-admin: %v", err)
+	}
+	for _, role := range []string{RoleRelayOps, "", "Super-Admin"} {
+		if err := a.CanSetTenantQuota(Actor{Role: role}, target); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("role %q: %v, want ErrForbidden", role, err)
+		}
+	}
+}
+
+// Sprint 23 S1 (D-45, D-06): tenant suspend and resume are super-admin only,
+// enforced in decide(); relay-ops and unknown roles are refused.
+func TestDecide_TenantLifecycleMatrix(t *testing.T) {
+	a := NewAuthz()
+	target := Target{Type: "tenant", ID: "w1"}
+	checks := []struct {
+		name  string
+		check func(Actor) error
+	}{
+		{ActionTenantSuspend, func(x Actor) error { return a.CanSuspendTenant(x, target) }},
+		{ActionTenantResume, func(x Actor) error { return a.CanResumeTenant(x, target) }},
+	}
+	for _, role := range []string{RoleSuperAdmin, RoleRelayOps, "", "Super-Admin", "super-admin "} {
+		for _, c := range checks {
+			err := c.check(Actor{UserID: "u", Email: "e@x", Role: role})
+			if role == RoleSuperAdmin {
+				if err != nil {
+					t.Errorf("role %q, %s: want allow, got %v", role, c.name, err)
+				}
+			} else if !errors.Is(err, ErrForbidden) {
+				t.Errorf("role %q, %s: want ErrForbidden, got %v", role, c.name, err)
+			}
+		}
 	}
 }

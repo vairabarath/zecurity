@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 // Tenant reads (Phase R, D-15 cross-tenant reads; super-admin only).
@@ -78,6 +80,17 @@ type TenantSummary struct {
 	CreatedAt   time.Time    `json:"created_at"`
 	CANotAfter  *time.Time   `json:"ca_not_after"`
 	Counts      TenantCounts `json:"counts"`
+	// Suspension is the provider suspension (Sprint 23 S1, D-45); null when
+	// the tenant isn't suspended. Status stays "active" while suspended.
+	Suspension *TenantSuspension `json:"suspension"`
+}
+
+// TenantSuspension is a tenant's provider suspension: when, by which
+// provider operator (email) and why.
+type TenantSuspension struct {
+	SuspendedAt time.Time `json:"suspended_at"`
+	By          string    `json:"by"`
+	Reason      string    `json:"reason"`
 }
 
 // TenantRemoteNetwork is one remote network in tenant detail.
@@ -123,6 +136,32 @@ type TenantDetail struct {
 	RelayPool TenantRelayPool `json:"relay_pool"`
 	// Plan is the tenant's plan (Sprint 23 B1, D-43).
 	Plan TenantPlan `json:"plan"`
+	// Quotas is the tenant's limit and usage per quota key (Sprint 23 S3,
+	// D-47), in display order.
+	Quotas []TenantQuota `json:"quotas"`
+	// FirstAdminInvitation is the provider-issued first-admin invitation
+	// while its seat is unclaimed (S2, D-44); null once an admin signed in,
+	// and for self-signup tenants. Status and expiry only: no email (users
+	// appear only as counts, OQ-2) and never the token.
+	FirstAdminInvitation *TenantFirstAdminInvitation `json:"first_admin_invitation"`
+}
+
+// TenantQuota is one quota key of tenant detail: the effective limit (null =
+// unlimited), where it comes from (plan, override or unlimited), the usage
+// counted with the D-47 rules, and whether usage is above the limit (a
+// lowered limit; nothing is deleted).
+type TenantQuota struct {
+	Key    string `json:"key"`
+	Limit  *int64 `json:"limit"`
+	Source string `json:"source"`
+	Used   int64  `json:"used"`
+	Over   bool   `json:"over"`
+}
+
+// TenantFirstAdminInvitation is the state of an unclaimed first-admin seat.
+type TenantFirstAdminInvitation struct {
+	Status    string    `json:"status"` // "pending" or "expired" (expired or replaced)
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // TenantFilter narrows ListTenants. Status "" means every status except
@@ -149,7 +188,8 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
        rn.active,
        uc.active, uc.suspended, uc.locked, uc.deleted,
        dc.active, dc.re_enroll_required, dc.renew_pending, dc.revoked,
-       COALESCE(rc.n, 0), gc.n, ar.n, rp.n
+       COALESCE(rc.n, 0), gc.n, ar.n, rp.n,
+       w.suspended_at, w.suspended_by, w.suspension_reason
   FROM workspaces w
   LEFT JOIN workspace_ca_keys k ON k.tenant_id = w.id
   LEFT JOIN LATERAL (
@@ -191,6 +231,8 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
 func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 	var s TenantSummary
 	c := &s.Counts
+	var suspendedAt *time.Time
+	var suspendedBy, suspensionReason *string
 	if err := row.Scan(
 		&s.ID, &s.Slug, &s.Name, &s.Status, &s.TrustDomain, &s.CreatedAt, &s.CANotAfter,
 		&c.Connectors.Pending, &c.Connectors.Active, &c.Connectors.Disconnected, &c.Connectors.Revoked,
@@ -199,11 +241,21 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		&c.Users.Active, &c.Users.Suspended, &c.Users.Locked, &c.Users.Deleted,
 		&c.ClientDevices.Active, &c.ClientDevices.ReEnrollRequired, &c.ClientDevices.RenewPending, &c.ClientDevices.Revoked,
 		&c.Policies.Resources, &c.Policies.Groups, &c.Policies.AccessRules, &c.Policies.ResourcePolicies,
+		&suspendedAt, &suspendedBy, &suspensionReason,
 	); err != nil {
 		return TenantSummary{}, err
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.CANotAfter = utcPtr(s.CANotAfter)
+	if suspendedAt != nil {
+		s.Suspension = &TenantSuspension{SuspendedAt: suspendedAt.UTC()}
+		if suspendedBy != nil {
+			s.Suspension.By = *suspendedBy
+		}
+		if suspensionReason != nil {
+			s.Suspension.Reason = *suspensionReason
+		}
+	}
 	return s, nil
 }
 
@@ -322,7 +374,42 @@ SELECT id::text, name, status, connector_id::text, remote_network_id::text, cert
 	if d.Plan, err = tenantPlan(ctx, q, id); err != nil {
 		return TenantDetail{}, err
 	}
+	// quota.AllUsage is the same definition every creation check uses.
+	usage, err := quota.AllUsage(ctx, q, id)
+	if err != nil {
+		return TenantDetail{}, fmt.Errorf("tenant quotas: %w", err)
+	}
+	d.Quotas = make([]TenantQuota, 0, len(usage))
+	for _, u := range usage {
+		d.Quotas = append(d.Quotas, TenantQuota{Key: u.Key, Limit: u.Limit, Source: u.Source, Used: u.Used, Over: u.Over})
+	}
+	if d.FirstAdminInvitation, err = tenantFirstAdminInvitation(ctx, q, id); err != nil {
+		return TenantDetail{}, err
+	}
 	return d, nil
+}
+
+// tenantFirstAdminInvitation reads the latest first-admin invitation of an
+// unclaimed seat (an 'invited' admin membership without an account).
+func tenantFirstAdminInvitation(ctx context.Context, q Querier, id string) (*TenantFirstAdminInvitation, error) {
+	var f TenantFirstAdminInvitation
+	err := q.QueryRow(ctx, `
+SELECT CASE WHEN i.status = 'pending' AND i.expires_at > NOW() THEN 'pending' ELSE 'expired' END, i.expires_at
+  FROM invitations i
+  JOIN workspace_members wm
+    ON wm.workspace_id = i.workspace_id AND wm.email = i.email
+   AND wm.role = 'admin' AND wm.status = 'invited' AND wm.user_id IS NULL
+ WHERE i.workspace_id = $1 AND i.role = 'admin' AND i.status IN ('pending', 'expired')
+ ORDER BY i.created_at DESC, i.id DESC
+ LIMIT 1`, id).Scan(&f.Status, &f.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant first-admin invitation: %w", err)
+	}
+	f.ExpiresAt = f.ExpiresAt.UTC()
+	return &f, nil
 }
 
 // collect runs a capped detail query (LIMIT DetailCap+1) and reports whether

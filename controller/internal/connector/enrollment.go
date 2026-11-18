@@ -18,6 +18,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -177,6 +178,17 @@ func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (
 	}
 	if wsStatus != "active" {
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace status is %q, expected active", wsStatus)
+	}
+
+	// Sprint 23 S1 (D-45): no enrollment of a new connector while the tenant is
+	// suspended by the provider. Separate from the status='active' check
+	// above, which stays unchanged (D-34). Existing agents are never gated
+	// here (D-08). The share lock orders this with a concurrent suspension.
+	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return nil, status.Error(codes.FailedPrecondition, tenantstate.Message)
+		}
+		return nil, status.Errorf(codes.Internal, "load workspace state: %v", err)
 	}
 
 	// Step 8 — Sign connector certificate. The signer only reads CA keys;

@@ -78,6 +78,46 @@ Order: **S1 → S3** (after Barath's **B1** is merged) **→ S4** (after S1). S2
 - **Authz and audit.**
 - **Mutation checks:** remove the check from one path → its test fails; refuse agents → the D-08 test fails.
 
+### Implementation status (2026-11-17)
+Built on the local branch `feat/s1-tenant-suspension` (from `main` 7ed6faec). **Not committed**: commit, push, PR and merge wait for the product owner's go. Live check not run yet.
+- Schema `064_tenant_suspension.sql` (with a CHECK that the three columns are set and cleared together).
+- `internal/tenantstate`: `Check` / `CheckForShare` (share lock for enrollment) and the SQL `NotSuspended` / `Suspended`; lookup error = ineligible.
+- Refused while suspended:
+  - admin sign-in (`auth/callback.go`, redirect `?error=workspace_suspended`);
+  - refresh, admin and client (`auth/refresh.go`, 401 `workspace suspended`, refresh sessions deleted);
+  - client sign-in (`client.TokenExchange`, before anything is written);
+  - device enrollment and renewal (`authorizeDeviceIssuance` + the atomic `deviceOwnerActiveSQL`);
+  - connector and shield enrollment (`CheckForShare` in the enrollment transaction, next to the unchanged status check);
+  - every tenant console route (`middleware.TenantEligibilityGuard` next to `WorkspaceGuard`, wired once in `main.go` through `workspaceGuard`; 403 `TENANT_SUSPENDED`).
+- Suspend (`internal/tenantlifecycle`): one transaction for the columns, the users' `identity_generation` bump, the pool policy versions (`relay.BumpWorkspacePoolPoliciesTx`) and the audit row. After commit: `InvalidateUserSessions` per user (refresh sessions + client devices, PENDING-09 C-1), `NotifyPolicyChange` (deny-all), relay lists published.
+- Deny-all: `policy.CompileACLSnapshot` returns `DenyAllSnapshot` for a suspended tenant. Relays: an empty list on both delivery paths (`relaylist.NoPool`), and the tenant is left out of `RelayWorkspacePolicy`.
+- Provider API `POST /provider/tenants/{id}/suspend|resume`, actions `tenant.suspend` / `tenant.resume`; `suspension` on the tenant list and detail DTO (`TestTenantDTOSurface` updated).
+- Provider console: Suspension section, Suspend dialog (reason + typed slug), Resume dialog (reason), "Suspended" badge on the list and detail, `api-surface.test.ts`.
+- Admin UI: `lib/suspension.ts`; login message `workspace_suspended`; the error link and the silent refresh send a suspended session there. Client: a clear message at `login`, and a warning on a suspended refresh.
+- Gates: controller build, vet and full `go test -count=1 ./...` with the DB env (only the two known skips); provider console test (619), lint, build; admin test (348) and build (lint has 17 problems that are already on `main`, none in S1 files); client `cargo test --lib` 384 (built in the dev-disk container).
+- Mutation checks: all 18 caught: every refused path, the console guard and its wiring, deny-all, both relay lists, the allowlist, the slug check, session revocation, relay-ops authz, and D-08 for connector renewal and shield heartbeat.
+- Open for review:
+  - SCIM provisioning isn't refused while suspended. D-45 lists config mutations next to `WorkspaceGuard`, and SCIM has its own auth. Product-owner call.
+  - The guard refuses reads as well as mutations (the admin sessions are revoked anyway).
+
+### S1 Post-Phase Fixes
+
+### Fix: A refused invited join into a suspended tenant still created the user (PR #223 review, 2026-11-18)
+**Issue:** the suspension check in `auth/callback.go` ran after `identitySvc.Authenticate`. For a first-time identity, that call had already run `bootstrap.Provision`, which creates the user and the identity link, consumes the invitation and activates the membership. So a refused sign-in still changed the tenant's membership, which D-45 forbids and which would also take an S3 user slot.
+
+**Fix applied:** `bootstrap.runInvitedUserTransaction` now starts with `tenantstate.CheckForShare(ctx, tx, workspaceID)` and returns `tenantstate.ErrSuspended` before any write. The share lock means a join can't commit after a suspension it didn't see. This covers the enterprise and the platform (Google) branches; the workspace is only known inside `Provision` for the platform branch. `auth/callback.go` maps `tenantstate.IsSuspended(err)` from `Authenticate` to `/login?error=workspace_suspended`.
+
+**Tests:** `bootstrap/suspended_join_test.go`: the join while suspended is refused with no user, no link, invitation pending and membership invited; after resume the join works. Mutation (check removed) is caught.
+
+### Fix: Refresh after a real suspension said "session revoked" instead of "suspended" (PR #223 review)
+**Issue:** `auth/refresh.go` checked the session generation before the suspension. Suspending bumps every user's `identity_generation`, so the generic refusal always won, and the admin UI and client "suspended by the provider" handling never fired. The test only wrote `suspended_at` without the bump.
+
+**Fix applied:** the `tenantstate.Check` block moved to the top of the pool section of the refresh, before the user, lifecycle and generation checks. The token is signature-verified, so its tenant is trusted.
+
+**Tests:** `auth/integration_test.go` now also suspends with a generation bump and expects 401 with `ErrMsgWorkspaceSuspended`. The old order fails this test.
+
+**Still open (product-owner call, unchanged):** SCIM writes aren't refused while suspended.
+
 ### Live check
 Suspend a lab tenant:
 - admin UI and client login refused, refresh refused;
@@ -140,6 +180,40 @@ Then resume: traffic returns with no re-enrollment.
 - **Fail closed** on a lookup error.
 - **Authz and audit** with before/after.
 
+### Implementation status (2026-11-18)
+Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged). **Not committed**: commit, push, PR and merge wait for the product owner's go. S2 merges first; then S3 rebases and adds the check to S2's first-admin invitation. Live check not run yet.
+- **Schema** `065_tenant_quotas.sql`: `workspace_quota_overrides (workspace_id, key, limit_value, reason, set_by, set_at)`. The column is `limit_value` because `LIMIT` is a reserved word. A NULL limit is explicitly unlimited; no row means the plan's value.
+- **`internal/quota`** (pgx only, so `providerquery` can use it, D-04) is the one definition:
+  - `Effective`: plan values overlaid with the overrides; a missing key fails closed. `plans.EffectiveLimits` delegates to it, and `plans.Keys` aliases `quota.Keys`.
+  - `Count` / `AllUsage` (one statement): the D-47 counting rules.
+  - `Reserve(key)` / `ReserveUser(email)`: `SELECT … FROM workspaces … FOR UPDATE`, then count, then `*Exceeded {key, limit, used}`. An identity already counted (a user, or a pending unexpired invitation, by lowercased email) takes no new slot.
+  - `SetOverride`.
+- **Checked inside the creating transaction:**
+  - `CreateRemoteNetwork`, `GenerateConnectorToken`, `GenerateShieldToken` (now transactional);
+  - `resource.Create`, which also covers discovery adoption (discovery itself is never limited);
+  - users: `invitation.CreateInvitation` and `AcceptInvitation`, `bootstrap` (invited join and first signup), SCIM `scimProvisioner`, client JIT `upsertUser`;
+  - client devices: `insertClientDevice` (now transactional).
+  - REST token regeneration inserts no row, so it takes no slot.
+- **Refusals:**
+  - GraphQL: the presenter sets `extensions {code: QUOTA_EXCEEDED, key, limit, used}`;
+  - REST invitations: 409 `{"error":"quota_exceeded", key, limit, used, message}`;
+  - SCIM: 403 with the quota text as detail (RFC 7644 has no quota scimType);
+  - client gRPC: `ResourceExhausted`;
+  - admin sign-in: `/login?error=user_limit_reached`.
+- **Provider API:** `PUT /provider/tenants/{id}/quotas/{key}` takes `{limit: n|null, reason}` or `{inherit: true, reason}` (removes the override). The action is `tenant.quota.set` (super-admin only), audited with before/after `{limit, source}`. The tenant detail DTO gets `quotas [{key, limit, source, used, over}]` (one more statement: 7).
+- **Provider console:** Quotas section (used, limit, source, "Over quota" badge, a Change dialog with a below-usage warning); `api-surface.test.ts`.
+- **Admin UI:** GraphQL `workspaceQuotas` (CONSOLE_READ) and a Settings → Limits card (read-only); a "Limit reached" toast for `QUOTA_EXCEEDED`; the login message `user_limit_reached`.
+- **Gates:**
+  - controller: build, vet, full `go test -count=1 ./...` with the DB env (only the two known skips);
+  - provider console: 627 tests, lint, build;
+  - admin: 347 tests, build; lint shows the 17 problems already on `main`, none in S3 files.
+- **Mutation checks:** all 18 caught: the lock (race), every creation path, the counting rules (deleting, identity once, expired invitations), off-by-one at the limit, the presenter, and relay-ops authz.
+- **Test fixture changes:**
+  - The SCIM test `seedWorkspace` now puts its workspace on the Legacy plan. A new workspace gets the default Free plan (5 users), and `TestGroups_Integration` provisions more than 5.
+  - `schema_authz_test.go` registers `workspaceQuotas` and marks `WorkspaceQuota.key` as read-safe.
+  - The tenant detail statement counts went from 6 to 7.
+
+
 ### Live check
 - On the Free plan, create up to 3 remote networks; the 4th is refused. Create resources up to the limit (use a test plan with a small resource limit to keep it quick); discovery still runs.
 - Plan limit 2 connectors; override 3 for one tenant.
@@ -149,6 +223,26 @@ Then resume: traffic returns with no re-enrollment.
 - Lower the limit below usage → "over quota", nothing removed.
 
 ---
+
+### Fix: The quota lock blocked every foreign-key insert in the workspace and could deadlock SCIM (PR #224 review)
+**Issue:** `quota.lock` took `SELECT … FOR UPDATE` on the workspace row. That conflicts with the `FOR KEY SHARE` lock every insert of a row referencing the workspace takes (audit, outbox, discovery). While any quota transaction was open, those inserts waited. SCIM Deprovision and Reactivate on the same user could also deadlock: user row, then outbox insert, against workspace lock, then user row.
+
+**Fix applied:** `FOR NO KEY UPDATE`. Quota transactions still serialise with each other and with plan assignment, overrides and suspension, but foreign-key inserts no longer wait.
+
+**Test:** `TestQuotaDB_LockDoesNotBlockForeignKeyInserts`. With a quota transaction open, an audit insert succeeds within 3 s, and a second quota transaction still waits. The old `FOR UPDATE` fails it.
+
+### Merge with S1 and S2 (2026-11-18, after #223 and #225)
+- **S2's creation paths are now covered (D-47):** `bootstrap.insertFirstAdminInvitation` calls `quota.ReserveInvitation` in the creation transaction, so both `CreateTenant` and `ReissueFirstAdminInvitation` are covered. A re-issue revokes the earlier invitation first, so it frees its own slot. `tenantcreate` maps `*quota.Exceeded` to 409 `quota_exceeded {key, limit, used}`.
+- **Self-signup:** S2's shared `createWorkspaceTx` gained a `beforeCA` hook, so `ReserveUser` still runs before the workspace CA is generated.
+- **Invited join, in this order:**
+  1. `tenantstate.Check`, so the suspended message wins;
+  2. `quota.ReserveUser`, which takes the workspace lock **before** the first-admin invitation is consumed, while the pending invitation still counts;
+  3. `tenantstate.CheckForShare` under that lock;
+  4. consume the invitation.
+
+  Taking the share lock first and the quota lock second in one transaction would deadlock two concurrent joins on the lock upgrade. Elsewhere, connector and shield enrollment take the S1 share lock but no quota lock (quotas apply at creation, in the resolvers), and client device issuance uses a plain check.
+- **Tenant detail:** `quotas` plus `first_admin_invitation`, 8 statements (pins updated).
+- **Tests:** `TestFirstAdminInvitation_UserQuota` (users = 0 refuses the create, nothing written; re-issue on users = 1 works), `TestCreateTenantHTTP_QuotaExceeded`. Mutation checks caught: the first-admin invitation quota, the 409 mapping, the invited-join quota.
 
 ## S4 — Delete: schedule, cancel, purge (F7) — D-46
 
@@ -195,6 +289,23 @@ On a throwaway lab tenant:
 2. Legal hold on (purge paused) → legal hold off.
 3. Purge with the test grace: the audit and security export exists; the tenant's data and CA keys are gone; the tombstone is there; the provider audit is intact.
 4. Interrupt a purge (kill the controller mid-run), restart: it completes.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: S3 user slots keyed on email (quota bypass)
+**Issue:** a user record created with an email the tenant already had took no user slot. A second SCIM or IdP account with a new subject but the same email, or many of them, got past the user limit. Separately, SCIM `Reactivate` set a removed (`deleted`) user back to active with no quota check.
+
+**Root cause:** `quota.ReserveUser` skipped the check for any "counted identity" (an email held by a live user or a pending invitation), and the count de-duplicated by email.
+
+**Fix applied** (`controller/internal/quota/quota.go`, `internal/invitation/store.go`, `internal/scim/directory_service.go`):
+- **Count:** every live user row counts on its own; a pending, unexpired invitation counts once per email, and only while no live user has that email.
+- **`ReserveUser`** (a user row is created or reactivated): free only when it uses the person's own pending invitation; otherwise it takes a slot.
+- **`ReserveInvitation`** (new; invitation create and accept, no row created): free when the person is already counted.
+- **SCIM `Reactivate`:** when the user was `deleted`, it runs `ReserveUser` in the transaction (403 at the limit); the UPDATE is conditional on the status it read.
+
+**Tests:** a second account with the same email takes a slot; reactivating a removed user at the limit is refused; lifting a suspension isn't. Mutation checks (email-only skip, no reactivation check, invitation of a member counted twice) are all caught.
 
 ---
 

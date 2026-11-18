@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
 var ErrNoMatchingShield = errors.New("no active shield installed on resource host")
@@ -282,6 +283,17 @@ func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input Create
 		return nil, fmt.Errorf("create resource: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Sprint 23 S3 (D-47): the resource quota is checked in the creating
+	// transaction (it locks the workspace row, so concurrent creates can't
+	// both take the last slot). Discovery itself is never limited; only
+	// creating (or adopting) a resource is. A *quota.Exceeded is returned
+	// as is.
+	if err := quota.Reserve(ctx, tx, tenantID, quota.KeyResources); err != nil {
+		if _, ok := quota.AsExceeded(err); ok {
+			return nil, err
+		}
+		return nil, fmt.Errorf("create resource: quota check: %w", err)
+	}
 	if kind == HostName {
 		if err := checkNameCollision(ctx, tx, tenantID, host, input.RemoteNetworkID, "", input.PortFrom, input.PortTo); err != nil {
 			return nil, err
