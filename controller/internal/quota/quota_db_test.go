@@ -501,3 +501,40 @@ func TestQuotaDB_SetOverride(t *testing.T) {
 		t.Fatalf("override kept after a failed audit: %s rows", n)
 	}
 }
+
+// PR #224 review: the quota lock is FOR NO KEY UPDATE, so a foreign-key
+// insert that references the workspace (here an audit row) does not wait
+// for an open quota transaction, while a second quota transaction still
+// does (serialised).
+func TestQuotaDB_LockDoesNotBlockForeignKeyInserts(t *testing.T) {
+	e := newEnv(t)
+	ws := e.workspace("lockws", "00000000-0000-0000-0001-000000000002")
+	tx, err := e.pool.Begin(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(e.ctx)
+	if err := Reserve(e.ctx, tx, ws, KeyRemoteNetworks); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
+	defer cancel()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO audit_logs (tenant_id, actor_email, action, target_type, target_id)
+		VALUES ($1, 'x@y.test', 'test.fk_insert', 'test', 't')`, ws); err != nil {
+		t.Fatalf("FK insert blocked by the quota lock: %v", err)
+	}
+
+	// Another quota transaction on the same workspace still waits.
+	tx2, err := e.pool.Begin(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx2.Rollback(e.ctx)
+	if _, err := tx2.Exec(e.ctx, `SET LOCAL lock_timeout = '300ms'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reserve(e.ctx, tx2, ws, KeyRemoteNetworks); err == nil {
+		t.Fatal("a second quota transaction did not wait for the first")
+	}
+}

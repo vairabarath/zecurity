@@ -7,7 +7,7 @@
 // closed). Usage is counted with the D-47 rules (Count).
 //
 // Every creation path calls Reserve (or ReserveUser) inside the transaction
-// that creates the row: it locks the workspace row (SELECT … FOR UPDATE), so
+// that creates the row: it locks the workspace row (SELECT … FOR NO KEY UPDATE), so
 // creations in one workspace are serialised and two of them can't both take
 // the last slot; it then counts and refuses at the limit with *Exceeded. Any
 // lookup error refuses too. Lowering a limit never deletes anything: such a
@@ -271,9 +271,15 @@ func AllUsage(ctx context.Context, q Querier, workspaceID string) ([]Usage, erro
 }
 
 // lock serialises creations in the workspace until the transaction ends.
+// FOR NO KEY UPDATE, not FOR UPDATE (PR #224 review): it still serialises
+// quota transactions with each other and with the FOR UPDATE / UPDATE of
+// plan assignment, overrides and suspension, but not with the FOR KEY SHARE
+// lock every foreign-key insert referencing the workspace takes (audit,
+// outbox, discovery rows). Under FOR UPDATE those inserts all waited, and
+// SCIM Deprovision vs Reactivate on one user could deadlock.
 func lock(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 	var id string
-	err := tx.QueryRow(ctx, `SELECT id::text FROM workspaces WHERE id = $1::uuid FOR UPDATE`, workspaceID).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT id::text FROM workspaces WHERE id = $1::uuid FOR NO KEY UPDATE`, workspaceID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrWorkspaceNotFound
 	}

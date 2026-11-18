@@ -184,6 +184,13 @@ Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merg
 
 ---
 
+### Fix: The quota lock blocked every foreign-key insert in the workspace and could deadlock SCIM (PR #224 review)
+**Issue:** `quota.lock` took `SELECT … FOR UPDATE` on the workspace row. That conflicts with the `FOR KEY SHARE` lock every insert of a row referencing the workspace takes (audit, outbox, discovery). While any quota transaction was open, those inserts waited. SCIM Deprovision and Reactivate on the same user could also deadlock: user row, then outbox insert, against workspace lock, then user row.
+
+**Fix applied:** `FOR NO KEY UPDATE`. Quota transactions still serialise with each other and with plan assignment, overrides and suspension, but foreign-key inserts no longer wait.
+
+**Test:** `TestQuotaDB_LockDoesNotBlockForeignKeyInserts`. With a quota transaction open, an audit insert succeeds within 3 s, and a second quota transaction still waits. The old `FOR UPDATE` fails it.
+
 ## S4 — Delete: schedule, cancel, purge (F7) — D-46
 
 **Needs S1 merged** (only suspended tenants can be deleted, D-10).
