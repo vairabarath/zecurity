@@ -327,7 +327,15 @@ PASS both runs.
 
 The enterprise branch is already scoped to one workspace and is unchanged.
 
-**Tests:** `TestPlatformInvitedJoin_ChoosesInvitationDeterministically`: with no hint, the seat wins over an older member invitation; with a hint naming the member workspace, that workspace wins; with two member invitations, the oldest wins. Mutation checks on each of the three keys are caught. Not live-checked: only Google reaches this branch (the local test login uses workspace connections).
+**Tests:** `TestPlatformInvitedJoin_ChoosesInvitationDeterministically`: with no hint, the seat wins over an older member invitation; with a hint naming the member workspace, that workspace wins; with two member invitations, the oldest wins. Mutation checks on each of the three keys are caught. Live-checked with a real Google sign-in (below).
+
+**Live (2026-11-18, `2426ed7e`, real Google sign-in by Sathiya; the Orca browser and Firefox):**
+- Setup: `alpha-live` (first-admin seat for the Google email) and `beta-live` (its admin invited the same email as a member). No Google identity in the DB.
+- **B1 (fix 1 on the Google path):** alpha's invitation backdated, no other usable invitation → Google sign-in refused with `invitation_expired`; nothing created (0 Google identities, no workspace, no user).
+- **Hint wins:** both invitations usable, beta's the older (10:01:58 vs 10:02:18). Signing in from the login page with workspace `beta-live` → joined beta as member. That is rule 1, the workspace the person chose. The local test DB was then reset for that one join (the user deleted, beta's invitation set back to pending).
+- **B2 (the seat is not lost to an older member invitation):** same state; Google sign-in from alpha-live's invite link → one Google identity, a user in `alpha-live` as admin/active; alpha's invitation `accepted` (`invitation.accept`: role admin, provider google, first_admin); beta's member invitation still pending.
+
+PASS.
 
 **Security review note (automated, 2026-11-18, "ambiguous name matching"): acknowledged, no change.**
 - The hint only orders the pending, unexpired invitations of the Google-verified email that is signing in, so it can't reach an invitation that person doesn't already hold.
