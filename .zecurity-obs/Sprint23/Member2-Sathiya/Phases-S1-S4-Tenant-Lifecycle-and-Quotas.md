@@ -100,6 +100,24 @@ Built on the local branch `feat/s1-tenant-suspension` (from `main` 7ed6faec). **
   - SCIM provisioning isn't refused while suspended. D-45 lists config mutations next to `WorkspaceGuard`, and SCIM has its own auth. Product-owner call.
   - The guard refuses reads as well as mutations (the admin sessions are revoked anyway).
 
+### S1 Post-Phase Fixes
+
+### Fix: A refused invited join into a suspended tenant still created the user (PR #223 review, 2026-11-18)
+**Issue:** the suspension check in `auth/callback.go` ran after `identitySvc.Authenticate`. For a first-time identity, that call had already run `bootstrap.Provision`, which creates the user and the identity link, consumes the invitation and activates the membership. So a refused sign-in still changed the tenant's membership, which D-45 forbids and which would also take an S3 user slot.
+
+**Fix applied:** `bootstrap.runInvitedUserTransaction` now starts with `tenantstate.CheckForShare(ctx, tx, workspaceID)` and returns `tenantstate.ErrSuspended` before any write. The share lock means a join can't commit after a suspension it didn't see. This covers the enterprise and the platform (Google) branches; the workspace is only known inside `Provision` for the platform branch. `auth/callback.go` maps `tenantstate.IsSuspended(err)` from `Authenticate` to `/login?error=workspace_suspended`.
+
+**Tests:** `bootstrap/suspended_join_test.go`: the join while suspended is refused with no user, no link, invitation pending and membership invited; after resume the join works. Mutation (check removed) is caught.
+
+### Fix: Refresh after a real suspension said "session revoked" instead of "suspended" (PR #223 review)
+**Issue:** `auth/refresh.go` checked the session generation before the suspension. Suspending bumps every user's `identity_generation`, so the generic refusal always won, and the admin UI and client "suspended by the provider" handling never fired. The test only wrote `suspended_at` without the bump.
+
+**Fix applied:** the `tenantstate.Check` block moved to the top of the pool section of the refresh, before the user, lifecycle and generation checks. The token is signature-verified, so its tenant is trusted.
+
+**Tests:** `auth/integration_test.go` now also suspends with a generation bump and expects 401 with `ErrMsgWorkspaceSuspended`. The old order fails this test.
+
+**Still open (product-owner call, unchanged):** SCIM writes aren't refused while suspended.
+
 ### Live check
 Suspend a lab tenant:
 - admin UI and client login refused, refresh refused;

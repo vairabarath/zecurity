@@ -151,6 +151,25 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// pool is configured (unit tests exercising token mechanics in isolation).
 	currentGen := claims.IdentityGeneration
 	if s.cfg.Pool != nil {
+		// Sprint 23 S1 (D-45): no refresh while the tenant is suspended by
+		// the provider. The sessions were already revoked at suspension;
+		// this also refuses a refresh that races it. Checked FIRST:
+		// suspending bumps every user's identity_generation, so the
+		// generation check below would otherwise refuse with the generic
+		// "session revoked" and the client could never say why. The token
+		// is signature-verified, so its tenant is the one it was issued
+		// for. A lookup error refuses (fail closed).
+		if err := tenantstate.Check(ctx, s.cfg.Pool, tenantID); err != nil {
+			if tenantstate.IsSuspended(err) {
+				s.redisClient.DeleteAllRefreshSessions(ctx, userID)
+				s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
+				return "", "", dead(ErrMsgWorkspaceSuspended)
+			}
+			if errors.Is(err, tenantstate.ErrNotFound) {
+				return "", "", dead("session revoked")
+			}
+			return "", "", serverError("server error")
+		}
 		var dbEmail, status, dbRole string
 		if err := s.cfg.Pool.QueryRow(ctx,
 			`SELECT email, status, identity_generation, role FROM users WHERE id = $1`,
@@ -181,21 +200,6 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
 			s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
 			return "", "", dead("session revoked")
-		}
-		// Sprint 23 S1 (D-45): no refresh while the tenant is suspended by
-		// the provider. The sessions were already revoked at suspension;
-		// this also refuses a refresh that races it. The token's tenant must
-		// be the user's. A lookup error refuses (fail closed).
-		if err := tenantstate.Check(ctx, s.cfg.Pool, tenantID); err != nil {
-			if tenantstate.IsSuspended(err) {
-				s.redisClient.DeleteAllRefreshSessions(ctx, userID)
-				s.sessionEnded(ctx, userID, claims.SessionID, "sessions_revoked")
-				return "", "", dead(ErrMsgWorkspaceSuspended)
-			}
-			if errors.Is(err, tenantstate.ErrNotFound) {
-				return "", "", dead("session revoked")
-			}
-			return "", "", serverError("server error")
 		}
 	}
 

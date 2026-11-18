@@ -132,6 +132,14 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			// The IdP proved who they are; this workspace just has not granted
 			// them access. That is a distinct, actionable outcome for the user —
 			// not a generic auth failure.
+			// Sprint 23 S1 (D-45): an invited join into a suspended tenant
+			// is refused inside the provisioning transaction, before
+			// anything is written.
+			if tenantstate.IsSuspended(err) {
+				log.Printf("auth callback: invited join refused: workspace is suspended")
+				fail("workspace_suspended")
+				return
+			}
 			if errors.Is(err, identity.ErrNotInvited) {
 				fail("not_invited")
 				return

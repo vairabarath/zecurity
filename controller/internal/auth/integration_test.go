@@ -321,8 +321,31 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, tenantID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if tok, _ := runAuthRoundTrip(t, svc, "code-resumed"); tok == "" {
+	resumedTok, resumedCookie := runAuthRoundTrip(t, svc, "code-resumed")
+	if resumedTok == "" {
 		t.Fatal("sign-in after resume issued no token")
+	}
+
+	// A real suspension also bumps every user's identity_generation
+	// (tenantlifecycle.Store.Suspend). Refresh still answers with the
+	// suspended message, not the generic "session revoked": the suspension
+	// is checked before the generation.
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NOW(), suspended_by = 'op@provider.test', suspension_reason = 'test' WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET identity_generation = identity_generation + 1 WHERE tenant_id = $1`, tenantID); err != nil {
+		t.Fatalf("bump generation: %v", err)
+	}
+	realRefresh := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	realRefresh.AddCookie(resumedCookie)
+	realRefresh.Header.Set("Authorization", "Bearer "+resumedTok)
+	realRec := httptest.NewRecorder()
+	svc.RefreshHandler().ServeHTTP(realRec, realRefresh)
+	if realRec.Code != http.StatusUnauthorized || !strings.Contains(realRec.Body.String(), ErrMsgWorkspaceSuspended) {
+		t.Fatalf("refresh after a real suspension: %d %s, want 401 %q", realRec.Code, realRec.Body.String(), ErrMsgWorkspaceSuspended)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("resume: %v", err)
 	}
 
 	// Nothing outside this run's keys was disturbed.
