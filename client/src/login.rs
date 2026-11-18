@@ -212,7 +212,17 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             code_verifier,
             invite_token: invite_token.unwrap_or_default(),
         })
-        .await?
+        .await
+        .map_err(|status| {
+            // Sprint 23 S1 (D-45): a clear message, not a raw gRPC status.
+            if status.code() == tonic::Code::PermissionDenied
+                && status.message() == crate::auth::WORKSPACE_SUSPENDED_MESSAGE
+            {
+                anyhow!("This workspace is suspended by the provider. Sign-in is unavailable until it is resumed; contact your provider.")
+            } else {
+                anyhow::Error::new(status)
+            }
+        })?
         .into_inner(); //accesstoken, refreshtoken, expiresin, email
 
     println!("Generating device certificate...");

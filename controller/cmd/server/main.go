@@ -75,6 +75,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/telemetry"
+	"github.com/yourorg/ztna/controller/internal/tenantcreate"
+	"github.com/yourorg/ztna/controller/internal/tenantlifecycle"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
@@ -575,17 +577,23 @@ func main() {
 	// asks for it. The workspace guard runs first, so a missing or inactive
 	// workspace gets its 403 rather than "console security policy
 	// unavailable" (503).
+	// Sprint 23 S1 (D-45): every tenant console route also refuses a tenant
+	// suspended by the provider. TenantEligibilityGuard sits next to
+	// WorkspaceGuard, whose status='active' query is unchanged (D-34).
+	workspaceGuard := func(next http.Handler) http.Handler {
+		return middleware.WorkspaceGuard(db.Pool)(middleware.TenantEligibilityGuard(db.Pool)(next))
+	}
 	requireConsoleMFA := middleware.RequireConsoleMFA(consoleMFA)
 	mfaHandlers := mfa.NewHandlers(mfaSvc, authSvc, consoleMFA, func(ctx context.Context, e audit.Entry) {
 		_ = audit.Record(context.WithoutCancel(ctx), db.Pool, e)
 	})
 	consoleAuth := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))
-	mux.Handle("GET /auth/mfa/status", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Status))))
-	mux.Handle("POST /auth/mfa/enroll", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Enroll))))
-	mux.Handle("POST /auth/mfa/verify", consoleAuth(middleware.WorkspaceGuard(db.Pool)(http.HandlerFunc(mfaHandlers.Verify))))
+	mux.Handle("GET /auth/mfa/status", consoleAuth(workspaceGuard(http.HandlerFunc(mfaHandlers.Status))))
+	mux.Handle("POST /auth/mfa/enroll", consoleAuth(workspaceGuard(http.HandlerFunc(mfaHandlers.Enroll))))
+	mux.Handle("POST /auth/mfa/verify", consoleAuth(workspaceGuard(http.HandlerFunc(mfaHandlers.Verify))))
 
 	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(requireConsoleMFA(gqlSrv)),
+		workspaceGuard(requireConsoleMFA(gqlSrv)),
 	)
 	// The discovery middleware sits outside the public/protected routing, so both
 	// routes share one budget and a refusal becomes 429/503 on either.
@@ -596,7 +604,7 @@ func main() {
 	mux.HandleFunc("/relay.crl", relay.RelayCRLHandler(pkiService, relayStore))
 
 	// REST endpoints: invitations
-	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(workspaceGuard(
 		requireConsoleMFA(
 			middleware.RequireCapability(roleChecker, rbac.MembersAdmin)(
 				http.HandlerFunc(inviteHandler.Create),
@@ -606,14 +614,14 @@ func main() {
 	mux.Handle("POST /api/invitations", inviteCreateRoute)
 	mux.Handle("GET /api/invitations/{token}", http.HandlerFunc(inviteHandler.Get))
 	inviteAcceptRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(
+		workspaceGuard(
 			http.HandlerFunc(inviteHandler.Accept),
 		),
 	)
 	mux.Handle("POST /api/invitations/{token}/accept", inviteAcceptRoute)
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
-	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(workspaceGuard(
 		requireConsoleMFA(
 			middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
@@ -623,7 +631,7 @@ func main() {
 	mux.Handle("/api/connectors/", connectorTokenRoute)
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
-	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(middleware.WorkspaceGuard(db.Pool)(
+	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(workspaceGuard(
 		requireConsoleMFA(
 			middleware.RequireCapability(roleChecker, rbac.NetworkWrite)(
 				shieldSvc.TokenHandler(),
@@ -704,6 +712,20 @@ func main() {
 	mux.Handle("POST /provider/relays/{id}/pool", requireProvider(http.HandlerFunc(relayAdminHandler.MoveRelay)))
 	mux.Handle("PUT /provider/tenants/{id}/relay-pool", requireProvider(http.HandlerFunc(relayAdminHandler.AssignTenantPool)))
 
+	// Tenant suspend / resume (Sprint 23 S1, D-45). Super-admin only (D-06),
+	// reason + typed slug (D-17 extended), audited with before/after. After
+	// commit: sessions end, the ACL is pushed (deny-all while suspended) and
+	// the relay lists are published (empty while suspended).
+	tenantLifecycle := &tenantlifecycle.Handler{
+		Store:             tenantlifecycle.NewStore(db.Pool),
+		Authz:             providerAuthz,
+		ProviderStore:     providerStore,
+		Sessions:          authSvc,
+		Policy:            policyNotifier,
+		PublishRelayLists: publishRelayList,
+	}
+	mux.Handle("POST /provider/tenants/{id}/suspend", requireProvider(http.HandlerFunc(tenantLifecycle.Suspend)))
+	mux.Handle("POST /provider/tenants/{id}/resume", requireProvider(http.HandlerFunc(tenantLifecycle.Resume)))
 	// Plans (Sprint 23 B1, D-43): super-admin only, audited. New workspaces
 	// get the current default plan from a database trigger (migration 062).
 	planHandler := &plans.Handler{Store: plans.NewStore(db.Pool), Authz: providerAuthz, ProviderStore: providerStore}
@@ -716,6 +738,13 @@ func main() {
 	// reason required, audited with before/after.
 	quotaAdmin := &quotaadmin.Handler{Pool: db.Pool, Authz: providerAuthz, ProviderStore: providerStore}
 	mux.Handle("PUT /provider/tenants/{id}/quotas/{key}", requireProvider(http.HandlerFunc(quotaAdmin.Set)))
+
+	// Tenant creation (Sprint 23 S2, D-44): super-admin only, audited; the
+	// same workspace bootstrap as self-signup plus a first-admin invitation.
+	tenantCreateHandler := &tenantcreate.Handler{Creator: bootstrapSvc, Authz: providerAuthz, ProviderStore: providerStore, Sender: inviteEmailer}
+	mux.Handle("POST /provider/tenants", requireProvider(http.HandlerFunc(tenantCreateHandler.Create)))
+	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProvider(http.HandlerFunc(tenantCreateHandler.Reinvite)))
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)

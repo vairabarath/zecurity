@@ -1,15 +1,20 @@
-import { useCallback } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { useCallback, useState } from 'react'
+import { Plus, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { listTenants } from '@/api/reads'
-import { TENANT_STATUSES, type AgentCounts, type Page, type TenantStatus, type TenantSummary } from '@/api/types'
+import { TENANT_STATUSES, type AgentCounts, type CreateTenantResponse, type Page, type TenantStatus, type TenantSummary } from '@/api/types'
+import { hasRole } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
+import { CreateTenantDialog } from '@/components/CreateTenantDialog'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { StatusBadge } from '@/components/StatusBadge'
+import { SuspendedBadge } from '@/components/TenantSuspension'
 import { TenantAvatar } from '@/components/TenantAvatar'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -20,6 +25,10 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // not audited; opening a tenant's detail is (OQ-1), so rows link to detail
 // only through an ordinary click: no prefetch, no hover requests.
 // Users appear only as counts (OQ-2).
+// Sprint 23 S2 (D-44): super-admins create a tenant here (Create tenant); the
+// controller decides, hiding the button is UX only.
+
+const SUPER_ADMIN = ['super-admin'] as const
 
 const FILTER_KEYS = ['status'] as const
 const ALL = 'all' // chip value for "no status filter" (every status except deleted)
@@ -54,6 +63,9 @@ const STATUS_OPTIONS = [
 export function Tenants() {
   const q = usePagedQuery<Page<TenantSummary>>({ filterKeys: FILTER_KEYS, validate: validStatus, fetchPage: fetchTenants })
   const onStatus = useCallback((v: string) => q.setFilters(v === ALL ? {} : { status: v }), [q])
+  const canCreate = hasRole(useSessionStore((s) => s.me?.role), SUPER_ADMIN)
+  const [creating, setCreating] = useState(false)
+  const [created, setCreated] = useState<CreateTenantResponse | null>(null)
 
   return (
     <div className="flex flex-col gap-6">
@@ -61,12 +73,40 @@ export function Tenants() {
         title="Tenants"
         description="Every workspace and its footprint, as counts. The list isn't audited; opening a tenant is."
         actions={
-          <Button variant="outline" onClick={q.retry} aria-label="Refresh tenants">
-            <RefreshCw aria-hidden />
-            Refresh
-          </Button>
+          <>
+            <Button variant="outline" onClick={q.retry} aria-label="Refresh tenants">
+              <RefreshCw aria-hidden />
+              Refresh
+            </Button>
+            {canCreate && (
+              <Button onClick={() => setCreating(true)}>
+                <Plus aria-hidden />
+                Create tenant
+              </Button>
+            )}
+          </>
         }
       />
+
+      {created && (
+        <Alert role="status">
+          <AlertDescription>
+            Created <Link to={`/tenants/${encodeURIComponent(created.id)}`} className="font-medium text-foreground underline">{created.name}</Link> on
+            the {created.plan_name} plan. An invitation was sent to {created.invitation.email}; it can be used once, until{' '}
+            {new Date(created.invitation.expires_at).toLocaleString()}.
+          </AlertDescription>
+        </Alert>
+      )}
+      {canCreate && creating && (
+        <CreateTenantDialog
+          onCancel={() => setCreating(false)}
+          onDone={(t) => {
+            setCreating(false)
+            setCreated(t)
+            q.retry()
+          }}
+        />
+      )}
 
       <FilterChips label="Status filter" options={STATUS_OPTIONS} value={q.filters.status ?? ALL} onChange={onStatus} />
 
@@ -114,7 +154,11 @@ export function Tenants() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <StatusBadge status={t.status} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusBadge status={t.status} />
+                        {/* Sprint 23 S1 (D-45): status stays "active" while suspended. */}
+                        {t.suspension && <SuspendedBadge />}
+                      </div>
                     </TableCell>
                     <TableCell className="min-w-28 max-w-36 text-[13px] leading-snug text-subtle-foreground">
                       <WrappingSummary counts={t.counts.connectors} />

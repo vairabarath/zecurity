@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { apolloClient } from '@/apollo/client'
 import { MeDocument, type MeQuery } from '@/generated/graphql'
+import { isSuspendedRefresh, SUSPENDED_LOGIN_PATH } from '@/lib/suspension'
 
 // useRequireAuth guards protected routes.
 //
@@ -60,8 +61,9 @@ export function useRequireAuth() {
           },
         })
         if (!resp.ok) {
+          const suspended = await isSuspendedRefresh(resp)
           if (cancelled) return
-          navigate('/login', { replace: true })
+          navigate(suspended ? SUSPENDED_LOGIN_PATH : '/login', { replace: true })
           return
         }
         const data = await resp.json()

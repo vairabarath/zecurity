@@ -5,9 +5,11 @@ import { getTenant } from '@/api/reads'
 import type { TenantDetail as TenantDetailDTO } from '@/api/types'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
+import { TenantFirstAdminSection } from '@/components/TenantFirstAdmin'
 import { TenantPlanSection } from '@/components/TenantPlan'
 import { TenantQuotasSection } from '@/components/TenantQuotas'
 import { TenantRelayPoolSection } from '@/components/TenantRelayPool'
+import { SuspendedBadge, TenantSuspensionSection } from '@/components/TenantSuspension'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TenantAvatar } from '@/components/TenantAvatar'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -32,8 +34,9 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 // Infrastructure only (OQ-2): no tenant users or identities exist in this
 // response; users are counts by status.
 //
-// The one write is Change pool (D-41, super-admin): after it succeeds the
-// page reloads once (one more tenant.read audit row), like a Refresh.
+// The writes are Change pool (D-41) and Suspend / Resume (Sprint 23 S1,
+// D-45), all super-admin: after one succeeds the page reloads once (one more
+// tenant.read audit row), like a Refresh.
 
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
@@ -176,6 +179,7 @@ function TenantView({
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="font-display text-[26px] font-semibold tracking-[-0.02em]">{t.name}</h1>
               <StatusBadge status={t.status} />
+              {t.suspension && <SuspendedBadge />}
             </div>
             <p className="flex flex-wrap gap-x-2 text-sm text-subtle-foreground">
               <span className="font-mono">{t.slug}</span>
@@ -226,6 +230,10 @@ function TenantView({
           {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks
         </CountTile>
       </section>
+
+      <TenantSuspensionSection tenant={t} onDone={onActionDone} />
+
+      <TenantFirstAdminSection tenant={t} onDone={onActionDone} />
 
       <TenantPlanSection tenant={t} onDone={onActionDone} />
 

@@ -113,6 +113,9 @@ export const ErrorCode = {
   unknownKey: 'unknown_key',
   invalidLimit: 'invalid_limit',
   limitRequired: 'limit_required',
+  // tenant suspend/resume (Sprint 23 S1, D-45)
+  alreadySuspended: 'already_suspended',
+  notSuspended: 'not_suspended',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -435,6 +438,18 @@ export interface TenantSummary {
   created_at: string
   ca_not_after: string | null
   counts: TenantCounts
+  /**
+   * The provider suspension (Sprint 23 S1, D-45), or null. `status` stays
+   * "active" while a tenant is suspended; this is what says it is.
+   */
+  suspension: TenantSuspension | null
+}
+
+/** A tenant's provider suspension: when, by which operator (email), why. */
+export interface TenantSuspension {
+  suspended_at: string
+  by: string
+  reason: string
 }
 
 export interface TenantRemoteNetwork {
@@ -481,6 +496,11 @@ export interface TenantDetail extends TenantSummary {
   plan: TenantPlan
   /** Limit and usage per quota key (Sprint 23 S3, D-47), in display order. */
   quotas: TenantQuota[]
+  /**
+   * The provider-issued first-admin invitation while its seat is unclaimed
+   * (Sprint 23 S2, D-44); null once an admin signed in. No email, no token.
+   */
+  first_admin_invitation: TenantFirstAdminInvitation | null
 }
 
 /** Where a tenant's limit for a key comes from (D-47). */
@@ -496,6 +516,17 @@ export interface TenantQuota {
   source: QuotaSource
   used: number
   over: boolean
+}
+
+export interface TenantFirstAdminInvitation {
+  status: 'pending' | 'expired'
+  expires_at: string
+}
+
+/** POST /provider/tenants/{id}/first-admin-invitation. No token, ever. */
+export interface ReinviteResponse {
+  tenant_id: string
+  invitation: { id: string; email: string; expires_at: string }
 }
 
 // ── plans (Sprint 23 B1, D-43; quota keys of D-47) ─────────────────────────────
@@ -527,6 +558,17 @@ export interface CreatePlanResponse {
   description: string
   limits: PlanLimits
   is_default: boolean
+}
+
+/** POST /provider/tenants (Sprint 23 S2). No invitation token, ever. */
+export interface CreateTenantResponse {
+  id: string
+  slug: string
+  name: string
+  trust_domain: string
+  plan_id: string
+  plan_name: string
+  invitation: { id: string; email: string; expires_at: string }
 }
 
 /** The plan section of GET /provider/tenants/{id}. */

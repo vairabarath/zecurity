@@ -3860,6 +3860,52 @@ serves on `127.0.0.1:9102`.
   - the README has a new scorecard and an "Open follow-ups" table;
   - the moved PENDING-21's links were updated.
 
+## 2026-11-17 — Sprint 23 S1: tenant suspend / resume (Sathiya, Claude Code)
+
+**What was done:**
+- Built S1 (F7 suspend/resume, D-45) on the local branch `feat/s1-tenant-suspension`, from `main` 7ed6faec. Sathiya chose to start before the Sprint 23 documents were signed off. Nothing is committed: commit, push, PR and merge need Barath's go.
+- Migration `064_tenant_suspension.sql`; `internal/tenantstate` (the one eligibility check); `internal/tenantlifecycle` (provider suspend/resume API); the refused paths, deny-all ACL, empty relay lists and residency allowlist removal; provider console Suspension section; admin UI and client messages. Details are in the S1 "Implementation status" in the phase file.
+- Gates green; 18 mutation checks caught.
+
+**Key decisions:**
+- Session revocation uses the existing mechanisms: a generation bump in the suspend transaction, then `InvalidateUserSessions` after commit. That also revokes the users' client devices (PENDING-09 C-1), so users enroll a new device after resume.
+- `TenantEligibilityGuard` refuses reads as well as mutations (the admin sessions are revoked anyway).
+- `PlacementAllowed` is not changed for a suspended tenant: it would write misleading D-40 `relay.placement_rejected` audit rows, and the empty relay list already removes the connectors from relays.
+
+- Committed and pushed to `feat/s1-tenant-suspension` on Sathiya's explicit instruction, without a recorded go from Barath (the Sprint 23 rule asks for one). No PR opened.
+
+**What's next:**
+- Barath: review the pushed branch. It needs a rebase on `main` (B1 #222 touched `tenants.go`, `authz.go`, `TenantDetail.tsx`, `api-surface.test.ts`, `types.ts`) before a PR (`[schema: reset DB]`).
+- Decide whether SCIM provisioning is refused while suspended.
+- Reset the local DB and run the S1 live check (`Pending-Live-Tests.md`).
+
+
+## 2026-11-18 — M1 (Sathiya): S2 provider tenant creation (handed over by Barath)
+
+**What was done:**
+- Branch `feat/s2-tenant-creation` from `main` (after B1 #222). Schema `067_tenant_first_admin_invite` (nullable invitation sender, `invitations.role`, DB rule: only a provider invitation grants admin).
+- `bootstrap.createWorkspaceTx` shared by self-signup and the new `CreateTenant` (no first user, single-use 7-day first-admin invitation). `POST /provider/tenants` (`internal/tenantcreate`, super-admin, reason, audited without the token). Console Create tenant dialog on the Tenants page.
+- First-admin invitation hardening: expiry and verified email checked at sign-in, consumed exactly once under a row lock; the accept endpoint and the client CLI refuse admin invitations.
+- Tests: 9 bootstrap DB tests (equivalence, slug race, email binding, concurrent single use, expiry, guards), 3 HTTP DB tests, client and authz unit tests, console tests; mutation checks all caught.
+
+**Key decisions:**
+- The user approved `067_` and the admin-only fixes; a first admin's email must not already belong to another workspace (recorded as a constraint).
+
+**What's next:**
+- Product owner's go for commit / push / PR (`[schema: reset DB]`); live check after reset DB. S3 (#224) then rebases onto S2 and adds the quota check to the first-admin path.
+
+## 2026-11-18 — M1 (Sathiya): S2 committed and live-checked
+
+**What was done:**
+- Committed S2 locally on `feat/s2-tenant-creation` (`35efd8b4`) at Sathiya's request (the sprint rule asks for the product owner's go; not pushed).
+- Live check on a reset DB in Orca's embedded browser: tenant creation, first-admin invitation (wrong email, unverified email, matching email, reuse, used link, expiry), API probes and a 6-way slug race. Then, as the new tenant admin: relay (archlinux), connector (luffy), shield + protected resource (omarchy), client on the dev box: access only through the tunnel. All PASS; no S2 defect.
+
+**Key decisions:**
+- First-admin sign-ins used a local test IdP registered as the tenant's connection (the Google invite button was not driven).
+
+**What's next:**
+- Barath's go to push and open the PR (`[schema: reset DB]`); then S3 (#224) merges main and adds the quota check to the first-admin path.
+
 ## 2026-11-17/18 — Sprint 23 S3: per-tenant quotas (Sathiya, Claude Code)
 
 **What was done:**
