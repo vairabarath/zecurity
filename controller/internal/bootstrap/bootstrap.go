@@ -14,6 +14,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // Service is the workspace-creating provisioner for the identity pipeline
@@ -325,8 +326,16 @@ func (s *Service) runInvitedUserTransaction(
 	}
 	defer tx.Rollback(ctx)
 
-	// S2 (D-44): consume the first-admin invitation FIRST, under its row
-	// lock. Only a pending, unexpired invitation for this email is taken; a
+	// Sprint 23 S1 (D-45): a suspended tenant gets no new members. Checked
+	// first, under a share lock, so a refused join writes nothing (no user,
+	// no identity link, invitation not consumed) and can't commit after a
+	// suspension it didn't see. The callback maps it to workspace_suspended.
+	if err := tenantstate.CheckForShare(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+
+	// S2 (D-44): consume the first-admin invitation before any write,
+	// under its row lock. Only a pending, unexpired invitation for this email is taken; a
 	// concurrent sign-in blocks here, then finds it accepted and is refused,
 	// so the invitation grants admin exactly once.
 	var firstAdminInvitationID string

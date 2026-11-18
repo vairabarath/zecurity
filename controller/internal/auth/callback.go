@@ -9,6 +9,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // CallbackHandler handles GET /auth/callback (registered public in main.go).
@@ -128,15 +129,23 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 					Details:    map[string]any{"client": false, "reason": SignInFailedReasonNotPermitted},
 				})
 			}
-			// The IdP proved who they are; this workspace just has not granted
-			// them access. That is a distinct, actionable outcome for the user —
-			// not a generic auth failure.
+			// Sprint 23 S1 (D-45): an invited join into a suspended tenant
+			// is refused inside the provisioning transaction, before
+			// anything is written.
+			if tenantstate.IsSuspended(err) {
+				log.Printf("auth callback: invited join refused: workspace is suspended")
+				fail("workspace_suspended")
+				return
+			}
 			// S2 (D-44): a first-admin invitation that expired or was
 			// replaced; the provider must send a new one.
 			if errors.Is(err, identity.ErrInvitationExpired) {
 				fail("invitation_expired")
 				return
 			}
+			// The IdP proved who they are; this workspace just has not granted
+			// them access. That is a distinct, actionable outcome for the user —
+			// not a generic auth failure.
 			if errors.Is(err, identity.ErrNotInvited) {
 				fail("not_invited")
 				return
@@ -145,6 +154,21 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			return
 		}
 		core := principal.Core
+
+		// Sprint 23 S1 (D-45): a tenant suspended by the provider can't sign
+		// in. A lookup error refuses too (fail closed). Checked after the
+		// identity pipeline, so the workspace is known; nothing is issued.
+		if s.cfg.Pool != nil {
+			if err := tenantstate.Check(ctx, s.cfg.Pool, core.TenantID); err != nil {
+				if tenantstate.IsSuspended(err) {
+					log.Printf("auth callback: workspace %s is suspended: sign-in refused", core.TenantID)
+					fail("workspace_suspended")
+					return
+				}
+				failErr("server_error", conn.ID, err)
+				return
+			}
+		}
 
 		// Steps 8–9 — start a new login session: refresh token (httpOnly
 		// cookie) plus an access JWT stamped with the identity generation and

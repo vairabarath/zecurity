@@ -17,7 +17,9 @@ import * as tenantsApi from './tenants'
 // the audit export reuses GET /provider/audit). Relay pools (D-41 amends D-30) add pool
 // create/rename/region-residency/delete, moving a relay between pools and a
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
-// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Tenant creation (Sprint 23 S2, D-44) adds POST /provider/tenants and the first-admin re-invite. Every exported API function is called here; a new write must be
+// update / delete / set default and a tenant's plan assignment, plus the two plan reads. Sprint 23 S1 (D-45
+// amends D-30) adds tenant suspend and resume; S2 (D-44) adds POST /provider/tenants and the first-admin
+// re-invite. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -43,6 +45,8 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/revoke',
   'POST /provider/tenants',
   'POST /provider/tenants/{id}/first-admin-invitation',
+  'POST /provider/tenants/{id}/resume',
+  'POST /provider/tenants/{id}/suspend',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
@@ -121,6 +125,8 @@ describe('API surface', () => {
       [`PATCH /provider/relay-pools/${ID}`]: { status: 204 },
       [`DELETE /provider/relay-pools/${ID}`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/relay-pool`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/suspend`]: { status: 204 },
+      [`POST /provider/tenants/${ID}/resume`]: { status: 204 },
       'GET /provider/plans': { status: 200, body: { items: [] } },
       [`GET /provider/plans/${ID}`]: { status: 200, body: {} },
       'POST /provider/plans': { status: 201, body: { id: ID, name: 'a', description: '', limits: {}, is_default: false } },

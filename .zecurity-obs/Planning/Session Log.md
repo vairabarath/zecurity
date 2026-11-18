@@ -3860,6 +3860,26 @@ serves on `127.0.0.1:9102`.
   - the README has a new scorecard and an "Open follow-ups" table;
   - the moved PENDING-21's links were updated.
 
+## 2026-11-17 — Sprint 23 S1: tenant suspend / resume (Sathiya, Claude Code)
+
+**What was done:**
+- Built S1 (F7 suspend/resume, D-45) on the local branch `feat/s1-tenant-suspension`, from `main` 7ed6faec. Sathiya chose to start before the Sprint 23 documents were signed off. Nothing is committed: commit, push, PR and merge need Barath's go.
+- Migration `064_tenant_suspension.sql`; `internal/tenantstate` (the one eligibility check); `internal/tenantlifecycle` (provider suspend/resume API); the refused paths, deny-all ACL, empty relay lists and residency allowlist removal; provider console Suspension section; admin UI and client messages. Details are in the S1 "Implementation status" in the phase file.
+- Gates green; 18 mutation checks caught.
+
+**Key decisions:**
+- Session revocation uses the existing mechanisms: a generation bump in the suspend transaction, then `InvalidateUserSessions` after commit. That also revokes the users' client devices (PENDING-09 C-1), so users enroll a new device after resume.
+- `TenantEligibilityGuard` refuses reads as well as mutations (the admin sessions are revoked anyway).
+- `PlacementAllowed` is not changed for a suspended tenant: it would write misleading D-40 `relay.placement_rejected` audit rows, and the empty relay list already removes the connectors from relays.
+
+- Committed and pushed to `feat/s1-tenant-suspension` on Sathiya's explicit instruction, without a recorded go from Barath (the Sprint 23 rule asks for one). No PR opened.
+
+**What's next:**
+- Barath: review the pushed branch. It needs a rebase on `main` (B1 #222 touched `tenants.go`, `authz.go`, `TenantDetail.tsx`, `api-surface.test.ts`, `types.ts`) before a PR (`[schema: reset DB]`).
+- Decide whether SCIM provisioning is refused while suspended.
+- Reset the local DB and run the S1 live check (`Pending-Live-Tests.md`).
+
+
 ## 2026-11-18 — M1 (Sathiya): S2 provider tenant creation (handed over by Barath)
 
 **What was done:**

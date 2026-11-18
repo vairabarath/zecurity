@@ -351,6 +351,11 @@ PASS.
 
 **Test:** `TestReissue_RefusedAfterSeatWasClaimed` (the admin signed in, was deleted, then re-issue is refused); the self-signup refusal was already tested. Mutation caught.
 
+### Merge with S1 (2026-11-18, after #223)
+- The invited join checks suspension (S1, share lock) **before** consuming the first-admin invitation. A suspended provider-created tenant's first admin is refused with `workspace_suspended`, and the invitation stays pending.
+- `ReissueFirstAdminInvitation` refuses while the tenant is suspended (`tenant_not_active`). Suspension keeps `status='active'` (D-34), so the status check alone didn't catch it.
+- Test: `TestFirstAdmin_SuspendedTenant` (mutation caught).
+
 **Security review note (automated, 2026-11-18, "ambiguous name matching"): acknowledged, no change.**
 - The hint only orders the pending, unexpired invitations of the Google-verified email that is signing in, so it can't reach an invitation that person doesn't already hold.
 - It is the signer's own choice, stored server-side with the sign-in state.

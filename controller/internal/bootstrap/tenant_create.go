@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // Provider tenant creation (Sprint 23 S2, F7, D-44). A super-admin creates a
@@ -253,6 +254,14 @@ func (s *Service) ReissueFirstAdminInvitation(ctx context.Context, workspaceID, 
 	}
 	if status != "active" {
 		return nil, ErrTenantNotActive
+	}
+	// S1 (D-45): no new admin invitation while the provider has the tenant
+	// suspended (suspension keeps status 'active', D-34).
+	if err := tenantstate.Check(ctx, tx, workspaceID); err != nil {
+		if tenantstate.IsSuspended(err) {
+			return nil, ErrTenantNotActive
+		}
+		return nil, err
 	}
 
 	err = tx.QueryRow(ctx,

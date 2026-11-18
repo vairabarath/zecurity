@@ -55,6 +55,10 @@ const CALLBACK_ERRORS: Record<string, string> = {
   token_issue_failed: 'Signed in, but no session could be issued. Please try again.',
   refresh_issue_failed: 'Signed in, but the session could not be persisted. Please try again.',
   server_error: 'The server could not complete sign-in. Please try again shortly.',
+  // Sprint 23 S1 (D-45): refused sign-in, refresh or request of a workspace
+  // suspended by the provider (see lib/suspension.ts).
+  workspace_suspended:
+    'This workspace is suspended by the provider. Sign-in is unavailable until it is resumed; contact your provider.',
 }
 
 const callbackErrorMessage = (reason: string | null): string | null => {

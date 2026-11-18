@@ -17,6 +17,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 const (
@@ -660,5 +661,33 @@ func TestReissue_RefusedAfterSeatWasClaimed(t *testing.T) {
 	}
 	if n := e.scalar(t, `SELECT count(*)::text FROM invitations WHERE workspace_id = $1 AND status = 'pending'`, ct.WorkspaceID); n != "0" {
 		t.Fatalf("pending invitations = %s, want 0", n)
+	}
+}
+
+// S1 x S2: while the provider has the tenant suspended, the first admin
+// can't take the seat (refused before any write) and no new invitation is
+// issued; after resume both work.
+func TestFirstAdmin_SuspendedTenant(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	ct := e.create(t, "acme", "first@acme.test", nil)
+	if _, err := e.pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NOW(), suspended_by = 'op', suspension_reason = 'r' WHERE id = $1`, ct.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.signIn("first@acme.test", "first", true); !tenantstate.IsSuspended(err) {
+		t.Fatalf("first admin while suspended: err = %v, want ErrSuspended", err)
+	}
+	if _, err := e.svc.ReissueFirstAdminInvitation(ctx, ct.WorkspaceID, "", nil); !errors.Is(err, bootstrap.ErrTenantNotActive) {
+		t.Fatalf("re-issue while suspended: err = %v, want ErrTenantNotActive", err)
+	}
+	if got := e.scalar(t, `SELECT (SELECT count(*) FROM users WHERE tenant_id = $1)::text || '|' ||
+		(SELECT string_agg(status, ',') FROM invitations WHERE workspace_id = $1)`, ct.WorkspaceID); got != "0|pending" {
+		t.Fatalf("users|invitations while suspended = %s, want 0|pending", got)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, ct.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := e.signIn("first@acme.test", "first", true); err != nil || p.TenantID != ct.WorkspaceID || p.Role != "admin" {
+		t.Fatalf("first admin after resume: %+v %v", p, err)
 	}
 }

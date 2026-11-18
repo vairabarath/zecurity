@@ -6,6 +6,7 @@ import { useAuthStore } from '@/store/auth'
 import { handleCapabilityRefusal, isCapabilityRefusal } from './refusal'
 import { mfaRequiredKind } from '@/lib/mfa'
 import { requestMfa } from '@/store/mfaPrompt'
+import { isSuspendedRefresh, isTenantSuspendedError, SUSPENDED_LOGIN_PATH } from '@/lib/suspension'
 
 // refreshAccessToken calls POST /auth/refresh.
 // The browser automatically sends the httpOnly cookie (same-origin).
@@ -43,9 +44,11 @@ async function refreshAccessToken(): Promise<string | null> {
     })
 
     if (!resp.ok) {
-      // Refresh failed — session is dead, redirect to login
+      // Refresh failed — session is dead, redirect to login (with the
+      // suspended message when the provider suspended the workspace).
+      const suspended = await isSuspendedRefresh(resp)
       store.clearAuth()
-      window.location.href = '/login'
+      window.location.href = suspended ? SUSPENDED_LOGIN_PATH : '/login'
       return null
     }
 
@@ -129,6 +132,13 @@ export const errorLink = new ErrorLink(({ error, operation, forward }: {
   operation: ApolloLink.Operation
   forward: ApolloLink.ForwardFunction
 }) => {
+  // Sprint 23 S1 (D-45): the provider suspended the workspace. The session
+  // is over: no retry, no refresh; the login page says why.
+  if (isTenantSuspendedError(error)) {
+    useAuthStore.getState().clearAuth()
+    window.location.href = SUSPENDED_LOGIN_PATH
+    return
+  }
   if (isCapabilityRefusal(error)) {
     void handleCapabilityRefusal()
     return

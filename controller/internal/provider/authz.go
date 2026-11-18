@@ -52,6 +52,10 @@ const (
 	// a residency tenant's connector reported a relay outside its pools.
 	ActionRelayPlacementRejected = "relay.placement_rejected"
 
+	// Tenant lifecycle (Sprint 23 S1, D-45): suspend and resume a tenant.
+	// tenant.* is super-admin only (D-06); decide() denies it to relay-ops.
+	ActionTenantSuspend = "tenant.suspend"
+	ActionTenantResume  = "tenant.resume"
 	// Plans (Sprint 23 B1, D-43). Plans are commercial/tenant data: not
 	// under relay.*, so decide() keeps them super-admin only (D-06), and
 	// assigning a tenant's plan is a tenant.* action.
@@ -163,6 +167,17 @@ func (a *Authz) CanMoveRelay(actor Actor, target Target) error {
 // (super-admin only: tenant.*, D-06, D-41).
 func (a *Authz) CanAssignTenantRelayPool(actor Actor, target Target) error {
 	return decide(actor, ActionTenantRelayPoolAssign, target)
+}
+
+// CanSuspendTenant gates POST /provider/tenants/{id}/suspend (super-admin
+// only: tenant.*, D-06, D-45).
+func (a *Authz) CanSuspendTenant(actor Actor, target Target) error {
+	return decide(actor, ActionTenantSuspend, target)
+}
+
+// CanResumeTenant gates POST /provider/tenants/{id}/resume (super-admin only).
+func (a *Authz) CanResumeTenant(actor Actor, target Target) error {
+	return decide(actor, ActionTenantResume, target)
 }
 
 // CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
