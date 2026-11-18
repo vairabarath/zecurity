@@ -12,7 +12,7 @@ status: signed off 2026-11-17; ready for implementation
 
 Read `Sprint23/path.md` first (order, conflict zones, rules). Binding decisions: Decision Record amendment **2026-11-17** — **D-43** (B1), **D-42** (B2), **D-44** (S2); D-06, D-17 (extended), D-30 and D-31 (amended) apply.
 
-Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read plans.
+Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read plans. **S2 was handed to Sathiya on 2026-11-18** and merged in #225; its record stays below.
 
 ---
 

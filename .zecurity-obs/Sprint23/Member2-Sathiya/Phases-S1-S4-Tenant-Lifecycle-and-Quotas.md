@@ -21,7 +21,7 @@ Read `Sprint23/path.md` first (order, conflict zones, rules). Binding decisions:
 - **D-17:** a reason plus the typed slug, now extended to tenants.
 - **D-34:** the protected predicates stay unchanged.
 
-Order: **S1 → S3** (after Barath's **B1** is merged) **→ S4** (after S1). S2 (tenant creation) is Barath's.
+Order: **S1 → S3** (after Barath's **B1** is merged) **→ S4** (after S1). S2 (tenant creation) was handed over by Barath on 2026-11-18 and built by Sathiya (merged #225); its record is in Barath's phase file, S2 section.
 
 ---
 
@@ -181,7 +181,7 @@ Then resume: traffic returns with no re-enrollment.
 - **Authz and audit** with before/after.
 
 ### Implementation status (2026-11-18)
-Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged). **Not committed**: commit, push, PR and merge wait for the product owner's go. S2 merges first; then S3 rebases and adds the check to S2's first-admin invitation. Live check not run yet.
+Built on `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged); merged in **#224** (2026-11-18) after S1 (#223) and S2 (#225), with the check added to S2's first-admin invitation (see "Merge with S1 and S2" below). Live check not run yet.
 - **Schema** `065_tenant_quotas.sql`: `workspace_quota_overrides (workspace_id, key, limit_value, reason, set_by, set_at)`. The column is `limit_value` because `LIMIT` is a reserved word. A NULL limit is explicitly unlimited; no row means the plan's value.
 - **`internal/quota`** (pgx only, so `providerquery` can use it, D-04) is the one definition:
   - `Effective`: plan values overlaid with the overrides; a missing key fails closed. `plans.EffectiveLimits` delegates to it, and `plans.Keys` aliases `quota.Keys`.
