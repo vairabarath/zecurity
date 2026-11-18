@@ -5,8 +5,8 @@ title: Provider Dashboard — remaining Must-have features (F5, F7, F8, F12)
 status: decided and signed off (2026-11-17); implementation in progress
 created: 2026-11-17
 team:
-  - Person 1 = Barath (M2): F8 plans (B1), F5 headroom (B2), F7 tenant creation (S2)
-  - Person 2 = Sathiya (M1): F7 suspend/resume (S1), F12 quotas (S3), F7 deletion (S4)
+  - Person 1 = Barath (M2): F8 plans (B1), F5 headroom (B2)
+  - Person 2 = Sathiya (M1): F7 suspend/resume (S1), F7 tenant creation (S2, handed over 2026-11-18), F12 quotas (S3), F7 deletion (S4)
 baseline: main 562c97e1 (relay pools F4/F9/F10/F11 done; Must have 14 / 18)
 ---
 
@@ -20,7 +20,7 @@ Finish the provider dashboard **Must-have** list (Phase 1, F1–F18). Four featu
 |---|---|---|
 | **F5** Capacity view — sessions, bandwidth, **headroom** | ◐ sessions and bandwidth done (PR #193) | **B2** (Barath) |
 | **F8** Tenant detail — counts, **plan** | ◐ counts done (Sprint 21, PR #190) | **B1** (Barath) |
-| **F7** Tenant **create / suspend / delete** | ⬜ | **S2** create (Barath), **S1** suspend/resume and **S4** delete (Sathiya) |
+| **F7** Tenant **create / suspend / delete** | ⬜ | **S2** create, **S1** suspend/resume and **S4** delete (Sathiya; S2 handed over by Barath) |
 | **F12** Per-tenant **quotas** | ⬜ | **S3** (Sathiya) |
 
 When all four are merged **and** live-checked, the Must-have list is complete (18 / 18).
@@ -62,8 +62,8 @@ A suspended tenant's counts are unchanged.
 
 ## Team assignments
 
-**Person 1 — Barath (M2):** B1 plans → B2 headroom → S2 tenant creation. Phase file: `Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md` (also holds S2).
-**Person 2 — Sathiya (M1):** S1 suspend/resume → S3 quotas → S4 deletion. Phase file: `Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md`.
+**Person 1 — Barath (M2):** B1 plans → B2 headroom. Phase file: `Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md` (also holds the S2 record).
+**Person 2 — Sathiya (M1):** S1 suspend/resume → S2 tenant creation → S3 quotas → S4 deletion. Phase file: `Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md`.
 
 **2026-11-18:** Barath handed **S2** to Sathiya (branch `feat/s2-tenant-creation`; record in Barath's phase file, S2 section). It still merges before S3; migration `067_tenant_first_admin_invite` is used.
 
@@ -75,16 +75,16 @@ Both: review each other's PRs; the sprint acceptance run (live, on a reset lab D
 |---|---|---|---|---|
 | **B1** Plans | Barath | F8 | D-43 | `062_tenant_plans.sql` |
 | **B2** Relay link capacity + headroom | Barath | F5 | D-42 | `063_relay_link_capacity.sql` |
-| **S2** Provider tenant creation | Barath | F7 | D-44, **B1 merged** | `067_` reserved (only if the first-admin invitation needs a role column) |
+| **S2** Provider tenant creation | Sathiya (handed over by Barath) | F7 | D-44, **B1 merged** | `067_tenant_first_admin_invite.sql` |
 | **S1** Suspend / resume | Sathiya | F7 | D-45 | `064_tenant_suspension.sql` |
 | **S3** Quotas | Sathiya | F12 | D-47, **B1 merged** | `065_tenant_quotas.sql` |
 | **S4** Delete: schedule, cancel, purge | Sathiya | F7 | D-46, **S1 merged** | `066_tenant_deletion.sql` |
 
 ```
-Barath:  B1 (plans) ──► B2 (headroom) ──► S2 (create)
-           │                                 ▲
-           └──── B1 merged ────► S3 (quotas) │  (S2 and S3 share user-creation files: merge S2 first)
-Sathiya: S1 (suspend) ───────────► S3 ──────► S4 (delete, needs S1)
+Barath:  B1 (plans) ──► B2 (headroom)
+           │
+           └──── B1 merged ────► S2 (create) ──► S3 (quotas)   (S2 and S3 share user-creation files: S2 merged first)
+Sathiya: S1 (suspend) ──► S2 ──► S3 ──► S4 (delete, needs S1)
 ```
 
 - **Critical path:** B1 lands first. Sathiya starts with S1 while B1 is in progress; **S2 and S3 don't start implementation before B1 is merged**.
@@ -170,11 +170,11 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 
 - [x] Phase 0: D-42 … D-47 decided and written into the Decision Record (2026-11-17)
 - [x] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — signed off by Barath 2026-11-17; implementation may start
-- [ ] B1 — Plans (Barath) — merged — live-checked
-- [ ] B2 — Relay link capacity + headroom (Barath) — merged — live-checked
-- [ ] S2 — Provider tenant creation (Barath) — merged — live-checked
-- [ ] S1 — Suspend / resume (Sathiya) — merged — live-checked
-- [ ] S3 — Quotas (Sathiya) — merged — live-checked
+- [ ] B1 — Plans (Barath) — merged (#222) — live-checked
+- [ ] B2 — Relay link capacity + headroom (Barath) — merged (#226) — live-checked
+- [ ] S2 — Provider tenant creation (Sathiya, handed over by Barath) — merged (#225) — live-checked
+- [ ] S1 — Suspend / resume (Sathiya) — merged (#223) — live-checked
+- [ ] S3 — Quotas (Sathiya) — merged (#224) — live-checked
 - [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — merged — live-checked
 - [ ] Sprint acceptance run (both); tracker 18 / 18
 

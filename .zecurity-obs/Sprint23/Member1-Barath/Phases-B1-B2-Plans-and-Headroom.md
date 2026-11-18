@@ -12,7 +12,7 @@ status: signed off 2026-11-17; ready for implementation
 
 Read `Sprint23/path.md` first (order, conflict zones, rules). Binding decisions: Decision Record amendment **2026-11-17** — **D-43** (B1), **D-42** (B2), **D-44** (S2); D-06, D-17 (extended), D-30 and D-31 (amended) apply.
 
-Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read plans.
+Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read plans. **S2 was handed to Sathiya on 2026-11-18** and merged in #225; its record stays below.
 
 ---
 
@@ -201,6 +201,7 @@ Order: **B1 → B2 → S2**. B1 lands first because S2 and Sathiya's S3 read pla
     - **mutation-checked**: counting one direction only fails both headroom tests.
   - Console: `capacity.test.ts` (5), `Headroom.test.tsx` (9), Overview near/over capacity.
 - **Gates (2026-11-18):** controller `go vet ./...` clean; full `go test ./...` **1,911 passed, 0 failed** (2 known skips); provider console **636** tests, lint and build clean.
+- **Merged (2026-11-18): PR #226** (`4e80c15c`), after main gained S1 (#223), S2 (#225) and S3 (#224). The merge of `main` into the branch (`1724dbac`) had two add/add conflicts, both sides kept: `authz.go` (`relay.capacity.set` beside `tenant.suspend`/`tenant.resume`) and the `api-surface.test.ts` header comment. Gates on the merged tree: **1,968 passed, 0 failed** (2 known skips); console **660** tests, lint and build clean; CI 8/8 green. Live check pending (reset DB).
 - **Live check:** pending (reset DB; set a capacity on a lab relay; push known traffic; headroom = capacity − both flows).
 
 ---

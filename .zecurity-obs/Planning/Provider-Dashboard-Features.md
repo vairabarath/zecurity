@@ -21,7 +21,7 @@ tags:
 
 **Progress:** Must have 14 / 18 done · Can have 3 / 22 done · **Total 17 / 40** (ticked = merged **and** live-checked)
 
-**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38) and 2026-11-17 (relay pools: F4, F9, F10, F11; [[Pending-Live-Tests]]). Nothing is waiting for a live check.
+**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38) and 2026-11-17 (relay pools: F4, F9, F10, F11; [[Pending-Live-Tests]]). **Waiting for a live check (Sprint 23, merged 2026-11-17/18):** B1 plans (#222), B2 headroom (#226), S1 suspend/resume (#223), S2 tenant creation (#225), S3 quotas (#224).
 
 ## Status snapshot (2026-11-12)
 
@@ -35,14 +35,14 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F2 | Relay certificates from the provider CA | ✅ Done | — |
 | F3 | Relay revoke and decommission | ✅ Done | — |
 | F4 | Relay list: status, version, region, heartbeat | ✅ Done | — (region via relay pools, PR #200; live PASS 2026-11-17) |
-| F5 | Capacity view: sessions, bandwidth, headroom | ◐ Partly | Bandwidth merged (PR #193) and live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197). Open: bandwidth *headroom* (a link-capacity ceiling): defer and tick, or build (Barath's call) |
+| F5 | Capacity view: sessions, bandwidth, headroom | 🧪 Merged | Bandwidth PR #193 (live PASS 2026-11-12). Headroom: Sprint 23 B2 (D-42), merged #226; live check pending |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
-| F7 | Tenant create / suspend / delete | ⬜ Not started | Needs a decision (D-34 epic) |
-| F8 | Tenant detail page | ◐ Partly | Policy counts merged (PR #190), live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197); **plan** needs billing (F34) |
+| F7 | Tenant create / suspend / delete | ◐ Partly | Sprint 23 (D-44 … D-46): create S2 #225 and suspend/resume S1 #223 merged, live check pending; delete (S4) not started |
+| F8 | Tenant detail page | 🧪 Merged | Policy counts PR #190 (live PASS 2026-11-12). Plan: Sprint 23 B1 (D-43, no billing), merged #222; live check pending |
 | F9 | Tenant → relay pool assignment | ✅ Done | — (PR #200; live PASS 2026-11-17) |
 | F10 | Region / residency constraint | ✅ Done | — (routing PR #200, relay-side enforcement PR #202, connector recovery fix PR #210; live PASS 2026-11-17) |
 | F11 | Failover pool per tenant | ✅ Done | — (PRs #201, #213, #215; live PASS 2026-11-17 run 2) |
-| F12 | Per-tenant quotas | ⬜ Not started | Needs a decision |
+| F12 | Per-tenant quotas | 🧪 Merged | Sprint 23 S3 (D-47, six keys), merged #224; live check pending |
 | F13 | Certificate inventory by expiry | ✅ Done | — |
 | F14 | Expiry alerting | ✅ Done | — (banner/filter; daily super-admin email D-36, PR #195; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
 | F15 | Revocation + CRL/OCSP status | ✅ Done | — (CRL-based by design, D-35; CRL status PR #190; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
@@ -254,3 +254,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-12: D-03 reopened and decided as D-37 … D-41 (tenant relay pools, controller-driven failover, region = routing, residency = relay-side enforcement). F4, F9, F10, F11, F30 unblocked; plan [[Relay-Pools-Implementation-Plan]] (PR 1 pools, PR 2 failover, PR 3 relay residency enforcement). F10 closes only after PR 3.
 - 2026-11-17: relay pools live run on the lab ([[Pending-Live-Tests]]): F4/F9 (PR #200) and F11 (PR #201) PASS; F10 (PR #202) failed at step 1 on a connector recovery defect (F10-1: a refused migration was never retried), fixed in PR #210 and retested live (recovered on its own, no restart). Ticked F4, F9, F10. F11 ◐: failover passed, but F11-1 (console/audit when both pools are down) is open; tick it with that fix. Progress 16 / 40 (Must have 13 / 18). Remaining Must-have items: F5 headroom, F7 (D-34), F8 plan, F12 quotas.
 - 2026-11-17: F11 completed: F11-1 (PR #213, "no relay path" display and audit) and F11-2 (PR #215, D-39 refinement: never held on an empty failover pool while the primary has an eligible relay) merged; full live re-run on a reset DB (`main` 883fed1c, migration 061) passed with traffic probes. Ticked F11. Progress 17 / 40 (Must have 14 / 18). Remaining Must-have items: F5 headroom, F7 (D-34), F8 plan, F12 quotas.
+- 2026-11-18: Sprint 23 merges: B1 plans #222 (F8), B2 headroom #226 (F5), S1 suspend/resume #223 and S2 tenant creation #225 (F7; S2 handed from Barath to Sathiya), S3 quotas #224 (F12). Snapshot rows set to 🧪 / ◐; nothing ticked until live-checked. S4 deletion remains.
