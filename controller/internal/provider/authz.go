@@ -56,6 +56,14 @@ const (
 	// tenant.* is super-admin only (D-06); decide() denies it to relay-ops.
 	ActionTenantSuspend = "tenant.suspend"
 	ActionTenantResume  = "tenant.resume"
+	// Tenant deletion (Sprint 23 S4, D-46): schedule, cancel and legal hold.
+	// tenant.* is super-admin only (D-06).
+	ActionTenantDelete       = "tenant.delete"
+	ActionTenantDeleteCancel = "tenant.delete.cancel"
+	ActionTenantLegalHoldSet = "tenant.legal_hold.set"
+	// ActionTenantPurged is the system-actor provider audit row a completed
+	// purge writes (not a permission).
+	ActionTenantPurged = "tenant.purged"
 	// Plans (Sprint 23 B1, D-43). Plans are commercial/tenant data: not
 	// under relay.*, so decide() keeps them super-admin only (D-06), and
 	// assigning a tenant's plan is a tenant.* action.
@@ -176,6 +184,21 @@ func (a *Authz) CanAssignTenantRelayPool(actor Actor, target Target) error {
 // only: tenant.*, D-06, D-45).
 func (a *Authz) CanSuspendTenant(actor Actor, target Target) error {
 	return decide(actor, ActionTenantSuspend, target)
+}
+
+// CanDeleteTenant gates POST /provider/tenants/{id}/delete (super-admin).
+func (a *Authz) CanDeleteTenant(actor Actor, target Target) error {
+	return decide(actor, ActionTenantDelete, target)
+}
+
+// CanCancelTenantDelete gates POST /provider/tenants/{id}/delete/cancel.
+func (a *Authz) CanCancelTenantDelete(actor Actor, target Target) error {
+	return decide(actor, ActionTenantDeleteCancel, target)
+}
+
+// CanSetTenantLegalHold gates PUT /provider/tenants/{id}/legal-hold.
+func (a *Authz) CanSetTenantLegalHold(actor Actor, target Target) error {
+	return decide(actor, ActionTenantLegalHoldSet, target)
 }
 
 // CanResumeTenant gates POST /provider/tenants/{id}/resume (super-admin only).

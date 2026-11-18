@@ -76,6 +76,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/telemetry"
 	"github.com/yourorg/ztna/controller/internal/tenantcreate"
+	"github.com/yourorg/ztna/controller/internal/tenantexport"
 	"github.com/yourorg/ztna/controller/internal/tenantlifecycle"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
@@ -723,9 +724,43 @@ func main() {
 		Sessions:          authSvc,
 		Policy:            policyNotifier,
 		PublishRelayLists: publishRelayList,
+		// S4 (D-46): grace (shortened only in development, for tests) and the
+		// emailed download link for the tenant's admins.
+		DeleteGrace: tenantDeleteGrace(),
+		Mailer:      inviteEmailer,
+		AppBaseURL:  envOr("APP_BASE_URL", "http://localhost:5173"),
 	}
 	mux.Handle("POST /provider/tenants/{id}/suspend", requireProvider(http.HandlerFunc(tenantLifecycle.Suspend)))
 	mux.Handle("POST /provider/tenants/{id}/resume", requireProvider(http.HandlerFunc(tenantLifecycle.Resume)))
+	// Tenant deletion (Sprint 23 S4, D-46): schedule (suspended tenants
+	// only, reason + typed slug), cancel, legal hold; super-admin only,
+	// audited with before/after.
+	mux.Handle("POST /provider/tenants/{id}/delete", requireProvider(http.HandlerFunc(tenantLifecycle.Delete)))
+	mux.Handle("POST /provider/tenants/{id}/delete/cancel", requireProvider(http.HandlerFunc(tenantLifecycle.CancelDelete)))
+	mux.Handle("PUT /provider/tenants/{id}/legal-hold", requireProvider(http.HandlerFunc(tenantLifecycle.LegalHold)))
+	// The purge job (D-46, single controller D-02): export (tenant S3 sink,
+	// else TENANT_PURGE_EXPORT_DIR) → revoke → tenant_purge (D-13) →
+	// tombstone; idempotent and resumable.
+	tenantPurger := &tenantlifecycle.Purger{
+		Pool:              db.Pool,
+		ProviderStore:     providerStore,
+		S3:                tenantlifecycle.AuditExportArchives{Store: auditExportStore},
+		HTTP:              auditexport.NewClient(auditExportOpts),
+		ExportDir:         envOr("TENANT_PURGE_EXPORT_DIR", ""),
+		Sessions:          authSvc,
+		Policy:            policyNotifier,
+		PublishRelayLists: publishRelayList,
+		Interval:          mustDuration("TENANT_PURGE_INTERVAL", tenantlifecycle.DefaultPurgeInterval),
+	}
+	if tenantPurger.ExportDir == "" {
+		log.Printf("tenant purge: TENANT_PURGE_EXPORT_DIR is unset; tenants without an S3 audit-export sink are not purged until it is set")
+	}
+	go tenantPurger.Run(ctx)
+	// A suspended tenant's own log download during the grace (2026-11-18
+	// design): token in the body, never the URL; no session.
+	tenantExport := &tenantexport.Handler{Pool: db.Pool}
+	mux.Handle("POST /api/tenant-export/info", http.HandlerFunc(tenantExport.Info))
+	mux.Handle("POST /api/tenant-export/download", http.HandlerFunc(tenantExport.Download))
 	// Plans (Sprint 23 B1, D-43): super-admin only, audited. New workspaces
 	// get the current default plan from a database trigger (migration 062).
 	planHandler := &plans.Handler{Store: plans.NewStore(db.Pool), Authz: providerAuthz, ProviderStore: providerStore}
@@ -1715,6 +1750,26 @@ func registerOutboxHandlers(reg *outbox.HandlerRegistry, pool *pgxpool.Pool, not
 // addresses are advertised to connectors and clients. Development labs only:
 // RELAY_DEV_ALLOW_PRIVATE_ADDR=true takes effect only with ENV=development;
 // anywhere else it is ignored with a warning.
+// tenantDeleteGrace is the deletion grace (D-10: 30 days). TENANT_DELETE_GRACE
+// shortens it for tests and live checks, and is honoured only with
+// ENV=development.
+func tenantDeleteGrace() time.Duration {
+	v := os.Getenv("TENANT_DELETE_GRACE")
+	if v == "" {
+		return tenantlifecycle.DefaultDeleteGrace
+	}
+	if os.Getenv("ENV") != "development" {
+		log.Printf("WARNING: TENANT_DELETE_GRACE ignored — only honoured with ENV=development")
+		return tenantlifecycle.DefaultDeleteGrace
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		log.Fatalf("TENANT_DELETE_GRACE=%q is not a duration", v)
+	}
+	log.Printf("DEV: tenant deletion grace is %s (TENANT_DELETE_GRACE, ENV=development)", d)
+	return d
+}
+
 func devAllowPrivateRelayAddrs() bool {
 	if os.Getenv("RELAY_DEV_ALLOW_PRIVATE_ADDR") != "true" {
 		return false

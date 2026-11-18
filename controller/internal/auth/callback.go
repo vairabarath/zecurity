@@ -10,6 +10,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/quota"
+	"github.com/yourorg/ztna/controller/internal/tenantexport"
 	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
@@ -168,6 +169,20 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		if s.cfg.Pool != nil {
 			if err := tenantstate.Check(ctx, s.cfg.Pool, core.TenantID); err != nil {
 				if tenantstate.IsSuspended(err) {
+					// Sprint 23 S4 (2026-11-18 design, amends D-45): an
+					// active admin of a suspended tenant with a scheduled
+					// deletion gets NO session, only a single-use
+					// download token for the tenant's own logs, and the
+					// export page. Anyone else is refused as before.
+					if core.Role == "admin" {
+						if tok, terr := tenantexport.IssueSigninToken(ctx, s.cfg.Pool, core.TenantID, core.UserID); terr == nil {
+							log.Printf("auth callback: workspace %s is suspended and scheduled for deletion: export-only sign-in for an admin", core.TenantID)
+							http.Redirect(w, r, s.cfg.AllowedOrigin+"/tenant-export#token="+tok.Token, http.StatusFound)
+							return
+						} else if !errors.Is(terr, tenantexport.ErrInvalidToken) {
+							log.Printf("auth callback: export-only sign-in for workspace %s: %v", core.TenantID, terr)
+						}
+					}
 					log.Printf("auth callback: workspace %s is suspended: sign-in refused", core.TenantID)
 					fail("workspace_suspended")
 					return

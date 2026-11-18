@@ -275,6 +275,22 @@ Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merg
 - **Backups:** data in DB backups persists until those backups expire. The backup retention and legal/security retention exceptions are an **ops/legal policy (open item)**; S4 only implements the legal hold.
 - **Provider console:** a Deletion section (schedule with typed slug, countdown, cancel, legal hold); `api-surface.test.ts`.
 
+### Design decisions (Sathiya, 2026-11-18) — proposed amendment to D-45 / D-46, product owner's confirmation pending
+- **The export is the tenant's own data and is tenant-private.**
+  - It contains the admin audit log (`audit_logs`), the access log (`connector_logs`), and certificate and revocation history (`connector_certificates`, `client_device_certificates`, `connector_revocations`, `shield_revocations`), packed as one archive (JSON lines plus a SHA-256 manifest).
+  - The provider console never shows its contents: no resource or network names, no who-accessed-what. The console shows deletion **status** only (scheduled, countdown, cancel, legal hold).
+- **Where the purge writes the export:** to the tenant's own S3 audit-export sink (PENDING-11) if one is configured and enabled; otherwise to `TENANT_PURGE_EXPORT_DIR` on the controller host. Destruction runs only after the written archive is read back and its hashes verified. With neither available the purge doesn't start; it retries and logs.
+- **The tenant downloads its logs during the 30-day grace window** (amends D-45's "no sign-in while suspended" for this one purpose), by two routes that share one download endpoint:
+  1. **Export-only sign-in.** An admin of a suspended tenant **with a scheduled deletion** who signs in gets **no session**. The callback issues a single-use, 15-minute download token and redirects to the admin UI page "Workspace suspended — download your logs until <date>". No other route, no device or agent change; `IssueSession` is not called.
+  2. **Emailed link.** When deletion is scheduled, every active tenant admin is emailed a link valid until the purge. The token is in the URL **fragment** (never sent to a server log); only its SHA-256 is stored; it is never logged, audited or returned by any API.
+
+  The download is a `POST` with the token in the body and is audited (tenant stream, no token).
+- **Purge steps** (one row in `tenant_purges`, each step idempotent and recorded):
+  1. `exported` (verified);
+  2. `revoked`: remaining connectors, shields and client devices marked revoked with revocation records; sessions ended; relay pool policy versions bumped;
+  3. `destroyed`: the D-13 `SECURITY DEFINER` function `tenant_purge(ws)` deletes outbox rows and the workspace (everything cascades, including the tenant `audit_logs`), refusing unless the export is verified, the grace has passed, the tenant is suspended and not on legal hold; `provider_audit_logs` is never touched (D-12);
+  4. `done`: tombstone plus a system-actor provider audit row.
+
 ### Tests
 - Delete is refused unless the tenant is suspended; cancel works within the grace; resume is refused while scheduled.
 - A legal hold pauses the purge.
