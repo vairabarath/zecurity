@@ -310,7 +310,19 @@ Barath handed S2 to Sathiya on 2026-11-18 (B2 not started). Built from `main` af
 
 **Related files:** `internal/identity/linker.go`, `internal/bootstrap/{bootstrap,tenant_create}.go`, `internal/auth/callback.go`, `internal/tenantcreate/handler.go`, `internal/provider/authz.go`, `internal/providerquery/tenants.go`, `cmd/server/main.go`, `admin/src/pages/Login.tsx`, `provider-console/src/{api/tenants.ts,api/types.ts,components/TenantFirstAdmin.tsx,pages/TenantDetail.tsx,lib/tenant-format.ts}`.
 
-**Still open from the same review (not fixed, by choice):** Google sign-in picks the first pending invitation by email with no ordering, so a pending member invitation elsewhere can win over the admin seat. The no-SMTP dev emailer prints the invite link with its token.
+### Fix: Google sign-in could pick the wrong pending invitation
+**Issue:** found in the same review. Platform (Google) login isn't scoped to a workspace. The invited-join lookup took `LIMIT 1` with no ordering, so an email with pending invitations in several workspaces joined an arbitrary one, and that first sign-in binds the identity to it for good (ADR-024). A first admin who also had a member invitation elsewhere could lose the admin seat.
+
+**Fix applied (`bootstrap.Provision`, platform branch):** a deterministic order:
+1. the workspace the person signed in for (`in.WorkspaceName`, which the invite link and the login page pass; matched on lower-cased name or slug);
+2. a provider first-admin seat;
+3. the oldest invitation (`invited_at`, then the workspace id).
+
+The enterprise branch is already scoped to one workspace and is unchanged.
+
+**Tests:** `TestPlatformInvitedJoin_ChoosesInvitationDeterministically`: with no hint, the seat wins over an older member invitation; with a hint naming the member workspace, that workspace wins; with two member invitations, the oldest wins. Mutation checks on each of the three keys are caught. Not live-checked: only Google reaches this branch (the local test login uses workspace connections).
+
+**Still open (not fixed, by choice):** the no-SMTP dev emailer prints the invite link with its token.
 
 ---
 

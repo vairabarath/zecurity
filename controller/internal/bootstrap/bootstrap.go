@@ -76,15 +76,26 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 			email, *in.ConnectionTenantID,
 		).Scan(&pendingWorkspaceID, &pendingRole, &firstAdmin)
 	} else {
+		// Platform login is not workspace-scoped, so the email may hold
+		// pending invitations in several workspaces, and this first sign-in
+		// binds the identity to exactly one of them (ADR-024). Choose
+		// deterministically (S2 post-phase fix): the workspace the person
+		// signed in for (the invite link and the login page pass its name),
+		// then a provider first-admin seat (it has no other way in), then
+		// the oldest invitation.
 		err = s.Pool.QueryRow(ctx,
 			`SELECT wm.workspace_id, wm.role, `+firstAdminInviteSQL+`
 			   FROM workspace_members wm
+			   JOIN workspaces w ON w.id = wm.workspace_id
 			  WHERE wm.email = $1
 			    AND wm.status = 'invited'
 			    AND wm.user_id IS NULL
 			    AND `+usableInviteSQL+`
+			  ORDER BY ($2 <> '' AND (lower(w.name) = $2 OR w.slug = $2)) DESC,
+			           `+firstAdminInviteSQL+` DESC,
+			           wm.invited_at, wm.workspace_id
 			  LIMIT 1`,
-			email,
+			email, strings.ToLower(strings.TrimSpace(in.WorkspaceName)),
 		).Scan(&pendingWorkspaceID, &pendingRole, &firstAdmin)
 	}
 

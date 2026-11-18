@@ -555,3 +555,61 @@ func TestFirstAdminInvitation_AcceptEndpointRefusesPending(t *testing.T) {
 		t.Fatalf("after refused accept invitation|membership = %s, want pending|invited", got)
 	}
 }
+
+// Platform sign-in with pending invitations in several workspaces binds the
+// identity to exactly one, chosen deterministically (S2 post-phase fix): the
+// workspace the person signed in for, then a provider first-admin seat, then
+// the oldest invitation.
+func TestPlatformInvitedJoin_ChoosesInvitationDeterministically(t *testing.T) {
+	e := newTenantEnv(t)
+	ctx := context.Background()
+	owner, err := e.signIn("owner@beta.test", "owner", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta := owner.TenantID
+	betaName := e.scalar(t, `SELECT name FROM workspaces WHERE id = $1`, beta)
+	inv := invitation.NewStore(e.pool)
+	// Member invitations in beta, made (and aged) before the provider seats.
+	for _, em := range []string{"a@x.test", "b@x.test", "c@x.test"} {
+		if _, err := inv.CreateInvitation(ctx, em, beta, owner.UserID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE workspace_members SET invited_at = NOW() - INTERVAL '1 day' WHERE workspace_id = $1`, beta); err != nil {
+		t.Fatal(err)
+	}
+	acme := e.create(t, "acme", "a@x.test", nil)
+	e.create(t, "acme2", "b@x.test", nil)
+
+	join := func(email, sub, hint string) *identity.PrincipalCore {
+		t.Helper()
+		p, err := e.svc.Provision(ctx, identity.ProvisionInput{
+			Email: email, Provider: "google", Subject: sub, Name: sub, WorkspaceName: hint,
+			ConnectionID: e.google, Issuer: "https://accounts.google.com", EmailVerified: true,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", email, err)
+		}
+		return p
+	}
+	// No hint: the first-admin seat wins over an older member invitation.
+	if p := join("a@x.test", "a", ""); p.TenantID != acme.WorkspaceID || p.Role != "admin" {
+		t.Fatalf("no hint: joined %s as %s, want acme as admin", p.TenantID, p.Role)
+	}
+	// Hint names beta (the invite link's workspace): beta wins, even over a seat.
+	if p := join("b@x.test", "b", "  "+strings.ToUpper(betaName)+" "); p.TenantID != beta || p.Role != "member" {
+		t.Fatalf("beta hint: joined %s as %s, want beta as member", p.TenantID, p.Role)
+	}
+	// Two member invitations, no seat, no hint: the oldest wins, every time.
+	gamma, err := e.signIn("owner@gamma.test", "gowner", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inv.CreateInvitation(ctx, "c@x.test", gamma.TenantID, gamma.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if p := join("c@x.test", "c", ""); p.TenantID != beta {
+		t.Fatalf("oldest: joined %s, want beta (older invitation)", p.TenantID)
+	}
+}

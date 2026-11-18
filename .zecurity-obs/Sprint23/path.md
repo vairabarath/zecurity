@@ -181,6 +181,7 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 ## Post-Sprint Fixes
 
 - **S2: expired first-admin invitation (2026-11-18).** Sign-in is now refused with `invitation_expired` instead of self-signing up the invitee, and super-admins re-issue the invitation with `POST /provider/tenants/{id}/first-admin-invitation` (`tenant.first_admin.reinvite`), from the console's tenant-detail "First admin" card. Details: Barath's phase file, "S2 Post-Phase Fixes".
+- **S2: Google sign-in invitation choice (2026-11-18).** With pending invitations in several workspaces, the first Google sign-in now joins, in order: the workspace it signed in for, then a provider first-admin seat, then the oldest invitation (it was arbitrary).
 
 ## Out of scope
 
