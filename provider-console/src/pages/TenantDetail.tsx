@@ -5,6 +5,7 @@ import { getTenant } from '@/api/reads'
 import type { TenantDetail as TenantDetailDTO } from '@/api/types'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
+import { TenantPlanSection } from '@/components/TenantPlan'
 import { TenantRelayPoolSection } from '@/components/TenantRelayPool'
 import { SuspendedBadge, TenantSuspensionSection } from '@/components/TenantSuspension'
 import { StatusBadge } from '@/components/StatusBadge'
@@ -229,6 +230,7 @@ function TenantView({
       </section>
 
       <TenantSuspensionSection tenant={t} onDone={onActionDone} />
+      <TenantPlanSection tenant={t} onDone={onActionDone} />
 
       <TenantRelayPoolSection tenant={t} onDone={onActionDone} />
 

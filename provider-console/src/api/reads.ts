@@ -6,6 +6,7 @@ import type {
   HealthResult,
   Page,
   PKIHierarchy,
+  PlanSummary,
   RelayDetail,
   RelayPoolDetail,
   RelayPoolSummary,
@@ -103,6 +104,16 @@ export function listRelayPools(): Promise<{ items: RelayPoolSummary[] }> {
 /** One pool with its relays; `tenant_list` is null unless the caller may read tenants (D-41). */
 export function getRelayPool(id: string): Promise<RelayPoolDetail> {
   return request<RelayPoolDetail>('GET', `/provider/relay-pools/${encodeURIComponent(id)}`)
+}
+
+/** GET /provider/plans (super-admin): default plan first. */
+export function listPlans(): Promise<{ items: PlanSummary[] }> {
+  return request<{ items: PlanSummary[] }>('GET', '/provider/plans')
+}
+
+/** GET /provider/plans/{id} (super-admin). */
+export function getPlan(id: string): Promise<PlanSummary> {
+  return request<PlanSummary>('GET', `/provider/plans/${encodeURIComponent(id)}`)
 }
 
 export function listTenants(params?: TenantListParams): Promise<Page<TenantSummary>> {

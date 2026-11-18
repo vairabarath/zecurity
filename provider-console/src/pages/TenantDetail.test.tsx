@@ -1,4 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
+import { TENANT_FREE_PLAN } from '@/test/plans'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { TenantDetail } from '@/api/types'
@@ -49,6 +50,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
     suspension: null,
+    plan: TENANT_FREE_PLAN,
     ...over,
   }
 }
@@ -238,13 +240,13 @@ describe('Tenant detail: content', () => {
     expect(screen.getAllByText('Showing the first 200 entries.')).toHaveLength(3)
   })
 
-  it('the only buttons are Refresh, Suspend tenant (Sprint 23 S1, D-45) and Change pool (D-41); loading sends GETs only', async () => {
+  it('the only buttons are Refresh, Suspend tenant (Sprint 23 S1, D-45), Change plan (D-43) and Change pool (D-41); loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/tenants/${ID}`]: ok() })
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Change pool'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Change plan', 'Change pool'])
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
     expect(within(main).queryByText(/\b(revoke|delete|edit|create)\b/i)).not.toBeInTheDocument()
   })

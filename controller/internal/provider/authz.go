@@ -56,6 +56,15 @@ const (
 	// tenant.* is super-admin only (D-06); decide() denies it to relay-ops.
 	ActionTenantSuspend = "tenant.suspend"
 	ActionTenantResume  = "tenant.resume"
+	// Plans (Sprint 23 B1, D-43). Plans are commercial/tenant data: not
+	// under relay.*, so decide() keeps them super-admin only (D-06), and
+	// assigning a tenant's plan is a tenant.* action.
+	ActionPlanRead         = "plan.read"
+	ActionPlanCreate       = "plan.create"
+	ActionPlanUpdate       = "plan.update"
+	ActionPlanDelete       = "plan.delete"
+	ActionPlanSetDefault   = "plan.set_default"
+	ActionTenantPlanAssign = "tenant.plan.assign"
 )
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
@@ -165,6 +174,18 @@ func (a *Authz) CanResumeTenant(actor Actor, target Target) error {
 }
 
 // CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
+// CanReadPlans reports whether actor may read plans (plan.read).
+func (a *Authz) CanReadPlans(actor Actor) error {
+	return decide(actor, ActionPlanRead, Target{Type: "plan"})
+}
+
+// CanManagePlans reports whether actor may perform a plan write
+// (ActionPlanCreate, ActionPlanUpdate, ActionPlanDelete, ActionPlanSetDefault
+// or ActionTenantPlanAssign).
+func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
+	return decide(actor, action, target)
+}
+
 func (a *Authz) CanReadRelays(actor Actor, target Target) error {
 	return decide(actor, ActionRelayRead, target)
 }

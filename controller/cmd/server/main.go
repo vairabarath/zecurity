@@ -63,6 +63,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/outbox"
 	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/plans"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
@@ -723,6 +724,14 @@ func main() {
 	}
 	mux.Handle("POST /provider/tenants/{id}/suspend", requireProvider(http.HandlerFunc(tenantLifecycle.Suspend)))
 	mux.Handle("POST /provider/tenants/{id}/resume", requireProvider(http.HandlerFunc(tenantLifecycle.Resume)))
+	// Plans (Sprint 23 B1, D-43): super-admin only, audited. New workspaces
+	// get the current default plan from a database trigger (migration 062).
+	planHandler := &plans.Handler{Store: plans.NewStore(db.Pool), Authz: providerAuthz, ProviderStore: providerStore}
+	mux.Handle("POST /provider/plans", requireProvider(http.HandlerFunc(planHandler.Create)))
+	mux.Handle("PATCH /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Update)))
+	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
+	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
+	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -762,6 +771,8 @@ func main() {
 	mux.Handle("GET /provider/relays/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelay)))
 	mux.Handle("GET /provider/relay-pools", requireProvider(http.HandlerFunc(providerReads.ListRelayPools)))
 	mux.Handle("GET /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelayPool)))
+	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
+	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))

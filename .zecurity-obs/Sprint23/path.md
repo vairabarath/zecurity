@@ -2,7 +2,7 @@
 type: sprint
 sprint: 23
 title: Provider Dashboard — remaining Must-have features (F5, F7, F8, F12)
-status: decided, documents in review (no implementation yet)
+status: decided and signed off (2026-11-17); implementation in progress
 created: 2026-11-17
 team:
   - Person 1 = Barath (M2): F8 plans (B1), F5 headroom (B2), F7 tenant creation (S2)
@@ -36,11 +36,11 @@ Decided by the product owner (Barath) after review; the full text is in the Deci
 | ID | Decision | Phase |
 |---|---|---|
 | **D-42** | F5: **operator-configured link capacity** per relay (bytes/s); headroom = capacity − measured rate per direction; rate, capacity and headroom shown separately; unset = **"Not configured"**; an operational estimate. No relay/proto change. | B2 |
-| **D-43** | F8: **provider-managed plans** (name, description, default limits; one default); every workspace has a plan; no pricing/billing; changes take effect immediately; lowering limits never deletes resources; no deleting an assigned or default plan. | B1 |
+| **D-43** | F8: **provider-managed plans** with limits for **all six quota keys** (explicit `null` = unlimited; a missing key is invalid and fails closed); one default. Seeded: **Free** (default for every new workspace): users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25; **Legacy** (all unlimited, operator-assigned only, never advertised). Values are configurable plan data. Every workspace gets the **current** default on insert (`BEFORE INSERT` trigger when none is given). No pricing/billing; feature entitlements are a later decision. Changes take effect immediately; lowering limits never deletes resources; no deleting an assigned or default plan. | B1 |
 | **D-44** | F7: super-admins **create a workspace** (same bootstrap path as self-signup) and **invite its first admin** (existing single-use, time-limited invitation, accepted by the matching verified email; admin role). Self-signup stays. | S2 |
 | **D-45** | F7: **suspension** = `suspended_at`, `suspended_by`, `suspension_reason`; `status` stays `'active'`. **One eligibility check**: refuses login, refresh, new sessions, configuration mutations and **new** enrollments; **revokes** client sessions/tokens and admin sessions; **agents keep their certificates and connections and get deny-all (D-08 preserved)**; empty relay list and removal from residency allowlists. Resume pushes the normal ACL. Reason + typed slug. | S1 |
 | **D-46** | F7: **deletion** of a suspended tenant only; 30-day grace, cancellable; **idempotent, resumable purge**; export `audit_logs` **and security records**, destroy everything tenant-scoped incl. keys, keep a tombstone; privileged purge role (D-13); **legal hold** pauses the purge; backup retention is an ops/legal policy (open, not blocking). | S4 |
-| **D-47** | F12: **hard limits** on connectors, shields, users, client devices (no session quota); plan default + per-tenant override; **server-side at every creation path, atomic with the creation**; `quota_exceeded {key, limit, used}`; counting rules (below). | S3 |
+| **D-47** | F12: **hard limits on six keys** (users, resources, remote_networks, connectors, shields, client_devices), tenant-wide, no session quota; plan value + per-tenant override; **server-side at every creation path, atomic with the creation**; `quota_exceeded {key, limit, used}`; counting rules (below); discovery is never limited. | S3 |
 
 **Amended:** D-07 (by D-45), D-11 (by D-46), D-17 (extended to tenant suspend/delete), D-30 (new console writes), D-31 (relay-ops sets link capacity). **Preserved:** D-08. **Implemented unchanged:** D-09, D-10, D-13. **Consistent, not amended:** D-34. **Unchanged:** D-06, D-12, D-14.
 
@@ -48,9 +48,11 @@ Decided by the product owner (Barath) after review; the full text is in the Deci
 
 | Resource | Counts | Doesn't count |
 |---|---|---|
+| Users | active members, **pending invitations**, SCIM-suspended users (each identity once) | removed members, expired or revoked invitations |
+| Resources | **every defined resource in any state except `deleting`** (un-protecting doesn't free a slot) | `deleting`; **discovered services** (`shield_discovered_services`, `connector_scan_results`) — discovery keeps working at the limit |
+| Remote networks | every provisioned network, including unavailable ones | deleted |
 | Connectors, shields | pending (token issued), active, inactive | revoked, deleted |
-| Users | active members, **pending invitations**, SCIM-suspended users | removed members, expired or revoked invitations |
-| Client devices | enrolled, not revoked | revoked |
+| Client devices | enrolled, not revoked | revoked, historical records |
 
 A suspended tenant's counts are unchanged.
 
@@ -138,8 +140,9 @@ Live run on a **reset lab DB with current `main`**. Record the Git SHA and lates
   - create and edit plans and set the default;
   - assign a plan to a tenant (reason, audited);
   - tenant detail shows the plan and its limits;
-  - a new signup gets the default plan;
-  - deleting an assigned plan is refused.
+  - the seeded **Free** (default) and **Legacy** plans exist with their values; a new signup gets **Free**; after switching the default, a new signup gets the new default;
+  - a plan without all six keys is refused;
+  - deleting an assigned plan and deleting the default plan are refused.
 - **F7 create:** create a tenant in the console; the invited first admin (matching email) accepts and signs in as admin; the invitation can't be reused.
 - **F7 suspend/resume:**
   - suspend (reason + typed slug): admin and client login refused, refresh refused, client traffic ends within seconds, admin sessions revoked;
@@ -155,7 +158,8 @@ Live run on a **reset lab DB with current `main`**. Record the Git SHA and lates
   - plan limits plus an override;
   - every creation path is refused at the limit with `quota_exceeded` (admin UI, API, SCIM);
   - concurrent creations can't pass the last slot;
-  - pending invitations count;
+  - pending invitations count; un-protecting a resource doesn't free a slot; resource discovery keeps working at the resource limit;
+  - remote network and resource creation are refused at their limits;
   - lowering a limit keeps resources and shows "over quota".
 
 Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 / 18**.
@@ -163,7 +167,7 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 ## Checklist
 
 - [x] Phase 0: D-42 … D-47 decided and written into the Decision Record (2026-11-17)
-- [ ] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — before any implementation
+- [x] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — signed off by Barath 2026-11-17; implementation may start
 - [ ] B1 — Plans (Barath) — merged — live-checked
 - [ ] B2 — Relay link capacity + headroom (Barath) — merged — live-checked
 - [ ] S2 — Provider tenant creation (Barath) — merged — live-checked

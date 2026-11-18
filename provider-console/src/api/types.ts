@@ -488,6 +488,47 @@ export interface TenantDetail extends TenantSummary {
   shields: TenantShield[]
   shields_truncated: boolean
   relay_pool: TenantRelayPool
+  /** The tenant's plan (Sprint 23 B1, D-43). */
+  plan: TenantPlan
+}
+
+// ── plans (Sprint 23 B1, D-43; quota keys of D-47) ─────────────────────────────
+
+/** The six quota keys, in display order. A plan always defines all six. */
+export const PLAN_LIMIT_KEYS = ['users', 'resources', 'remote_networks', 'connectors', 'shields', 'client_devices'] as const
+export type PlanLimitKey = (typeof PLAN_LIMIT_KEYS)[number]
+
+/** Every key is present; `null` is explicitly unlimited (a missing key is invalid, never unlimited). */
+export type PlanLimits = Record<PlanLimitKey, number | null>
+
+/** GET /provider/plans item (super-admin only). Default plan first. */
+export interface PlanSummary {
+  id: string
+  name: string
+  description: string
+  limits: PlanLimits
+  is_default: boolean
+  /** Workspaces on this plan. */
+  tenants: number
+  created_at: string
+  updated_at: string
+}
+
+/** POST /provider/plans → 201. */
+export interface CreatePlanResponse {
+  id: string
+  name: string
+  description: string
+  limits: PlanLimits
+  is_default: boolean
+}
+
+/** The plan section of GET /provider/tenants/{id}. */
+export interface TenantPlan {
+  id: string
+  name: string
+  limits: PlanLimits
+  is_default: boolean
 }
 
 /** GET /provider/audit item (provider operator records only). */

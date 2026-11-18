@@ -14,6 +14,7 @@ import { NotFound } from '@/pages/NotFound'
 import { ProviderUsers } from '@/pages/ProviderUsers'
 import { RelayDetail } from '@/pages/RelayDetail'
 import { RelayPoolDetail } from '@/pages/RelayPoolDetail'
+import { Plans } from '@/pages/Plans'
 import { RelayPools } from '@/pages/RelayPools'
 import { Relays } from '@/pages/Relays'
 import { TenantDetail } from '@/pages/TenantDetail'
@@ -51,6 +52,9 @@ export function AppRoutes() {
           <Route element={<RequireRole roles={rolesFor('tenants')} />}>
             <Route path="tenants" element={<Tenants />} />
             <Route path="tenants/:id" element={<TenantDetail />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('plans')} />}>
+            <Route path="plans" element={<Plans />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('audit')} />}>
             <Route path="audit" element={<Audit />} />

@@ -8,12 +8,12 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 23 is the active sprint: Provider Dashboard, remaining Must-have features (F5, F7, F8, F12).** Finish the Must-have list (14 / 18 → 18 / 18). Decisions **D-42 … D-47** are made (Decision Record amendment **2026-11-17**); the Sprint 23 documents are **in review: no implementation until the product owner (Barath) signs them off**.
-- **B1 — plans (F8, D-43)**, Barath: provider-managed plans (name, default limits, one default), a plan per workspace, no billing. Lands first: S2 and S3 read plans.
+**Sprint 23 is the active sprint: Provider Dashboard, remaining Must-have features (F5, F7, F8, F12).** Finish the Must-have list (14 / 18 → 18 / 18). Decisions **D-42 … D-47** are made (Decision Record amendment **2026-11-17**); the Sprint 23 documents were **signed off by the product owner (Barath) on 2026-11-17**; implementation may start in the phase order below.
+- **B1 — plans (F8, D-43)**, Barath: provider-managed plans with limits for all six quota keys (explicit `null` = unlimited), one default; seeded **Free** (default: users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25) and **Legacy** (unlimited, operator-assigned); every workspace gets the current default plan on insert (`BEFORE INSERT` trigger); no billing. Lands first: S2 and S3 read plans.
 - **B2 — relay link capacity and headroom (F5, D-42)**, Barath: operator-set `link_capacity_bps` (bytes/s); headroom = capacity − measured rate; "Not configured" when unset. No relay/proto change.
 - **S2 — provider tenant creation (F7, D-44)**, Barath, after B1: same bootstrap path as self-signup + single-use, time-limited first-admin invitation.
 - **S1 — suspend/resume (F7, D-45)**, Sathiya: `suspended_at` (status stays `'active'`), one eligibility check, sessions revoked, **agents stay connected with deny-all (D-08 preserved)**.
-- **S3 — quotas (F12, D-47)**, Sathiya, after B1: hard limits on connectors, shields, users, client devices; plan default + per-tenant override; atomic, server-side on every creation path.
+- **S3 — quotas (F12, D-47)**, Sathiya, after B1: hard limits on six keys (users, resources, remote_networks, connectors, shields, client_devices); plan value + per-tenant override; atomic, server-side on every creation path; discovery never limited.
 - **S4 — deletion (F7, D-46)**, Sathiya, after S1: suspended tenants only, 30-day grace, cancellable, idempotent resumable purge (export audit + security records, destroy, tombstone), legal hold.
 - **Not in Sprint 23:** billing/invoicing (F34), metering and session quotas (F32, F33), alerting (F26), more provider roles (F19), impersonation (F31), bulk pool moves (F30). (Connector relay-failure detection O1/O3 was fixed separately in PR #218.)
 

@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { TENANT_FREE_PLAN } from '@/test/plans'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { TenantDetail, TenantSummary } from '@/api/types'
@@ -102,7 +103,7 @@ describe('Tenants list', () => {
 
   it('hovering a row link makes no tenant detail request; a click makes exactly one', async () => {
     signedInAs(superAdminMe)
-    const detail: TenantDetail = { ...A, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false, relay_pool: TENANT_DEFAULT_POOL }
+    const detail: TenantDetail = { ...A, remote_networks: [], remote_networks_truncated: false, connectors: [], connectors_truncated: false, shields: [], shields_truncated: false, relay_pool: TENANT_DEFAULT_POOL, plan: TENANT_FREE_PLAN }
     const { calls } = mockFetch({
       'GET /provider/tenants': { status: 200, body: { items: [A], next_cursor: null } },
       [`GET /provider/tenants/${ID_A}`]: { status: 200, body: detail },
