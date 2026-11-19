@@ -44,6 +44,7 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     plan: TENANT_FREE_PLAN,
     quotas: FREE_QUOTAS,
     suspension: null,
+    deletion: null,
     first_admin_invitation: null,
     ...over,
   }
@@ -158,8 +159,8 @@ describe('Tenants list: suspended badge', () => {
   it('shows "Suspended" next to the status of a suspended tenant only', async () => {
     signedInAs(superAdminMe)
     const summary = (over: Partial<TenantSummary>): TenantSummary => {
-      const { id, slug, name, status, trust_domain, created_at, ca_not_after, counts, suspension } = tenant()
-      return { id, slug, name, status, trust_domain, created_at, ca_not_after, counts, suspension, ...over }
+      const { id, slug, name, status, trust_domain, created_at, ca_not_after, counts, suspension, deletion } = tenant()
+      return { id, slug, name, status, trust_domain, created_at, ca_not_after, counts, suspension, deletion, ...over }
     }
     mockFetch({
       'GET /provider/tenants': {

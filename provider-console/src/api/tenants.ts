@@ -45,3 +45,23 @@ export function suspendTenant(id: string, reason: string, confirmSlug: string): 
 export function resumeTenant(id: string, reason: string): Promise<void> {
   return request<void>('POST', `${tenantPath(id)}/resume`, { body: { reason } })
 }
+
+// Tenant deletion (Sprint 23 S4, D-46; D-30 amended). Super-admin only. The
+// reason (and, for delete, the slug typed back) go in the body; the server
+// checks them and audits before/after. Only a suspended tenant can be
+// scheduled; the purge runs after a 30-day grace.
+
+/** Schedules the deletion of a suspended tenant; returns when it will run. */
+export function scheduleTenantDelete(id: string, reason: string, confirmSlug: string): Promise<{ delete_after: string }> {
+  return request<{ delete_after: string }>('POST', `${tenantPath(id)}/delete`, { body: { reason, confirm_slug: confirmSlug } })
+}
+
+/** Cancels a scheduled deletion before the purge starts. */
+export function cancelTenantDelete(id: string, reason: string): Promise<void> {
+  return request<void>('POST', `${tenantPath(id)}/delete/cancel`, { body: { reason } })
+}
+
+/** Places or releases a legal hold, which pauses the purge. */
+export function setTenantLegalHold(id: string, on: boolean, reason: string): Promise<void> {
+  return request<void>('PUT', `${tenantPath(id)}/legal-hold`, { body: { on, reason } })
+}

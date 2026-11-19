@@ -29,6 +29,7 @@ function tenant(over: Partial<TenantSummary>): TenantSummary {
       policies: { resources: 12, groups: 4, access_rules: 9, resource_policies: 2 },
     },
     suspension: null,
+    deletion: null,
     ...over,
   }
 }

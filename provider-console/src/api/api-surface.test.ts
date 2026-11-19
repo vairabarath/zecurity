@@ -20,7 +20,7 @@ import * as tenantsApi from './tenants'
 // tenant's pool assignment, plus the two pool reads. Plans (Sprint 23 B1, D-43 amends D-30) add plan create /
 // update / delete / set default and a tenant's plan assignment, plus the two plan reads. Sprint 23 S1 (D-45
 // amends D-30) adds tenant suspend and resume; S2 (D-44) adds POST /provider/tenants and the first-admin
-// re-invite. Every exported API function is called here; a new write must be
+// re-invite; S4 (D-46) adds delete, cancel delete and legal hold. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
 const ALLOWED_WRITES = [
@@ -45,6 +45,8 @@ const ALLOWED_WRITES = [
   'POST /provider/relays/{id}/resume',
   'POST /provider/relays/{id}/revoke',
   'POST /provider/tenants',
+  'POST /provider/tenants/{id}/delete',
+  'POST /provider/tenants/{id}/delete/cancel',
   'POST /provider/tenants/{id}/first-admin-invitation',
   'POST /provider/tenants/{id}/resume',
   'POST /provider/tenants/{id}/suspend',
@@ -53,6 +55,7 @@ const ALLOWED_WRITES = [
   'POST /provider/users/{id}/enable',
   'POST /provider/users/{id}/reset-password',
   'POST /provider/users/{id}/reset-totp',
+  'PUT /provider/tenants/{id}/legal-hold',
   'PUT /provider/tenants/{id}/plan',
   'PUT /provider/tenants/{id}/quotas/{key}',
   'PUT /provider/tenants/{id}/relay-pool',
@@ -142,6 +145,9 @@ describe('API surface', () => {
       [`PUT /provider/tenants/${ID}/plan`]: { status: 204 },
       [`PUT /provider/tenants/${ID}/quotas/b`]: { status: 204 },
       'GET /provider/tenants': page,
+      [`POST /provider/tenants/${ID}/delete`]: { status: 200, body: { delete_after: '2026-12-18T00:00:00Z' } },
+      [`POST /provider/tenants/${ID}/delete/cancel`]: { status: 204 },
+      [`PUT /provider/tenants/${ID}/legal-hold`]: { status: 204 },
       [`POST /provider/tenants/${ID}/first-admin-invitation`]: { status: 201, body: { tenant_id: ID, invitation: { id: 'i', email: 'b', expires_at: '' } } },
       'POST /provider/tenants': { status: 201, body: { id: ID, slug: 'a', name: 'a', invitation: { id: 'i', email: 'b', expires_at: '' } } },
       [`GET /provider/tenants/${ID}`]: { status: 200, body: {} },

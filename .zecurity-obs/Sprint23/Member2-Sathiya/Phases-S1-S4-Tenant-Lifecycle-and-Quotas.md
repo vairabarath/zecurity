@@ -314,6 +314,47 @@ Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merg
 - `provider_audit_logs` is untouched; the keys are gone; the agents' certificates are on the CRL.
 - **Mutation checks:** delete without suspension; purge without export.
 
+### Implementation status (2026-11-19, branch `feat/s4-tenant-deletion`)
+- **Schema `066_tenant_deletion.sql`:**
+  - deletion and legal-hold columns, with CHECKs: a deletion only on a suspended tenant (D-10), and the columns set and cleared together;
+  - `tenant_purges` (progress), `workspace_tombstones`, `tenant_export_tokens` (SHA-256 only);
+  - the D-13 `SECURITY DEFINER` step functions (`tenant_purge_start`, `_record_export`, `_mark_revoked`, `tenant_purge`, `_finish`, `_record_error`). `ztna_app` can only read purge progress and tombstones.
+- **`internal/tenantlifecycle`:**
+  - `ScheduleDelete`: suspended only, typed slug; issues the emailed download tokens in the transaction;
+  - `CancelDelete`: refused once the purge started;
+  - `SetLegalHold`;
+  - `Resume` refuses `delete_scheduled`;
+  - handlers `Delete`, `CancelDelete`, `LegalHold`;
+  - `Purger` (the job): export, then revoke, then `tenant_purge`, then finish; resumable; a legal hold pauses it.
+- **`internal/tenantexport`:**
+  - the archive (`audit_log`, `access_log`, certificates and revocations as JSON lines plus `manifest.json`, one tar.gz);
+  - tokens: email tokens valid until the purge; sign-in tokens single-use, 15 min, admins only;
+  - `POST /api/tenant-export/{info,download}` (token in the body; the download is audited as `tenant_export.download` without the token).
+- **`internal/auditexport/archive.go`:** puts the archive to the tenant's oldest enabled S3 sink and reads it back.
+- **Auth callback:** an active admin of a suspended tenant with a scheduled deletion is redirected to `/tenant-export#token=…` with **no session**; anyone else gets `workspace_suspended`.
+- **Provider API and authz:** `tenant.delete`, `tenant.delete.cancel`, `tenant.legal_hold.set` (super-admin); `tenant.purged` (a system-actor audit row).
+- **Tenant summary:** `deletion {scheduled_at, delete_after, by, reason, legal_hold, legal_hold_reason, purge_step}`.
+- **`main.go`:** routes, plus the purger started at boot. The env settings are:
+  - `TENANT_PURGE_EXPORT_DIR`: without it, tenants without an S3 sink are not purged, and this is logged;
+  - `TENANT_PURGE_INTERVAL` (default 5 min);
+  - `TENANT_DELETE_GRACE`: development only.
+- **Console:** a tenant-detail **Deletion** section (Delete disabled unless suspended; a countdown; cancel; legal hold; the purge step) and `api-surface.test.ts` (+3 writes).
+- **Admin UI:** the `/tenant-export` page. It drops the fragment from the URL at once and sends the token only in the POST body.
+- **Tests:**
+  - `tenantlifecycle/delete_db_test.go`:
+    - the API rules;
+    - a crash at each step, then resume, giving one export and the same end state;
+    - legal hold before and during a purge;
+    - no export destination;
+    - the S3 path, including a read-back mismatch;
+    - local verification;
+    - the function checks;
+    - privileges as `ztna_app`;
+    - start only when due.
+  - `tenantexport/export_db_test.go`; auth integration (export-only sign-in, no session);
+  - console `TenantDeletion.test.tsx`; admin `TenantExport.test.tsx`.
+  - Mutation checks are all caught, among them: delete without suspension, purge without export, legal hold (function and loop), resume while scheduled, cancel after start, both verifications, S3 preferred, the token rules (single use, purge start, cancel, admins only) and the step-function checks.
+
 ### Live check
 On a throwaway lab tenant:
 1. Suspend → schedule delete → cancel → schedule again.
