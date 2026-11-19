@@ -376,9 +376,25 @@ Throwaway tenant `s4live`: a first admin signed in through a test IdP connection
 - **Display:** the admin page says "its deletion is pending" past the deadline. The console countdown shows minutes, hours or days, or "due; paused by the legal hold" (it said "in 1 days" for 2 minutes).
 - **Tests:** `TestExportDB_LinksWorkUnderLegalHoldPastTheGrace`, and no sign-in token once the purge started. Mutation checks caught.
 
-**Not exercised live:**
-- The S3 destination (covered by DB tests with a fake bucket);
-- revocation of installed agents (the connector was never installed; agent revocation is covered by DB tests).
+**Second live run (2026-11-19): S3 destination and real agents.**
+
+Setup:
+- SeaweedFS (open-source S3-compatible server; MinIO's images are no longer publicly pullable) on `https://192.168.1.164:8333`, with a test CA. The controller trusts it through the development switches `AUDIT_EXPORT_DEV_ALLOW_PRIVATE` and `AUDIT_EXPORT_DEV_CA_FILE`.
+- Tenant `s4s3`: its first admin added an **Amazon S3 audit-export sink** in the admin UI (Settings → Add sink).
+- A connector installed and active on **luffy**, and a shield installed and active on **archlinux** (omarchy was offline).
+
+Results:
+- **The regular audit exporter** delivered the tenant's admin events to the bucket (`…/admin/2026/11/19/06/1-10.jsonl.gz`).
+- **Suspend, then schedule:** the agents stay connected and get the deny-all ACL (D-08).
+- **The purge ran on its first attempt** and exported to **S3**: `s3://s4-tenant-bucket/zecurity/v1/<ws>/tenant-deletion/<scheduled>.tar.gz`. The object downloaded back from the bucket hashes exactly to the tombstone's SHA-256. It holds the manifest, 10 audit rows and the connector's certificate record. No local file was written (the tenant's bucket takes precedence).
+- **End state:** the workspace, audit log, connector, shield, CA key, the tenant's S3 sink settings and the users are gone. The provider audit reads `tenant.create`, `tenant.suspend`, `tenant.delete`, `tenant.purged`.
+- **Agents at the purge (06:36:45):**
+  - the controller refuses the connector's next health report (`NotFound`, "unknown") and closes its stream;
+  - the connector goes **fail-closed, terminal**: sessions cancelled, shield streams closed, relay selector stopped;
+  - the shield reports "every known connector is revoked or unknown" and backs off.
+- **Test-environment note (not a Zecurity issue):** SeaweedFS's default 30 GB volume couldn't be created on this disk (uploads answered HTTP 500); restarting it with `-master.volumeSizeLimitMB=64` fixed it.
+
+PASS.
 
 ### Live check
 On a throwaway lab tenant:
