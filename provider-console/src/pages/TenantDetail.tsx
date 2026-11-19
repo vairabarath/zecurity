@@ -9,6 +9,7 @@ import { TenantFirstAdminSection } from '@/components/TenantFirstAdmin'
 import { TenantPlanSection } from '@/components/TenantPlan'
 import { TenantQuotasSection } from '@/components/TenantQuotas'
 import { TenantRelayPoolSection } from '@/components/TenantRelayPool'
+import { TenantDeletionSection } from '@/components/TenantDeletion'
 import { SuspendedBadge, TenantSuspensionSection } from '@/components/TenantSuspension'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TenantAvatar } from '@/components/TenantAvatar'
@@ -232,6 +233,8 @@ function TenantView({
       </section>
 
       <TenantSuspensionSection tenant={t} onDone={onActionDone} />
+
+      <TenantDeletionSection tenant={t} onDone={onActionDone} />
 
       <TenantFirstAdminSection tenant={t} onDone={onActionDone} />
 

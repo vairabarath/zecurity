@@ -83,6 +83,23 @@ type TenantSummary struct {
 	// Suspension is the provider suspension (Sprint 23 S1, D-45); null when
 	// the tenant isn't suspended. Status stays "active" while suspended.
 	Suspension *TenantSuspension `json:"suspension"`
+	// Deletion is the scheduled deletion and legal hold (Sprint 23 S4,
+	// D-46); null when neither is set. Status only: never the tenant's
+	// exported content.
+	Deletion *TenantDeletion `json:"deletion"`
+}
+
+// TenantDeletion is a tenant's deletion state for the provider console.
+type TenantDeletion struct {
+	ScheduledAt     *time.Time `json:"scheduled_at"`
+	DeleteAfter     *time.Time `json:"delete_after"`
+	By              *string    `json:"by"`
+	Reason          *string    `json:"reason"`
+	LegalHold       bool       `json:"legal_hold"`
+	LegalHoldReason *string    `json:"legal_hold_reason"`
+	// PurgeStep is the purge's progress once it started (pending, exported,
+	// revoked, destroyed, done); null before.
+	PurgeStep *string `json:"purge_step"`
 }
 
 // TenantSuspension is a tenant's provider suspension: when, by which
@@ -189,7 +206,9 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
        uc.active, uc.suspended, uc.locked, uc.deleted,
        dc.active, dc.re_enroll_required, dc.renew_pending, dc.revoked,
        COALESCE(rc.n, 0), gc.n, ar.n, rp.n,
-       w.suspended_at, w.suspended_by, w.suspension_reason
+       w.suspended_at, w.suspended_by, w.suspension_reason,
+       w.delete_scheduled_at, w.delete_after, w.delete_by, w.delete_reason, w.legal_hold, w.legal_hold_reason,
+       (SELECT tp.step FROM tenant_purges tp WHERE tp.workspace_id = w.id)
   FROM workspaces w
   LEFT JOIN workspace_ca_keys k ON k.tenant_id = w.id
   LEFT JOIN LATERAL (
@@ -233,6 +252,7 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 	c := &s.Counts
 	var suspendedAt *time.Time
 	var suspendedBy, suspensionReason *string
+	var d TenantDeletion
 	if err := row.Scan(
 		&s.ID, &s.Slug, &s.Name, &s.Status, &s.TrustDomain, &s.CreatedAt, &s.CANotAfter,
 		&c.Connectors.Pending, &c.Connectors.Active, &c.Connectors.Disconnected, &c.Connectors.Revoked,
@@ -242,6 +262,7 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		&c.ClientDevices.Active, &c.ClientDevices.ReEnrollRequired, &c.ClientDevices.RenewPending, &c.ClientDevices.Revoked,
 		&c.Policies.Resources, &c.Policies.Groups, &c.Policies.AccessRules, &c.Policies.ResourcePolicies,
 		&suspendedAt, &suspendedBy, &suspensionReason,
+		&d.ScheduledAt, &d.DeleteAfter, &d.By, &d.Reason, &d.LegalHold, &d.LegalHoldReason, &d.PurgeStep,
 	); err != nil {
 		return TenantSummary{}, err
 	}
@@ -255,6 +276,10 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		if suspensionReason != nil {
 			s.Suspension.Reason = *suspensionReason
 		}
+	}
+	if d.ScheduledAt != nil || d.LegalHold || d.PurgeStep != nil {
+		d.ScheduledAt, d.DeleteAfter = utcPtr(d.ScheduledAt), utcPtr(d.DeleteAfter)
+		s.Deletion = &d
 	}
 	return s, nil
 }

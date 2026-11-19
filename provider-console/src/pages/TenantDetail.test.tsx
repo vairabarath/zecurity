@@ -50,6 +50,7 @@ function detail(over: Partial<TenantDetail> = {}): TenantDetail {
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
     suspension: null,
+    deletion: null,
     plan: TENANT_FREE_PLAN,
     quotas: FREE_QUOTAS,
     first_admin_invitation: null,
@@ -242,14 +243,15 @@ describe('Tenant detail: content', () => {
     expect(screen.getAllByText('Showing the first 200 entries.')).toHaveLength(3)
   })
 
-  it('the only buttons are Refresh, Suspend tenant (Sprint 23 S1, D-45), Change plan (D-43), one Change per quota (S3, D-47) and Change pool (D-41); loading sends GETs only', async () => {
+  it('the only buttons are Refresh, Suspend tenant (Sprint 23 S1, D-45), Place legal hold and Delete tenant (S4, D-46), Change plan (D-43), one Change per quota (S3, D-47) and Change pool (D-41); loading sends GETs only', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({ [`GET /provider/tenants/${ID}`]: ok() })
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Change plan', ...Array(6).fill('Change'), 'Change pool'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Place legal hold', 'Delete tenant', 'Change plan', ...Array(6).fill('Change'), 'Change pool'])
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
-    expect(within(main).queryByText(/\b(revoke|delete|edit|create)\b/i)).not.toBeInTheDocument()
+    // S4 (D-46) adds Delete tenant on purpose; nothing else destructive.
+    expect(within(main).queryByText(/\b(revoke|edit|create)\b/i)).not.toBeInTheDocument()
   })
 })

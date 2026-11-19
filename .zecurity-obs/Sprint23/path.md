@@ -170,13 +170,13 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 
 - [x] Phase 0: D-42 … D-47 decided and written into the Decision Record (2026-11-17)
 - [x] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — signed off by Barath 2026-11-17; implementation may start
-- [ ] B1 — Plans (Barath) — merged (#222) — live-checked
-- [ ] B2 — Relay link capacity + headroom (Barath) — merged (#226) — live-checked
-- [ ] S2 — Provider tenant creation (Sathiya, handed over by Barath) — merged (#225) — live-checked
-- [ ] S1 — Suspend / resume (Sathiya) — merged (#223) — live-checked
-- [ ] S3 — Quotas (Sathiya) — merged (#224) — live-checked
-- [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — merged — live-checked
-- [ ] Sprint acceptance run (both); tracker 18 / 18
+- [x] B1 — Plans (Barath) — merged (#222) — live-checked 2026-11-19 (PASS)
+- [x] B2 — Relay link capacity + headroom (Barath) — merged (#226) — live-checked 2026-11-19 (PASS)
+- [x] S2 — Provider tenant creation (Sathiya, handed over by Barath) — merged (#225) — live-checked (branch 2026-11-18; recheck on `main` 2026-11-19, PASS)
+- [x] S1 — Suspend / resume (Sathiya) — merged (#223) — live-checked 2026-11-19 (PASS; residency allowlist part not run, one relay)
+- [x] S3 — Quotas (Sathiya) — merged (#224) — live-checked 2026-11-19 (PASS)
+- [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — merged (#229, 2026-11-19) — live-checked on the branch 2026-11-18/19 (local export and S3 export with real agents, PASS)
+- [ ] Sprint acceptance run (both); tracker 18 / 18 — run 2026-11-19 on `main` `4d1faf50`: B1, B2, S1, S2 recheck, S3 and cross-feature PASS (PR #230); S4 check on `main` still to do (reset DB for `066_`); tracker 17 / 18
 
 ## Post-Sprint Fixes
 
@@ -184,6 +184,9 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 - **S2: expired first-admin invitation (2026-11-18).** Sign-in is now refused with `invitation_expired` instead of self-signing up the invitee, and super-admins re-issue the invitation with `POST /provider/tenants/{id}/first-admin-invitation` (`tenant.first_admin.reinvite`), from the console's tenant-detail "First admin" card. Details: Barath's phase file, "S2 Post-Phase Fixes".
 - **S2: Google sign-in invitation choice (2026-11-18).** With pending invitations in several workspaces, the first Google sign-in now joins, in order: the workspace it signed in for, then a provider first-admin seat, then the oldest invitation (it was arbitrary).
 - **S3, user slots keyed on email (2026-11-18):** a second account with an email already in use took no slot, and SCIM reactivation of a removed user wasn't checked. Users now count per row (plus invitations without a user); `ReserveInvitation` is new; reactivation is checked. Details are in the S3 phase file, "Post-Phase Fixes".
+- **S4: purge steps only through `SECURITY DEFINER` functions (security review, 2026-11-18).** The app role could write `tenant_purges` directly, so every step change now goes through the `tenant_purge_*` functions in `066_tenant_deletion.sql` (the app role only reads `tenant_purges` and `workspace_tombstones`), and `tenant_purge_start` locks the workspace so it can't race a cancel. Details: Sathiya's phase file, S4 "Security review".
+- **S4: download links cut off by a legal hold (live check, 2026-11-18).** A legal hold kept past the grace made the emailed links invalid while the data still existed. Links now work until the purge **starts**; the "(in 1 days)" countdown was also fixed (`timeUntil`). Details: Sathiya's phase file, S4 "Live check".
+- **S4: proposed amendment to D-45/D-46 (Sathiya, 2026-11-18, needs Barath's confirmation).** The deletion export is tenant-private: it goes to the tenant's own S3 audit-export sink if one is configured, else to `TENANT_PURGE_EXPORT_DIR`. Tenant admins download it during the grace through an emailed link or an export-only sign-in (single-use 15-minute token, no session). Both work until the purge starts. The provider dashboard never shows tenant content. Recorded in Sathiya's phase file and PR #229; not yet in the Decision Record.
 
 ## Out of scope
 

@@ -182,6 +182,16 @@ func (st *Store) Resume(ctx context.Context, workspaceID string, inTx InTx) (bef
 	if before.SuspendedAt == nil {
 		return Suspension{}, Suspension{}, ErrNotSuspended
 	}
+	// S4 (D-46): a tenant with a scheduled deletion stays suspended; cancel
+	// the deletion first (the DB CHECK workspaces_delete_only_when_suspended
+	// backs this).
+	var scheduled bool
+	if err := tx.QueryRow(ctx, `SELECT delete_scheduled_at IS NOT NULL FROM workspaces WHERE id = $1`, workspaceID).Scan(&scheduled); err != nil {
+		return Suspension{}, Suspension{}, fmt.Errorf("check deletion: %w", err)
+	}
+	if scheduled {
+		return Suspension{}, Suspension{}, ErrDeleteScheduled
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE workspaces
 		   SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL, updated_at = NOW()

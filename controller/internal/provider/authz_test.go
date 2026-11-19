@@ -168,6 +168,9 @@ func TestDecide_TenantLifecycleMatrix(t *testing.T) {
 	}{
 		{ActionTenantSuspend, func(x Actor) error { return a.CanSuspendTenant(x, target) }},
 		{ActionTenantResume, func(x Actor) error { return a.CanResumeTenant(x, target) }},
+		{ActionTenantDelete, func(x Actor) error { return a.CanDeleteTenant(x, target) }},
+		{ActionTenantDeleteCancel, func(x Actor) error { return a.CanCancelTenantDelete(x, target) }},
+		{ActionTenantLegalHoldSet, func(x Actor) error { return a.CanSetTenantLegalHold(x, target) }},
 	}
 	for _, role := range []string{RoleSuperAdmin, RoleRelayOps, "", "Super-Admin", "super-admin "} {
 		for _, c := range checks {

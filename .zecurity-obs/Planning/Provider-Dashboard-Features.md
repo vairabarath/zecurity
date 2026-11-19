@@ -21,7 +21,7 @@ tags:
 
 **Progress:** Must have 17 / 18 done · Can have 3 / 22 done · **Total 20 / 40** (ticked = merged **and** live-checked)
 
-**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). **Waiting:** S4 tenant deletion (PR #229, open; live-checked on its branch).
+**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). **Waiting:** S4 tenant deletion on `main` (merged #229 2026-11-19; live-checked on its branch).
 
 ## Status snapshot (2026-11-12)
 
@@ -37,7 +37,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F4 | Relay list: status, version, region, heartbeat | ✅ Done | — (region via relay pools, PR #200; live PASS 2026-11-17) |
 | F5 | Capacity view: sessions, bandwidth, headroom | ✅ Done | — (bandwidth PR #193, live PASS 2026-11-12; headroom B2 #226, live PASS 2026-11-19) |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
-| F7 | Tenant create / suspend / delete | ◐ Partly | Create S2 #225 and suspend/resume S1 #223 merged and live PASS 2026-11-19; delete S4 PR #229 open (live-checked on the branch), then the S4 check on `main` |
+| F7 | Tenant create / suspend / delete | 🧪 Merged | Create S2 #225 and suspend/resume S1 #223 live PASS 2026-11-19; delete S4 merged #229 (2026-11-19), live-checked on the branch (local export and S3 export with real agents, PASS); S4 check on `main` pending (reset DB for `066_`) |
 | F8 | Tenant detail page | ✅ Done | — (policy counts PR #190, live PASS 2026-11-12; plan B1 #222, live PASS 2026-11-19) |
 | F9 | Tenant → relay pool assignment | ✅ Done | — (PR #200; live PASS 2026-11-17) |
 | F10 | Region / residency constraint | ✅ Done | — (routing PR #200, relay-side enforcement PR #202, connector recovery fix PR #210; live PASS 2026-11-17) |
@@ -104,7 +104,7 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 - [x] **F6** Drain mode (no new placements, bleed off existing) ✅ (Phase D, PR #156; AT-D live PASS)
 
 *Tenants*
-- [ ] **F7** Tenant create / suspend / delete ◐ (create #225 and suspend/resume #223 live PASS 2026-11-19; delete S4 PR #229 open)
+- [ ] **F7** Tenant create / suspend / delete ◐ (create #225 and suspend/resume #223 live PASS 2026-11-19; delete S4 merged #229, check on `main` pending)
 - [x] **F8** Tenant detail page — connectors, users, policies count, plan ✅ (policy counts PR #190; plan B1 #222, live PASS 2026-11-19)
 - [x] **F9** Tenant → relay pool assignment ✅ (PR #200; live PASS 2026-11-17)
 - [x] **F10** Region / residency constraint on placement ✅ (PRs #200, #202, #210; live PASS 2026-11-17)

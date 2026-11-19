@@ -55,6 +55,18 @@ type Handler struct {
 	// PublishRelayLists rebuilds and broadcasts the relay lists (a
 	// suspended tenant's is empty). Optional.
 	PublishRelayLists func(ctx context.Context) error
+
+	// S4 (D-46): the grace between scheduling and the purge (default
+	// DefaultDeleteGrace), and the emailer and admin-UI base URL for the
+	// download link sent to the tenant's admins. Mailer is optional.
+	DeleteGrace time.Duration
+	Mailer      Mailer
+	AppBaseURL  string
+}
+
+// Mailer sends one plain-text email (invitation.Emailer.SendPlain).
+type Mailer interface {
+	SendPlain(to, subject, body string) error
 }
 
 type suspendRequest struct {
@@ -216,6 +228,14 @@ func writeError(w http.ResponseWriter, what string, err error) {
 		provider.WriteError(w, http.StatusConflict, "already_suspended")
 	case errors.Is(err, ErrNotSuspended):
 		provider.WriteError(w, http.StatusConflict, "not_suspended")
+	case errors.Is(err, ErrDeleteScheduled):
+		provider.WriteError(w, http.StatusConflict, "delete_scheduled")
+	case errors.Is(err, ErrDeleteNotScheduled):
+		provider.WriteError(w, http.StatusConflict, "delete_not_scheduled")
+	case errors.Is(err, ErrPurgeStarted):
+		provider.WriteError(w, http.StatusConflict, "purge_started")
+	case errors.Is(err, ErrLegalHoldUnchanged):
+		provider.WriteError(w, http.StatusConflict, "legal_hold_unchanged")
 	default:
 		log.Printf("tenant lifecycle: %s: %v", what, err)
 		provider.WriteError(w, http.StatusInternalServerError, "server_error")
