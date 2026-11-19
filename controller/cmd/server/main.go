@@ -711,6 +711,8 @@ func main() {
 	mux.Handle("PATCH /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.UpdatePool)))
 	mux.Handle("DELETE /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.DeletePool)))
 	mux.Handle("POST /provider/relays/{id}/pool", requireProvider(http.HandlerFunc(relayAdminHandler.MoveRelay)))
+	// Relay link capacity (Sprint 23 B2, D-42): relay-ops and super-admin.
+	mux.Handle("PUT /provider/relays/{id}/link-capacity", requireProvider(http.HandlerFunc(relayAdminHandler.SetLinkCapacity)))
 	mux.Handle("PUT /provider/tenants/{id}/relay-pool", requireProvider(http.HandlerFunc(relayAdminHandler.AssignTenantPool)))
 
 	// Tenant suspend / resume (Sprint 23 S1, D-45). Super-admin only (D-06),

@@ -4,6 +4,7 @@ import { Link, Navigate, useParams } from 'react-router-dom'
 import { getRelay } from '@/api/reads'
 import type { RelayDetail as RelayDetailDTO } from '@/api/types'
 import { BandwidthDetail } from '@/components/Bandwidth'
+import { RelayCapacityCard } from '@/components/Headroom'
 import { CapacityTier } from '@/components/Capacity'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
@@ -287,6 +288,7 @@ function RelayView({
           </h2>
           <BandwidthDetail bandwidth={r.bandwidth} />
         </Card>
+        <RelayCapacityCard relay={r} onDone={onActionDone} />
       </div>
 
       <Section title="Allowlists">

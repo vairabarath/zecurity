@@ -30,6 +30,8 @@ function relay(over: Partial<RelaySummary>): RelaySummary {
     draining_since: null,
     drain_state: null,
     bandwidth: null,
+    link_capacity_bps: null,
+    headroom: null,
     pool: DEFAULT_POOL, policy: RELAY_POLICY,
     ...over,
   }
