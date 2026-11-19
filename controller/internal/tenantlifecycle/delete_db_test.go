@@ -437,11 +437,25 @@ func TestPurgeDB_PrivilegedPath(t *testing.T) {
 	denied("delete provider_audit_logs", `DELETE FROM provider_audit_logs`)
 	denied("delete tombstones", `DELETE FROM workspace_tombstones`)
 	denied("tenant_purge without a purge row", `SELECT tenant_purge($1)`, id)
-	if _, err := conn.Exec(ctx, `INSERT INTO tenant_purges (workspace_id, slug, delete_by, delete_reason, scheduled_at)
-		VALUES ($1, 'priv', 'op', 'r', NOW())`, id); err != nil {
-		t.Fatal(err)
+	// The app role can't write purge progress or tombstones directly: only
+	// through the step functions, which check their preconditions.
+	denied("insert a purge row", `INSERT INTO tenant_purges (workspace_id, slug, delete_by, delete_reason, scheduled_at)
+		VALUES ($1, 'priv', 'op', 'r', NOW())`, id)
+	denied("insert a tombstone", `INSERT INTO workspace_tombstones (workspace_id, slug, deleted_by, delete_reason, scheduled_at,
+		export_kind, export_location, export_sha256) VALUES ($1, 'x', 'x', 'x', NOW(), 'local', '/x', repeat('a', 64))`, id)
+	var started bool
+	if err := conn.QueryRow(ctx, `SELECT tenant_purge_start($1)`, id).Scan(&started); err != nil || !started {
+		t.Fatalf("tenant_purge_start on a due tenant: %v %v", started, err)
 	}
+	denied("update a purge row", `UPDATE tenant_purges SET step = 'revoked' WHERE workspace_id = $1`, id)
 	denied("tenant_purge before the export", `SELECT tenant_purge($1)`, id)
+	denied("mark revoked before the export", `SELECT tenant_purge_mark_revoked($1)`, id)
+	if _, err := conn.Exec(ctx, `SELECT tenant_purge_record_export($1, 'local', '/x', repeat('a', 64))`, id); err != nil {
+		t.Fatalf("record export: %v", err)
+	}
+	denied("record the export twice", `SELECT tenant_purge_record_export($1, 'local', '/y', repeat('b', 64))`, id)
+	denied("mark revoked with an active connector", `SELECT tenant_purge_mark_revoked($1)`, id)
+	denied("tenant_purge before the revoke step", `SELECT tenant_purge($1)`, id)
 	var n int
 	e.scalar(t, &n, `SELECT count(*) FROM workspaces WHERE id = $1`, id)
 	if n != 1 {
@@ -598,5 +612,27 @@ func TestPurgeDB_TenantPurgeFunctionChecks(t *testing.T) {
 	e.scalar(t, &n, `SELECT count(*) FROM workspaces WHERE id = $1`, id)
 	if n != 0 {
 		t.Fatal("workspace not deleted")
+	}
+}
+
+// The purge row is created only for a due tenant, under the workspace lock:
+// after a cancel (or under a legal hold) tenant_purge_start creates none, so
+// a cancelled deletion can never go on to revoke the tenant.
+func TestPurgeDB_StartOnlyWhenDue(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	id := e.due(t, "cancelled")
+	if _, _, err := e.h.Store.CancelDelete(ctx, id, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.purger(t, t.TempDir()).Purge(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	e.scalar(t, &n, `SELECT count(*) FROM tenant_purges WHERE workspace_id = $1`, id)
+	var active string
+	e.scalar(t, &active, `SELECT status FROM connectors WHERE tenant_id = $1`, id)
+	if n != 0 || active != "active" {
+		t.Fatalf("purge rows=%d connector=%s after a cancelled deletion, want 0 and active", n, active)
 	}
 }

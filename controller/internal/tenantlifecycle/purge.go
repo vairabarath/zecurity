@@ -152,8 +152,7 @@ func (p *Purger) RunOnce(ctx context.Context) error {
 }
 
 func (p *Purger) recordError(ctx context.Context, workspaceID string, err error) {
-	if _, e := p.Pool.Exec(context.WithoutCancel(ctx),
-		`UPDATE tenant_purges SET attempts = attempts + 1, last_error = left($2, 500), updated_at = NOW() WHERE workspace_id = $1`,
+	if _, e := p.Pool.Exec(context.WithoutCancel(ctx), `SELECT tenant_purge_record_error($1, $2)`,
 		workspaceID, err.Error()); e != nil {
 		log.Printf("tenant purge %s: record error: %v", workspaceID, e)
 	}
@@ -167,14 +166,15 @@ type purgeRow struct {
 
 // Purge advances one tenant's purge as far as it can.
 func (p *Purger) Purge(ctx context.Context, workspaceID string) error {
-	// Start (or find) the purge row; only a due tenant gets one.
-	if _, err := p.Pool.Exec(ctx, `
-		INSERT INTO tenant_purges (workspace_id, slug, delete_by, delete_reason, scheduled_at)
-		SELECT id, slug, delete_by, delete_reason, delete_scheduled_at FROM workspaces
-		 WHERE id = $1 AND suspended_at IS NOT NULL AND delete_after IS NOT NULL
-		   AND delete_after <= NOW() AND NOT legal_hold
-		ON CONFLICT (workspace_id) DO NOTHING`, workspaceID); err != nil {
+	// Start (or find) the purge row; only a due tenant gets one. The
+	// function locks the workspace row, so it serialises with CancelDelete
+	// (which refuses once a purge row exists) and SetLegalHold.
+	var started bool
+	if err := p.Pool.QueryRow(ctx, `SELECT tenant_purge_start($1)`, workspaceID).Scan(&started); err != nil {
 		return fmt.Errorf("start purge: %w", err)
+	}
+	if !started {
+		return nil
 	}
 	for {
 		var r purgeRow
@@ -252,16 +252,8 @@ func (p *Purger) export(ctx context.Context, workspaceID string, r purgeRow) err
 	if err != nil {
 		return err
 	}
-	tag, err := p.Pool.Exec(ctx, `
-		UPDATE tenant_purges
-		   SET step = 'exported', export_kind = $2, export_location = $3, export_sha256 = $4,
-		       export_verified_at = NOW(), last_error = NULL, updated_at = NOW()
-		 WHERE workspace_id = $1 AND step = 'pending'`, workspaceID, kind, loc, sha)
-	if err != nil {
+	if _, err := p.Pool.Exec(ctx, `SELECT tenant_purge_record_export($1, $2, $3, $4)`, workspaceID, kind, loc, sha); err != nil {
 		return fmt.Errorf("record export: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return errors.New("record export: purge moved on concurrently")
 	}
 	return nil
 }
@@ -345,6 +337,11 @@ func copyFileSync(src, dst string) error {
 func (p *Purger) revoke(ctx context.Context, workspaceID string) error {
 	var userIDs []string
 	err := pgx.BeginTxFunc(ctx, p.Pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		// Workspace row first: the same lock order as CancelDelete and
+		// SetLegalHold; tenant_purge_mark_revoked re-checks "due" under it.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE`, workspaceID); err != nil {
+			return fmt.Errorf("lock workspace: %w", err)
+		}
 		stmts := []string{
 			// connectors_record_revocation (041) writes the tombstones.
 			`UPDATE connectors SET status = 'revoked', revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW()
@@ -376,13 +373,8 @@ func (p *Purger) revoke(ctx context.Context, workspaceID string) error {
 		if err := relay.BumpWorkspacePoolPoliciesTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `UPDATE tenant_purges SET step = 'revoked', last_error = NULL, updated_at = NOW()
-			 WHERE workspace_id = $1 AND step = 'exported'`, workspaceID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("purge moved on concurrently")
+		if _, err := tx.Exec(ctx, `SELECT tenant_purge_mark_revoked($1)`, workspaceID); err != nil {
+			return fmt.Errorf("record revoke: %w", err)
 		}
 		return nil
 	})
@@ -408,23 +400,9 @@ func (p *Purger) revoke(ctx context.Context, workspaceID string) error {
 
 // destroy runs the privileged purge (D-13) and records step 'destroyed'.
 func (p *Purger) destroy(ctx context.Context, workspaceID string) error {
-	err := pgx.BeginTxFunc(ctx, p.Pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		var deleted bool
-		if err := tx.QueryRow(ctx, `SELECT tenant_purge($1)`, workspaceID).Scan(&deleted); err != nil {
-			return fmt.Errorf("tenant_purge: %w", err)
-		}
-		tag, err := tx.Exec(ctx, `UPDATE tenant_purges SET step = 'destroyed', last_error = NULL, updated_at = NOW()
-			 WHERE workspace_id = $1 AND step = 'revoked'`, workspaceID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("purge moved on concurrently")
-		}
-		return nil
-	})
-	if err != nil {
-		return err
+	// tenant_purge (D-13) deletes the workspace and records 'destroyed'.
+	if _, err := p.Pool.Exec(ctx, `SELECT tenant_purge($1)`, workspaceID); err != nil {
+		return fmt.Errorf("tenant_purge: %w", err)
 	}
 	if p.PublishRelayLists != nil {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fanoutTimeout)
@@ -443,16 +421,11 @@ func (p *Purger) finish(ctx context.Context, workspaceID string, r purgeRow) err
 		return errors.New("finish: purge row has no export")
 	}
 	return pgx.BeginTxFunc(ctx, p.Pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO workspace_tombstones (workspace_id, slug, deleted_by, delete_reason, scheduled_at,
-			                                  export_kind, export_location, export_sha256)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (workspace_id) DO NOTHING`,
-			workspaceID, r.slug, r.by, r.reason, r.scheduledAt, *r.exportKind, *r.exportLoc, *r.exportSHA)
-		if err != nil {
+		var written bool
+		if err := tx.QueryRow(ctx, `SELECT tenant_purge_finish($1)`, workspaceID).Scan(&written); err != nil {
 			return fmt.Errorf("tombstone: %w", err)
 		}
-		if tag.RowsAffected() == 1 {
+		if written {
 			if err := p.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
 				ProviderEmail: SystemPurgeActor,
 				Action:        provider.ActionTenantPurged,
@@ -467,8 +440,6 @@ func (p *Purger) finish(ctx context.Context, workspaceID string, r purgeRow) err
 				return err
 			}
 		}
-		_, err = tx.Exec(ctx, `UPDATE tenant_purges SET step = 'done', last_error = NULL, updated_at = NOW()
-			 WHERE workspace_id = $1 AND step = 'destroyed'`, workspaceID)
-		return err
+		return nil
 	})
 }

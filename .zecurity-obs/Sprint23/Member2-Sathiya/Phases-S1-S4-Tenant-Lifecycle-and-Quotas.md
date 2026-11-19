@@ -291,6 +291,21 @@ Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merg
   3. `destroyed`: the D-13 `SECURITY DEFINER` function `tenant_purge(ws)` deletes outbox rows and the workspace (everything cascades, including the tenant `audit_logs`), refusing unless the export is verified, the grace has passed, the tenant is suspended and not on legal hold; `provider_audit_logs` is never touched (D-12);
   4. `done`: tombstone plus a system-actor provider audit row.
 
+### Security review of the S4 backend commit (automated, 2026-11-19): two findings, both fixed
+1. **The app role could write the columns the privileged function trusts** (`tenant_purges.step` and `export_*`).
+   - **Fixed:** `ztna_app` can now only *read* `tenant_purges` and `workspace_tombstones`. Every step change goes through a `SECURITY DEFINER` function that checks its own preconditions under the workspace row lock:
+     - `tenant_purge_start`: only when due;
+     - `tenant_purge_record_export`: only from `pending`, while due;
+     - `tenant_purge_mark_revoked`: only from `exported`, while due, and only when no connector, shield or client device is left unrevoked;
+     - `tenant_purge`: only from `revoked`; records `destroyed`;
+     - `tenant_purge_finish`: the tombstone;
+     - `tenant_purge_record_error`.
+   - **Residual (accepted, inherent):** the controller performs the export, so `tenant_purge_record_export` trusts the location and hash it is given. A database function can't read the tenant's bucket or the controller's disk.
+2. **The purge start raced with cancel.**
+   - **Before:** the purge row was inserted without locking the workspace, so a concurrent cancel could succeed while a purge row was created. The purge would then revoke a tenant whose deletion had been cancelled.
+   - **Fixed:** `tenant_purge_start` locks the workspace row and creates the row only when the tenant is due. The revoke transaction locks the workspace row first, the same order as cancel and legal hold.
+   - **Tests:** `TestPurgeDB_StartOnlyWhenDue`, and the extended `TestPurgeDB_PrivilegedPath`. Mutation checks caught: start-when-due, mark-revoked's "all revoked" check, record-export's "from pending only" check, and the app-role write revoke.
+
 ### Tests
 - Delete is refused unless the tenant is suspended; cancel works within the grace; resume is refused while scheduled.
 - A legal hold pauses the purge.

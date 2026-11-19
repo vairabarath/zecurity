@@ -97,48 +97,164 @@ CREATE TABLE tenant_export_tokens (
 CREATE INDEX tenant_export_tokens_workspace ON tenant_export_tokens (workspace_id);
 
 -- ── D-13: the privileged purge path ─────────────────────────────────────────
--- Deletes one tenant: its outbox rows (RESTRICT FK), then the workspace row;
--- every tenant table cascades, including audit_logs, connector_logs and the
--- audit stream heads. Refuses unless the purge row records a verified export
--- and the revoke step, the grace has passed, and the tenant is still
--- suspended, scheduled and not on legal hold. Idempotent: a workspace that is
--- already gone is a no-op (the job then writes the tombstone). Raises with
--- insufficient_privilege on a refused precondition.
+-- The runtime role (ztna_app) can't write tenant_purges or the tombstones
+-- (only read them): every step change goes through one of the SECURITY
+-- DEFINER functions below, owned by the migration owner, and each checks its
+-- own preconditions under the workspace row lock. The lock also serialises a
+-- step with CancelDelete / SetLegalHold, which lock the same row. Residual:
+-- the export is performed by the controller, so tenant_purge_record_export
+-- trusts the (kind, location, sha256) it is given; the function cannot read
+-- the tenant's bucket or the controller's disk.
+
+-- tenant_due locks the workspace row and reports whether its deletion is due
+-- (suspended, scheduled, grace passed, no legal hold). NULL: no such row.
+CREATE FUNCTION tenant_due(p_workspace UUID) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    w RECORD;
+BEGIN
+    SELECT suspended_at, delete_after, legal_hold INTO w FROM workspaces WHERE id = p_workspace FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    RETURN w.suspended_at IS NOT NULL AND w.delete_after IS NOT NULL AND w.delete_after <= now() AND NOT w.legal_hold;
+END;
+$$;
+
+-- Starts the purge of a due tenant (idempotent). Returns whether a purge row
+-- exists afterwards.
+CREATE FUNCTION tenant_purge_start(p_workspace UUID) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF tenant_due(p_workspace) THEN
+        INSERT INTO tenant_purges (workspace_id, slug, delete_by, delete_reason, scheduled_at)
+        SELECT id, slug, delete_by, delete_reason, delete_scheduled_at FROM workspaces WHERE id = p_workspace
+        ON CONFLICT (workspace_id) DO NOTHING;
+    END IF;
+    RETURN EXISTS (SELECT 1 FROM tenant_purges WHERE workspace_id = p_workspace);
+END;
+$$;
+
+-- Records the verified export: only from step 'pending', while due.
+CREATE FUNCTION tenant_purge_record_export(p_workspace UUID, p_kind TEXT, p_location TEXT, p_sha256 TEXT) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF NOT coalesce(tenant_due(p_workspace), false) THEN
+        RAISE EXCEPTION 'tenant_purge_record_export: % is not due', p_workspace USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    UPDATE tenant_purges
+       SET step = 'exported', export_kind = p_kind, export_location = p_location, export_sha256 = p_sha256,
+           export_verified_at = now(), last_error = NULL, updated_at = now()
+     WHERE workspace_id = p_workspace AND step = 'pending';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant_purge_record_export: % is not at step pending', p_workspace USING ERRCODE = 'insufficient_privilege';
+    END IF;
+END;
+$$;
+
+-- Records the revoke step: only from 'exported', while due, and only when
+-- nothing of the tenant can still authenticate (every connector and shield
+-- revoked, every client device revoked).
+CREATE FUNCTION tenant_purge_mark_revoked(p_workspace UUID) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF NOT coalesce(tenant_due(p_workspace), false) THEN
+        RAISE EXCEPTION 'tenant_purge_mark_revoked: % is not due', p_workspace USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF EXISTS (SELECT 1 FROM connectors WHERE tenant_id = p_workspace AND status <> 'revoked')
+       OR EXISTS (SELECT 1 FROM shields WHERE tenant_id = p_workspace AND status <> 'revoked')
+       OR EXISTS (SELECT 1 FROM client_devices WHERE workspace_id = p_workspace AND revoked_at IS NULL) THEN
+        RAISE EXCEPTION 'tenant_purge_mark_revoked: % still has unrevoked agents or devices', p_workspace
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    UPDATE tenant_purges SET step = 'revoked', last_error = NULL, updated_at = now()
+     WHERE workspace_id = p_workspace AND step = 'exported';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant_purge_mark_revoked: % is not at step exported', p_workspace USING ERRCODE = 'insufficient_privilege';
+    END IF;
+END;
+$$;
+
+-- tenant_purge deletes one tenant: its outbox rows (RESTRICT FK), then the
+-- workspace row; every tenant table cascades, including audit_logs,
+-- connector_logs and the audit stream heads. Only from step 'revoked' (a
+-- verified export recorded), while due; records step 'destroyed'. Idempotent:
+-- at step 'destroyed' it is a no-op. provider_audit_logs is never touched.
 CREATE FUNCTION tenant_purge(p_workspace UUID) RETURNS BOOLEAN
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
     p RECORD;
-    w RECORD;
 BEGIN
-    SELECT * INTO p FROM tenant_purges WHERE workspace_id = p_workspace FOR UPDATE;
-    IF NOT FOUND OR p.step NOT IN ('revoked', 'destroyed') OR p.export_verified_at IS NULL THEN
+    SELECT step, export_verified_at INTO p FROM tenant_purges WHERE workspace_id = p_workspace FOR UPDATE;
+    IF FOUND AND p.step = 'destroyed' THEN
+        RETURN false;
+    END IF;
+    IF NOT FOUND OR p.step <> 'revoked' OR p.export_verified_at IS NULL THEN
         RAISE EXCEPTION 'tenant_purge: % has no verified export and revoke step', p_workspace
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-
-    SELECT id, suspended_at, delete_after, legal_hold INTO w
-      FROM workspaces WHERE id = p_workspace FOR UPDATE;
-    IF NOT FOUND THEN
-        RETURN false; -- already destroyed (a resumed purge)
-    END IF;
-    IF w.suspended_at IS NULL OR w.delete_after IS NULL OR w.delete_after > now() OR w.legal_hold THEN
+    IF NOT coalesce(tenant_due(p_workspace), false) THEN
         RAISE EXCEPTION 'tenant_purge: % is not due (suspended, scheduled, past grace, no legal hold)', p_workspace
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-
     DELETE FROM outbox_events WHERE workspace_id = p_workspace;
     DELETE FROM workspaces WHERE id = p_workspace;
+    UPDATE tenant_purges SET step = 'destroyed', last_error = NULL, updated_at = now() WHERE workspace_id = p_workspace;
     RETURN true;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION tenant_purge(UUID) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION tenant_purge(UUID) TO ztna_app;
+-- Writes the tombstone from the purge row and records 'done'. Returns
+-- whether the tombstone was written now (the caller then writes the
+-- provider audit row in the same transaction).
+CREATE FUNCTION tenant_purge_finish(p_workspace UUID) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    n INT;
+BEGIN
+    PERFORM 1 FROM tenant_purges WHERE workspace_id = p_workspace AND step = 'destroyed' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant_purge_finish: % is not at step destroyed', p_workspace USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    INSERT INTO workspace_tombstones (workspace_id, slug, deleted_by, delete_reason, scheduled_at,
+                                      export_kind, export_location, export_sha256)
+    SELECT workspace_id, slug, delete_by, delete_reason, scheduled_at, export_kind, export_location, export_sha256
+      FROM tenant_purges WHERE workspace_id = p_workspace
+    ON CONFLICT (workspace_id) DO NOTHING;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    UPDATE tenant_purges SET step = 'done', last_error = NULL, updated_at = now() WHERE workspace_id = p_workspace;
+    RETURN n = 1;
+END;
+$$;
 
--- The runtime role reads and advances purge progress and writes tombstones;
--- it may never delete a tombstone.
-GRANT SELECT, INSERT, UPDATE ON tenant_purges, workspace_tombstones, tenant_export_tokens TO ztna_app;
-GRANT DELETE ON tenant_purges, tenant_export_tokens TO ztna_app;
-REVOKE DELETE, TRUNCATE ON workspace_tombstones FROM ztna_app;
+-- Records a failed attempt (no step change).
+CREATE FUNCTION tenant_purge_record_error(p_workspace UUID, p_error TEXT) RETURNS VOID
+LANGUAGE sql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+    UPDATE tenant_purges SET attempts = attempts + 1, last_error = left(p_error, 500), updated_at = now()
+     WHERE workspace_id = p_workspace;
+$$;
+
+REVOKE ALL ON FUNCTION tenant_due(UUID), tenant_purge_start(UUID), tenant_purge_record_export(UUID, TEXT, TEXT, TEXT),
+    tenant_purge_mark_revoked(UUID), tenant_purge(UUID), tenant_purge_finish(UUID), tenant_purge_record_error(UUID, TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tenant_purge_start(UUID), tenant_purge_record_export(UUID, TEXT, TEXT, TEXT),
+    tenant_purge_mark_revoked(UUID), tenant_purge(UUID), tenant_purge_finish(UUID), tenant_purge_record_error(UUID, TEXT) TO ztna_app;
+
+-- The runtime role reads purge progress and tombstones only; download tokens
+-- it manages directly.
+REVOKE ALL ON tenant_purges, workspace_tombstones FROM ztna_app;
+GRANT SELECT ON tenant_purges, workspace_tombstones TO ztna_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_export_tokens TO ztna_app;
