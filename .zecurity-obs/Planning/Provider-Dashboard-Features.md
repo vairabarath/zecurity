@@ -1,7 +1,7 @@
 ---
 type: tracker
 title: Provider Dashboard — Feature Tracker
-updated: 2026-11-17
+updated: 2026-11-19
 owners: [Barath (M2), Sathiya (M1)]
 source: Feature list from Barath, 2026-10-26 (Phase 1 / 2 / 3)
 baseline: main c79a75e1 (Sprint 22 T, A, E, X, D merged; FU-1 … FU-19 done except FU-11, mitigated; quick wins #190, F17 #192, F5 #193, F14 #195 merged and live-checked 2026-11-12)
@@ -19,15 +19,15 @@ tags:
 
 ## Tracking
 
-**Progress:** Must have 14 / 18 done · Can have 3 / 22 done · **Total 17 / 40** (ticked = merged **and** live-checked)
+**Progress:** Must have 17 / 18 done · Can have 3 / 22 done · **Total 20 / 40** (ticked = merged **and** live-checked)
 
-**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38) and 2026-11-17 (relay pools: F4, F9, F10, F11; [[Pending-Live-Tests]]). **Waiting for a live check (Sprint 23, merged 2026-11-17/18):** B1 plans (#222), B2 headroom (#226), S1 suspend/resume (#223), S2 tenant creation (#225), S3 quotas (#224).
+**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). **Waiting:** S4 tenant deletion on `main` (merged #229 2026-11-19; live-checked on its branch).
 
 ## Status snapshot (2026-11-12)
 
 Checked against `main` `c79a75e1`. "Quick" = controller read API + console view only (🟢 in the effort key).
 
-### Must have (Phase 1): 14 of 18 done
+### Must have (Phase 1): 17 of 18 done
 
 | ID | Feature | Status | What's left |
 |---|---|---|---|
@@ -35,14 +35,14 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F2 | Relay certificates from the provider CA | ✅ Done | — |
 | F3 | Relay revoke and decommission | ✅ Done | — |
 | F4 | Relay list: status, version, region, heartbeat | ✅ Done | — (region via relay pools, PR #200; live PASS 2026-11-17) |
-| F5 | Capacity view: sessions, bandwidth, headroom | 🧪 Merged | Bandwidth PR #193 (live PASS 2026-11-12). Headroom: Sprint 23 B2 (D-42), merged #226; live check pending |
+| F5 | Capacity view: sessions, bandwidth, headroom | ✅ Done | — (bandwidth PR #193, live PASS 2026-11-12; headroom B2 #226, live PASS 2026-11-19) |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
-| F7 | Tenant create / suspend / delete | ◐ Partly | Sprint 23 (D-44 … D-46): create S2 #225 and suspend/resume S1 #223 merged, live check pending; delete (S4) PR #229 open, live-checked on the branch (local export and S3 export with real agents, PASS) |
-| F8 | Tenant detail page | 🧪 Merged | Policy counts PR #190 (live PASS 2026-11-12). Plan: Sprint 23 B1 (D-43, no billing), merged #222; live check pending |
+| F7 | Tenant create / suspend / delete | 🧪 Merged | Create S2 #225 and suspend/resume S1 #223 live PASS 2026-11-19; delete S4 merged #229 (2026-11-19), live-checked on the branch (local export and S3 export with real agents, PASS); S4 check on `main` pending (reset DB for `066_`) |
+| F8 | Tenant detail page | ✅ Done | — (policy counts PR #190, live PASS 2026-11-12; plan B1 #222, live PASS 2026-11-19) |
 | F9 | Tenant → relay pool assignment | ✅ Done | — (PR #200; live PASS 2026-11-17) |
 | F10 | Region / residency constraint | ✅ Done | — (routing PR #200, relay-side enforcement PR #202, connector recovery fix PR #210; live PASS 2026-11-17) |
 | F11 | Failover pool per tenant | ✅ Done | — (PRs #201, #213, #215; live PASS 2026-11-17 run 2) |
-| F12 | Per-tenant quotas | 🧪 Merged | Sprint 23 S3 (D-47, six keys), merged #224; live check pending |
+| F12 | Per-tenant quotas | ✅ Done | — (S3 #224, six keys, live PASS 2026-11-19) |
 | F13 | Certificate inventory by expiry | ✅ Done | — |
 | F14 | Expiry alerting | ✅ Done | — (banner/filter; daily super-admin email D-36, PR #195; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
 | F15 | Revocation + CRL/OCSP status | ✅ Done | — (CRL-based by design, D-35; CRL status PR #190; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
@@ -100,16 +100,16 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 - [x] **F2** Cert issuance to relay from provider CA ✅
 - [x] **F3** Relay decommission / revoke ✅
 - [x] **F4** Relay list with status, version, region, last heartbeat ✅ (region via relay pools PR #200; live PASS 2026-11-17)
-- [ ] **F5** Capacity view — active sessions, bandwidth, headroom ◐ (bandwidth PR #193, live PASS 2026-11-12; headroom open)
+- [x] **F5** Capacity view — active sessions, bandwidth, headroom ✅ (bandwidth PR #193, live PASS 2026-11-12; headroom B2 #226, live PASS 2026-11-19)
 - [x] **F6** Drain mode (no new placements, bleed off existing) ✅ (Phase D, PR #156; AT-D live PASS)
 
 *Tenants*
-- [ ] **F7** Tenant create / suspend / delete ⬜
-- [ ] **F8** Tenant detail page — connectors, users, policies count, plan ◐ (policy counts PR #190, live PASS 2026-11-12; plan missing)
+- [ ] **F7** Tenant create / suspend / delete ◐ (create #225 and suspend/resume #223 live PASS 2026-11-19; delete S4 merged #229, check on `main` pending)
+- [x] **F8** Tenant detail page — connectors, users, policies count, plan ✅ (policy counts PR #190; plan B1 #222, live PASS 2026-11-19)
 - [x] **F9** Tenant → relay pool assignment ✅ (PR #200; live PASS 2026-11-17)
 - [x] **F10** Region / residency constraint on placement ✅ (PRs #200, #202, #210; live PASS 2026-11-17)
 - [x] **F11** Failover pool per tenant ✅ (PRs #201, #213, #215; live PASS 2026-11-17, run 2 on a reset DB)
-- [ ] **F12** Per-tenant quotas (connectors, users, sessions) ⬜
+- [x] **F12** Per-tenant quotas ✅ (S3 #224: users, resources, remote networks, connectors, shields, client devices; live PASS 2026-11-19)
 
 *PKI*
 - [x] **F13** Certificate inventory with expiry, sorted by days remaining ✅

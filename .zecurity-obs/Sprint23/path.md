@@ -170,13 +170,13 @@ Tracker: F5, F7, F8, F12 ticked only after their live checks → **Must have 18 
 
 - [x] Phase 0: D-42 … D-47 decided and written into the Decision Record (2026-11-17)
 - [x] Documents reviewed (Sprint 23 files, Decision Record amendment, CLAUDE.md) — signed off by Barath 2026-11-17; implementation may start
-- [ ] B1 — Plans (Barath) — merged (#222) — live-checked
-- [ ] B2 — Relay link capacity + headroom (Barath) — merged (#226) — live-checked
-- [ ] S2 — Provider tenant creation (Sathiya, handed over by Barath) — merged (#225) — live-checked
-- [ ] S1 — Suspend / resume (Sathiya) — merged (#223) — live-checked
-- [ ] S3 — Quotas (Sathiya) — merged (#224) — live-checked
-- [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — PR #229 open (not merged) — live-checked on the branch 2026-11-18/19 (local export and S3 export with real agents, PASS)
-- [ ] Sprint acceptance run (both); tracker 18 / 18
+- [x] B1 — Plans (Barath) — merged (#222) — live-checked 2026-11-19 (PASS)
+- [x] B2 — Relay link capacity + headroom (Barath) — merged (#226) — live-checked 2026-11-19 (PASS)
+- [x] S2 — Provider tenant creation (Sathiya, handed over by Barath) — merged (#225) — live-checked (branch 2026-11-18; recheck on `main` 2026-11-19, PASS)
+- [x] S1 — Suspend / resume (Sathiya) — merged (#223) — live-checked 2026-11-19 (PASS; residency allowlist part not run, one relay)
+- [x] S3 — Quotas (Sathiya) — merged (#224) — live-checked 2026-11-19 (PASS)
+- [ ] S4 — Delete: schedule, cancel, purge (Sathiya) — merged (#229, 2026-11-19) — live-checked on the branch 2026-11-18/19 (local export and S3 export with real agents, PASS)
+- [ ] Sprint acceptance run (both); tracker 18 / 18 — run 2026-11-19 on `main` `4d1faf50`: B1, B2, S1, S2 recheck, S3 and cross-feature PASS (PR #230); S4 check on `main` still to do (reset DB for `066_`); tracker 17 / 18
 
 ## Post-Sprint Fixes
 
