@@ -205,6 +205,9 @@ func TestExportDB_SigninTokenAndLimits(t *testing.T) {
 	if w := f.post("/api/tenant-export/download", tok); w.Code != 404 {
 		t.Fatalf("download after the purge started: %d", w.Code)
 	}
+	if _, err := tenantexport.IssueSigninToken(ctx, f.pool, f.ws, f.admin); err != tenantexport.ErrInvalidToken {
+		t.Fatalf("sign-in token after the purge started: %v", err)
+	}
 	for _, bad := range []string{"x", strings.Repeat("A", 43), ""} {
 		if w := f.post("/api/tenant-export/download", bad); w.Code != 404 && w.Code != 400 {
 			t.Fatalf("bad token %q: %d", bad, w.Code)
@@ -216,5 +219,27 @@ func TestExportDB_SigninTokenAndLimits(t *testing.T) {
 	}
 	if _, err := tenantexport.IssueSigninToken(ctx, f.pool, f.ws, f.admin); err != tenantexport.ErrInvalidToken {
 		t.Fatalf("sign-in token without a scheduled deletion: %v", err)
+	}
+}
+
+// A legal hold keeps a tenant past its scheduled deletion: its data is still
+// there, so the emailed link keeps working and admins can still get a
+// sign-in download, until the purge starts.
+func TestExportDB_LinksWorkUnderLegalHoldPastTheGrace(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	tok := f.emailToken(t)
+	if _, err := f.pool.Exec(ctx, `UPDATE workspaces SET delete_after = NOW() - INTERVAL '1 hour',
+		legal_hold = true, legal_hold_reason = 'r', legal_hold_by = 'op', legal_hold_at = NOW() WHERE id = $1`, f.ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE tenant_export_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE workspace_id = $1`, f.ws); err != nil {
+		t.Fatal(err)
+	}
+	if w := f.post("/api/tenant-export/download", tok); w.Code != 200 {
+		t.Fatalf("email link under a legal hold past the grace: %d", w.Code)
+	}
+	if _, err := tenantexport.IssueSigninToken(ctx, f.pool, f.ws, f.admin); err != nil {
+		t.Fatalf("sign-in token under a legal hold past the grace: %v", err)
 	}
 }

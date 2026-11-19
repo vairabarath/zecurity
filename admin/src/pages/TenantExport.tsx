@@ -108,9 +108,16 @@ export default function TenantExport() {
       <div className="max-w-md text-center">
         <h1 className="text-2xl font-semibold tracking-tight">Workspace suspended</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          <span className="font-medium text-foreground">{info.workspace_name}</span> is suspended by your provider and
-          scheduled for deletion on <span className="font-medium text-foreground">{deadline}</span>. Until then you can
-          download your workspace’s logs: the admin audit log, the access log and the certificate history.
+          <span className="font-medium text-foreground">{info.workspace_name}</span> is suspended by your provider and{' '}
+          {new Date(info.delete_after).getTime() > Date.now() ? (
+            <>
+              scheduled for deletion on <span className="font-medium text-foreground">{deadline}</span>.
+            </>
+          ) : (
+            <>its deletion is pending.</>
+          )}{' '}
+          Until the deletion starts you can download your workspace’s logs: the admin audit log, the access log and the
+          certificate history.
         </p>
       </div>
       {downloadError && (

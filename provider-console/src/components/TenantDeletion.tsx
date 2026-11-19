@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { formatDateTime } from '@/lib/format'
 import { tenantLifecycleFailure, type TenantLifecycleAction } from '@/lib/tenant-errors'
+import { timeUntil } from '@/lib/tenant-format'
 
 const SUPER_ADMIN = ['super-admin'] as const
 
@@ -24,9 +25,6 @@ const PURGE_STEPS: Record<PurgeStep, string> = {
 
 type Action = 'delete' | 'cancel' | 'hold' | 'release'
 
-function daysUntil(iso: string): number {
-  return Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000))
-}
 
 // Tenant detail's "Deletion" section (Sprint 23 S4, D-46, D-17 extended).
 // Status only: the tenant's exported logs go to the tenant, never to the
@@ -128,7 +126,12 @@ export function TenantDeletionSection({ tenant, onDone }: { tenant: TenantDetail
           <dt className="text-muted-foreground">Deletes on</dt>
           <dd data-delete-after>
             {formatDateTime(d!.delete_after!)}
-            {!started && <span className="text-muted-foreground"> (in {daysUntil(d!.delete_after!)} days)</span>}
+            {!started && (
+              <span className="text-muted-foreground" data-countdown>
+                {' '}
+                ({timeUntil(d!.delete_after!) ?? (d!.legal_hold ? 'due; paused by the legal hold' : 'due; the purge starts shortly')})
+              </span>
+            )}
           </dd>
           <dt className="text-muted-foreground">Scheduled by</dt>
           <dd>{d!.by}</dd>

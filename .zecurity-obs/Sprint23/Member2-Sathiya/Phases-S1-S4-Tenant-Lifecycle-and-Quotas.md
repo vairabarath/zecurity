@@ -355,6 +355,31 @@ Built on the local branch `feat/s3-tenant-quotas` (from `main` 28694918, B1 merg
   - console `TenantDeletion.test.tsx`; admin `TenantExport.test.tsx`.
   - Mutation checks are all caught, among them: delete without suspension, purge without export, legal hold (function and loop), resume while scheduled, cancel after start, both verifications, S3 preferred, the token rules (single use, purge start, cancel, admins only) and the step-function checks.
 
+### Live check (2026-11-19, build `19d0170f` plus the fix below, reset DB, Orca embedded browser; controller with `ENV=development TENANT_DELETE_GRACE=2m TENANT_PURGE_INTERVAL=30s TENANT_PURGE_EXPORT_DIR=…`)
+Throwaway tenant `s4live`: a first admin signed in through a test IdP connection, one remote network, one connector (registered, not installed), 7 audit rows.
+
+| Check | Result |
+|---|---|
+| Delete on an active tenant | ✅ Console button disabled ("Only a suspended tenant can be deleted") |
+| Suspend, then Delete (reason and typed slug) | ✅ 2-minute grace; `tenant.delete` audited with the reason; one email token; email sent over SMTP |
+| Export-only sign-in (admin) | ✅ Lands on `/tenant-export` with the fragment removed and no session (`localStorage` empty); download works and is audited `tenant_export.download {via: signin}`; reusing the sign-in token is refused |
+| Resume while scheduled | ✅ Refused: "Cancel the deletion first" |
+| Legal hold past the grace | ✅ No purge row; connector still active |
+| Cancel, then schedule again | ✅ Tokens dropped. The emailed link (opened by Sathiya in a browser) works from the new email (`via: email` audited); the old email's link shows "Download link not valid" |
+| Purge with a read-only export dir | ✅ Fails at export (step `pending`, `last_error` permission denied); nothing destroyed |
+| Controller stopped, directory fixed, restarted | ✅ The purge resumes and completes (`done`, attempts = 3) with **one** export file; its SHA-256 on disk equals the tombstone's |
+| End state | ✅ The archive holds `manifest.json` and the 10 audit rows of the tenant. Workspace, audit log, access log, users, connector, network, CA key, tokens and IdP connection are gone. Provider audit intact (create through legal hold, plus `tenant.purged` by `system:tenant-purge`). The tenant list is empty; tenant detail is 404 |
+
+**Fix found live:**
+- **Problem:** download links were tied to the scheduled deletion time. A legal hold keeping a tenant past that time cut its admins off from their still-existing logs (the email link expired, and sign-in refused).
+- **Now:** links work until the purge **starts**. Emailed links ignore `expires_at`; sign-in tokens need only "scheduled and purge not started" (15 minutes each).
+- **Display:** the admin page says "its deletion is pending" past the deadline. The console countdown shows minutes, hours or days, or "due; paused by the legal hold" (it said "in 1 days" for 2 minutes).
+- **Tests:** `TestExportDB_LinksWorkUnderLegalHoldPastTheGrace`, and no sign-in token once the purge started. Mutation checks caught.
+
+**Not exercised live:**
+- The S3 destination (covered by DB tests with a fake bucket);
+- revocation of installed agents (the connector was never installed; agent revocation is covered by DB tests).
+
 ### Live check
 On a throwaway lab tenant:
 1. Suspend → schedule delete → cancel → schedule again.

@@ -87,7 +87,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 				link := strings.TrimSuffix(h.AppBaseURL, "/") + "/tenant-export#token=" + l.Token
 				body := fmt.Sprintf("Your Zecurity workspace is suspended and scheduled for deletion on %s.\r\n\r\n"+
 					"Until then you can download your workspace's logs (admin audit log, access log and certificate history):\r\n%s\r\n\r\n"+
-					"The link works until the deletion. After that, the workspace and its data can't be recovered.",
+					"The link works until the deletion starts. After that, the workspace and its data can't be recovered.",
 					l.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC"), link)
 				if err := h.Mailer.SendPlain(l.Email, "Your Zecurity workspace is scheduled for deletion", body); err != nil {
 					log.Printf("tenant delete %s: email the download link to an admin: %v", workspaceID, err)

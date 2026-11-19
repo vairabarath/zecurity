@@ -12,9 +12,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Download tokens (2026-11-18 design): an emailed link valid until the purge
-// (purpose "email") and a single-use, short-lived token handed out by an
-// export-only sign-in (purpose "signin"). Only SHA-256(token) is stored; a
+// Download tokens (2026-11-18 design): an emailed link (purpose "email") that
+// works until the purge STARTS — a legal hold past the scheduled time keeps
+// it working, since the data is still there — and a single-use, short-lived
+// token handed out by an export-only sign-in (purpose "signin"). Both stop the
+// moment the deletion is cancelled or the purge starts. Only SHA-256(token) is stored; a
 // token is never logged, audited or returned by a provider API.
 
 // SigninTokenTTL is how long an export-only sign-in token lasts.
@@ -95,10 +97,11 @@ func IssueSigninToken(ctx context.Context, db interface {
 	var expires time.Time
 	err = db.QueryRow(ctx, `
 		INSERT INTO tenant_export_tokens (token_sha256, workspace_id, purpose, user_id, expires_at)
-		SELECT $1, w.id, 'signin', u.id, LEAST(NOW() + make_interval(secs => $4), w.delete_after)
+		SELECT $1, w.id, 'signin', u.id, NOW() + make_interval(secs => $4)
 		  FROM workspaces w JOIN users u ON u.tenant_id = w.id
 		 WHERE w.id = $2 AND u.id = $3
-		   AND w.suspended_at IS NOT NULL AND w.delete_after IS NOT NULL AND w.delete_after > NOW()
+		   AND w.suspended_at IS NOT NULL AND w.delete_after IS NOT NULL
+		   AND NOT EXISTS (SELECT 1 FROM tenant_purges p WHERE p.workspace_id = w.id)
 		   AND u.role = 'admin' AND u.status = 'active'
 		RETURNING expires_at`, h, workspaceID, userID, SigninTokenTTL.Seconds()).Scan(&expires)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -133,7 +136,7 @@ func lookup(ctx context.Context, tx pgx.Tx, token string, lock bool) (Grant, []b
 		  JOIN workspaces w ON w.id = t.workspace_id
 		  JOIN users u ON u.id = t.user_id AND u.tenant_id = w.id
 		 WHERE t.token_sha256 = $1
-		   AND t.expires_at > NOW() AND t.used_at IS NULL
+		   AND (t.purpose = 'email' OR t.expires_at > NOW()) AND t.used_at IS NULL
 		   AND w.suspended_at IS NOT NULL AND w.delete_after IS NOT NULL
 		   AND u.role = 'admin' AND u.status = 'active'
 		   AND NOT EXISTS (SELECT 1 FROM tenant_purges p WHERE p.workspace_id = w.id)`

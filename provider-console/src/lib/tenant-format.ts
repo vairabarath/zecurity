@@ -35,3 +35,13 @@ export function slugFromName(name: string): string {
     .slice(0, 60)
     .replace(/-+$/, '')
 }
+
+/** "in 29 days", "in 5 hours", "in 3 minutes", or null once due. */
+export function timeUntil(iso: string, now = Date.now()): string | null {
+  const ms = new Date(iso).getTime() - now
+  if (ms <= 0) return null
+  const plural = (n: number, unit: string) => `in ${n} ${unit}${n === 1 ? '' : 's'}`
+  if (ms < 3_600_000) return plural(Math.max(1, Math.ceil(ms / 60_000)), 'minute')
+  if (ms < 86_400_000) return plural(Math.ceil(ms / 3_600_000), 'hour')
+  return plural(Math.ceil(ms / 86_400_000), 'day')
+}
