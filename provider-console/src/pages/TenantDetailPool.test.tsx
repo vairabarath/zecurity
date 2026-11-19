@@ -50,6 +50,7 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     shields_truncated: false,
     relay_pool: TENANT_DEFAULT_POOL,
     suspension: null,
+    deletion: null,
     plan: TENANT_FREE_PLAN,
     quotas: FREE_QUOTAS,
     first_admin_invitation: null,

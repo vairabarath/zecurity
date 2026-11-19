@@ -37,7 +37,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F4 | Relay list: status, version, region, heartbeat | ✅ Done | — (region via relay pools, PR #200; live PASS 2026-11-17) |
 | F5 | Capacity view: sessions, bandwidth, headroom | 🧪 Merged | Bandwidth PR #193 (live PASS 2026-11-12). Headroom: Sprint 23 B2 (D-42), merged #226; live check pending |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
-| F7 | Tenant create / suspend / delete | ◐ Partly | Sprint 23 (D-44 … D-46): create S2 #225 and suspend/resume S1 #223 merged, live check pending; delete (S4) not started |
+| F7 | Tenant create / suspend / delete | ◐ Partly | Sprint 23 (D-44 … D-46): create S2 #225 and suspend/resume S1 #223 merged, live check pending; delete (S4) PR #229 open, live-checked on the branch (local export and S3 export with real agents, PASS) |
 | F8 | Tenant detail page | 🧪 Merged | Policy counts PR #190 (live PASS 2026-11-12). Plan: Sprint 23 B1 (D-43, no billing), merged #222; live check pending |
 | F9 | Tenant → relay pool assignment | ✅ Done | — (PR #200; live PASS 2026-11-17) |
 | F10 | Region / residency constraint | ✅ Done | — (routing PR #200, relay-side enforcement PR #202, connector recovery fix PR #210; live PASS 2026-11-17) |

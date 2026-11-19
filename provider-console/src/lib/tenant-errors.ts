@@ -1,7 +1,7 @@
 import { ApiError } from '@/api/client'
 import { ErrorCode } from '@/api/types'
 
-export type TenantLifecycleAction = 'suspend' | 'resume'
+export type TenantLifecycleAction = 'suspend' | 'resume' | 'delete' | 'cancel the deletion' | 'legal hold change'
 
 /**
  * What a failed suspend/resume means for the console (Sprint 23 S1, D-45);
@@ -26,10 +26,21 @@ export function tenantLifecycleFailure(err: unknown, action: TenantLifecycleActi
     case ErrorCode.reasonTooLong:
       return { field: 'reason', message: 'Keep the reason to 500 characters or fewer.' }
     case ErrorCode.forbidden:
-      return { message: 'Only super-admins can suspend or resume tenants.' }
+      return { message: 'Only super-admins can suspend, resume or delete tenants.' }
+    case ErrorCode.deleteScheduled:
+      return action === 'resume'
+        ? { message: `${tenantName} is scheduled for deletion. Cancel the deletion first.` }
+        : { refresh: true, message: `${tenantName}’s deletion is already scheduled. The page is up to date.` }
+    case ErrorCode.deleteNotScheduled:
+      return { refresh: true, message: `${tenantName} has no scheduled deletion (another operator may have cancelled it). The page is up to date.` }
+    case ErrorCode.purgeStarted:
+      return { refresh: true, message: `${tenantName}’s purge has started and can’t be cancelled any more. Place a legal hold to pause it.` }
+    case ErrorCode.legalHoldUnchanged:
+      return { refresh: true, message: `${tenantName}’s legal hold was already in that state. The page is up to date.` }
     case ErrorCode.alreadySuspended:
       return { refresh: true, message: `${tenantName} was already suspended, possibly by another operator. The page is up to date.` }
     case ErrorCode.notSuspended:
+      if (action === 'delete') return { refresh: true, message: `Only a suspended tenant can be deleted. ${tenantName} isn’t suspended: suspend it first.` }
       return { refresh: true, message: `${tenantName} isn’t suspended (another operator may have resumed it). The page is up to date.` }
     case ErrorCode.notFound:
       return { refresh: true, message: `${tenantName} no longer exists.` }

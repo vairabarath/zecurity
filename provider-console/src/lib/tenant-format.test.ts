@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '@/api/client'
-import { SLUG_PATTERN, slugFromName, tenantCreateErrorMessage } from './tenant-format'
+import { SLUG_PATTERN, slugFromName, tenantCreateErrorMessage, timeUntil } from './tenant-format'
 
 describe('tenant-format', () => {
   it('suggests a valid slug from the name', () => {
@@ -21,5 +21,16 @@ describe('tenant-format', () => {
       expect(tenantCreateErrorMessage(new ApiError({ status: 400, code }))).not.toMatch(/Something went wrong/)
     }
     expect(tenantCreateErrorMessage(new TypeError('x'))).toMatch(/Couldn’t reach/)
+  })
+})
+
+describe('timeUntil (S4 countdown)', () => {
+  const now = Date.parse('2026-11-19T10:00:00Z')
+  it('says minutes, hours or days, and null once due', () => {
+    expect(timeUntil('2026-11-19T10:02:00Z', now)).toBe('in 2 minutes')
+    expect(timeUntil('2026-11-19T10:00:20Z', now)).toBe('in 1 minute')
+    expect(timeUntil('2026-11-19T15:00:00Z', now)).toBe('in 5 hours')
+    expect(timeUntil('2026-12-19T10:00:00Z', now)).toBe('in 30 days')
+    expect(timeUntil('2026-11-19T09:59:00Z', now)).toBeNull()
   })
 })

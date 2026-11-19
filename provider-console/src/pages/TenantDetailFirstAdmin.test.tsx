@@ -43,6 +43,7 @@ function tenant(over: Partial<TenantDetail> = {}): TenantDetail {
     quotas: FREE_QUOTAS,
     first_admin_invitation: null,
     suspension: null,
+    deletion: null,
     ...over,
   }
 }

@@ -19,6 +19,7 @@ import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
 import Step3Auth from '@/pages/signup/Step3Auth'
 import InviteAccept from '@/pages/InviteAccept'
+import TenantExport from '@/pages/TenantExport'
 import ClientInstall from '@/pages/ClientInstall'
 import Groups from '@/pages/Groups'
 import GroupDetail from '@/pages/GroupDetail'
@@ -66,6 +67,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/invite/:token" element={<InviteAccept />} />
+      <Route path="/tenant-export" element={<TenantExport />} />
 
       {/* Signup wizard routes */}
       <Route path="/signup" element={<Step1Email />} />

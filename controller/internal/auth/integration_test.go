@@ -318,6 +318,47 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	if loc := runAuthCallbackLocation(t, svc, "code-suspended"); loc != "/login?error=workspace_suspended" {
 		t.Fatalf("sign-in while suspended redirected to %q, want /login?error=workspace_suspended", loc)
 	}
+	// Sprint 23 S4 (2026-11-18 design): with a deletion scheduled, an admin
+	// gets an export-only sign-in: a redirect to the export page with a
+	// download token and NO session (no refresh cookie); a non-admin is
+	// still refused.
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET delete_scheduled_at = NOW(), delete_after = NOW() + INTERVAL '30 days',
+		delete_by = 'op', delete_reason = 'r' WHERE id = $1`, tenantID); err != nil {
+		t.Fatalf("schedule delete: %v", err)
+	}
+	if loc := runAuthCallbackLocation(t, svc, "code-sched-member"); loc != "/login?error=workspace_suspended" {
+		t.Fatalf("non-admin sign-in while scheduled redirected to %q", loc)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'admin' WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	{
+		initPayload, err := svc.InitiateAuth(ctx, "google", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		svc.CallbackHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?code=code-export&state="+url.QueryEscape(initPayload.State), nil))
+		loc := rec.Header().Get("Location")
+		if rec.Code != http.StatusFound || !strings.HasPrefix(loc, "/tenant-export#token=") || len(loc) < len("/tenant-export#token=")+40 {
+			t.Fatalf("admin sign-in while scheduled: %d %q, want /tenant-export#token=…", rec.Code, loc)
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == "refresh_token" && c.Value != "" {
+				t.Fatal("export-only sign-in issued a session")
+			}
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM tenant_export_tokens WHERE workspace_id = $1 AND purpose = 'signin'`, tenantID).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("sign-in tokens = %d %v", n, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET delete_scheduled_at = NULL, delete_after = NULL, delete_by = NULL, delete_reason = NULL WHERE id = $1`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET role = 'devops' WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, tenantID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}

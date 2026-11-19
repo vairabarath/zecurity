@@ -3922,3 +3922,21 @@ serves on `127.0.0.1:9102`.
 - Committed and pushed to `feat/s3-tenant-quotas` and a PR opened, on Sathiya's explicit instruction, without a recorded go from Barath (the Sprint 23 rule asks for one). Per the conflict zones, S2 merges first; then S3 rebases and adds the check to S2's first-admin invitation.
 - Reset the DB and run the S3 live check (`Pending-Live-Tests.md`).
 
+
+## 2026-11-18/19 — M1 (Sathiya): S1/S2/S3 reviewed and merged; S4 built and live-checked
+
+**What was done:**
+- Independent reviews of #223 (S1), #225 (S2), #224 (S3); review findings fixed; merged in that order at Sathiya's request (no separate product-owner go): `f57fc423`, `dcc9888a`, `1712ceef`.
+- S4 (tenant deletion, D-46) on local `feat/s4-tenant-deletion`. It covers:
+  - schema 066 with `SECURITY DEFINER` purge step functions (hardened after the security review);
+  - the provider delete, cancel and legal-hold API;
+  - the resumable purge job (export → revoke → destroy → tombstone);
+  - the tenant's own log download (an emailed link plus an export-only sign-in);
+  - the console Deletion card and the admin `/tenant-export` page.
+- Live check PASS. One fix found live: links now work until the purge starts, which matters under a legal hold.
+
+**Key decisions:**
+- Sathiya decided on a tenant-private export (to the tenant's S3 sink, else a local directory) and on downloading through both routes. This is a proposed amendment to D-45/D-46 awaiting Barath.
+
+**What's next:**
+- Barath: confirm the D-45/D-46 amendment; push and open the S4 PR (`[schema: reset DB]`).

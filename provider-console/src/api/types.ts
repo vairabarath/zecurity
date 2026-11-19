@@ -116,6 +116,11 @@ export const ErrorCode = {
   // tenant suspend/resume (Sprint 23 S1, D-45)
   alreadySuspended: 'already_suspended',
   notSuspended: 'not_suspended',
+  // tenant deletion (Sprint 23 S4, D-46)
+  deleteScheduled: 'delete_scheduled',
+  deleteNotScheduled: 'delete_not_scheduled',
+  purgeStarted: 'purge_started',
+  legalHoldUnchanged: 'legal_hold_unchanged',
   // client-side only
   networkError: 'network_error',
 } as const
@@ -465,6 +470,24 @@ export interface TenantSummary {
    * "active" while a tenant is suspended; this is what says it is.
    */
   suspension: TenantSuspension | null
+  /**
+   * The scheduled deletion and legal hold (Sprint 23 S4, D-46), or null.
+   * Status only: the tenant's exported logs are never shown to the provider.
+   */
+  deletion: TenantDeletion | null
+}
+
+export type PurgeStep = 'pending' | 'exported' | 'revoked' | 'destroyed' | 'done'
+
+/** A tenant's deletion state. */
+export interface TenantDeletion {
+  scheduled_at: string | null
+  delete_after: string | null
+  by: string | null
+  reason: string | null
+  legal_hold: boolean
+  legal_hold_reason: string | null
+  purge_step: PurgeStep | null
 }
 
 /** A tenant's provider suspension: when, by which operator (email), why. */

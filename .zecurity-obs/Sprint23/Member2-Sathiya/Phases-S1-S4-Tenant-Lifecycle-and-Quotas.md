@@ -275,6 +275,37 @@ Built on `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged); merged in **
 - **Backups:** data in DB backups persists until those backups expire. The backup retention and legal/security retention exceptions are an **ops/legal policy (open item)**; S4 only implements the legal hold.
 - **Provider console:** a Deletion section (schedule with typed slug, countdown, cancel, legal hold); `api-surface.test.ts`.
 
+### Design decisions (Sathiya, 2026-11-18) — proposed amendment to D-45 / D-46, product owner's confirmation pending
+- **The export is the tenant's own data and is tenant-private.**
+  - It contains the admin audit log (`audit_logs`), the access log (`connector_logs`), and certificate and revocation history (`connector_certificates`, `client_device_certificates`, `connector_revocations`, `shield_revocations`), packed as one archive (JSON lines plus a SHA-256 manifest).
+  - The provider console never shows its contents: no resource or network names, no who-accessed-what. The console shows deletion **status** only (scheduled, countdown, cancel, legal hold).
+- **Where the purge writes the export:** to the tenant's own S3 audit-export sink (PENDING-11) if one is configured and enabled; otherwise to `TENANT_PURGE_EXPORT_DIR` on the controller host. Destruction runs only after the written archive is read back and its hashes verified. With neither available the purge doesn't start; it retries and logs.
+- **The tenant downloads its logs during the 30-day grace window** (amends D-45's "no sign-in while suspended" for this one purpose), by two routes that share one download endpoint:
+  1. **Export-only sign-in.** An admin of a suspended tenant **with a scheduled deletion** who signs in gets **no session**. The callback issues a single-use, 15-minute download token and redirects to the admin UI page "Workspace suspended — download your logs until <date>". No other route, no device or agent change; `IssueSession` is not called.
+  2. **Emailed link.** When deletion is scheduled, every active tenant admin is emailed a link valid until the purge. The token is in the URL **fragment** (never sent to a server log); only its SHA-256 is stored; it is never logged, audited or returned by any API.
+
+  The download is a `POST` with the token in the body and is audited (tenant stream, no token).
+- **Purge steps** (one row in `tenant_purges`, each step idempotent and recorded):
+  1. `exported` (verified);
+  2. `revoked`: remaining connectors, shields and client devices marked revoked with revocation records; sessions ended; relay pool policy versions bumped;
+  3. `destroyed`: the D-13 `SECURITY DEFINER` function `tenant_purge(ws)` deletes outbox rows and the workspace (everything cascades, including the tenant `audit_logs`), refusing unless the export is verified, the grace has passed, the tenant is suspended and not on legal hold; `provider_audit_logs` is never touched (D-12);
+  4. `done`: tombstone plus a system-actor provider audit row.
+
+### Security review of the S4 backend commit (automated, 2026-11-19): two findings, both fixed
+1. **The app role could write the columns the privileged function trusts** (`tenant_purges.step` and `export_*`).
+   - **Fixed:** `ztna_app` can now only *read* `tenant_purges` and `workspace_tombstones`. Every step change goes through a `SECURITY DEFINER` function that checks its own preconditions under the workspace row lock:
+     - `tenant_purge_start`: only when due;
+     - `tenant_purge_record_export`: only from `pending`, while due;
+     - `tenant_purge_mark_revoked`: only from `exported`, while due, and only when no connector, shield or client device is left unrevoked;
+     - `tenant_purge`: only from `revoked`; records `destroyed`;
+     - `tenant_purge_finish`: the tombstone;
+     - `tenant_purge_record_error`.
+   - **Residual (accepted, inherent):** the controller performs the export, so `tenant_purge_record_export` trusts the location and hash it is given. A database function can't read the tenant's bucket or the controller's disk.
+2. **The purge start raced with cancel.**
+   - **Before:** the purge row was inserted without locking the workspace, so a concurrent cancel could succeed while a purge row was created. The purge would then revoke a tenant whose deletion had been cancelled.
+   - **Fixed:** `tenant_purge_start` locks the workspace row and creates the row only when the tenant is due. The revoke transaction locks the workspace row first, the same order as cancel and legal hold.
+   - **Tests:** `TestPurgeDB_StartOnlyWhenDue`, and the extended `TestPurgeDB_PrivilegedPath`. Mutation checks caught: start-when-due, mark-revoked's "all revoked" check, record-export's "from pending only" check, and the app-role write revoke.
+
 ### Tests
 - Delete is refused unless the tenant is suspended; cancel works within the grace; resume is refused while scheduled.
 - A legal hold pauses the purge.
@@ -282,6 +313,88 @@ Built on `feat/s3-tenant-quotas` (from `main` 28694918, B1 merged); merged in **
 - **Crash mid-purge** at each step → a re-run completes with no double export and no partial state.
 - `provider_audit_logs` is untouched; the keys are gone; the agents' certificates are on the CRL.
 - **Mutation checks:** delete without suspension; purge without export.
+
+### Implementation status (2026-11-19, branch `feat/s4-tenant-deletion`)
+- **Schema `066_tenant_deletion.sql`:**
+  - deletion and legal-hold columns, with CHECKs: a deletion only on a suspended tenant (D-10), and the columns set and cleared together;
+  - `tenant_purges` (progress), `workspace_tombstones`, `tenant_export_tokens` (SHA-256 only);
+  - the D-13 `SECURITY DEFINER` step functions (`tenant_purge_start`, `_record_export`, `_mark_revoked`, `tenant_purge`, `_finish`, `_record_error`). `ztna_app` can only read purge progress and tombstones.
+- **`internal/tenantlifecycle`:**
+  - `ScheduleDelete`: suspended only, typed slug; issues the emailed download tokens in the transaction;
+  - `CancelDelete`: refused once the purge started;
+  - `SetLegalHold`;
+  - `Resume` refuses `delete_scheduled`;
+  - handlers `Delete`, `CancelDelete`, `LegalHold`;
+  - `Purger` (the job): export, then revoke, then `tenant_purge`, then finish; resumable; a legal hold pauses it.
+- **`internal/tenantexport`:**
+  - the archive (`audit_log`, `access_log`, certificates and revocations as JSON lines plus `manifest.json`, one tar.gz);
+  - tokens: email tokens valid until the purge; sign-in tokens single-use, 15 min, admins only;
+  - `POST /api/tenant-export/{info,download}` (token in the body; the download is audited as `tenant_export.download` without the token).
+- **`internal/auditexport/archive.go`:** puts the archive to the tenant's oldest enabled S3 sink and reads it back.
+- **Auth callback:** an active admin of a suspended tenant with a scheduled deletion is redirected to `/tenant-export#token=…` with **no session**; anyone else gets `workspace_suspended`.
+- **Provider API and authz:** `tenant.delete`, `tenant.delete.cancel`, `tenant.legal_hold.set` (super-admin); `tenant.purged` (a system-actor audit row).
+- **Tenant summary:** `deletion {scheduled_at, delete_after, by, reason, legal_hold, legal_hold_reason, purge_step}`.
+- **`main.go`:** routes, plus the purger started at boot. The env settings are:
+  - `TENANT_PURGE_EXPORT_DIR`: without it, tenants without an S3 sink are not purged, and this is logged;
+  - `TENANT_PURGE_INTERVAL` (default 5 min);
+  - `TENANT_DELETE_GRACE`: development only.
+- **Console:** a tenant-detail **Deletion** section (Delete disabled unless suspended; a countdown; cancel; legal hold; the purge step) and `api-surface.test.ts` (+3 writes).
+- **Admin UI:** the `/tenant-export` page. It drops the fragment from the URL at once and sends the token only in the POST body.
+- **Tests:**
+  - `tenantlifecycle/delete_db_test.go`:
+    - the API rules;
+    - a crash at each step, then resume, giving one export and the same end state;
+    - legal hold before and during a purge;
+    - no export destination;
+    - the S3 path, including a read-back mismatch;
+    - local verification;
+    - the function checks;
+    - privileges as `ztna_app`;
+    - start only when due.
+  - `tenantexport/export_db_test.go`; auth integration (export-only sign-in, no session);
+  - console `TenantDeletion.test.tsx`; admin `TenantExport.test.tsx`.
+  - Mutation checks are all caught, among them: delete without suspension, purge without export, legal hold (function and loop), resume while scheduled, cancel after start, both verifications, S3 preferred, the token rules (single use, purge start, cancel, admins only) and the step-function checks.
+
+### Live check (2026-11-19, build `19d0170f` plus the fix below, reset DB, Orca embedded browser; controller with `ENV=development TENANT_DELETE_GRACE=2m TENANT_PURGE_INTERVAL=30s TENANT_PURGE_EXPORT_DIR=…`)
+Throwaway tenant `s4live`: a first admin signed in through a test IdP connection, one remote network, one connector (registered, not installed), 7 audit rows.
+
+| Check | Result |
+|---|---|
+| Delete on an active tenant | ✅ Console button disabled ("Only a suspended tenant can be deleted") |
+| Suspend, then Delete (reason and typed slug) | ✅ 2-minute grace; `tenant.delete` audited with the reason; one email token; email sent over SMTP |
+| Export-only sign-in (admin) | ✅ Lands on `/tenant-export` with the fragment removed and no session (`localStorage` empty); download works and is audited `tenant_export.download {via: signin}`; reusing the sign-in token is refused |
+| Resume while scheduled | ✅ Refused: "Cancel the deletion first" |
+| Legal hold past the grace | ✅ No purge row; connector still active |
+| Cancel, then schedule again | ✅ Tokens dropped. The emailed link (opened by Sathiya in a browser) works from the new email (`via: email` audited); the old email's link shows "Download link not valid" |
+| Purge with a read-only export dir | ✅ Fails at export (step `pending`, `last_error` permission denied); nothing destroyed |
+| Controller stopped, directory fixed, restarted | ✅ The purge resumes and completes (`done`, attempts = 3) with **one** export file; its SHA-256 on disk equals the tombstone's |
+| End state | ✅ The archive holds `manifest.json` and the 10 audit rows of the tenant. Workspace, audit log, access log, users, connector, network, CA key, tokens and IdP connection are gone. Provider audit intact (create through legal hold, plus `tenant.purged` by `system:tenant-purge`). The tenant list is empty; tenant detail is 404 |
+
+**Fix found live:**
+- **Problem:** download links were tied to the scheduled deletion time. A legal hold keeping a tenant past that time cut its admins off from their still-existing logs (the email link expired, and sign-in refused).
+- **Now:** links work until the purge **starts**. Emailed links ignore `expires_at`; sign-in tokens need only "scheduled and purge not started" (15 minutes each).
+- **Display:** the admin page says "its deletion is pending" past the deadline. The console countdown shows minutes, hours or days, or "due; paused by the legal hold" (it said "in 1 days" for 2 minutes).
+- **Tests:** `TestExportDB_LinksWorkUnderLegalHoldPastTheGrace`, and no sign-in token once the purge started. Mutation checks caught.
+
+**Second live run (2026-11-19): S3 destination and real agents.**
+
+Setup:
+- SeaweedFS (open-source S3-compatible server; MinIO's images are no longer publicly pullable) on `https://192.168.1.164:8333`, with a test CA. The controller trusts it through the development switches `AUDIT_EXPORT_DEV_ALLOW_PRIVATE` and `AUDIT_EXPORT_DEV_CA_FILE`.
+- Tenant `s4s3`: its first admin added an **Amazon S3 audit-export sink** in the admin UI (Settings → Add sink).
+- A connector installed and active on **luffy**, and a shield installed and active on **archlinux** (omarchy was offline).
+
+Results:
+- **The regular audit exporter** delivered the tenant's admin events to the bucket (`…/admin/2026/11/19/06/1-10.jsonl.gz`).
+- **Suspend, then schedule:** the agents stay connected and get the deny-all ACL (D-08).
+- **The purge ran on its first attempt** and exported to **S3**: `s3://s4-tenant-bucket/zecurity/v1/<ws>/tenant-deletion/<scheduled>.tar.gz`. The object downloaded back from the bucket hashes exactly to the tombstone's SHA-256. It holds the manifest, 10 audit rows and the connector's certificate record. No local file was written (the tenant's bucket takes precedence).
+- **End state:** the workspace, audit log, connector, shield, CA key, the tenant's S3 sink settings and the users are gone. The provider audit reads `tenant.create`, `tenant.suspend`, `tenant.delete`, `tenant.purged`.
+- **Agents at the purge (06:36:45):**
+  - the controller refuses the connector's next health report (`NotFound`, "unknown") and closes its stream;
+  - the connector goes **fail-closed, terminal**: sessions cancelled, shield streams closed, relay selector stopped;
+  - the shield reports "every known connector is revoked or unknown" and backs off.
+- **Test-environment note (not a Zecurity issue):** SeaweedFS's default 30 GB volume couldn't be created on this disk (uploads answered HTTP 500); restarting it with `-master.volumeSizeLimitMB=64` fixed it.
+
+PASS.
 
 ### Live check
 On a throwaway lab tenant:
