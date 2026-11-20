@@ -27,6 +27,10 @@ type scimProvisioner struct {
 	connID    string
 	syncInst  string
 	publisher identity.EventPublisher
+	// probe: this is the mapping probe's synthetic user (Sprint 24 X1). It
+	// takes no users quota slot and is created suspended. Set only by
+	// DirectoryService.probeMappingWithClaims, never from a SCIM request.
+	probe bool
 }
 
 var _ identity.Provisioner = (*scimProvisioner)(nil)
@@ -67,7 +71,14 @@ func (p *scimProvisioner) Provision(ctx context.Context, in identity.ProvisionIn
 
 	// Sprint 23 S3 (D-47): a provisioned user takes a user slot (each
 	// identity once), checked under the workspace lock in this transaction.
-	if err := quota.ReserveUser(ctx, tx, p.tenantID, email); err != nil {
+	// Sprint 24 X1: the mapping probe's user takes no slot (still locked).
+	status := "active"
+	if p.probe {
+		status = "suspended"
+		if err := quota.ReserveMappingProbe(ctx, tx, p.tenantID); err != nil {
+			return nil, fmt.Errorf("scim provision quota lock: %w", err)
+		}
+	} else if err := quota.ReserveUser(ctx, tx, p.tenantID, email); err != nil {
 		if _, ok := quota.AsExceeded(err); ok {
 			return nil, err
 		}
@@ -79,9 +90,9 @@ func (p *scimProvisioner) Provision(ctx context.Context, in identity.ProvisionIn
 		`INSERT INTO users
 		   (tenant_id, email, provider, provider_sub, role, status,
 		    provisioned_by, provisioning_owner, sync_instance_id)
-		 VALUES ($1, $2, $3, $4, 'member', 'active', 'scim', 'scim', $5)
+		 VALUES ($1, $2, $3, $4, 'member', $6, 'scim', 'scim', $5)
 		 RETURNING id`,
-		p.tenantID, email, in.Provider, in.Subject, nullIfUUID(p.syncInst),
+		p.tenantID, email, in.Provider, in.Subject, nullIfUUID(p.syncInst), status,
 	).Scan(&userID)
 	if err != nil {
 		return nil, fmt.Errorf("scim insert user: %w", err)
@@ -115,7 +126,7 @@ func (p *scimProvisioner) Provision(ctx context.Context, in identity.ProvisionIn
 		TenantID:   p.tenantID,
 		Role:       "member",
 		Email:      email,
-		Status:     "active",
+		Status:     status,
 		Generation: 1,
 	}, nil
 }

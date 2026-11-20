@@ -353,6 +353,18 @@ func ReserveUser(ctx context.Context, tx pgx.Tx, workspaceID, email string) erro
 	return check(ctx, tx, workspaceID, KeyUsers)
 }
 
+// ReserveMappingProbe is called instead of ReserveUser when the SCIM mapping
+// probe creates its synthetic probe user (Sprint 24 X1, D-47 refinement
+// 2026-11-20): the probe takes no users slot, so SCIM can be enabled on a
+// workspace at its user limit. It still takes the workspace lock, so the
+// probe is serialised with every other user creation. The probe user is
+// created suspended (no login, device enrollment or network access) and is
+// removed in the same flow; the caller guarantees one probe per workspace
+// at a time. Never call this for a real user.
+func ReserveMappingProbe(ctx context.Context, tx pgx.Tx, workspaceID string) error {
+	return lock(ctx, tx, workspaceID)
+}
+
 // ReserveInvitation is Reserve for the users key when an invitation is
 // created or accepted (no user row is created). A person the tenant already
 // counts (a live user or a pending invitation with that email) takes no new

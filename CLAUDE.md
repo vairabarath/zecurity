@@ -12,7 +12,7 @@
 - **R1 — per-workspace relay counters (F23, D-54)**, Barath: the relay reports cumulative bytes per direction and active streams **per trust domain** in the heartbeat (**additive** proto field 13, `WorkspaceTraffic`); the controller maps trust domain → workspace (unknown/revoked ignored, never stored); older relays read "Not reported".
 - **M1 — metric store + read API (F23, D-49)**, Barath: Postgres, 1-min samples kept 7 days, hourly roll-ups kept 400 days, gaps never zero-filled; `GET /provider/metrics/{series}`; per-tenant series super-admin only (D-40 extended).
 - **M2 — console charts (F23)**, Barath, after M1: relay detail, tenant detail, Overview sparkline (1 h / 24 h / 7 d / 30 d).
-- **X1 — Sprint 23 follow-ups**, Sathiya: client quota message; SCIM mapping probe exempt from the users quota (one probe at a time, no enrollment rights; real creates get a clear `quota_exceeded` SCIM error); SCIM refused with 403 while suspended; the S4 export amendment waits for Barath's confirmation.
+- **X1 — Sprint 23 follow-ups**, Sathiya: client quota message; SCIM mapping probe exempt from the users quota (one probe at a time, no enrollment rights; real creates get a clear `quota_exceeded` SCIM error); SCIM refused with 403 while suspended; the S4 export amendment is confirmed (D-46 refinement, 2026-11-20).
 - **A1 — alert rules + evaluator (F26, D-50, D-53)**, Sathiya: **platform** vs **tenant** scope separate in the schema (tenant rows need `tenant_id`, CHECK); built-in rule kinds only; firing → resolved with `for` and re-notify; read errors never resolve.
 - **A2 — delivery (F26, D-52)**, Sathiya, after A1: one generic versioned JSON webhook (no vendor SDKs), HMAC over timestamp + body (`X-Zecurity-Signature`), sealed secret shown once, HTTPS outside dev, SSRF guard at connect time; email via the F14 sender; outbox retries.
 - **A3 — Alerts console (F26)**, Sathiya, after A2. **T1 — incident timeline (F27)**, stretch.
@@ -133,7 +133,7 @@ cd controller && docker compose down -v && docker compose up -d   # Recreate loc
 Sprint 24 specific:
 - Build gate passes before proceeding to the next phase (DB-backed tests must run, not skip; a skipped DB test is a failed case).
 - The Decision Record (all amendments through **2026-11-20**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
-- No phase before its dependencies are merged (M1 before M2; A1 before A2 before A3). X1 item 4 (S4 export amendment) waits for Barath's confirmation.
+- No phase before its dependencies are merged (M1 before M2; A1 before A2 before A3).
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
 - **Proto (R1, D-54):** additive only — `repeated WorkspaceTraffic workspace_traffic = 13`; never renumber; an older relay must keep working and read "Not reported" (never 0).
 - **Alert scopes (D-50):** platform and tenant alerts are separate in the schema; tenant rows always carry `tenant_id` (DB CHECK); tenant-scoped reads always filter by it. Relay-ops never see tenant names, tenant alerts or per-tenant series (D-40 extended).

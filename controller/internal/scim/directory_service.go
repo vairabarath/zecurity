@@ -9,6 +9,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +43,9 @@ type DirectoryService struct {
 	audit     identity.EventPublisher // conflict approval/transition audit (Phase 8)
 	perm      *permission.Store       // explicit fine-grained permissions (Phase 8)
 	roles     rbac.Invalidator        // live role cache (PENDING-19 §5); nil-safe
+	// probing: workspaces with a mapping probe running (Sprint 24 X1: one
+	// probe per workspace at a time; process-local is enough under D-02).
+	probing sync.Map
 }
 
 // NewDirectoryService builds a DirectoryService. A nil publisher defaults to
@@ -125,6 +129,9 @@ type scope struct {
 	subjectClaim string
 	scimIdent    string
 	scimEnabled  bool
+	// probe: the mapping probe's own scope (Sprint 24 X1). resolveScope never
+	// sets it, so no SCIM request can create a slot-free user.
+	probe bool
 }
 
 // resolveScope loads the connection for the token's scope and enforces that SCIM
@@ -247,6 +254,7 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 
 	// First-seen → JIT-create via the SCIM provisioner (atomic user + link).
 	prov := newSCIMProvisioner(s.pool, sc.workspaceID, sc.connectionID, syncInst, s.publisher)
+	prov.probe = sc.probe
 	linker := identity.NewLinker(prov)
 	email := userNameOf(resource)
 	name := displayNameOf(resource)

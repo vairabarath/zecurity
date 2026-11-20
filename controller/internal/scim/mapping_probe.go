@@ -108,7 +108,18 @@ func (s *DirectoryService) probeMappingWithClaims(ctx context.Context, conn *idp
 		subjectClaim: conn.SubjectClaim,
 		scimIdent:    conn.ScimIdentifier,
 		scimEnabled:  true, // probe-local value only; never persisted, never used to satisfy resolveScope's real gate
+		probe:        true, // Sprint 24 X1: no users quota slot; the probe user is created suspended
 	}
+
+	// Sprint 24 X1 (D-47 refinement, 2026-11-20): the probe takes no users
+	// quota slot, so at most one probe per workspace may run at a time.
+	if _, running := s.probing.LoadOrStore(workspaceID, struct{}{}); running {
+		return MappingProbeResult{
+			Verified: false,
+			Reason:   "mapping probe skipped: another mapping probe is already running for this workspace; try again",
+		}
+	}
+	defer s.probing.Delete(workspaceID)
 
 	scimIdentAttr := conn.ScimIdentifier
 	if scimIdentAttr == "" {

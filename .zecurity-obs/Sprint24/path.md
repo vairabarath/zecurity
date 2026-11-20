@@ -47,7 +47,7 @@ Decided by the product owner (Barath) after review of the scope draft; full text
 - X1.1 SCIM at the users limit: the **mapping probe doesn't take a users slot** (one probe at a time per workspace, no enrollment or login rights); real SCIM creates at the limit get a clear `quota_exceeded` SCIM error.
 - X1.3 SCIM while suspended: **refused with 403**; the IdP reconciles after resume.
 
-**Open (blocks only X1.4):** confirm the S4 export amendment to D-45/D-46 and write it into the Decision Record.
+- X1.4 S4 export amendment: **confirmed**; written into the Decision Record (amendment 2026-11-20, D-46 refinement).
 
 ---
 
@@ -62,7 +62,7 @@ Both: review each other's PRs; the sprint acceptance run (live, on a reset lab D
 
 | Phase | Owner | Feature | Depends on | Migration |
 |---|---|---|---|---|
-| **X1** Sprint 23 follow-ups | Sathiya | F7, F12 | items 1–3 decided; item 4 needs confirmation | none expected |
+| **X1** Sprint 23 follow-ups | Sathiya | F7, F12 | all items decided (2026-11-20) | none expected |
 | **R1** Per-workspace relay counters | Barath | F23 | D-54 | none (proto + relay; controller side lands with M1) |
 | **M1** Metric store + read API | Barath | F23 | D-49; per-tenant relay series need R1 | `068_metric_samples.sql` |
 | **M2** Console charts | Barath | F23 | M1 merged | none |
@@ -153,7 +153,7 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 
 - [x] Phase 0: D-48 … D-54 decided and written into the Decision Record (2026-11-20)
 - [x] Documents reviewed (scope draft, Sprint 24 files, Decision Record amendment) — signed off by Barath 2026-11-20; implementation may start
-- [ ] X1 — Sprint 23 follow-ups (Sathiya)
+- [ ] X1 — Sprint 23 follow-ups (Sathiya) — built on `feat/x1-sprint23-followups`, live-checked 2026-11-20 (PASS); not merged
 - [ ] R1 — Per-workspace relay counters (Barath)
 - [ ] M1 — Metric store + read API (Barath)
 - [ ] M2 — Console charts (Barath)
