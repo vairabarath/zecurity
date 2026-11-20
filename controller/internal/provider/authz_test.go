@@ -185,3 +185,39 @@ func TestDecide_TenantLifecycleMatrix(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 24 A1 (D-50, D-53): relay-ops may read alerts (filtered by the
+// handler) but never manage rules; super-admins may do everything.
+func TestDecide_AlertMatrix(t *testing.T) {
+	a := NewAuthz()
+	for _, c := range []struct {
+		role, action string
+		allow        bool
+	}{
+		{RoleSuperAdmin, ActionAlertRead, true},
+		{RoleSuperAdmin, ActionAlertRuleRead, true},
+		{RoleSuperAdmin, ActionAlertRuleCreate, true},
+		{RoleSuperAdmin, ActionAlertRuleUpdate, true},
+		{RoleSuperAdmin, ActionAlertRuleDelete, true},
+		{RoleRelayOps, ActionAlertRead, true},
+		{RoleRelayOps, ActionAlertRuleRead, false},
+		{RoleRelayOps, ActionAlertRuleCreate, false},
+		{RoleRelayOps, ActionAlertRuleUpdate, false},
+		{RoleRelayOps, ActionAlertRuleDelete, false},
+		{"admin", ActionAlertRead, false},
+		{"", ActionAlertRead, false},
+	} {
+		var err error
+		if c.action == ActionAlertRead {
+			err = a.CanReadAlerts(Actor{Role: c.role})
+		} else {
+			err = a.CanManageAlertRules(Actor{Role: c.role}, c.action, Target{Type: "alert_rule"})
+		}
+		if c.allow != (err == nil) {
+			t.Errorf("%s / %s: allow=%v, got %v", c.role, c.action, c.allow, err)
+		}
+		if !c.allow && !errors.Is(err, ErrForbidden) {
+			t.Errorf("%s / %s: want ErrForbidden, got %v", c.role, c.action, err)
+		}
+	}
+}

@@ -89,6 +89,24 @@ const (
 	ActionTenantFirstAdminReinvite = "tenant.first_admin.reinvite"
 )
 
+// Alerts (Sprint 24 A1, D-50, D-53). alert.read: super-admins see every
+// alert; relay-ops see platform relay and pool alerts only (the handler
+// filters by kind, never showing tenant alerts or tenant names, D-40). Rule
+// management (read included) is super-admin only.
+const (
+	ActionAlertRead       = "alert.read"
+	ActionAlertRuleRead   = "alert.rule.read"
+	ActionAlertRuleCreate = "alert.rule.create"
+	ActionAlertRuleUpdate = "alert.rule.update"
+	ActionAlertRuleDelete = "alert.rule.delete"
+)
+
+// relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
+// perform.
+var relayOpsAlsoAllowed = map[string]bool{
+	ActionAlertRead: true,
+}
+
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
 // the destructive ones (D-31), and setting a pool's region or residency (D-41).
 var superAdminOnlyRelayActions = map[string]bool{
@@ -256,6 +274,19 @@ func (a *Authz) CanReadTenants(actor Actor, target Target) error {
 	return decide(actor, ActionTenantRead, target)
 }
 
+// CanReadAlerts gates GET /provider/alerts and /provider/alert-events
+// (super-admin; relay-ops filtered to relay and pool alerts).
+func (a *Authz) CanReadAlerts(actor Actor) error {
+	return decide(actor, ActionAlertRead, Target{Type: "alert"})
+}
+
+// CanManageAlertRules gates the alert rule API (ActionAlertRuleRead,
+// ActionAlertRuleCreate, ActionAlertRuleUpdate, ActionAlertRuleDelete;
+// super-admin only, D-53).
+func (a *Authz) CanManageAlertRules(actor Actor, action string, target Target) error {
+	return decide(actor, action, target)
+}
+
 // CanReadHealth gates GET /provider/health (super-admin only).
 func (a *Authz) CanReadHealth(actor Actor) error {
 	return decide(actor, ActionHealthRead, Target{Type: "health"})
@@ -270,7 +301,7 @@ func (a *Authz) CanReadCertificates(actor Actor) error {
 //
 //	super-admin → every action
 //	relay-ops   → the "relay.*" namespace, EXCEPT relay.revoke, relay.delete
-//	              and relay.pool.set_placement
+//	              and relay.pool.set_placement; plus alert.read (Sprint 24)
 //
 // The exception is Decision Record D-31 (amends D-05, Sprint 22 Phase A):
 // relay-ops may create relays, issue provisioning tokens, read (and later
@@ -283,6 +314,9 @@ func decide(actor Actor, action string, target Target) error {
 		return nil
 	case RoleRelayOps:
 		if strings.HasPrefix(action, "relay.") && !superAdminOnlyRelayActions[action] {
+			return nil
+		}
+		if relayOpsAlsoAllowed[action] {
 			return nil
 		}
 	}

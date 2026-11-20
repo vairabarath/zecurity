@@ -39,6 +39,7 @@ import (
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
+	"github.com/yourorg/ztna/controller/internal/alerting"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auditexport"
@@ -782,6 +783,19 @@ func main() {
 	mux.Handle("POST /provider/tenants", requireProvider(http.HandlerFunc(tenantCreateHandler.Create)))
 	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProvider(http.HandlerFunc(tenantCreateHandler.Reinvite)))
 
+	// Alerts (Sprint 24 A1, F26, D-50/D-53): alert reads (super-admin; relay-ops
+	// relay and pool alerts only) and rule management (super-admin, reason,
+	// audited). The evaluator is started with the other background jobs.
+	alertStore := alerting.NewStore(db.Pool)
+	alertNotifier := alerting.Notifier(alerting.LogNotifier{}) // A2 replaces this with webhook/email delivery
+	alertHandler := &alerting.Handler{Store: alertStore, Authz: providerAuthz, ProviderStore: providerStore, Notifier: alertNotifier}
+	mux.Handle("GET /provider/alerts", requireProvider(http.HandlerFunc(alertHandler.ListActive)))
+	mux.Handle("GET /provider/alert-events", requireProvider(http.HandlerFunc(alertHandler.ListEvents)))
+	mux.Handle("GET /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.ListRules)))
+	mux.Handle("POST /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.CreateRule)))
+	mux.Handle("PATCH /provider/alert-rules/{id}", requireProvider(http.HandlerFunc(alertHandler.UpdateRule)))
+	mux.Handle("DELETE /provider/alert-rules/{id}", requireProvider(http.HandlerFunc(alertHandler.DeleteRule)))
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -1085,6 +1099,24 @@ func main() {
 		})
 	} else {
 		log.Printf("cert expiry alert: disabled (CERT_EXPIRY_ALERTS=false)")
+	}
+
+	// Alert evaluator (Sprint 24 A1, F26): every ALERT_EVAL_INTERVAL (default
+	// 30s) it evaluates every rule; a rule whose condition can't be read keeps
+	// its alerts unchanged. ALERTS_ENABLED=false turns it off.
+	if envOr("ALERTS_ENABLED", "true") != "false" {
+		evalInterval, err := time.ParseDuration(envOr("ALERT_EVAL_INTERVAL", alerting.DefaultInterval.String()))
+		if err != nil || evalInterval < 5*time.Second {
+			log.Fatalf("ALERT_EVAL_INTERVAL must be a duration of at least 5s, got %q", os.Getenv("ALERT_EVAL_INTERVAL"))
+		}
+		alertEvaluator := &alerting.Evaluator{
+			Store:    alertStore,
+			Observer: alerting.Sources{DB: db.Pool, Health: healthRegistry, Controller: controllerRotator},
+			Notifier: alertNotifier,
+		}
+		workers.Go("alert-evaluator", func() { alertEvaluator.Run(ctx, evalInterval) })
+	} else {
+		log.Printf("alert evaluator: disabled (ALERTS_ENABLED=false)")
 	}
 
 	workers.Go("hourly-ticker", func() {

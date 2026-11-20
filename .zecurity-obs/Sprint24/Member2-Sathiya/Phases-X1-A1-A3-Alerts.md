@@ -100,6 +100,42 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 - Authz: relay-ops can't see tenant alerts or names, can't write rules → 403.
 - **Mutation checks:** drop the scope filter for relay-ops → its test fails; resolve on read error → its test fails.
 
+### A1 build record (branch `feat/a1-alert-rules`, 2026-11-20)
+- **Schema `069_alerts.sql`:**
+  - Creates `alert_rules`, `alert_states`, `alert_events`, plus A2's `alert_channels` and `alert_deliveries`, so A2 needs no schema change.
+  - Scope CHECKs on states and events: `(scope = 'tenant') = (tenant_id IS NOT NULL)`. `alert_rules_kind_scope` ties each kind to its scope.
+  - Tenant rows reference `workspaces` `ON DELETE CASCADE`, so the S4 purge removes them (D-46).
+  - The runtime role can only insert into events and deliveries (no update or delete).
+  - Nine rules are seeded with fixed ids `00000000-0000-0000-0002-00000000000N`: platform rules enabled, tenant rules disabled.
+- **Shared relay reader:** `providerquery.RelayLoads` gives every non-revoked relay with its bandwidth and headroom, built from the same columns and logic as `GET /provider/relays`. M1's sampler must reuse it (path.md conflict zone).
+- **`internal/alerting`:**
+  - `kinds.go`: kinds, scopes and `ParseParams` (unknown fields refused, defaults applied).
+  - `signals.go`, one reader per kind:
+    - `relay.offline` = status `inactive`;
+    - `relay.over_capacity` = `Headroom.Utilization` ≥ threshold, only with a capacity set;
+    - `pool.no_eligible_relay` = 0 eligible relays and at least one tenant;
+    - `controlplane.degraded` = a F25 component not up;
+    - `certificate.expiring` = CAs within `days`, relay and controller certificates within 24 h (D-36 scope);
+    - `connector.offline` and `shield.offline` = `disconnected`;
+    - `tenant.no_relay_path` = an effective pool (`relaypool.EffectivePool`) with no eligible relay while the tenant has connectors;
+    - `tenant.over_quota` = `quota.AllUsage` `Over`.
+    Tenant kinds skip suspended tenants.
+  - `store.go`: `Apply` runs the state machine in one transaction: pending, then firing after `for_seconds`, renotify, then resolved. `DeleteRule` resolves the rule's firing alerts in the same transaction.
+  - `evaluator.go`: when a rule can't be read, its states are left unchanged. A disabled rule resolves its alerts. `Notifier` is the hook A2 implements (`LogNotifier` for now).
+  - `reads.go` and `handler.go`: the API in `handler.go`'s header comment.
+- **Authz:**
+  - `alert.read`: super-admin, and relay-ops filtered to the relay and pool kinds. A relay-ops request for the tenant scope or a tenant gets an empty result.
+  - `alert.rule.read`, `.create`, `.update`, `.delete`: super-admin only (D-53).
+- **`main.go` env:** `ALERT_EVAL_INTERVAL` (default 30 s, at least 5 s); `ALERTS_ENABLED=false` turns the evaluator off.
+- **Tests:**
+  - `TestAlertsDB_SchemaScopes`, `TestAlertsDB_StateMachine`, `TestAlertsDB_Signals`, `TestAlertsDB_API`;
+  - `TestParseParams`, `TestKindScopes`, `TestRuleValidate`, `TestDecide_AlertMatrix`.
+- **Mutation checks**, each making a test fail:
+  - a read error resolves alerts;
+  - the relay-ops filter is removed;
+  - suspended tenants are included;
+  - relay-ops may update rules.
+
 ---
 
 ## A2 — Delivery: webhook and email — D-52
