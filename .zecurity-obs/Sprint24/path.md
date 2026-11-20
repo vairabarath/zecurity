@@ -88,7 +88,7 @@ Sathiya: X1 ──► A1 (rules, evaluator) ──► A2 (delivery) ──► A3
 |---|---|---|
 | `proto/relay/v1/relay.proto` | Barath (R1) | **Additive only**: field 13 and the `WorkspaceTraffic` message; `buf generate`; never renumber. |
 | `controller/internal/relay/heartbeat.go` (B2 bandwidth code) | Barath (R1, M1) | Per-workspace rates next to `bandwidthSample`; same window and restart detection as B2. |
-| Relay state readers (connections, bandwidth, headroom) | Barath (M1), Sathiya (A1) | One reader, shared; whoever merges first owns it, the other reuses it. |
+| Relay state readers (connections, bandwidth, headroom) | Barath (M1), Sathiya (A1) | One reader, shared: **`providerquery.RelayLoads`** (added by A1). M1's sampler reuses it; don't add a second relay-load query. |
 | `controller/cmd/server/main.go` | both | Own block per phase (metric job, evaluator, delivery worker, routes); rebase before merge. |
 | `controller/internal/provider/authz.go` (`decide()`) | both | New actions: `metrics.read` (M1; relay series relay-ops + super-admin, tenant series super-admin); `alert.read`, `alert.rule.*`, `alert.channel.*` (A1–A3; super-admin; relay-ops `alert.read` platform relay alerts only). |
 | `provider-console/src/api/api-surface.test.ts` | both | Every new console write added on purpose (D-30 amended). |
@@ -153,11 +153,11 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 
 - [x] Phase 0: D-48 … D-54 decided and written into the Decision Record (2026-11-20)
 - [x] Documents reviewed (scope draft, Sprint 24 files, Decision Record amendment) — signed off by Barath 2026-11-20; implementation may start
-- [ ] X1 — Sprint 23 follow-ups (Sathiya) — built on `feat/x1-sprint23-followups`, live-checked 2026-11-20 (PASS); not merged
+- [x] X1 — Sprint 23 follow-ups (Sathiya) — merged (#233, `53e5d01e`) — live-checked 2026-11-20 (PASS)
 - [ ] R1 — Per-workspace relay counters (Barath)
 - [ ] M1 — Metric store + read API (Barath)
 - [ ] M2 — Console charts (Barath)
-- [ ] A1 — Alert rules + evaluator (Sathiya)
+- [ ] A1 — Alert rules + evaluator (Sathiya) — built on `feat/a1-alert-rules`, live-checked 2026-11-20 (PASS); not merged
 - [ ] A2 — Delivery: webhook, email (Sathiya)
 - [ ] A3 — Alerts console (Sathiya)
 - [ ] T1 — Incident timeline (Sathiya, stretch)
