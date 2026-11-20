@@ -787,8 +787,43 @@ func main() {
 	// relay and pool alerts only) and rule management (super-admin, reason,
 	// audited). The evaluator is started with the other background jobs.
 	alertStore := alerting.NewStore(db.Pool)
-	alertNotifier := alerting.Notifier(alerting.LogNotifier{}) // A2 replaces this with webhook/email delivery
+	// Delivery (Sprint 24 A2, D-52 refined 2026-11-20): one generic signed
+	// JSON webhook plus email, through the alerts' own durable queue
+	// (alert_delivery_queue) with the outbox's retry policy. Webhooks use the
+	// SIEM export's SSRF-safe client (dial-time address check, no redirects,
+	// no proxy); ALERT_WEBHOOK_DEV_ALLOW_PRIVATE=true (ENV=development only)
+	// allows private targets and plain http for a lab receiver.
+	alertURLPolicy := alerting.URLPolicy{}
+	if os.Getenv("ALERT_WEBHOOK_DEV_ALLOW_PRIVATE") == "true" {
+		if os.Getenv("ENV") == "development" {
+			alertURLPolicy.AllowPrivate = true
+			log.Printf("DEV: alert webhooks may reach private and loopback addresses over http (ALERT_WEBHOOK_DEV_ALLOW_PRIVATE=true)")
+		} else {
+			log.Printf("alert webhooks: ALERT_WEBHOOK_DEV_ALLOW_PRIVATE ignored: only honoured with ENV=development")
+		}
+	}
+	alertChannels := alerting.NewChannelStore(alertStore, pkiService, alertURLPolicy)
+	alertConsoleURL := strings.TrimSpace(os.Getenv("PROVIDER_CONSOLE_URL"))
+	if alertConsoleURL == "" {
+		alertConsoleURL = strings.TrimSpace(os.Getenv("PROVIDER_CONSOLE_ORIGIN"))
+	}
+	alertDeliverer := &alerting.Deliverer{
+		Store: alertStore, Channels: alertChannels,
+		HTTP:       auditexport.NewClient(auditexport.ClientOptions{AllowPrivate: alertURLPolicy.AllowPrivate}),
+		Mail:       inviteEmailer,
+		ConsoleURL: alertConsoleURL,
+		Policy:     alerting.DefaultRetryPolicy(),
+	}
+	alertNotifier := alerting.Notifier(alertDeliverer)
 	alertHandler := &alerting.Handler{Store: alertStore, Authz: providerAuthz, ProviderStore: providerStore, Notifier: alertNotifier}
+	alertChannelHandler := &alerting.ChannelHandler{Channels: alertChannels, Deliverer: alertDeliverer, Authz: providerAuthz, ProviderStore: providerStore}
+	mux.Handle("GET /provider/alert-channels", requireProvider(http.HandlerFunc(alertChannelHandler.List)))
+	mux.Handle("POST /provider/alert-channels", requireProvider(http.HandlerFunc(alertChannelHandler.Create)))
+	mux.Handle("PATCH /provider/alert-channels/{id}", requireProvider(http.HandlerFunc(alertChannelHandler.Update)))
+	mux.Handle("DELETE /provider/alert-channels/{id}", requireProvider(http.HandlerFunc(alertChannelHandler.Delete)))
+	mux.Handle("POST /provider/alert-channels/{id}/test", requireProvider(http.HandlerFunc(alertChannelHandler.Test)))
+	mux.Handle("POST /provider/alert-channels/{id}/rotate-secret", requireProvider(http.HandlerFunc(alertChannelHandler.Rotate)))
+	mux.Handle("GET /provider/alert-events/{id}/deliveries", requireProvider(http.HandlerFunc(alertChannelHandler.Deliveries)))
 	mux.Handle("GET /provider/alerts", requireProvider(http.HandlerFunc(alertHandler.ListActive)))
 	mux.Handle("GET /provider/alert-events", requireProvider(http.HandlerFunc(alertHandler.ListEvents)))
 	mux.Handle("GET /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.ListRules)))
@@ -1115,6 +1150,7 @@ func main() {
 			Notifier: alertNotifier,
 		}
 		workers.Go("alert-evaluator", func() { alertEvaluator.Run(ctx, evalInterval) })
+		workers.Go("alert-delivery", func() { alertDeliverer.Run(ctx, 5*time.Second) })
 	} else {
 		log.Printf("alert evaluator: disabled (ALERTS_ENABLED=false)")
 	}

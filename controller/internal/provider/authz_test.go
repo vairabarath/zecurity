@@ -221,3 +221,19 @@ func TestDecide_AlertMatrix(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 24 A2: channel management is super-admin only.
+func TestDecide_AlertChannelMatrix(t *testing.T) {
+	a := NewAuthz()
+	for _, action := range []string{ActionAlertChannelRead, ActionAlertChannelCreate, ActionAlertChannelUpdate,
+		ActionAlertChannelDelete, ActionAlertChannelTest, ActionAlertChannelRotate} {
+		if err := a.CanManageAlertChannels(Actor{Role: RoleSuperAdmin}, action, Target{Type: "alert_channel"}); err != nil {
+			t.Errorf("super-admin %s: %v", action, err)
+		}
+		for _, role := range []string{RoleRelayOps, "admin", ""} {
+			if err := a.CanManageAlertChannels(Actor{Role: role}, action, Target{Type: "alert_channel"}); !errors.Is(err, ErrForbidden) {
+				t.Errorf("%q %s: want ErrForbidden, got %v", role, action, err)
+			}
+		}
+	}
+}
