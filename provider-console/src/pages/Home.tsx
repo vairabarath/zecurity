@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { ChevronRight, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { listActiveAlerts, type ActiveAlert } from '@/api/alerts'
 import { getCertificates, getHealth, listRelayPools, queryAudit } from '@/api/reads'
 import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelayPoolSummary, RelaySummary } from '@/api/types'
 import { hasRole } from '@/auth/roles'
@@ -27,6 +28,8 @@ import { cn } from '@/lib/utils'
 //   - GET /provider/relays, every page (relay.read: both roles);
 //   - GET /provider/relay-pools (relay.read: both roles; counts only), for
 //     pools the controller has failed over (D-39);
+//   - GET /provider/alerts?status=firing (alert.read: both roles; relay-ops
+//     get relay and pool alerts only), for the firing-alerts tile (F26, A3);
 //   - super-admin only: GET /provider/certificates?within=168h (summary and
 //     the soonest expiries), GET /provider/audit?limit=6 and GET
 //     /provider/health (control-plane health, quick-win F25).
@@ -39,6 +42,7 @@ const fetchSoonCertificates = () => getCertificates({ within: '168h', limit: 6 }
 const fetchRecentAudit = () => queryAudit({ limit: 6 })
 const fetchHealth = () => getHealth()
 const fetchPools = () => listRelayPools()
+const fetchFiring = () => listActiveAlerts({ status: 'firing' })
 const skip = () => Promise.resolve(null)
 
 function greeting(hour: number): string {
@@ -61,6 +65,7 @@ export function Home() {
 
   const fleet = useDetailQuery(`relays|${round}`, fetchFleet)
   const pools = useDetailQuery(`pools|${round}`, fetchPools)
+  const firing = useDetailQuery(`firing|${round}`, fetchFiring)
   const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchSoonCertificates : skip)
   const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
   const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
@@ -82,6 +87,7 @@ export function Home() {
       />
 
       <FleetTiles state={fleet.state} onRetry={refresh}>
+        <FiringAlertsTile state={firing.state} />
         {isSuperAdmin && <CertificateTile state={certs.state} />}
       </FleetTiles>
 
@@ -236,6 +242,31 @@ function FleetTiles({ state, onRetry, children }: { state: DetailState<Fleet>; o
       </Tile>
       {children}
     </div>
+  )
+}
+
+function FiringAlertsTile({ state }: { state: DetailState<{ items: ActiveAlert[]; truncated: boolean }> }) {
+  if (state.status !== 'ready') {
+    return (
+      <Tile label="Firing alerts">
+        {state.status === 'loading' ? <Skeleton className="h-9 w-16" /> : <Sub>Couldn’t load alerts.</Sub>}
+      </Tile>
+    )
+  }
+  const items = state.data.items
+  const critical = items.filter((a) => a.severity === 'critical').length
+  return (
+    <Link to="/alerts" className="flex min-w-0 flex-[1_1_200px] rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <Tile label="Firing alerts" className="transition-colors hover:border-border-strong">
+        <Big>
+          <span className={items.length > 0 ? 'text-critical-text' : undefined} aria-label={`${items.length} firing alerts`}>
+            {items.length}
+            {state.data.truncated ? '+' : ''}
+          </span>
+        </Big>
+        <Sub>{items.length === 0 ? 'Nothing firing' : `${critical} critical · ${items.length - critical} other`}</Sub>
+      </Tile>
+    </Link>
   )
 }
 

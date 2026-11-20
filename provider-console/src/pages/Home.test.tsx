@@ -88,6 +88,7 @@ const routes = {
   'GET /provider/certificates': { status: 200, body: CERTS },
   'GET /provider/audit': { status: 200, body: AUDIT },
   'GET /provider/health': { status: 200, body: HEALTH },
+  'GET /provider/alerts': { status: 200, body: { items: [], truncated: false } },
 }
 
 const paths = (calls: RecordedCall[]) => calls.map((c) => `${c.method} ${c.path}`)
@@ -99,8 +100,9 @@ describe('Overview', () => {
     const { calls } = mockFetch(routes)
     renderApp('/', undefined, { strict: true })
     await screen.findByText('relay-low is in the low capacity tier')
-    await waitFor(() => expect(calls).toHaveLength(5))
-    expect(paths(calls).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
+    await waitFor(() => expect(calls).toHaveLength(6))
+    expect(paths(calls).sort()).toEqual(['GET /provider/alerts', 'GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
+    expect(qs(calls.find((c) => c.path === '/provider/alerts')!)).toEqual({ status: 'firing' })
     expect(qs(calls.find((c) => c.path === '/provider/certificates')!)).toEqual({ within: '168h', limit: '6' })
     expect(qs(calls.find((c) => c.path === '/provider/audit')!)).toEqual({ limit: '6' })
     expect(qs(calls.find((c) => c.path === '/provider/relays')!)).toEqual({ limit: '200' })
@@ -108,16 +110,17 @@ describe('Overview', () => {
       window.dispatchEvent(new Event('focus'))
       document.dispatchEvent(new Event('visibilitychange'))
     })
-    expect(calls).toHaveLength(5)
+    expect(calls).toHaveLength(6)
     expect(calls.every((c) => c.method === 'GET' && !c.path.startsWith('/provider/tenants'))).toBe(true)
   })
 
-  it('relay-ops reads relays and relay pools only: no certificate, audit or health request', async () => {
+  it('relay-ops reads relays, relay pools and firing alerts only: no certificate, audit or health request', async () => {
     signedInAs(relayOpsMe)
     const { calls } = mockFetch(routes)
     renderApp('/')
     await screen.findByText('relay-low is in the low capacity tier')
-    expect(paths(calls).sort()).toEqual(['GET /provider/relay-pools', 'GET /provider/relays'])
+    await waitFor(() => expect(calls).toHaveLength(3))
+    expect(paths(calls).sort()).toEqual(['GET /provider/alerts', 'GET /provider/relay-pools', 'GET /provider/relays'])
     expect(screen.getByRole('heading', { name: 'Your access' })).toBeInTheDocument()
     expect(screen.queryByText('Certificates needing action')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Recent operator activity' })).not.toBeInTheDocument()
@@ -166,10 +169,10 @@ describe('Overview', () => {
     const { calls } = mockFetch(routes)
     renderApp('/')
     await screen.findByText('relay-low is in the low capacity tier')
-    await waitFor(() => expect(calls).toHaveLength(5))
+    await waitFor(() => expect(calls).toHaveLength(6))
     await userEvent.setup().click(screen.getByRole('button', { name: 'Refresh overview' }))
-    await waitFor(() => expect(calls).toHaveLength(10))
-    expect(paths(calls.slice(5)).sort()).toEqual(['GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
+    await waitFor(() => expect(calls).toHaveLength(12))
+    expect(paths(calls.slice(6)).sort()).toEqual(['GET /provider/alerts', 'GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/relay-pools', 'GET /provider/relays'])
   })
 
   it('a failed source shows Retry without hiding the rest', async () => {

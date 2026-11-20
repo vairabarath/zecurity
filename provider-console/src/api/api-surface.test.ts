@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
+import * as alertsApi from './alerts'
 import * as authApi from './auth'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
@@ -22,15 +23,22 @@ import * as tenantsApi from './tenants'
 // amends D-30) adds tenant suspend and resume; S2 (D-44) adds POST /provider/tenants and the first-admin
 // re-invite; S4 (D-46) adds delete, cancel delete and legal hold. Relay link capacity (Sprint 23 B2, D-42) adds
 // PUT /provider/relays/{id}/link-capacity. Every exported API function is called here; a new write must be
-// added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
+// added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose. Alerts (Sprint 24 A3, F26; D-53 amends
+// D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads.
 
 const ALLOWED_WRITES = [
+  'DELETE /provider/alert-channels/{id}',
   'DELETE /provider/plans/{id}',
   'DELETE /provider/relay-pools/{id}',
   'DELETE /provider/relays/{id}',
+  'PATCH /provider/alert-channels/{id}',
+  'PATCH /provider/alert-rules/{id}',
   'PATCH /provider/plans/{id}',
   'PATCH /provider/relay-pools/{id}',
   'PATCH /provider/users/{id}',
+  'POST /provider/alert-channels',
+  'POST /provider/alert-channels/{id}/rotate-secret',
+  'POST /provider/alert-channels/{id}/test',
   'POST /provider/auth/login',
   'POST /provider/auth/logout',
   'POST /provider/auth/password',
@@ -64,6 +72,11 @@ const ALLOWED_WRITES = [
 ]
 
 const ALLOWED_READS = [
+  'GET /provider/alert-channels',
+  'GET /provider/alert-events',
+  'GET /provider/alert-events/{id}/deliveries',
+  'GET /provider/alert-rules',
+  'GET /provider/alerts',
   'GET /provider/audit',
   'GET /provider/certificates',
   'GET /provider/health',
@@ -81,6 +94,7 @@ const ALLOWED_READS = [
 ]
 
 const API_MODULES: Record<string, Record<string, unknown>> = {
+  alerts: alertsApi,
   auth: authApi,
   operators: operatorsApi,
   plans: plansApi,
@@ -96,7 +110,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 const ID = 'a'
 const normalize = (path: string) =>
   path
-    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events))/${ID}(?=/|$)`), '$1/{id}')
     .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
 
 describe('API surface', () => {
@@ -158,6 +172,17 @@ describe('API surface', () => {
       'GET /provider/certificates': { status: 200, body: { summary: {}, items: [], next_cursor: null } },
       'GET /provider/pki': { status: 200, body: {} },
       'GET /provider/health': { status: 200, body: {} },
+      'GET /provider/alerts': { status: 200, body: { items: [], truncated: false } },
+      'GET /provider/alert-events': page,
+      [`GET /provider/alert-events/${ID}/deliveries`]: { status: 200, body: { items: [] } },
+      'GET /provider/alert-rules': { status: 200, body: { items: [] } },
+      'GET /provider/alert-channels': { status: 200, body: { items: [] } },
+      [`PATCH /provider/alert-rules/${ID}`]: { status: 200, body: {} },
+      'POST /provider/alert-channels': { status: 201, body: { channel: {}, secret: 'whsec_x' } },
+      [`PATCH /provider/alert-channels/${ID}`]: { status: 200, body: {} },
+      [`DELETE /provider/alert-channels/${ID}`]: { status: 204 },
+      [`POST /provider/alert-channels/${ID}/test`]: { status: 200, body: { delivered: true, http_status: 204 } },
+      [`POST /provider/alert-channels/${ID}/rotate-secret`]: { status: 200, body: { secret: 'whsec_y' } },
     })
 
     let exported = 0

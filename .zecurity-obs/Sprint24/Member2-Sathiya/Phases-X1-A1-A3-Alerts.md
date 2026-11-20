@@ -210,6 +210,30 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 ### Tests
 - `npm test`, `npm run lint`, `npm run build`; reason required in dialogs; secret displayed once and cleared.
 
+### A3 build record (branch `feat/a3-alerts-console`, 2026-11-20)
+- **`src/api/alerts.ts`:** types, five reads (`/provider/alerts`, `/alert-events`, `/alert-events/{id}/deliveries`, `/alert-rules`, `/alert-channels`) and six writes (rule `PATCH`; channel `POST`, `PATCH`, `DELETE`, `/test`, `/rotate-secret`). All are in `api-surface.test.ts` on purpose (D-30 amended by D-53).
+- **`src/pages/Alerts.tsx`:**
+  - Tabs **Active** and **History** for both roles. The controller filters relay-ops to relay and pool alerts; the console also hides the scope filter and tenant links from them.
+  - Tabs **Rules** and **Channels** for super-admin only; a `?tab=rules` URL falls back to Active for relay-ops.
+  - Active shows the truncation note; History pages by cursor and opens a Deliveries dialog per event (super-admin).
+- **`src/components/AlertDialogs.tsx`:**
+  - Edit rule: enable, severity, threshold or days, fire-after and re-notify delays.
+  - Add / edit / test / rotate / delete channel.
+  - Every write needs a reason (`ReasonField`).
+  - `SecretDialog` shows the webhook secret once and drops it on close; it is never stored. `static-guards.test.ts` allows clipboard access here.
+- **Navigation:** an Alerts section for both roles (`roles.ts`, Bell icon).
+- **Overview:** a "Firing alerts" tile (`GET /provider/alerts?status=firing`, both roles) linking to `/alerts`. `Home.test.tsx` was updated to pin the new request.
+- **Review fixes (PR #236):**
+  - History resets its paging when the scope changes (`key={scope}`).
+  - `console_url` (`/alerts?event=<id>`) opens History on that event; for super-admins it also opens the event's deliveries.
+  - An unknown `tab` or `scope` in the URL falls back to the default.
+  - Webhook URLs must be `https://` in the console too.
+  - `invalid_request`, `invalid_filter` and `server_error` get clear messages.
+
+  4 new tests.
+- **Not in A3:** creating or deleting rules from the console (the API exists; the nine seeded rules are edited in place).
+- **Tests:** `src/pages/Alerts.test.tsx` (9). Full suite: 675 tests, lint and build clean. Mutation check: giving relay-ops all four tabs makes the relay-ops test fail.
+
 ---
 
 ## T1 — Incident timeline (F27, stretch)
