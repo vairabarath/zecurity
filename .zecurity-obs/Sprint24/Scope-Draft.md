@@ -2,7 +2,7 @@
 type: sprint-scope-draft
 sprint: 24
 title: Provider Dashboard — monitoring and alerting (F23, F26; F27 stretch)
-status: DRAFT by Sathiya (M1), 2026-11-20, revised the same day with Barath's first answers (per-tenant relay bandwidth in scope; platform vs tenant alerts separated; generic webhook only) — the D-48 … D-53 decisions and sign-off are still open
+status: DRAFT by Sathiya (M1), 2026-11-20, revised the same day with Barath's first answers (per-tenant relay bandwidth in scope; platform vs tenant alerts separated; generic webhook only; tenant-facing alerts admin UI first; retention approved) — sign-off of D-48 … D-54 still open
 baseline: main 81aabc82 (Sprint 23 closed; Must have 18 / 18; Can have 3 / 22)
 ---
 
@@ -139,9 +139,10 @@ One part needs an agent change: **per-tenant relay bandwidth** (in scope, Barath
 - Tenant visibility needs a clean boundary: platform alerts (relay, certificates, DB latency) never mix with tenant-actionable alerts (their connector is down). The scopes are separate in the schema now, so tenant-facing notifications later need no refactor → D-50.
 - Paging and chat tools through **one generic JSON webhook** (severity, timestamp, tenant_id, event type), no vendor SDKs → D-52.
 
-**Still open:**
-- When tenant-facing alerts arrive (later sprint): admin UI only, or also the tenant's own webhook?
-- Retention numbers in D-49 (7 days at 1 minute, 400 days hourly) — OK?
+- Tenant-facing alerts (later sprint) start **in the admin UI only**; the tenant's own webhook is added only if customers ask for it.
+- Retention in D-49 is **approved as proposed**: 1-minute samples kept 7 days, hourly roll-ups kept 400 days.
+
+**Still open:** none of the scope questions. The decisions D-48 … D-54 and the documents still need Barath's sign-off before implementation.
 
 ## Suggested split (two members, as in Sprint 23)
 
@@ -158,7 +159,7 @@ M1 and A1 are independent and can run in parallel. A1's capacity rule reads the 
 
 ## Not in Sprint 24 (proposed)
 - F22 tunnel success rate (needs relay and connector success/failure counters; R1 adds byte and stream counters only).
-- Tenant-facing alert delivery (admin UI, tenant webhooks): the schema is ready (D-50), the feature is later.
+- Tenant-facing alert delivery: the schema is ready (D-50), the feature is later — admin UI first; tenant webhooks only on customer demand.
 - Vendor-specific integrations (Slack app, PagerDuty SDK): covered by the generic webhook (D-52).
 - F32/F33 metering and usage report; F34 billing.
 - F28/F29 relay config push, version pinning.
