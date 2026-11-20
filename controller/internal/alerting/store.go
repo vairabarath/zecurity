@@ -416,7 +416,27 @@ VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING 
 	if err != nil {
 		return Event{}, fmt.Errorf("insert alert event: %w", err)
 	}
+	// A2 (D-52): route the event to every enabled channel whose scope filter
+	// and minimum severity match, in this transaction, so a committed event
+	// always has its deliveries queued. Due at the event's time (the
+	// evaluator's clock, which the delivery worker also uses).
+	if _, err := tx.Exec(ctx, `
+INSERT INTO alert_delivery_queue (event_id, channel_id, next_attempt_at)
+SELECT $1::uuid, c.id, $4::timestamptz FROM alert_channels c
+ WHERE c.enabled
+   AND (c.scope_filter = 'all' OR c.scope_filter = $2)
+   AND `+severityRank("$3")+` <= `+severityRank("c.min_severity"),
+		ev.ID, ev.Scope, ev.Severity, ev.OccurredAt); err != nil {
+		return Event{}, fmt.Errorf("queue alert deliveries: %w", err)
+	}
 	return ev, nil
+}
+
+// severityRank is a SQL expression ranking a severity (critical 0, warning
+// 1, info 2): an event matches a channel when its rank is at most the
+// channel's minimum.
+func severityRank(expr string) string {
+	return `(CASE ` + expr + ` WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END)`
 }
 
 // Apply moves one rule's states to match obs (the targets whose condition

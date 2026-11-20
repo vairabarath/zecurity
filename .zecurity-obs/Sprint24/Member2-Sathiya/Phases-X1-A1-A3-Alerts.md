@@ -176,6 +176,27 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 - Retry and final failure recorded; scope filter respected.
 - **Mutation checks:** remove the connect-time check → the rebinding test fails; send tenant alerts to a platform-only channel → its test fails.
 
+### A2 build record (branch `feat/a2-alert-delivery`, 2026-11-20)
+- **Retries: own queue, not the outbox.** `outbox_events.workspace_id` is NOT NULL, so platform alerts can't be queued there. Chosen by Sathiya on 2026-11-20 and recorded as a D-52 refinement in the Decision Record; **it awaits Barath's confirmation** (he is the product owner).
+  - Migration `070_alert_delivery_queue.sql` adds a table with one row per (event, channel), leased by the worker.
+  - `alerting.insertEvent` queues every matching enabled channel in the event's own transaction: `scope_filter` all or the same scope, and severity at or above `min_severity`.
+- **`delivery.go` (`Deliverer`):**
+  - It implements `Notifier`, which only wakes it; it also polls every 5 s.
+  - It leases due rows with `FOR UPDATE SKIP LOCKED` and a 1-minute lease, then sends.
+  - It appends each attempt to `alert_deliveries` (`delivered`, `retrying` or `failed`) and deletes or reschedules the queue row.
+  - Backoff is `outbox.RetryPolicy` with a 5 s base, 5 min maximum and 10 attempts.
+  - Webhooks: `POST` with `X-Zecurity-Signature` (`auditexport.Signature` over timestamp + body) and `X-Zecurity-Event-Id`. Receivers reject `t` older than 5 minutes (`ReplayWindow`).
+  - Email goes through the F14 sender (`invitation.Emailer.SendPlain`), to the listed recipients or every active super-admin.
+- **`payload.go`:** the D-52 payload v1, pinned by `TestPayload_Golden`. `console_url` comes from `PROVIDER_CONSOLE_URL` (falling back to `PROVIDER_CONSOLE_ORIGIN`); it is null when unset.
+- **`channels.go`:**
+  - The secret is generated server-side (`whsec_…`, 256 bits) and sealed with `pki.EncryptSecret` (context `alert-webhook-secret:<id>`). It is returned only by create and rotate, with `no-store`.
+  - The URL is returned and audited only as scheme and host (`auditexport.RedactURL`).
+  - URL checks: `auditexport.ValidateURL`, plus a refusal of non-canonical numeric hosts; then the dial-time check in `auditexport.NewClient`.
+  - Dev: `ALERT_WEBHOOK_DEV_ALLOW_PRIVATE=true` with `ENV=development` allows private targets and plain http.
+- **API as built** (super-admin only, `alert.channel.*`): `GET/POST /provider/alert-channels`, `PATCH/DELETE /provider/alert-channels/{id}`, `POST …/{id}/test`, `POST …/{id}/rotate-secret`, `GET /provider/alert-events/{id}/deliveries`. Every write needs a reason and is audited (test sends included, with their outcome).
+- **Tests:** `TestPayload_Golden`, `TestURLPolicy`, `TestWebhook_DialTimeGuardAndRedirects`, `TestDeliveryDB_WebhookEndToEnd`, `TestDeliveryDB_Routing`, `TestDeliveryDB_ChannelValidation`, `TestDecide_AlertChannelMatrix`. They cover the signature, the fields, delivered / retrying / failed, rotation, the secret and URL path never in the list or audit, routing, email, validation and relay-ops 403.
+- **Mutation checks:** removing the dial-time check makes the rebinding test fail; routing tenant alerts to a platform-only channel makes the routing test fail.
+
 ---
 
 ## A3 — Alerts console

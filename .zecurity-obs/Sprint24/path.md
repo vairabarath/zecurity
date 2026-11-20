@@ -67,7 +67,7 @@ Both: review each other's PRs; the sprint acceptance run (live, on a reset lab D
 | **M1** Metric store + read API | Barath | F23 | D-49; per-tenant relay series need R1 | `068_metric_samples.sql` |
 | **M2** Console charts | Barath | F23 | M1 merged | none |
 | **A1** Alert rules + evaluator | Sathiya | F26 | D-50, D-53 | `069_alerts.sql` |
-| **A2** Delivery (webhook, email) | Sathiya | F26 | A1 merged, D-52 | in `069_` (channels, deliveries) |
+| **A2** Delivery (webhook, email) | Sathiya | F26 | A1 merged, D-52 | in `069_` (channels, deliveries) + `070_alert_delivery_queue` (D-52 refined: own queue, not the outbox) |
 | **A3** Alerts console | Sathiya | F26 | A2 merged | none |
 | **T1** Incident timeline (stretch) | Sathiya | F27 | A1 merged | none |
 
@@ -94,7 +94,7 @@ Sathiya: X1 ──► A1 (rules, evaluator) ──► A2 (delivery) ──► A3
 | `provider-console/src/api/api-surface.test.ts` | both | Every new console write added on purpose (D-30 amended). |
 | `provider-console/src/pages/Home.tsx` (Overview), navigation | both | M2 sparkline; A3 firing-alerts badge and Alerts nav entry. One section each. |
 | Relay detail / tenant detail pages | Barath (M2), Sathiya (A3) | M2 adds chart sections; A3 may link active alerts. Separate sections. |
-| `controller/migrations/` | both | Reserved `068_` (M1), `069_` (A1/A2); `[schema: reset DB]` in the PR title. |
+| `controller/migrations/` | both | Reserved `068_` (M1), `069_` (A1/A2, merged), `070_` (A2 delivery queue); `[schema: reset DB]` in the PR title. |
 
 ---
 
@@ -157,8 +157,8 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - [ ] R1 — Per-workspace relay counters (Barath)
 - [ ] M1 — Metric store + read API (Barath)
 - [ ] M2 — Console charts (Barath)
-- [ ] A1 — Alert rules + evaluator (Sathiya) — built on `feat/a1-alert-rules`, live-checked 2026-11-20 (PASS); not merged
-- [ ] A2 — Delivery: webhook, email (Sathiya)
+- [x] A1 — Alert rules + evaluator (Sathiya) — merged (#234) — live-checked 2026-11-20 (PASS)
+- [ ] A2 — Delivery: webhook, email (Sathiya) — built on `feat/a2-alert-delivery`, live-checked 2026-11-20 (PASS); not merged
 - [ ] A3 — Alerts console (Sathiya)
 - [ ] T1 — Incident timeline (Sathiya, stretch)
 - [ ] Sprint acceptance run (both); tracker F23, F26

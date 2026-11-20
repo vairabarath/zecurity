@@ -99,6 +99,14 @@ const (
 	ActionAlertRuleCreate = "alert.rule.create"
 	ActionAlertRuleUpdate = "alert.rule.update"
 	ActionAlertRuleDelete = "alert.rule.delete"
+
+	// Delivery channels (Sprint 24 A2, D-52, D-53): super-admin only.
+	ActionAlertChannelRead   = "alert.channel.read"
+	ActionAlertChannelCreate = "alert.channel.create"
+	ActionAlertChannelUpdate = "alert.channel.update"
+	ActionAlertChannelDelete = "alert.channel.delete"
+	ActionAlertChannelTest   = "alert.channel.test"
+	ActionAlertChannelRotate = "alert.channel.rotate_secret"
 )
 
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
@@ -284,6 +292,12 @@ func (a *Authz) CanReadAlerts(actor Actor) error {
 // ActionAlertRuleCreate, ActionAlertRuleUpdate, ActionAlertRuleDelete;
 // super-admin only, D-53).
 func (a *Authz) CanManageAlertRules(actor Actor, action string, target Target) error {
+	return decide(actor, action, target)
+}
+
+// CanManageAlertChannels gates the alert channel API (alert.channel.*;
+// super-admin only, D-53).
+func (a *Authz) CanManageAlertChannels(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
 }
 

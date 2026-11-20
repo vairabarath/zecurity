@@ -198,6 +198,11 @@ func RedactURL(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// DescribeTransportError is describeTransportError for other users of
+// NewClient (F26 alert webhooks): a console-safe description with no URL or
+// resolved address.
+func DescribeTransportError(err error) string { return describeTransportError(err) }
+
 func describeTransportError(err error) string {
 	var ue *url.Error
 	if errors.As(err, &ue) {
