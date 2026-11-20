@@ -1,7 +1,8 @@
 // The single role matrix for the provider console (Sprint 21 C3). Routes
 // (RequireRole) and the nav both read SECTIONS, so a new page is one entry
 // here: C-b added Operators, Phase P added Relays/Tenants/Audit/
-// Certificates; relay pools (D-37) added Relay pools; plans (D-43) added Plans.
+// Certificates; relay pools (D-37) added Relay pools; plans (D-43) added Plans;
+// alerts (Sprint 24 A3, F26) added Alerts.
 //
 // This is UX only. The controller authorizes every /provider/* request on
 // its own (decide()); hiding a section never grants or removes access.
@@ -26,6 +27,8 @@ export interface Section {
 
 export const SECTIONS: readonly Section[] = [
   { key: 'home', path: '/', label: 'Overview', roles: PROVIDER_ROLES },
+  // Alerts (Sprint 24 A3): both roles; relay-ops see relay and pool alerts only.
+  { key: 'alerts', path: '/alerts', label: 'Alerts', roles: PROVIDER_ROLES },
   { key: 'relays', path: '/relays', label: 'Relays', roles: PROVIDER_ROLES, group: 'Fleet' },
   { key: 'relay-pools', path: '/relay-pools', label: 'Relay pools', roles: PROVIDER_ROLES, group: 'Fleet' },
   { key: 'tenants', path: '/tenants', label: 'Tenants', roles: ['super-admin'], group: 'Fleet' },

@@ -3,6 +3,7 @@ import { RedirectIfAuthenticated, RequireRole, RequireSession } from '@/auth/gua
 import { rolesFor } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
+import { Alerts } from '@/pages/Alerts'
 import { Audit } from '@/pages/Audit'
 import { Certificates } from '@/pages/Certificates'
 import { ChangePassword } from '@/pages/ChangePassword'
@@ -41,6 +42,9 @@ export function AppRoutes() {
       <Route element={<RequireSession />}>
         <Route element={<Layout />}>
           <Route index element={<Home />} />
+          <Route element={<RequireRole roles={rolesFor('alerts')} />}>
+            <Route path="alerts" element={<Alerts />} />
+          </Route>
           <Route element={<RequireRole roles={rolesFor('relays')} />}>
             <Route path="relays" element={<Relays />} />
             <Route path="relays/:id" element={<RelayDetail />} />
