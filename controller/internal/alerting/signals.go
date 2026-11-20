@@ -162,22 +162,42 @@ func (s Sources) relayOverCapacity(ctx context.Context, p Params) ([]Observation
 	return out, nil
 }
 
-// poolNoEligibleRelay: a pool with tenants (primary or failover) and no
-// eligible relay (F11-1). An unused empty pool doesn't fire.
+// poolNoEligibleRelay: a pool that active (not suspended) tenants use,
+// as primary or failover, and that has no eligible relay (F11-1). An
+// unused pool, or one used only by suspended tenants, doesn't fire.
 func (s Sources) poolNoEligibleRelay(ctx context.Context) ([]Observation, error) {
-	pools, err := providerquery.ListRelayPools(ctx, s.DB)
+	rows, err := s.DB.Query(ctx, `
+SELECT p.id::text, p.name,
+       (SELECT count(*) FROM workspaces w WHERE `+activeTenant+`
+           AND (w.relay_pool_id = p.id OR w.relay_failover_pool_id = p.id))
+  FROM relay_pools p
+ WHERE NOT EXISTS (SELECT 1 FROM relays WHERE pool_id = p.id AND `+eligible.Where+`)
+ ORDER BY p.id`)
+	if err != nil {
+		return nil, fmt.Errorf("pools without a relay: %w", err)
+	}
+	all, err := collect(rows, func(r pgx.Rows) (Observation, error) {
+		var id, name string
+		var tenants int64
+		if err := r.Scan(&id, &name, &tenants); err != nil {
+			return Observation{}, err
+		}
+		if tenants == 0 {
+			return Observation{}, nil
+		}
+		return Observation{
+			TargetType: "pool", TargetID: id, TargetName: name,
+			Summary: fmt.Sprintf("Relay pool %s has no eligible relay (%d active tenants use it)", name, tenants),
+		}, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var out []Observation
-	for _, p := range pools {
-		if p.EligibleRelays > 0 || p.Tenants+p.FailoverTenants == 0 {
-			continue
+	out := all[:0]
+	for _, o := range all {
+		if o.TargetID != "" {
+			out = append(out, o)
 		}
-		out = append(out, Observation{
-			TargetType: "pool", TargetID: p.ID, TargetName: p.Name,
-			Summary: fmt.Sprintf("Relay pool %s has no eligible relay (%d tenants use it)", p.Name, p.Tenants+p.FailoverTenants),
-		})
 	}
 	return out, nil
 }
@@ -249,6 +269,11 @@ func (s Sources) certificateExpiring(ctx context.Context, p Params, now time.Tim
 				name := e.EntityID
 				if e.EntityName != nil && *e.EntityName != "" {
 					name = *e.EntityName
+				}
+				if e.Kind == "workspace_ca" {
+					// A platform alert never carries a tenant (D-50): name
+					// the CA by its id, not the workspace's name.
+					name = "workspace CA " + e.EntityID
 				}
 				state := "expires " + e.NotAfter.UTC().Format(time.RFC3339)
 				if !e.NotAfter.After(now) {

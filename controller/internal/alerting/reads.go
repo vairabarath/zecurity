@@ -60,12 +60,15 @@ func (f ReadFilter) valid() error {
 	return nil
 }
 
+// MaxActive caps one ListActive read; truncated reports the cut.
+const MaxActive = 1000
+
 // ListActive returns the pending and firing alerts, firing first, most
 // severe first, oldest first. Tenant-scoped reads always filter by
-// tenant_id (D-50).
-func (s *Store) ListActive(ctx context.Context, f ReadFilter) ([]ActiveAlert, error) {
+// tenant_id (D-50). truncated is true when more than MaxActive match.
+func (s *Store) ListActive(ctx context.Context, f ReadFilter) (items []ActiveAlert, truncated bool, err error) {
 	if err := f.valid(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT s.rule_id::text, r.name, r.kind, s.scope, s.tenant_id::text, s.target_type, s.target_id, s.target_name,
@@ -78,11 +81,11 @@ SELECT s.rule_id::text, r.name, r.kind, s.scope, s.tenant_id::text, s.target_typ
  ORDER BY (s.status = 'firing') DESC,
           CASE s.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
           s.pending_since, s.rule_id, s.target_type, s.target_id
- LIMIT 1000`, f.Scope, f.TenantID, f.Status, f.Kinds)
+ LIMIT $5`, f.Scope, f.TenantID, f.Status, f.Kinds, MaxActive+1)
 	if err != nil {
-		return nil, fmt.Errorf("list active alerts: %w", err)
+		return nil, false, fmt.Errorf("list active alerts: %w", err)
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (ActiveAlert, error) {
+	items, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (ActiveAlert, error) {
 		var a ActiveAlert
 		err := r.Scan(&a.RuleID, &a.RuleName, &a.Kind, &a.Scope, &a.TenantID, &a.TargetType, &a.TargetID,
 			&a.TargetName, &a.Status, &a.Severity, &a.Summary, &a.PendingSince, &a.FiringSince)
@@ -93,6 +96,13 @@ SELECT s.rule_id::text, r.name, r.kind, s.scope, s.tenant_id::text, s.target_typ
 		}
 		return a, err
 	})
+	if err != nil {
+		return nil, false, fmt.Errorf("list active alerts: %w", err)
+	}
+	if len(items) > MaxActive {
+		return items[:MaxActive], true, nil
+	}
+	return items, false, nil
 }
 
 // ListEvents returns one page of the alert history, newest first.

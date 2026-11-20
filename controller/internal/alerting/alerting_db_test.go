@@ -226,7 +226,8 @@ func TestAlertsDB_StateMachine(t *testing.T) {
 	now := t0
 	obsv := &fakeObserver{obs: map[string][]Observation{}}
 	ev := &Evaluator{Store: e.store, Observer: obsv, Now: func() time.Time { return now }}
-	relayA := Observation{TargetType: "relay", TargetID: "r-a", TargetName: "relay-a", Summary: "Relay relay-a is offline"}
+	relayID := e.one(t, `INSERT INTO relays (name, status) VALUES ('relay-a', 'inactive') RETURNING id::text`)
+	relayA := Observation{TargetType: "relay", TargetID: relayID, TargetName: "relay-a", Summary: "Relay relay-a is offline"}
 	step := func(at time.Duration, obs []Observation, err error, want ...string) []Event {
 		t.Helper()
 		now = t0.Add(at)
@@ -526,5 +527,127 @@ func TestAlertsDB_API(t *testing.T) {
 	e.exec(t, `DELETE FROM workspaces WHERE id = $1`, acme)
 	if n := e.count(t, `SELECT (SELECT count(*) FROM alert_states WHERE tenant_id IS NOT NULL) + (SELECT count(*) FROM alert_events WHERE tenant_id IS NOT NULL)`); n != 0 {
 		t.Fatalf("tenant alert rows left after the workspace was deleted: %d", n)
+	}
+}
+
+// Review fixes (PR #234): a rule changed mid-tick changes nothing; a target
+// that leaves scope resolves with the reason; workspace CAs carry no tenant
+// name; a pool used only by suspended tenants doesn't fire; one bad stored
+// rule doesn't stop the others; the active list reports truncation.
+func TestAlertsDB_ReviewFixes(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Stale rule copy: Apply with an old UpdatedAt does nothing.
+	e.onlyRule(t, ruleRelayOffline)
+	e.exec(t, `UPDATE alert_rules SET for_seconds = 0 WHERE id = $1`, ruleRelayOffline)
+	r, err := e.store.GetRule(ctx, ruleRelayOffline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := r
+	stale.UpdatedAt = r.UpdatedAt.Add(-time.Minute)
+	relayA := Observation{TargetType: "relay", TargetID: "r-a", TargetName: "relay-a", Summary: "Relay relay-a is offline"}
+	if ev, err := e.store.Apply(ctx, stale, []Observation{relayA}, now, ""); err != nil || len(ev) != 0 {
+		t.Fatalf("stale apply: %v %v", ev, err)
+	}
+	if n := e.count(t, `SELECT count(*) FROM alert_states`); n != 0 {
+		t.Fatalf("stale apply wrote %d states", n)
+	}
+	disabledCopy := r
+	disabledCopy.Enabled = false
+	if ev, _ := e.store.Apply(ctx, r, []Observation{relayA}, now, ""); len(ev) != 1 {
+		t.Fatalf("fresh apply: %v", ev)
+	}
+	if ev, _ := e.store.Apply(ctx, disabledCopy, nil, now, ""); len(ev) != 0 {
+		t.Fatalf("an apply from a stale 'disabled' copy resolved alerts: %v", ev)
+	}
+
+	// Leaving scope: a suspended tenant's firing connector alert resolves
+	// as "tenant suspended", not as fixed.
+	acme := e.workspace(t, "acme")
+	c1 := e.connector(t, acme, "acme-c1", "disconnected")
+	e.onlyRule(t, ruleConnectorOffline)
+	e.exec(t, `UPDATE alert_rules SET for_seconds = 0 WHERE id = $1`, ruleConnectorOffline)
+	ev := &Evaluator{Store: e.store, Observer: Sources{DB: e.pool}}
+	ofKind := func(events []Event, kind string) []Event {
+		var out []Event
+		for _, x := range events {
+			if x.Kind == kind {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	if got := ofKind(ev.Tick(ctx), KindConnectorOffline); len(got) != 1 || got[0].TargetID != c1 {
+		t.Fatalf("connector alert: %+v", got)
+	}
+	e.exec(t, `UPDATE workspaces SET suspended_at = NOW(), suspended_by = 't', suspension_reason = 't' WHERE id = $1`, acme)
+	got := ofKind(ev.Tick(ctx), KindConnectorOffline)
+	if len(got) != 1 || !strings.HasPrefix(got[0].Summary, "Resolved (tenant suspended): ") {
+		t.Fatalf("suspended tenant resolve: %+v", got)
+	}
+
+	// Pool used only by the suspended tenant: no alert.
+	src := Sources{DB: e.pool}
+	if obs, err := src.Observe(ctx, KindPoolNoEligibleRelay, Params{}, now); err != nil || len(obs) != 0 {
+		t.Fatalf("pool used only by a suspended tenant: %v %v", targets(obs), err)
+	}
+	e.exec(t, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, acme)
+	if obs, err := src.Observe(ctx, KindPoolNoEligibleRelay, Params{}, now); err != nil || len(obs) != 1 {
+		t.Fatalf("pool used by an active tenant: %v %v", targets(obs), err)
+	}
+
+	// Workspace CA: platform alert without the tenant's name.
+	e.exec(t, `UPDATE workspaces SET name = 'Acme Secret Corp' WHERE id = $1`, acme)
+	if n := e.count(t, `SELECT count(*) FROM workspace_ca_keys WHERE tenant_id = $1`, acme); n > 0 {
+		e.exec(t, `UPDATE workspace_ca_keys SET not_after = NOW() + interval '3 days' WHERE tenant_id = $1`, acme)
+		p, _ := ParseParams(KindCertificateExpiring, nil)
+		obs, err := src.Observe(ctx, KindCertificateExpiring, p, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range obs {
+			if strings.Contains(o.TargetName+o.Summary, "Acme Secret Corp") {
+				t.Fatalf("platform certificate alert names the tenant: %+v", o)
+			}
+		}
+	} else {
+		var keyID string
+		err := e.pool.QueryRow(ctx, `INSERT INTO workspace_ca_keys (tenant_id, encrypted_private_key, nonce, certificate_pem, not_before, not_after)
+			VALUES ($1, 'k', 'n', 'not a pem', NOW() - interval '1 day', NOW() + interval '3 days') RETURNING id::text`, acme).Scan(&keyID)
+		if err != nil {
+			t.Fatalf("seed workspace CA (adjust columns if the schema changed): %v", err)
+		}
+		p, _ := ParseParams(KindCertificateExpiring, nil)
+		obs, err := src.Observe(ctx, KindCertificateExpiring, p, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, o := range obs {
+			if strings.Contains(o.TargetName+o.Summary, "Acme Secret Corp") {
+				t.Fatalf("platform certificate alert names the tenant: %+v", o)
+			}
+			if o.TargetName == "workspace CA "+keyID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("workspace CA not reported: %s", targets(obs))
+		}
+	}
+
+	// A bad stored rule is skipped, the others still listed.
+	e.exec(t, `UPDATE alert_rules SET params = '{"keys": ["sessions"]}' WHERE kind = 'tenant.over_quota'`)
+	rules, err := e.store.ListRules(ctx)
+	if err != nil || len(rules) != 8 {
+		t.Fatalf("list with one bad rule: %d rules, %v", len(rules), err)
+	}
+
+	// Truncation flag on the active list.
+	if r := e.do(t, provider.RoleSuperAdmin, "GET", "/provider/alerts", nil); r.code != 200 || !strings.Contains(r.body, `"truncated":false`) {
+		t.Fatalf("truncated flag: %d %s", r.code, r.body)
 	}
 }

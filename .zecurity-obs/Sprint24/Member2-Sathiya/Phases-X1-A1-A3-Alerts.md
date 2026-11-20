@@ -90,8 +90,8 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
   - a target that disappears (relay deleted, tenant purged) resolves with a reason;
   - suspended tenants: tenant rules skip them (agents are deny-all by design; no noise).
   - Hands fired/resolved events to A2 (an interface; A1 merges with a no-op or log sink).
-- **Read API:** `GET /provider/alerts?status=&scope=&tenant=` (active and history), `GET /provider/alert-rules`. Action `alert.read`: super-admin all; relay-ops **platform relay and pool alerts only, without tenant names** (D-40). Tenant-scoped reads always filter by `tenant_id`.
-- **Rule writes:** `PUT /provider/alert-rules/{id}` (params, severity, enable/disable) with `{reason}`; actions `alert.rule.update` (super-admin, D-53); audit before/after. Create/delete of additional rules of a kind: `POST /provider/alert-rules`, `DELETE /provider/alert-rules/{id}` with reason.
+- **Read API (as built):** `GET /provider/alerts?status=&scope=&tenant_id=` (active, with a `truncated` flag), `GET /provider/alert-events?scope=&tenant_id=&cursor=&limit=` (history), `GET /provider/alert-rules`. Action `alert.read`: super-admin all; relay-ops **platform relay and pool alerts only, without tenant names** (D-40). Tenant-scoped reads always filter by `tenant_id`.
+- **Rule writes (as built):** `PATCH /provider/alert-rules/{id}` (name, params, severity, enabled, for/renotify) with `{reason}`; actions `alert.rule.update` (super-admin, D-53); audit before/after. Create/delete of additional rules of a kind: `POST /provider/alert-rules`, `DELETE /provider/alert-rules/{id}` with reason.
 
 ### Tests
 - Each kind: fires after `for`, no repeat, renotify, resolves; target removed → resolved.
@@ -130,6 +130,15 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 - **Tests:**
   - `TestAlertsDB_SchemaScopes`, `TestAlertsDB_StateMachine`, `TestAlertsDB_Signals`, `TestAlertsDB_API`;
   - `TestParseParams`, `TestKindScopes`, `TestRuleValidate`, `TestDecide_AlertMatrix`.
+- **Review fixes (PR #234):**
+  - a rule changed mid-tick is skipped (`updated_at` check);
+  - workspace CA alerts carry no tenant name;
+  - a target that left scope resolves with the reason ("tenant suspended", "relay removed");
+  - the pool alert counts only active, non-suspended tenants;
+  - a stored rule with bad params is skipped, not fatal;
+  - `GET /provider/alerts` returns `truncated`.
+
+  Test: `TestAlertsDB_ReviewFixes`.
 - **Mutation checks**, each making a test fail:
   - a read error resolves alerts;
   - the relay-ops filter is removed;

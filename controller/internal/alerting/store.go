@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -121,13 +122,28 @@ func scanRule(row pgx.Row) (Rule, error) {
 	return r, nil
 }
 
-// ListRules returns every rule, platform first, then by name.
+// ListRules returns every rule, platform first, then by name. A row whose
+// stored params no longer parse is logged and skipped, so one bad rule
+// can't stop every other rule from being evaluated.
 func (s *Store) ListRules(ctx context.Context) ([]Rule, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+ruleColumns+` FROM alert_rules ORDER BY scope, name, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list alert rules: %w", err)
 	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Rule, error) { return scanRule(r) })
+	defer rows.Close()
+	var out []Rule
+	for rows.Next() {
+		r, err := scanRule(rows)
+		if errors.Is(err, ErrInvalidParams) {
+			log.Printf("alerting: skipping rule with invalid stored params: %v", err)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list alert rules: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // GetRule returns one rule.
@@ -335,6 +351,47 @@ SELECT target_type, target_id, scope, tenant_id::text, target_name, status, seve
 	return out, nil
 }
 
+// leftScope reports why a resolved target no longer counts, or "" when its
+// condition simply cleared: its tenant was suspended, or the relay, pool,
+// connector or shield was removed.
+func leftScope(ctx context.Context, tx pgx.Tx, st state) (string, error) {
+	var reason string
+	if st.TenantID != nil {
+		var suspended bool
+		err := tx.QueryRow(ctx, `SELECT suspended_at IS NOT NULL FROM workspaces WHERE id = $1::uuid`, *st.TenantID).Scan(&suspended)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "tenant removed", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("resolve reason: %w", err)
+		}
+		if suspended {
+			return "tenant suspended", nil
+		}
+	}
+	var q string
+	switch st.TargetType {
+	case "relay":
+		q = `SELECT CASE WHEN status IN ('revoked', 'deleted') THEN 'relay removed' ELSE '' END FROM relays WHERE id::text = $1`
+	case "pool":
+		q = `SELECT '' FROM relay_pools WHERE id::text = $1`
+	case "connector":
+		q = `SELECT CASE WHEN status = 'revoked' OR revoked_at IS NOT NULL THEN 'connector removed' ELSE '' END FROM connectors WHERE id::text = $1`
+	case "shield":
+		q = `SELECT CASE WHEN status = 'revoked' THEN 'shield removed' ELSE '' END FROM shields WHERE id::text = $1`
+	default:
+		return "", nil
+	}
+	err := tx.QueryRow(ctx, q, st.TargetID).Scan(&reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return st.TargetType + " removed", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve reason: %w", err)
+	}
+	return reason, nil
+}
+
 func insertEvent(ctx context.Context, tx pgx.Tx, r Rule, st state, transition, summary string, now time.Time) (Event, error) {
 	status := statusFiring
 	if transition == TransitionResolved {
@@ -383,6 +440,12 @@ func (s *Store) Apply(ctx context.Context, r Rule, obs []Observation, now time.T
 		}
 		if err != nil {
 			return err
+		}
+		// The rule changed since it was listed (a PATCH landed while its
+		// condition was being read): obs was computed for the old version.
+		// Change nothing; the next tick evaluates the current rule.
+		if !cur.UpdatedAt.Equal(r.UpdatedAt) || cur.Enabled != r.Enabled {
+			return nil
 		}
 		if !cur.Enabled {
 			obs = nil
@@ -448,10 +511,18 @@ ON CONFLICT (rule_id, target_type, target_id) DO UPDATE
 			}
 			if st.Status == statusFiring {
 				summary := "Resolved: " + st.Summary
+				reason := resolvedSummary
 				if !cur.Enabled {
-					summary = "Resolved (rule disabled): " + st.Summary
-				} else if resolvedSummary != "" {
-					summary = "Resolved (" + resolvedSummary + "): " + st.Summary
+					reason = "rule disabled"
+				} else if reason == "" {
+					// A target that left the rule's scope isn't "fixed":
+					// say why it no longer counts.
+					if reason, err = leftScope(ctx, tx, st); err != nil {
+						return err
+					}
+				}
+				if reason != "" {
+					summary = "Resolved (" + reason + "): " + st.Summary
 				}
 				ev, err := insertEvent(ctx, tx, cur, st, TransitionResolved, summary, now)
 				if err != nil {

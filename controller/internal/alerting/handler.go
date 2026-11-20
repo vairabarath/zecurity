@@ -20,7 +20,7 @@ import (
 
 // Alert API (Sprint 24 A1, D-50, D-53). Errors are {"error":"<code>"}.
 //
-//	GET    /provider/alerts?scope=&tenant_id=&status=            → {"items":[ActiveAlert]}
+//	GET    /provider/alerts?scope=&tenant_id=&status=            → {"items":[ActiveAlert], "truncated": bool}
 //	GET    /provider/alert-events?scope=&tenant_id=&cursor=&limit= → Page[Event]
 //	GET    /provider/alert-rules                                 → {"items":[Rule]}
 //	POST   /provider/alert-rules      {kind, name, enabled?, severity, params?, for_seconds?, renotify_seconds?, reason} → 201 Rule
@@ -101,9 +101,10 @@ func (h *Handler) ListActive(w http.ResponseWriter, r *http.Request) {
 	}
 	f, visible := readFilter(r, actor)
 	items := []ActiveAlert{}
+	truncated := false
 	if visible {
 		var err error
-		if items, err = h.Store.ListActive(r.Context(), f); err != nil {
+		if items, truncated, err = h.Store.ListActive(r.Context(), f); err != nil {
 			writeReadError(w, "list active", err)
 			return
 		}
@@ -111,7 +112,7 @@ func (h *Handler) ListActive(w http.ResponseWriter, r *http.Request) {
 			items = []ActiveAlert{}
 		}
 	}
-	provider.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	provider.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "truncated": truncated})
 }
 
 // ListEvents: GET /provider/alert-events.
