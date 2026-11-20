@@ -177,7 +177,7 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 - **Mutation checks:** remove the connect-time check → the rebinding test fails; send tenant alerts to a platform-only channel → its test fails.
 
 ### A2 build record (branch `feat/a2-alert-delivery`, 2026-11-20)
-- **Retries: own queue, not the outbox.** `outbox_events.workspace_id` is NOT NULL, so platform alerts can't be queued there. Decided by Sathiya and recorded as a D-52 refinement in the Decision Record.
+- **Retries: own queue, not the outbox.** `outbox_events.workspace_id` is NOT NULL, so platform alerts can't be queued there. Chosen by Sathiya on 2026-11-20 and recorded as a D-52 refinement in the Decision Record; **it awaits Barath's confirmation** (he is the product owner).
   - Migration `070_alert_delivery_queue.sql` adds a table with one row per (event, channel), leased by the worker.
   - `alerting.insertEvent` queues every matching enabled channel in the event's own transaction: `scope_filter` all or the same scope, and severity at or above `min_severity`.
 - **`delivery.go` (`Deliverer`):**

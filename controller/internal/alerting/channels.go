@@ -232,6 +232,13 @@ func (cs *ChannelStore) ListChannels(ctx context.Context) ([]Channel, error) {
 }
 
 func (cs *ChannelStore) validate(c Channel, rawURL *string) error {
+	return cs.validateURL(c, rawURL, true)
+}
+
+// validateURL is validate; checkURL false keeps a stored URL as is (an
+// update that doesn't change it, e.g. disabling a channel whose URL no
+// longer passes the current policy).
+func (cs *ChannelStore) validateURL(c Channel, rawURL *string, checkURL bool) error {
 	switch {
 	case !validName(c.Name):
 		return fmt.Errorf("%w: name must be 1..100 characters without surrounding spaces", ErrInvalidChannel)
@@ -248,6 +255,9 @@ func (cs *ChannelStore) validate(c Channel, rawURL *string) error {
 		}
 		if c.Recipients != nil {
 			return fmt.Errorf("%w: a webhook has no recipients", ErrInvalidChannel)
+		}
+		if !checkURL {
+			return nil
 		}
 		return cs.policy.ValidateWebhookURL(*rawURL)
 	}
@@ -360,7 +370,7 @@ func (cs *ChannelStore) UpdateChannel(ctx context.Context, id string, in Channel
 			u := strings.TrimSpace(*in.URL)
 			rawURL = &u
 		}
-		if err := cs.validate(after, rawURL); err != nil {
+		if err := cs.validateURL(after, rawURL, in.URL != nil); err != nil {
 			return err
 		}
 		row, err := scanChannel(tx.QueryRow(ctx, `

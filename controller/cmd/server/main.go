@@ -810,7 +810,7 @@ func main() {
 	alertDeliverer := &alerting.Deliverer{
 		Store: alertStore, Channels: alertChannels,
 		HTTP:       auditexport.NewClient(auditexport.ClientOptions{AllowPrivate: alertURLPolicy.AllowPrivate}),
-		Mail:       inviteEmailer,
+		Mail:       alertMailer(inviteEmailer),
 		ConsoleURL: alertConsoleURL,
 		Policy:     alerting.DefaultRetryPolicy(),
 	}
@@ -1136,6 +1136,11 @@ func main() {
 		log.Printf("cert expiry alert: disabled (CERT_EXPIRY_ALERTS=false)")
 	}
 
+	// Alert delivery (Sprint 24 A2) runs even with ALERTS_ENABLED=false: rule
+	// changes through the API can still record events (resolved on delete or
+	// disable), and their deliveries must not pile up.
+	workers.Go("alert-delivery", func() { alertDeliverer.Run(ctx, 5*time.Second) })
+
 	// Alert evaluator (Sprint 24 A1, F26): every ALERT_EVAL_INTERVAL (default
 	// 30s) it evaluates every rule; a rule whose condition can't be read keeps
 	// its alerts unchanged. ALERTS_ENABLED=false turns it off.
@@ -1150,7 +1155,6 @@ func main() {
 			Notifier: alertNotifier,
 		}
 		workers.Go("alert-evaluator", func() { alertEvaluator.Run(ctx, evalInterval) })
-		workers.Go("alert-delivery", func() { alertDeliverer.Run(ctx, 5*time.Second) })
 	} else {
 		log.Printf("alert evaluator: disabled (ALERTS_ENABLED=false)")
 	}
@@ -1889,4 +1893,15 @@ func reloadGeoIP(geoDB *geoip.DB) {
 	}
 	metrics.SetGeoIPBuild(geoDB.Build())
 	warnStaleGeoIP(geoDB)
+}
+
+// alertMailer returns the email sender for alert channels, or nil when SMTP
+// isn't configured: invitation.Emailer then only logs, which would record
+// alert emails as delivered although nothing was sent (A2 review).
+func alertMailer(e *invitation.Emailer) alerting.Mailer {
+	if strings.TrimSpace(os.Getenv("SMTP_HOST")) == "" {
+		log.Printf("alert email: SMTP_HOST not set; email channels will fail (not configured)")
+		return nil
+	}
+	return e
 }

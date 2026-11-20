@@ -95,7 +95,7 @@ type deliveryEnv struct {
 
 func newDeliveryEnv(t *testing.T) *deliveryEnv {
 	e := newEnv(t)
-	d := &deliveryEnv{env: e, mail: &fakeMail{}, now: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}
+	d := &deliveryEnv{env: e, mail: &fakeMail{}, now: time.Now().UTC().Truncate(time.Second)}
 	d.channels = NewChannelStore(e.store, testSealer{}, URLPolicy{AllowPrivate: true})
 	d.deliv = &Deliverer{
 		Store: e.store, Channels: d.channels,
@@ -409,4 +409,99 @@ func TestDeliveryDB_ChannelValidation(t *testing.T) {
 	if r := d.do(t, provider.RoleRelayOps, "POST", "/provider/alert-channels", map[string]any{"name": "x", "type": "email", "reason": "r"}); r.code != 403 {
 		t.Fatalf("relay-ops create: %d", r.code)
 	}
+}
+
+// Review fixes (PR #235).
+func TestDeliveryDB_ReviewFixes(t *testing.T) {
+	d := newDeliveryEnv(t)
+	ctx := context.Background()
+	na := func(context.Context, pgxTx, *Channel, *Channel) error { return nil }
+	s := func(v string) *string { return &v }
+
+	// A queued tenant delivery isn't sent after the channel became
+	// platform-only.
+	ch, _, err := d.channels.CreateChannel(ctx, ChannelInput{Name: s("shared"), Type: ChannelEmail, MinSeverity: s(SeverityInfo)}, na)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acme := d.workspace(t, "acme")
+	d.fireOne(t, ruleConnectorOffline, Observation{TargetType: "connector", TargetID: "c-1", TargetName: "c1", TenantID: acme, Summary: "s"})
+	if _, err := d.channels.UpdateChannel(ctx, ch.ID, ChannelInput{ScopeFilter: s(FilterPlatform)}, na); err != nil {
+		t.Fatal(err)
+	}
+	d.deliv.RunOnce(ctx)
+	if len(d.mail.sent) != 0 {
+		t.Fatalf("tenant alert sent to a now platform-only channel: %v", d.mail.sent)
+	}
+	if n := d.count(t, `SELECT count(*) FROM alert_deliveries WHERE status = 'failed' AND error = 'channel filters no longer match'`); n != 1 {
+		t.Fatalf("filter-mismatch record: %d", n)
+	}
+
+	// No mailer configured: email fails (never "delivered").
+	d.exec(t, `UPDATE alert_channels SET scope_filter = 'all'`)
+	d.exec(t, `DELETE FROM alert_states`)
+	d.now = d.now.Add(time.Minute)
+	d.deliv.Mail = nil
+	d.fireOne(t, ruleConnectorOffline, Observation{TargetType: "connector", TargetID: "c-2", TargetName: "c2", TenantID: acme, Summary: "s"})
+	d.deliv.RunOnce(ctx)
+	if n := d.count(t, `SELECT count(*) FROM alert_deliveries WHERE status = 'retrying' AND error = 'email not configured'`); n != 1 {
+		t.Fatalf("unconfigured mailer recorded as: %d retrying rows", n)
+	}
+
+	// A stalled mail server is abandoned after the timeout.
+	d.exec(t, `DELETE FROM alert_delivery_queue`)
+	d.deliv.Mail = stallMail{}
+	d.deliv.MailTimeout = 200 * time.Millisecond
+	start := time.Now()
+	if err := d.deliv.sendEmail(ctx, []string{"a@x.test"}, "s", "b"); err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("stalled SMTP: err %v after %s", err, time.Since(start))
+	}
+
+	// Partial email failure: delivered, with the shortfall recorded.
+	pm := &partialMail{bad: "b@x.test"}
+	d.deliv.Mail = pm
+	err = d.deliv.sendEmail(ctx, []string{"a@x.test", "b@x.test"}, "s", "b")
+	var partial *partialEmailError
+	if !errors.As(err, &partial) || partial.failed != 1 || partial.total != 2 {
+		t.Fatalf("partial email: %v", err)
+	}
+
+	// A channel whose stored URL fails today's policy can still be disabled.
+	dev := NewChannelStore(d.store, testSealer{}, URLPolicy{AllowPrivate: true})
+	hook, _, err := dev.CreateChannel(ctx, ChannelInput{Name: s("lab-hook"), Type: ChannelWebhook, URL: s("http://10.0.0.5/hook")}, na)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict := NewChannelStore(d.store, testSealer{}, URLPolicy{})
+	off := false
+	if _, err := strict.UpdateChannel(ctx, hook.ID, ChannelInput{Enabled: &off}, na); err != nil {
+		t.Fatalf("disable a channel with a now-refused URL: %v", err)
+	}
+	if _, err := strict.UpdateChannel(ctx, hook.ID, ChannelInput{URL: s("http://10.0.0.6/hook")}, na); !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("a changed URL is still checked: %v", err)
+	}
+
+	// Concurrent Notify and Run share one wake channel (run with -race).
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 50; i++ {
+			d.deliv.Notify(ctx, nil)
+		}
+		close(done)
+	}()
+	_ = d.deliv.wakeCh()
+	<-done
+}
+
+type stallMail struct{}
+
+func (stallMail) SendPlain(string, string, string) error { time.Sleep(3 * time.Second); return nil }
+
+type partialMail struct{ bad string }
+
+func (m *partialMail) SendPlain(to, _, _ string) error {
+	if to == m.bad {
+		return errors.New("mailbox full")
+	}
+	return nil
 }

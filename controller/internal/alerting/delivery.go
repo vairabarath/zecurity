@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -59,8 +60,11 @@ type Deliverer struct {
 	Now        func() time.Time
 	Lease      time.Duration
 	Batch      int
+	// MailTimeout bounds one email send (the SMTP client takes no context).
+	MailTimeout time.Duration
 
-	wake chan struct{}
+	wakeOnce sync.Once
+	wake     chan struct{}
 }
 
 func (d *Deliverer) now() time.Time {
@@ -71,9 +75,7 @@ func (d *Deliverer) now() time.Time {
 }
 
 func (d *Deliverer) wakeCh() chan struct{} {
-	if d.wake == nil {
-		d.wake = make(chan struct{}, 1)
-	}
+	d.wakeOnce.Do(func() { d.wake = make(chan struct{}, 1) })
 	return d.wake
 }
 
@@ -168,10 +170,26 @@ SELECT id::text, rule_id::text, kind, scope, tenant_id::text, target_type, targe
 // deliver makes one attempt and records it.
 func (d *Deliverer) deliver(ctx context.Context, q queued) {
 	attempt := q.attempts + 1
+	policy := d.Policy
+	if policy.MaxRetries == 0 {
+		policy = DefaultRetryPolicy()
+	}
+	// failOrRetry: a failed attempt retries with backoff until the last one.
+	failOrRetry := func(status *int, msg string) {
+		if attempt >= policy.MaxRetries {
+			d.finish(ctx, q, attempt, DeliveryFailed, status, msg)
+			return
+		}
+		d.retry(ctx, q, attempt, status, msg, d.now().Add(policy.Backoff(attempt-1)))
+	}
 	ev, err := d.loadEvent(ctx, q.eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return // purged: the queue row went with it
+	}
 	if err != nil {
+		// A transient read error (failover, timeout) is retried, never final.
 		log.Printf("alert delivery: event %s: %v", q.eventID, err)
-		d.finish(ctx, q, attempt, DeliveryFailed, nil, "event unreadable")
+		failOrRetry(nil, "event unreadable (will retry)")
 		return
 	}
 	ch, secret, err := d.Channels.loadChannel(ctx, d.Store.pool, q.channelID)
@@ -180,11 +198,18 @@ func (d *Deliverer) deliver(ctx context.Context, q queued) {
 	}
 	if err != nil {
 		log.Printf("alert delivery: channel %s: %v", q.channelID, err)
-		d.finish(ctx, q, attempt, DeliveryFailed, nil, "channel unreadable")
+		failOrRetry(nil, "channel unreadable (will retry)")
 		return
 	}
 	if !ch.Enabled {
 		d.finish(ctx, q, attempt, DeliveryFailed, nil, "channel disabled")
+		return
+	}
+	// The channel's filters may have changed since the event was queued
+	// (D-50): never send a tenant alert to a channel now limited to
+	// platform alerts, or below its current minimum severity.
+	if !channelMatches(ch.Channel, ev) {
+		d.finish(ctx, q, attempt, DeliveryFailed, nil, "channel filters no longer match")
 		return
 	}
 	p := NewPayload(ev, d.ConsoleURL)
@@ -193,15 +218,32 @@ func (d *Deliverer) deliver(ctx context.Context, q queued) {
 		d.finish(ctx, q, attempt, DeliveryDelivered, status, "")
 		return
 	}
-	policy := d.Policy
-	if policy.MaxRetries == 0 {
-		policy = DefaultRetryPolicy()
-	}
-	if attempt >= policy.MaxRetries {
-		d.finish(ctx, q, attempt, DeliveryFailed, status, sendErr.Error())
+	var partial *partialEmailError
+	if errors.As(sendErr, &partial) {
+		// Some recipients got it; retrying would duplicate theirs. Record the
+		// shortfall so it is visible (A3).
+		d.finish(ctx, q, attempt, DeliveryDelivered, nil, sendErr.Error())
 		return
 	}
-	d.retry(ctx, q, attempt, status, sendErr.Error(), d.now().Add(policy.Backoff(attempt-1)))
+	failOrRetry(status, sendErr.Error())
+}
+
+func severityRankOf(s string) int {
+	switch s {
+	case SeverityCritical:
+		return 0
+	case SeverityWarning:
+		return 1
+	}
+	return 2
+}
+
+// channelMatches is the routing rule of insertEvent, re-checked at send time.
+func channelMatches(c Channel, e Event) bool {
+	if c.ScopeFilter != FilterAll && c.ScopeFilter != e.Scope {
+		return false
+	}
+	return severityRankOf(e.Severity) <= severityRankOf(c.MinSeverity)
 }
 
 // send delivers p over the channel. It returns the HTTP status (webhook)
@@ -236,7 +278,7 @@ func (d *Deliverer) postWebhook(ctx context.Context, rawURL string, secret []byt
 	resp, err := d.HTTP.Do(req)
 	if err != nil {
 		// Never echo the URL: its path may be a credential.
-		return nil, fmt.Errorf("post to %s failed: %s", auditexport.RedactURL(rawURL), sanitizeErr(err))
+		return nil, fmt.Errorf("post to %s failed: %s", auditexport.RedactURL(rawURL), auditexport.DescribeTransportError(err))
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -247,17 +289,9 @@ func (d *Deliverer) postWebhook(ctx context.Context, rawURL string, secret []byt
 	return &code, nil
 }
 
-// sanitizeErr keeps the error class without the URL (net/http errors quote it).
-func sanitizeErr(err error) string {
-	var ue interface{ Unwrap() error }
-	if errors.As(err, &ue) && ue.Unwrap() != nil {
-		err = ue.Unwrap()
-	}
-	return truncate(err.Error(), 200)
-}
-
 func (d *Deliverer) sendEmail(ctx context.Context, recipients []string, subject, body string) error {
-	if d.Mail == nil {
+	mailer := d.Mail // captured: an abandoned send keeps using this one
+	if mailer == nil {
 		return errors.New("email not configured")
 	}
 	to := recipients
@@ -270,19 +304,54 @@ func (d *Deliverer) sendEmail(ctx context.Context, recipients []string, subject,
 	if len(to) == 0 {
 		return errors.New("no recipients")
 	}
+	timeout := d.MailTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	sent := 0
 	var last error
 	for _, addr := range to {
-		if err := d.Mail.SendPlain(addr, subject, body); err != nil {
+		if err := sendWithTimeout(ctx, timeout, func() error { return mailer.SendPlain(addr, subject, body) }); err != nil {
 			last = err
 			continue
 		}
 		sent++
 	}
-	if sent == 0 {
+	switch {
+	case sent == 0:
 		return fmt.Errorf("email to %d recipients failed: %s", len(to), truncate(last.Error(), 200))
+	case sent < len(to):
+		return &partialEmailError{failed: len(to) - sent, total: len(to), last: truncate(last.Error(), 200)}
 	}
 	return nil
+}
+
+// partialEmailError: some recipients got the email, some didn't.
+type partialEmailError struct {
+	failed, total int
+	last          string
+}
+
+func (e *partialEmailError) Error() string {
+	return fmt.Sprintf("email: %d of %d recipients failed: %s", e.failed, e.total, e.last)
+}
+
+// sendWithTimeout runs send (an SMTP call that takes no context) and gives up
+// after timeout, so one stalled mail server can't block every other
+// delivery. A send that is abandoned finishes (or fails) in the background.
+func sendWithTimeout(ctx context.Context, timeout time.Duration, send func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- send() }()
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return errors.New("email send timed out")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func activeSuperAdmins(ctx context.Context, s *Store) ([]string, error) {

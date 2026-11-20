@@ -418,14 +418,15 @@ VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING 
 	}
 	// A2 (D-52): route the event to every enabled channel whose scope filter
 	// and minimum severity match, in this transaction, so a committed event
-	// always has its deliveries queued.
+	// always has its deliveries queued. Due at the event's time (the
+	// evaluator's clock, which the delivery worker also uses).
 	if _, err := tx.Exec(ctx, `
-INSERT INTO alert_delivery_queue (event_id, channel_id)
-SELECT $1::uuid, c.id FROM alert_channels c
+INSERT INTO alert_delivery_queue (event_id, channel_id, next_attempt_at)
+SELECT $1::uuid, c.id, $4::timestamptz FROM alert_channels c
  WHERE c.enabled
    AND (c.scope_filter = 'all' OR c.scope_filter = $2)
    AND `+severityRank("$3")+` <= `+severityRank("c.min_severity"),
-		ev.ID, ev.Scope, ev.Severity); err != nil {
+		ev.ID, ev.Scope, ev.Severity, ev.OccurredAt); err != nil {
 		return Event{}, fmt.Errorf("queue alert deliveries: %w", err)
 	}
 	return ev, nil
