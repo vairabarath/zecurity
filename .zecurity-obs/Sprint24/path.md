@@ -158,7 +158,7 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - [ ] M1 — Metric store + read API (Barath)
 - [ ] M2 — Console charts (Barath)
 - [x] A1 — Alert rules + evaluator (Sathiya) — merged (#234) — live-checked 2026-11-20 (PASS)
-- [ ] A2 — Delivery: webhook, email (Sathiya) — built on `feat/a2-alert-delivery`, live-checked 2026-11-20 (PASS); not merged
+- [x] A2 — Delivery: webhook, email (Sathiya) — merged (#235) — live-checked 2026-11-20 (PASS)
 - [ ] A3 — Alerts console (Sathiya)
 - [ ] T1 — Incident timeline (Sathiya, stretch)
 - [ ] Sprint acceptance run (both); tracker F23, F26
