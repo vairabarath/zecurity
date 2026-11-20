@@ -262,7 +262,7 @@ export function CreateChannelDialog({
   const { pending, error, run } = useWrite()
   const parsedRecipients = parseRecipients(recipients)
   const nameOk = name.trim().length > 0 && name.trim().length <= 100
-  const targetOk = type === 'webhook' ? /^https?:\/\/\S+$/.test(url.trim()) : parsedRecipients !== null
+  const targetOk = type === 'webhook' ? /^https:\/\/\S+$/.test(url.trim()) : parsedRecipients !== null
   const valid = nameOk && targetOk && reasonValid(reason)
   return (
     <FormDialog
@@ -337,7 +337,7 @@ export function EditChannelDialog({ channel, onCancel, onDone }: { channel: Aler
   const valid =
     name.trim().length > 0 &&
     (channel.type !== 'email' || parsedRecipients !== null) &&
-    (url.trim() === '' || /^https?:\/\/\S+$/.test(url.trim())) &&
+    (url.trim() === '' || /^https:\/\/\S+$/.test(url.trim())) &&
     Object.keys(change).length > 0 &&
     reasonValid(reason)
   return (

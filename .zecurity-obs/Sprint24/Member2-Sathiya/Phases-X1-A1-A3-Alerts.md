@@ -223,6 +223,14 @@ Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
   - `SecretDialog` shows the webhook secret once and drops it on close; it is never stored. `static-guards.test.ts` allows clipboard access here.
 - **Navigation:** an Alerts section for both roles (`roles.ts`, Bell icon).
 - **Overview:** a "Firing alerts" tile (`GET /provider/alerts?status=firing`, both roles) linking to `/alerts`. `Home.test.tsx` was updated to pin the new request.
+- **Review fixes (PR #236):**
+  - History resets its paging when the scope changes (`key={scope}`).
+  - `console_url` (`/alerts?event=<id>`) opens History on that event; for super-admins it also opens the event's deliveries.
+  - An unknown `tab` or `scope` in the URL falls back to the default.
+  - Webhook URLs must be `https://` in the console too.
+  - `invalid_request`, `invalid_filter` and `server_error` get clear messages.
+
+  4 new tests.
 - **Not in A3:** creating or deleting rules from the console (the API exists; the nine seeded rules are edited in place).
 - **Tests:** `src/pages/Alerts.test.tsx` (9). Full suite: 675 tests, lint and build clean. Mutation check: giving relay-ops all four tabs makes the relay-ops test fail.
 

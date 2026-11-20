@@ -215,3 +215,67 @@ describe('Overview: firing alerts tile', () => {
     expect(screen.getByText('1 critical · 0 other')).toBeInTheDocument()
   })
 })
+
+describe('Alerts: review fixes (PR #236)', () => {
+  it('changing the scope in History starts at the newest page of that scope', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch({
+      'GET /provider/alert-events': (c) =>
+        c.search.includes('cursor=c2')
+          ? { status: 200, body: { items: [{ ...EVENT, id: 'ev0', summary: 'Older event' }], next_cursor: null } }
+          : { status: 200, body: { items: [EVENT], next_cursor: 'c2' } },
+    })
+    renderApp('/alerts?tab=history')
+    const user = userEvent.setup()
+    await screen.findByRole('row', { name: 'Relay relay-a is offline' })
+    await user.click(screen.getByRole('button', { name: 'Older' }))
+    await screen.findByRole('row', { name: 'Older event' })
+    await user.click(within(screen.getByRole('group', { name: 'Scope' })).getByRole('button', { name: 'Tenant' }))
+    await waitFor(() => expect(calls.some((c) => c.search.includes('scope=tenant'))).toBe(true))
+    const tenantCalls = calls.filter((c) => c.search.includes('scope=tenant'))
+    expect(tenantCalls.every((c) => !c.search.includes('cursor='))).toBe(true)
+  })
+
+  it('a console_url link (?event=) opens History on that event with its deliveries', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({
+      'GET /provider/alert-events': { status: 200, body: { items: [EVENT], next_cursor: null } },
+      'GET /provider/alert-events/ev1/deliveries': {
+        status: 200,
+        body: { items: [{ channel_id: 'ch1', channel_name: 'ops-hook', attempt: 1, status: 'delivered', http_status: 204, error: null, at: '2026-11-20T10:05:01Z' }] },
+      },
+    })
+    renderApp('/alerts?event=ev1')
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(await dialog.findByText('ops-hook')).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: 'Relay relay-a is offline', hidden: true })).toHaveAttribute('aria-current', 'true')
+  })
+
+  it('an unknown tab falls back to Active; an unknown scope is not sent', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch({ 'GET /provider/alerts': { status: 200, body: { items: [], truncated: false } } })
+    renderApp('/alerts?tab=foo&scope=x')
+    expect(await screen.findByText('No alerts are firing or pending.')).toBeInTheDocument()
+    expect(calls.every((c) => c.search === '')).toBe(true)
+  })
+
+  it('an http webhook URL keeps Add disabled; invalid_request has a clear message', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({
+      'GET /provider/alert-channels': { status: 200, body: { items: [] } },
+      'POST /provider/alert-channels': { status: 400, body: { error: 'invalid_request' } },
+    })
+    renderApp('/alerts?tab=channels')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Add channel' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    await user.type(dialog.getByLabelText('Name'), 'h')
+    await user.type(dialog.getByLabelText('Webhook URL'), 'http://hooks.example.test/x')
+    await user.type(dialog.getByLabelText('Reason'), 'r')
+    expect(dialog.getByRole('button', { name: 'Add channel' })).toBeDisabled()
+    await user.clear(dialog.getByLabelText('Webhook URL'))
+    await user.type(dialog.getByLabelText('Webhook URL'), 'https://hooks.example.test/x')
+    await user.click(dialog.getByRole('button', { name: 'Add channel' }))
+    expect(await dialog.findByText(/wasn’t understood/)).toBeInTheDocument()
+  })
+})

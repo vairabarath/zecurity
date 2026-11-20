@@ -51,6 +51,9 @@ const ALERT_ERRORS: Record<string, string> = {
   channel_name_taken: 'Another channel has that name.',
   not_found: 'It no longer exists. Refresh the page.',
   forbidden: 'Your role can’t do that.',
+  invalid_request: 'The request wasn’t understood. Check the values and try again.',
+  invalid_filter: 'That filter isn’t valid.',
+  server_error: 'The controller hit an error. Try again; if it persists, check the controller log.',
 }
 
 export function alertErrorMessage(err: unknown): string {

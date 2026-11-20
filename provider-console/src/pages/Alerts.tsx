@@ -65,9 +65,14 @@ export function Alerts() {
   const me = useSessionStore((s) => s.me)
   const isSuperAdmin = hasRole(me?.role, ['super-admin'])
   const [sp, setSp] = useSearchParams()
-  const requested = (sp.get('tab') ?? 'active') as Tab
-  const tab: Tab = !isSuperAdmin && (requested === 'rules' || requested === 'channels') ? 'active' : requested
-  const scope = isSuperAdmin ? (sp.get('scope') ?? '') : ''
+  // console_url in webhook and email payloads is /alerts?event=<id> (A2):
+  // open History on that event.
+  const eventLink = sp.get('event') ?? ''
+  const rawTab = sp.get('tab') ?? (eventLink ? 'history' : 'active')
+  const known: Tab[] = isSuperAdmin ? ['active', 'history', 'rules', 'channels'] : ['active', 'history']
+  const tab: Tab = (known as string[]).includes(rawTab) ? (rawTab as Tab) : 'active'
+  const rawScope = sp.get('scope') ?? ''
+  const scope = isSuperAdmin && (rawScope === 'platform' || rawScope === 'tenant') ? rawScope : ''
   const [round, setRound] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const refresh = () => {
@@ -78,7 +83,7 @@ export function Alerts() {
     const next = new URLSearchParams(sp)
     if (v) next.set(k, v)
     else next.delete(k)
-    if (k === 'tab') next.delete('cursor')
+    next.delete('event')
     setSp(next, { replace: true })
     setNotice(null)
   }
@@ -111,7 +116,18 @@ export function Alerts() {
         </Alert>
       )}
       {tab === 'active' && <ActiveTab round={round} scope={scope} showTenant={isSuperAdmin} />}
-      {tab === 'history' && <HistoryTab round={round} scope={scope} showTenant={isSuperAdmin} showDeliveries={isSuperAdmin} />}
+      {tab === 'history' && (
+        // keyed by scope: a new scope starts at its newest page (the cursor
+        // stack belongs to one scope).
+        <HistoryTab
+          key={scope}
+          round={round}
+          scope={scope}
+          showTenant={isSuperAdmin}
+          showDeliveries={isSuperAdmin}
+          focusEvent={eventLink}
+        />
+      )}
       {tab === 'rules' && isSuperAdmin && (
         <RulesTab
           round={round}
@@ -235,15 +251,41 @@ function ActiveTab({ round, scope, showTenant }: { round: number; scope: string;
 
 const TRANSITION_LABELS: Record<string, string> = { fired: 'Fired', renotified: 'Reminder', resolved: 'Resolved' }
 
-function HistoryTab({ round, scope, showTenant, showDeliveries }: { round: number; scope: string; showTenant: boolean; showDeliveries: boolean }) {
+// A linked event that isn't on the first History page: its deliveries are
+// still readable by id.
+const LINKED_STUB: AlertEvent = {
+  id: '', rule_id: '', kind: '', scope: 'platform', tenant_id: null, target_type: '', target_id: '', target_name: '',
+  transition: 'fired', status: 'firing', severity: 'info', summary: 'The alert event from your link', started_at: '', occurred_at: '',
+}
+
+function HistoryTab({
+  round,
+  scope,
+  showTenant,
+  showDeliveries,
+  focusEvent,
+}: {
+  round: number
+  scope: string
+  showTenant: boolean
+  showDeliveries: boolean
+  focusEvent: string
+}) {
   const [cursors, setCursors] = useState<string[]>([''])
   const cursor = cursors[cursors.length - 1]
   const { state } = useDetailQuery(`events|${round}|${scope}|${cursor}`, () =>
     listAlertEvents({ scope: scope as '' | 'platform' | 'tenant', cursor, limit: 50 }),
   )
   const [deliveriesOf, setDeliveriesOf] = useState<AlertEvent | null>(null)
+  // A linked event (console_url): its deliveries open once, for super-admins.
+  const [linkOpened, setLinkOpened] = useState(false)
   if (state.status !== 'ready') return <NotReady state={state} what="alert history" />
   const items = state.data.items
+  const linked = focusEvent ? items.find((e) => e.id === focusEvent) : undefined
+  if (focusEvent && showDeliveries && !linkOpened && !deliveriesOf) {
+    setLinkOpened(true)
+    setDeliveriesOf(linked ?? { ...LINKED_STUB, id: focusEvent })
+  }
   if (items.length === 0 && cursors.length === 1) return <p className="py-6 text-sm text-muted-foreground">No alert history yet.</p>
   return (
     <Card>
@@ -263,7 +305,7 @@ function HistoryTab({ round, scope, showTenant, showDeliveries }: { round: numbe
         </TableHeader>
         <TableBody>
           {items.map((e) => (
-            <TableRow key={e.id} aria-label={e.summary}>
+            <TableRow key={e.id} aria-label={e.summary} aria-current={e.id === focusEvent ? 'true' : undefined} className={e.id === focusEvent ? 'bg-primary-soft' : undefined}>
               <TableCell className="whitespace-nowrap font-mono text-xs">{formatDateTime(e.occurred_at)}</TableCell>
               <TableCell>
                 <span className="inline-flex items-center gap-2">
