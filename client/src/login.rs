@@ -213,16 +213,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             invite_token: invite_token.unwrap_or_default(),
         })
         .await
-        .map_err(|status| {
-            // Sprint 23 S1 (D-45): a clear message, not a raw gRPC status.
-            if status.code() == tonic::Code::PermissionDenied
-                && status.message() == crate::auth::WORKSPACE_SUSPENDED_MESSAGE
-            {
-                anyhow!("This workspace is suspended by the provider. Sign-in is unavailable until it is resumed; contact your provider.")
-            } else {
-                anyhow::Error::new(status)
-            }
-        })?
+        .map_err(user_facing_error)?
         .into_inner(); //accesstoken, refreshtoken, expiresin, email
 
     println!("Generating device certificate...");
@@ -260,7 +251,8 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
                                                 "device_name": "DESKTOP-ABC123",
                                                 "os": "linux"
                                                 } */
-        .await?
+        .await
+        .map_err(user_facing_error)?
         .into_inner();
 
     let ca_cert_pem = device_ca_chain(&trusted_intermediate_pem, &enroll, &sent_csr_pem)?;
@@ -382,6 +374,26 @@ pub async fn fetch_controller_ca(conf: &ClientConf) -> Result<String> {
     Ok(ca_pem)
 }
 
+/// A controller refusal the user can act on, as a plain sentence instead of
+/// a raw gRPC status dump; anything else is passed through unchanged.
+/// - Sprint 23 S1 (D-45): the workspace is suspended by the provider.
+/// - Sprint 24 X1 (D-47): a quota refusal (`ResourceExhausted`, user or
+///   device limit); the controller's message is user-safe
+///   (`quota.Exceeded.Error()`), so it is shown as is.
+fn user_facing_error(status: tonic::Status) -> anyhow::Error {
+    match status.code() {
+        tonic::Code::PermissionDenied
+            if status.message() == crate::auth::WORKSPACE_SUSPENDED_MESSAGE =>
+        {
+            anyhow!("This workspace is suspended by the provider. Sign-in is unavailable until it is resumed; contact your provider.")
+        }
+        tonic::Code::ResourceExhausted if status.message().starts_with("quota exceeded") => {
+            anyhow!("Sign-in refused: {}", status.message())
+        }
+        _ => anyhow::Error::new(status),
+    }
+}
+
 fn extract_trust_domain(spiffe_id: &str) -> String {
     // "spiffe://ws-slug.zecurity.in/client/uuid" → "ws-slug.zecurity.in"
     spiffe_id
@@ -397,4 +409,35 @@ fn certificate_not_after_unix(certificate_pem: &str) -> Result<i64> {
     let (_, cert) = X509Certificate::from_der(&pem.contents)
         .map_err(|err| anyhow!("parse issued certificate DER: {err}"))?;
     Ok(cert.validity().not_after.timestamp())
+}
+
+#[cfg(test)]
+mod user_facing_error_tests {
+    use super::user_facing_error;
+
+    #[test]
+    fn quota_refusal_is_one_plain_line() {
+        let msg = "quota exceeded: client devices limit is 1 (in use: 1); remove some or ask your provider to raise the limit";
+        let err = user_facing_error(tonic::Status::resource_exhausted(msg)).to_string();
+        assert_eq!(err, format!("Sign-in refused: {msg}"));
+        assert!(!err.contains("MetadataMap"), "no raw gRPC dump: {err}");
+        assert!(!err.contains("ResourceExhausted"), "no gRPC code name: {err}");
+    }
+
+    #[test]
+    fn suspended_refusal_keeps_its_message() {
+        let err = user_facing_error(tonic::Status::permission_denied(
+            crate::auth::WORKSPACE_SUSPENDED_MESSAGE,
+        ))
+        .to_string();
+        assert!(err.starts_with("This workspace is suspended by the provider."), "{err}");
+    }
+
+    #[test]
+    fn other_errors_pass_through() {
+        let err = user_facing_error(tonic::Status::resource_exhausted("too many requests"));
+        assert!(err.downcast_ref::<tonic::Status>().is_some());
+        let err = user_facing_error(tonic::Status::internal("boom"));
+        assert!(err.downcast_ref::<tonic::Status>().is_some());
+    }
 }

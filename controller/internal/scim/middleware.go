@@ -3,8 +3,11 @@ package scim
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
+
+	"github.com/yourorg/ztna/controller/internal/tenantstate"
 )
 
 // contextKey is a private type for scim request-context values. Using a
@@ -54,6 +57,20 @@ func (s *Store) AuthMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			// Single generic response for not-found / expired / revoked.
 			writeSCIM401(w, "invalid or expired token")
+			return
+		}
+
+		// Sprint 24 X1 (D-45, decided 2026-11-20): SCIM is a configuration
+		// mutation, so every SCIM request (reads too) is refused while the
+		// tenant is suspended: the directory stays frozen and the IdP
+		// reconciles after resume. A lookup error denies (fail closed).
+		if err := tenantstate.Check(r.Context(), s.pool, token.WorkspaceID); err != nil {
+			if tenantstate.IsSuspended(err) {
+				writeSCIMError(w, newSCIMError(http.StatusForbidden, "", tenantstate.Message))
+				return
+			}
+			log.Printf("scim: tenant state check failed (workspace=%s): %v", token.WorkspaceID, err)
+			writeSCIMError(w, newSCIMError(http.StatusServiceUnavailable, "", "workspace state unavailable; try again later"))
 			return
 		}
 

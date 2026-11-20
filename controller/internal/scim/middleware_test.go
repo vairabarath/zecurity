@@ -90,6 +90,28 @@ func TestScimAuthMiddleware(t *testing.T) {
 		}
 	})
 
+	t.Run("suspended tenant → 403 for every method, works again after resume (X1, D-45)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NOW(), suspended_by = 'test', suspension_reason = 'x1' WHERE id = $1`, ws); err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+		for _, m := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+			rec := do(t, m, "Bearer "+good.Plaintext)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s while suspended: want 403, got %d (%s)", m, rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "urn:ietf:params:scim:api:messages:error") || !strings.Contains(body, "suspended by the provider") || !strings.Contains(body, `"status":"403"`) {
+				t.Fatalf("%s: not the SCIM suspended error: %s", m, body)
+			}
+		}
+		if _, err := pool.Exec(ctx, `UPDATE workspaces SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = $1`, ws); err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		if rec := do(t, "GET", "Bearer "+good.Plaintext); rec.Code != http.StatusOK {
+			t.Fatalf("after resume: want 200, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("missing Authorization header → 401", func(t *testing.T) {
 		rec := do(t, "GET", "")
 		if rec.Code != http.StatusUnauthorized {

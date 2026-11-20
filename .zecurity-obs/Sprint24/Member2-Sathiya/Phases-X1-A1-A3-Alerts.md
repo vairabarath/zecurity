@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 23 follow-ups (F7, F12), F26 alert rules + webhook/email, F27 incident timeline (stretch)]
 phases: [X1, A1, A2, A3, T1]
 decisions: [D-50, D-52, D-53, D-51, D-40]
-status: signed off 2026-11-20; ready for implementation (X1.4 waits for Barath's confirmation)
+status: signed off 2026-11-20; ready for implementation
 ---
 
 # Sprint 24 — Sathiya: X1 follow-ups, A1 rules + evaluator, A2 delivery, A3 console (F26); T1 timeline (F27, stretch)
@@ -23,7 +23,7 @@ Order: **X1 → A1 → A2 → A3 → (T1)**. A1 runs in parallel with Barath's M
 
 ## X1 — Sprint 23 follow-ups
 
-Found in the Sprint 23 acceptance run (2026-11-19). Each item is a separate small change. Items 1 and 3 decided by Barath 2026-11-20; item 4 waits for confirmation.
+Found in the Sprint 23 acceptance run (2026-11-19). Each item is a separate small change. Items 1, 3 and 4 decided by Barath 2026-11-20.
 
 1. **SCIM enable at the users limit** — *decided by Barath 2026-11-20.* `ProbeMapping` (`controller/internal/scim/mapping_probe.go`) provisions a probe user, which the S3 quota refuses at the limit, so SCIM can't be turned on.
    - **The mapping probe doesn't take a users quota slot.** Guardrails: **at most one probe user per workspace at a time** (serialised per workspace, same lock as the quota check); the probe user is created and deleted in the same flow; it has **no rights to enroll devices or join networks** (no client login, no device enrollment, no invitation) and never appears as a member.
@@ -31,7 +31,23 @@ Found in the Sprint 23 acceptance run (2026-11-19). Each item is a separate smal
    - Tests: enable SCIM at the limit succeeds; a second concurrent probe is refused; the probe user can't log in or enroll; a real create at the limit gets the quota error; the count after the probe is unchanged.
 2. **Client quota message.** The client prints the device-quota refusal as a raw gRPC dump. Map `ResourceExhausted` with the `quota_exceeded` message to a clear line, as `client/src/login.rs` (~line 217) already does for the suspended message. Test: the mapped message, and other errors unchanged.
 3. **SCIM while a tenant is suspended** — *decided by Barath 2026-11-20: refuse.* Every SCIM request (read and write) for a suspended tenant gets **HTTP 403** with a SCIM error body ("workspace suspended by the provider"); state stays frozen, and the IdP reconciles on its own after resume. The check is the existing eligibility check (`internal/tenantstate`), in the SCIM middleware, fail closed. Tests: each SCIM verb refused while suspended; works again after resume; a lookup error denies.
-4. **D-45/D-46 export amendment** — *needs confirmation.* S4's tenant-private export (tenant S3 sink or `TENANT_PURGE_EXPORT_DIR`; emailed link and export-only sign-in; valid until the purge starts; provider never shows tenant content). On confirmation, write it into the Decision Record as a refinement of D-46.
+4. **D-45/D-46 export amendment** — *confirmed by Barath 2026-11-20; written into the Decision Record (amendment 2026-11-20, D-46 refinement).* The S4 deletion export is tenant-private: the tenant's S3 sink or `TENANT_PURGE_EXPORT_DIR`; an emailed link or an export-only sign-in; valid until the purge starts; the provider never shows tenant content.
+
+### X1 build record (branch `feat/x1-sprint23-followups`, 2026-11-20)
+- **Item 1:**
+  - `scope.probe` is set only by `probeMappingWithClaims`; `resolveScope` never sets it.
+  - The probe provisioner calls the new `quota.ReserveMappingProbe`, which takes the workspace lock but no slot, and inserts the probe user with `status = 'suspended'`.
+  - `DirectoryService.probing` (a `sync.Map`, process-local under D-02) allows one probe per workspace; a second probe returns "another mapping probe is already running".
+  - Real SCIM creates at the limit already returned 403 with the `quota exceeded: users limit is N (in use: M)` detail (S3); a test now pins it.
+  - Known effect: while a probe runs (milliseconds), its suspended user appears in the users count, since SCIM-suspended users count under D-47.
+  - Tests: `TestSCIMMappingProbe_Quota` (`internal/scim/quota_integration_test.go`).
+- **Item 2:**
+  - `client/src/login.rs` `user_facing_error` maps a `ResourceExhausted` "quota exceeded…" status to "Sign-in refused: <message>" on both TokenExchange (user limit) and EnrollDevice (device limit); the suspended message is unchanged; other errors pass through.
+  - Tests: `login::user_facing_error_tests`.
+- **Item 3:**
+  - The SCIM `AuthMiddleware`, after token lookup, calls `tenantstate.Check`: suspended → 403 SCIM error "this workspace is suspended by the provider" for every method; lookup error → 503 (denied).
+  - Tests: the `TestScimAuthMiddleware` subtest for suspend and resume.
+- **Mutation checks:** making the probe take a slot, removing the suspension check, and removing the single-probe guard each make a test fail.
 
 Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
 
