@@ -157,7 +157,7 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - [ ] R1 — Per-workspace relay counters (Barath)
 - [ ] M1 — Metric store + read API (Barath)
 - [ ] M2 — Console charts (Barath)
-- [ ] A1 — Alert rules + evaluator (Sathiya) — built on `feat/a1-alert-rules`, live-checked 2026-11-20 (PASS); not merged
+- [x] A1 — Alert rules + evaluator (Sathiya) — merged (#234) — live-checked 2026-11-20 (PASS)
 - [ ] A2 — Delivery: webhook, email (Sathiya)
 - [ ] A3 — Alerts console (Sathiya)
 - [ ] T1 — Incident timeline (Sathiya, stretch)
