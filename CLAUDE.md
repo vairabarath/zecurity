@@ -8,16 +8,17 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 23 is the active sprint: Provider Dashboard, remaining Must-have features (F5, F7, F8, F12).** Finish the Must-have list (14 / 18 → 18 / 18). Decisions **D-42 … D-47** are made (Decision Record amendment **2026-11-17**); the Sprint 23 documents were **signed off by the product owner (Barath) on 2026-11-17**; implementation may start in the phase order below.
-- **B1 — plans (F8, D-43)**, Barath: provider-managed plans with limits for all six quota keys (explicit `null` = unlimited), one default; seeded **Free** (default: users 5, resources 50, remote_networks 3, connectors 10, shields 10, client_devices 25) and **Legacy** (unlimited, operator-assigned); every workspace gets the current default plan on insert (`BEFORE INSERT` trigger); no billing. Lands first: S2 and S3 read plans.
-- **B2 — relay link capacity and headroom (F5, D-42)**, Barath: operator-set `link_capacity_bps` (bytes/s); one capacity per relay (its tighter direction); headroom = capacity − (to clients + to connectors); "Not configured" when unset. No relay/proto change.
-- **S2 — provider tenant creation (F7, D-44)**, Barath handed it to **Sathiya** on 2026-11-18 (merged #225), after B1: same bootstrap path as self-signup + single-use, time-limited first-admin invitation.
-- **S1 — suspend/resume (F7, D-45)**, Sathiya: `suspended_at` (status stays `'active'`), one eligibility check, sessions revoked, **agents stay connected with deny-all (D-08 preserved)**.
-- **S3 — quotas (F12, D-47)**, Sathiya, after B1: hard limits on six keys (users, resources, remote_networks, connectors, shields, client_devices); plan value + per-tenant override; atomic, server-side on every creation path; discovery never limited.
-- **S4 — deletion (F7, D-46)**, Sathiya, after S1: suspended tenants only, 30-day grace, cancellable, idempotent resumable purge (export audit + security records, destroy, tombstone), legal hold.
-- **Not in Sprint 23:** billing/invoicing (F34), metering and session quotas (F32, F33), alerting (F26), more provider roles (F19), impersonation (F31), bulk pool moves (F30). (Connector relay-failure detection O1/O3 was fixed separately in PR #218.)
+**Sprint 24 is the active sprint: Provider Dashboard, monitoring and alerting (F23, F26; F27 stretch).** Starts the Can-have list (Must have is 18 / 18 since Sprint 23). Decisions **D-48 … D-54** are made (Decision Record amendment **2026-11-20**); the Sprint 24 documents were **signed off by the product owner (Barath) on 2026-11-20**; implementation may start in the phase order below.
+- **R1 — per-workspace relay counters (F23, D-54)**, Barath: the relay reports cumulative bytes per direction and active streams **per trust domain** in the heartbeat (**additive** proto field 13, `WorkspaceTraffic`); the controller maps trust domain → workspace (unknown/revoked ignored, never stored); older relays read "Not reported".
+- **M1 — metric store + read API (F23, D-49)**, Barath: Postgres, 1-min samples kept 7 days, hourly roll-ups kept 400 days, gaps never zero-filled; `GET /provider/metrics/{series}`; per-tenant series super-admin only (D-40 extended).
+- **M2 — console charts (F23)**, Barath, after M1: relay detail, tenant detail, Overview sparkline (1 h / 24 h / 7 d / 30 d).
+- **X1 — Sprint 23 follow-ups**, Sathiya: client quota message; SCIM mapping probe exempt from the users quota (one probe at a time, no enrollment rights; real creates get a clear `quota_exceeded` SCIM error); SCIM refused with 403 while suspended; the S4 export amendment waits for Barath's confirmation.
+- **A1 — alert rules + evaluator (F26, D-50, D-53)**, Sathiya: **platform** vs **tenant** scope separate in the schema (tenant rows need `tenant_id`, CHECK); built-in rule kinds only; firing → resolved with `for` and re-notify; read errors never resolve.
+- **A2 — delivery (F26, D-52)**, Sathiya, after A1: one generic versioned JSON webhook (no vendor SDKs), HMAC over timestamp + body (`X-Zecurity-Signature`), sealed secret shown once, HTTPS outside dev, SSRF guard at connect time; email via the F14 sender; outbox retries.
+- **A3 — Alerts console (F26)**, Sathiya, after A2. **T1 — incident timeline (F27)**, stretch.
+- **Not in Sprint 24:** F22 tunnel success rate, tenant-facing alert delivery (later: admin UI first, tenant webhooks only on demand), vendor integrations, F32/F33 metering, F34 billing, F28/F29, F19, F31, F35, F37, F39, F40.
 
-Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41) and **2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08)**. The plan is `.zecurity-obs/Sprint23/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
+Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) and **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)**. The plan is `.zecurity-obs/Sprint24/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
 
 **Database (pre-production rule):**
 - Schema changes are new numbered SQL files in `controller/migrations/`, run by Postgres only when its volume is first created.
@@ -25,7 +26,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → d
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only, both developing in Sprint 23.** **M1 = Sathiya** (Person 2): S1 suspend/resume, S3 quotas, S4 deletion, plus S2 tenant creation (handed over by Barath 2026-11-18; its record stays in Barath's phase file) — `Sprint23/Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md`. **M2 = Barath** (Person 1, product owner): B1 plans, B2 headroom — `Sprint23/Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md`. Both review each other's PRs and run the sprint acceptance on the lab.
+**Team: two members only, both developing in Sprint 24.** **M1 = Sathiya** (Person 2): X1 follow-ups, A1 rules + evaluator, A2 delivery, A3 console, T1 (stretch) — `Sprint24/Member2-Sathiya/Phases-X1-A1-A3-Alerts.md`. **M2 = Barath** (Person 1, product owner): R1 relay counters, M1 metric store, M2 charts — `Sprint24/Member1-Barath/Phases-R1-M1-M2-Timeseries.md`. Both review each other's PRs and run the sprint acceptance on the lab.
 
 ---
 
@@ -34,8 +35,8 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → d
 When a team member starts a session, they will tell you who they are (Sathiya / M1 or Barath / M2). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint23/path.md` — decisions (D-42 … D-47), order, conflict zones, rules, test gates and acceptance
-3. Read their phase file and pick the **first unchecked phase** whose dependencies are merged (Barath: B1 → B2; Sathiya: S1 → S2 → S3 → S4, S2 and S3 after B1, S4 after S1). If the documents aren't signed off yet (`path.md` checklist), don't start implementation
+2. Read `.zecurity-obs/Sprint24/path.md` — decisions (D-48 … D-54), order, conflict zones, rules, test gates and acceptance
+3. Read their phase file and pick the **first unchecked phase** whose dependencies are merged (Barath: R1 and M1 in parallel → M2; Sathiya: X1 → A1 → A2 → A3 → T1 stretch). If the documents aren't signed off yet (`path.md` checklist), don't start implementation
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 
@@ -48,9 +49,11 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint23/path.md` | Active sprint: decisions summary, phases and order, conflict zones, rules, test gates, acceptance, checklist |
-| `.zecurity-obs/Sprint23/Member1-Barath/Phases-B1-B2-Plans-and-Headroom.md` | Barath's phases B1, B2; S2 record (built by Sathiya) |
-| `.zecurity-obs/Sprint23/Member2-Sathiya/Phases-S1-S4-Tenant-Lifecycle-and-Quotas.md` | Sathiya's phases S1, S3, S4 |
+| `.zecurity-obs/Sprint24/path.md` | Active sprint: decisions summary, phases and order, conflict zones, rules, test gates, acceptance, checklist |
+| `.zecurity-obs/Sprint24/Member1-Barath/Phases-R1-M1-M2-Timeseries.md` | Barath's phases R1, M1, M2 (F23) |
+| `.zecurity-obs/Sprint24/Member2-Sathiya/Phases-X1-A1-A3-Alerts.md` | Sathiya's phases X1, A1, A2, A3, T1 (F26, F27) |
+| `.zecurity-obs/Sprint24/Scope-Draft.md` | Sprint 24 scope discussion (signed off 2026-11-20) |
+| `.zecurity-obs/Sprint23/path.md` | Previous sprint record (plans, headroom, tenant lifecycle, quotas; Post-Sprint Fixes) |
 | `.zecurity-obs/Planning/Provider-Dashboard-Features.md` | Feature tracker (tick only when merged **and** live-checked) |
 | `.zecurity-obs/Planning/Pending-Live-Tests.md` | Live-check steps and results log for merged features |
 | `.zecurity-obs/Planning/Relay-Pools-Implementation-Plan.md` | Relay pools record (D-37 … D-41, F11-1/F11-2 fixes) |
@@ -127,13 +130,18 @@ cd controller && docker compose down -v && docker compose up -d   # Recreate loc
 
 ## Rules (non-negotiable)
 
-Sprint 23 specific:
+Sprint 24 specific:
 - Build gate passes before proceeding to the next phase (DB-backed tests must run, not skip; a skipped DB test is a failed case).
-- The Decision Record (all amendments through **2026-11-17**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
-- **No implementation before the Sprint 23 documents are signed off**, and no phase before its dependencies are merged (B1 before S2 and S3; S1 before S4).
+- The Decision Record (all amendments through **2026-11-20**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
+- No phase before its dependencies are merged (M1 before M2; A1 before A2 before A3). X1 item 4 (S4 export amendment) waits for Barath's confirmation.
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
-- **No migration framework.** Reserved: `062_tenant_plans` (B1), `063_relay_link_capacity` (B2), `064_tenant_suspension` (S1), `065_tenant_quotas` (S3), `066_tenant_deletion` (S4), `067_tenant_first_admin_invite` (S2, used); check the latest with `ls controller/migrations | tail -3` before adding one. Never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
-- **Console writes (D-30, amended by D-42 … D-47):** auth calls (incl. TOTP), operator management, relay create / revoke / delete / drain / resume / move / pools, tenant pool assignment, **plans and plan assignment, relay link capacity, tenant create / suspend / resume / delete / cancel delete / legal hold, quota overrides**. Every new write goes into `api-surface.test.ts` on purpose. `admin/` may change only where a phase file says so (S1 suspended message, S2 invitation, S3 quota errors and usage).
+- **Proto (R1, D-54):** additive only — `repeated WorkspaceTraffic workspace_traffic = 13`; never renumber; an older relay must keep working and read "Not reported" (never 0).
+- **Alert scopes (D-50):** platform and tenant alerts are separate in the schema; tenant rows always carry `tenant_id` (DB CHECK); tenant-scoped reads always filter by it. Relay-ops never see tenant names, tenant alerts or per-tenant series (D-40 extended).
+- **Webhooks (D-52):** one generic versioned JSON payload, no vendor SDKs; HMAC over timestamp + body; secret sealed, shown once, never logged/audited/returned; HTTPS outside dev; SSRF guard checked at connect time; no secrets or tenant content in the payload.
+- **Rules and channels (D-53):** super-admin only, reason + before/after audit; built-in rule kinds, no query language.
+- **Metrics (D-49):** Postgres, 1-min 7 days, hourly 400 days; an unknown value is a gap, never 0. Evaluator read errors never resolve an alert.
+- **No migration framework.** Reserved: `068_metric_samples` (M1), `069_alerts` (A1/A2). Earlier: `062_` … `067_` (Sprint 23); check the latest with `ls controller/migrations | tail -3` before adding one. Never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
+- **Console writes (D-30, amended by D-42 … D-47 and D-53):** auth calls (incl. TOTP), operator management, relay create / revoke / delete / drain / resume / move / pools, tenant pool assignment, plans and plan assignment, relay link capacity, tenant create / suspend / resume / delete / cancel delete / legal hold, quota overrides, **alert rules and alert channels (create, update, enable/disable, delete, test, rotate secret)**. Every new write goes into `api-surface.test.ts` on purpose. `admin/` may change only where a phase file says so.
 - **Tenant actions are super-admin only (D-06)**, plans too; relay link capacity is relay-ops or super-admin (D-31 amended). Enforced server-side in `decide()`; console visibility is never the authorization control.
 - **D-17 (extended):** relay revoke/delete and **tenant suspend/delete** need a mandatory reason (in the body, never the URL; stored in the audit) and a typed name/slug confirmation, checked by the server. Tenant-affecting writes (plan assignment, resume, cancel, quota override, legal hold) need a reason. Audit with before/after (F17).
 - **D-08 holds:** suspension never refuses or invalidates an existing connector's or shield's authentication; suspended agents get a deny-all ACL and resume without re-enrollment.
@@ -146,8 +154,8 @@ Sprint 23 specific:
 - Provider Identity is an **internal controller module** (`controller/internal/provider`, ADR-029), not a separate service.
 - Never log, audit or return passwords (incl. temporary ones), `password_hash`, TOTP secrets or codes, invitation tokens or key material. Provider login and TOTP verification stay rate-limited (fail closed) and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04). A provisioning token is returned once (`Cache-Control: no-store`) and never stored in the console.
-- Proto changes are additive only; never renumber fields (none are planned this sprint).
-- Respect the `Sprint23/path.md` conflict zones (`main.go`, `authz.go`, tenant detail DTO, user-creation paths: S2 merges before S3).
+- Proto changes are additive only; never renumber fields (Sprint 24: R1 field 13 only).
+- Respect the `Sprint24/path.md` conflict zones (`relay.proto`, relay heartbeat handler, shared relay reader for M1/A1, `main.go`, `authz.go`, `api-surface.test.ts`, `Home.tsx`).
 
 Sprint 20 (invariants still in force):
 - Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.

@@ -3959,3 +3959,16 @@ serves on `127.0.0.1:9102`.
 - Lab cleanup: AT23 relay and shield on archlinux, connector on luffy, the local `inet at23` nftables table, the run folder.
 - Sprint 24 scope (Barath): candidates F26 alert rules, F23 session timeseries.
 
+
+## 2026-11-20 — M1 (Sathiya): Sprint 24 scoped, signed off and created
+
+**What was done:**
+- Scope draft `Sprint24/Scope-Draft.md` (PR #232), revised with Barath's answers: per-tenant relay bandwidth now (R1, additive proto field 13); platform vs tenant alerts separate in the schema; one generic signed JSON webhook, no vendor SDKs; tenant-facing alerts later in the admin UI first (tenant webhooks only on demand); retention 1-min 7 days / hourly 400 days approved.
+- Sign-off by Barath (2026-11-20). Created `Sprint24/path.md`, `Member1-Barath/Phases-R1-M1-M2-Timeseries.md`, `Member2-Sathiya/Phases-X1-A1-A3-Alerts.md`; Decision Record amendment **2026-11-20 (D-48 … D-54)**; CLAUDE.md switched to Sprint 24.
+
+**Key decisions:** D-48 scope, D-49 retention, D-50 alert scopes, D-51 F14 unchanged, D-52 webhook, D-53 management, D-54 per-tenant relay bandwidth.
+
+**What's next:**
+- Barath: R1 and M1 (`068_metric_samples`) in parallel, then M2.
+- Sathiya: X1 (client quota message first; items 1, 3, 4 wait for Barath's answers), then A1 (`069_alerts`).
+- Lab cleanup from Sprint 23 still pending (hosts .75 and .37 offline).
