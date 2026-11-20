@@ -27,6 +27,7 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F5 (B2) | Relay link capacity and headroom (D-42, migration `063_relay_link_capacity.sql`) | #226 | ☑ 2026-11-19 (Sprint 23 live session) |
 | F7 (S1) | Tenant suspend / resume (D-45, migration `064_tenant_suspension.sql`) | #223 | ☑ 2026-11-19 (Sprint 23 live session; residency-allowlist part of step 6 not run: one relay) |
 | F7 (S2) | Provider tenant creation (D-44, migration `067_tenant_first_admin_invite.sql`) | #225 | ☑ 2026-11-18 on the branch (`35efd8b4`, fixes `2426ed7e`, Sathiya); short recheck on merged `main` below |
+| F7 (S4) | Tenant deletion (D-46, migration `066_tenant_deletion.sql`) | #229 | ☑ 2026-11-18/19 on the branch (two runs: local export, crash and resume, legal hold, cancel, both download routes; export to the tenant's S3 sink with real agents); merged S4 code = tested code |
 | F12 (S3) | Per-tenant quotas (D-47, migration `065_tenant_quotas.sql`) | #224 | ☑ 2026-11-19 (Sprint 23 live session) |
 | Sprint 23 | Cross-feature checks on merged `main` (B1 × S3, S2 × S3, S1 × S2, S1 × B2) | — | ☑ 2026-11-19 |
 

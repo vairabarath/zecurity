@@ -1,7 +1,7 @@
 ---
 type: tracker
 title: Provider Dashboard — Feature Tracker
-updated: 2026-11-19
+updated: 2026-11-20
 owners: [Barath (M2), Sathiya (M1)]
 source: Feature list from Barath, 2026-10-26 (Phase 1 / 2 / 3)
 baseline: main c79a75e1 (Sprint 22 T, A, E, X, D merged; FU-1 … FU-19 done except FU-11, mitigated; quick wins #190, F17 #192, F5 #193, F14 #195 merged and live-checked 2026-11-12)
@@ -19,15 +19,15 @@ tags:
 
 ## Tracking
 
-**Progress:** Must have 17 / 18 done · Can have 3 / 22 done · **Total 20 / 40** (ticked = merged **and** live-checked)
+**Progress:** Must have **18 / 18** done · Can have 3 / 22 done · **Total 21 / 40** (ticked = merged **and** live-checked)
 
-**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). **Waiting:** S4 tenant deletion on `main` (merged #229 2026-11-19; live-checked on its branch).
+**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). S4 tenant deletion (#229) was live-checked on its branch (two runs, PASS); the merged S4 code is identical to the tested code (only B2 #226 and docs were merged in afterwards).
 
 ## Status snapshot (2026-11-12)
 
 Checked against `main` `c79a75e1`. "Quick" = controller read API + console view only (🟢 in the effort key).
 
-### Must have (Phase 1): 17 of 18 done
+### Must have (Phase 1): 18 of 18 done
 
 | ID | Feature | Status | What's left |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F4 | Relay list: status, version, region, heartbeat | ✅ Done | — (region via relay pools, PR #200; live PASS 2026-11-17) |
 | F5 | Capacity view: sessions, bandwidth, headroom | ✅ Done | — (bandwidth PR #193, live PASS 2026-11-12; headroom B2 #226, live PASS 2026-11-19) |
 | F6 | Drain mode | ✅ Done | — (Phase D, PR #156; AT-D live PASS) |
-| F7 | Tenant create / suspend / delete | 🧪 Merged | Create S2 #225 and suspend/resume S1 #223 live PASS 2026-11-19; delete S4 merged #229 (2026-11-19), live-checked on the branch (local export and S3 export with real agents, PASS); S4 check on `main` pending (reset DB for `066_`) |
+| F7 | Tenant create / suspend / delete | ✅ Done | — (create S2 #225 and suspend/resume S1 #223 live PASS 2026-11-19 on `main`; delete S4 #229 live PASS on the branch 2026-11-18/19, same S4 code as merged) |
 | F8 | Tenant detail page | ✅ Done | — (policy counts PR #190, live PASS 2026-11-12; plan B1 #222, live PASS 2026-11-19) |
 | F9 | Tenant → relay pool assignment | ✅ Done | — (PR #200; live PASS 2026-11-17) |
 | F10 | Region / residency constraint | ✅ Done | — (routing PR #200, relay-side enforcement PR #202, connector recovery fix PR #210; live PASS 2026-11-17) |
@@ -104,7 +104,7 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 - [x] **F6** Drain mode (no new placements, bleed off existing) ✅ (Phase D, PR #156; AT-D live PASS)
 
 *Tenants*
-- [ ] **F7** Tenant create / suspend / delete ◐ (create #225 and suspend/resume #223 live PASS 2026-11-19; delete S4 merged #229, check on `main` pending)
+- [x] **F7** Tenant create / suspend / delete ✅ (create #225, suspend/resume #223 live PASS 2026-11-19; delete S4 #229 live PASS on the branch, same code as merged)
 - [x] **F8** Tenant detail page — connectors, users, policies count, plan ✅ (policy counts PR #190; plan B1 #222, live PASS 2026-11-19)
 - [x] **F9** Tenant → relay pool assignment ✅ (PR #200; live PASS 2026-11-17)
 - [x] **F10** Region / residency constraint on placement ✅ (PRs #200, #202, #210; live PASS 2026-11-17)

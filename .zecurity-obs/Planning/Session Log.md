@@ -3940,3 +3940,22 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Barath: confirm the D-45/D-46 amendment; push and open the S4 PR (`[schema: reset DB]`).
+
+
+## 2026-11-19/20 — M1 (Sathiya): Sprint 23 acceptance run; S4 merged; Sprint 23 closed
+
+**What was done:**
+- Sprint 23 live acceptance on `main` `4d1faf50` with a reset DB: B1, B2, S1, S2 recheck, S3 and the cross-feature checks (B1×S3, S2×S3, S1×S2, S1×B2) PASS. Results in `Pending-Live-Tests.md`, PR #230 (merged `979ca78d`).
+- S4 PR #229 merged (`a1845beb`) at Sathiya's request ("merge both now"); no review and no separate product-owner go were recorded.
+- S4 was live-checked on its branch; the merged S4 code is the tested code, so F7 is ticked without a separate run on `main`. Tracker: Must have **18 / 18**. Sprint 23 closed.
+
+**Open for Barath:**
+- Confirm the proposed D-45/D-46 amendment (tenant-private export, two download routes, links valid until the purge starts).
+- At the users limit an admin can't enable SCIM (the mapping probe provisions a user and the quota refuses it).
+- The client prints the device-quota refusal as a raw gRPC dump.
+- SCIM provisioning isn't refused while a tenant is suspended (open since S1).
+
+**What's next:**
+- Lab cleanup: AT23 relay and shield on archlinux, connector on luffy, the local `inet at23` nftables table, the run folder.
+- Sprint 24 scope (Barath): candidates F26 alert rules, F23 session timeseries.
+
