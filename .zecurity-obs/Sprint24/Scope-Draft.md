@@ -2,13 +2,13 @@
 type: sprint-scope-draft
 sprint: 24
 title: Provider Dashboard — monitoring and alerting (F23, F26; F27 stretch)
-status: DRAFT by Sathiya (M1), 2026-11-20, revised the same day with Barath's first answers (per-tenant relay bandwidth in scope; platform vs tenant alerts separated; generic webhook only; tenant-facing alerts admin UI first; retention approved) — sign-off of D-48 … D-54 still open
+status: SIGNED OFF by Barath 2026-11-20 — superseded by Sprint24/path.md and the Decision Record amendment 2026-11-20 (D-48 … D-54); kept as the scope discussion record
 baseline: main 81aabc82 (Sprint 23 closed; Must have 18 / 18; Can have 3 / 22)
 ---
 
 # Sprint 24 — scope draft
 
-> **Status: draft for discussion.** It proposes a scope, phases and the decisions to make first. Barath decides the scope and the decisions (D-48 …), and signs off before any implementation, as in Sprint 23.
+> **Status: signed off 2026-11-20.** The binding plan is `Sprint24/path.md` and the phase files; the decisions are in the Decision Record (amendment 2026-11-20, D-48 … D-54). This file is the discussion record.
 
 ## Goal
 
@@ -142,7 +142,7 @@ One part needs an agent change: **per-tenant relay bandwidth** (in scope, Barath
 - Tenant-facing alerts (later sprint) start **in the admin UI only**; the tenant's own webhook is added only if customers ask for it.
 - Retention in D-49 is **approved as proposed**: 1-minute samples kept 7 days, hourly roll-ups kept 400 days.
 
-**Still open:** none of the scope questions. The decisions D-48 … D-54 and the documents still need Barath's sign-off before implementation.
+**Signed off by Barath on 2026-11-20.** Still open (each blocks only its X1 item): X1.1, X1.3, X1.4.
 
 ## Suggested split (two members, as in Sprint 23)
 

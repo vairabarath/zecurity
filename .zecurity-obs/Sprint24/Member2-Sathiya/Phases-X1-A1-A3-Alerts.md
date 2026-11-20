@@ -1,0 +1,151 @@
+---
+type: phase
+sprint: 24
+owner: Sathiya (Person 2, M1)
+features: [Sprint 23 follow-ups (F7, F12), F26 alert rules + webhook/email, F27 incident timeline (stretch)]
+phases: [X1, A1, A2, A3, T1]
+decisions: [D-50, D-52, D-53, D-51, D-40]
+status: signed off 2026-11-20; ready for implementation (X1.4 waits for Barath's confirmation)
+---
+
+# Sprint 24 — Sathiya: X1 follow-ups, A1 rules + evaluator, A2 delivery, A3 console (F26); T1 timeline (F27, stretch)
+
+Read `Sprint24/path.md` first (order, conflict zones, rules). Binding decisions: Decision Record amendment **2026-11-20** — **D-50** (alert scopes and recipients), **D-52** (webhook format and security), **D-53** (rule and channel management), **D-51** (F14 email unchanged). Also binding:
+- **D-06:** tenant-identifying data and management are super-admin only.
+- **D-40 (extended):** relay-ops see platform relay alerts only, never tenant names or tenant alerts.
+- **D-02:** single controller; the evaluator and delivery worker are process-local.
+- **D-12, D-14, D-17:** append-only audit in `provider_audit_logs`, reasons for changes.
+- **D-36:** the F14 daily email stays as it is.
+
+Order: **X1 → A1 → A2 → A3 → (T1)**. A1 runs in parallel with Barath's M1 (shared relay reader, see `path.md`).
+
+---
+
+## X1 — Sprint 23 follow-ups
+
+Found in the Sprint 23 acceptance run (2026-11-19). Each item is a separate small change. Items 1 and 3 decided by Barath 2026-11-20; item 4 waits for confirmation.
+
+1. **SCIM enable at the users limit** — *decided by Barath 2026-11-20.* `ProbeMapping` (`controller/internal/scim/mapping_probe.go`) provisions a probe user, which the S3 quota refuses at the limit, so SCIM can't be turned on.
+   - **The mapping probe doesn't take a users quota slot.** Guardrails: **at most one probe user per workspace at a time** (serialised per workspace, same lock as the quota check); the probe user is created and deleted in the same flow; it has **no rights to enroll devices or join networks** (no client login, no device enrollment, no invitation) and never appears as a member.
+   - **Real SCIM user creates at the limit** get a clear SCIM error: HTTP 403, `scimType` / `detail` saying the users quota is reached (`quota_exceeded`, with limit and used), not a generic failure.
+   - Tests: enable SCIM at the limit succeeds; a second concurrent probe is refused; the probe user can't log in or enroll; a real create at the limit gets the quota error; the count after the probe is unchanged.
+2. **Client quota message.** The client prints the device-quota refusal as a raw gRPC dump. Map `ResourceExhausted` with the `quota_exceeded` message to a clear line, as `client/src/login.rs` (~line 217) already does for the suspended message. Test: the mapped message, and other errors unchanged.
+3. **SCIM while a tenant is suspended** — *decided by Barath 2026-11-20: refuse.* Every SCIM request (read and write) for a suspended tenant gets **HTTP 403** with a SCIM error body ("workspace suspended by the provider"); state stays frozen, and the IdP reconciles on its own after resume. The check is the existing eligibility check (`internal/tenantstate`), in the SCIM middleware, fail closed. Tests: each SCIM verb refused while suspended; works again after resume; a lookup error denies.
+4. **D-45/D-46 export amendment** — *needs confirmation.* S4's tenant-private export (tenant S3 sink or `TENANT_PURGE_EXPORT_DIR`; emailed link and export-only sign-in; valid until the purge starts; provider never shows tenant content). On confirmation, write it into the Decision Record as a refinement of D-46.
+
+Live check: items 1–3 on the lab, recorded in `Pending-Live-Tests.md`.
+
+---
+
+## A1 — Alert rules and evaluator — D-50, D-53
+
+### What exists
+- Relay state: heartbeat values, B2 headroom (`relays.link_capacity_bps`), offline detection (`last_heartbeat`).
+- Pools: `relaypool.EffectivePool`, `no_eligible_relays` (F11-1). Never re-derive the effective pool.
+- Control plane: `internal/health` registry (`Checker`, F25), `GET /provider/health`.
+- Quotas: `over` per key (S3, `internal/providerquery`).
+- Connectors and shields: status and last heartbeat per tenant.
+- Certificates: `providerquery` certificate entries (F15/F14).
+
+### Build
+- **Schema `069_alerts.sql`** (A1 and A2 tables together):
+  - `alert_rules (id, kind, scope, enabled, params JSONB, severity, for_seconds, renotify_seconds, created_*, updated_*)`, `scope IN ('platform','tenant')`; each `kind` has a fixed scope (checked in code and by a CHECK listing kinds per scope).
+  - `alert_states (rule_id, target_type, target_id, scope, tenant_id NULL, status, pending_since, firing_since, last_notified_at, resolved_at)`, PK `(rule_id, target_type, target_id)`.
+  - `alert_events (id, rule_id, scope, tenant_id NULL, target_type, target_id, target_name, event_type, status, severity, summary, occurred_at)` — append-only (no UPDATE/DELETE grant for the app role).
+  - **CHECK on states and events:** `(scope = 'tenant') = (tenant_id IS NOT NULL)`.
+  - A2's `alert_channels` and `alert_deliveries` go in the same file (see A2).
+- **Rule kinds** (built-in, parameters only; no query language):
+  | Kind | Scope | Target | Params |
+  |---|---|---|---|
+  | `relay.offline` | platform | relay | minutes |
+  | `relay.over_capacity` | platform | relay | threshold % of link capacity (B2), minutes; no capacity → never fires |
+  | `pool.no_eligible_relay` | platform | pool | minutes |
+  | `controlplane.degraded` | platform | controller | which F25 checks, minutes |
+  | `certificate.expiring` | platform | certificate | days (provider-owned certificates, as D-36) |
+  | `connector.offline` | tenant | connector | minutes |
+  | `shield.offline` | tenant | shield | minutes |
+  | `tenant.no_relay_path` | tenant | tenant | minutes |
+  | `tenant.over_quota` | tenant | tenant | keys (informational, severity `info`) |
+- Seed one enabled default rule per platform kind and disabled defaults for tenant kinds (super-admin turns them on).
+- **Evaluator job** (`main.go`, own block; every 30 s by default):
+  - per rule and target: `ok → pending` when the condition holds, `pending → firing` after `for_seconds`, `firing → resolved` when it stops holding; one `alert_events` row per transition (`fired`, `resolved`);
+  - no repeat while firing, except after `renotify_seconds`;
+  - **a read error leaves the state unchanged** (never a false "resolved"), logged;
+  - a target that disappears (relay deleted, tenant purged) resolves with a reason;
+  - suspended tenants: tenant rules skip them (agents are deny-all by design; no noise).
+  - Hands fired/resolved events to A2 (an interface; A1 merges with a no-op or log sink).
+- **Read API:** `GET /provider/alerts?status=&scope=&tenant=` (active and history), `GET /provider/alert-rules`. Action `alert.read`: super-admin all; relay-ops **platform relay and pool alerts only, without tenant names** (D-40). Tenant-scoped reads always filter by `tenant_id`.
+- **Rule writes:** `PUT /provider/alert-rules/{id}` (params, severity, enable/disable) with `{reason}`; actions `alert.rule.update` (super-admin, D-53); audit before/after. Create/delete of additional rules of a kind: `POST /provider/alert-rules`, `DELETE /provider/alert-rules/{id}` with reason.
+
+### Tests
+- Each kind: fires after `for`, no repeat, renotify, resolves; target removed → resolved.
+- DB CHECK: a tenant row without `tenant_id` and a platform row with one are refused.
+- Read error → state unchanged.
+- Authz: relay-ops can't see tenant alerts or names, can't write rules → 403.
+- **Mutation checks:** drop the scope filter for relay-ops → its test fails; resolve on read error → its test fails.
+
+---
+
+## A2 — Delivery: webhook and email — D-52
+
+### What exists
+- `internal/auditexport/adapter.go`: `Signature(key, t, body)` = `t=<unix>,v1=<hex HMAC-SHA256(key, "<unix>." + body)>`, header `X-Zecurity-Signature`.
+- `internal/outbox`: retry with backoff.
+- `internal/certalert`: `Sender` interface (plain-text email over `SMTP_*`; stdout in dev), super-admin recipient lookup.
+- Sealing: the PKI service's `EncryptSecret` (as used by `internal/idp`, `internal/mfa`).
+- SSRF patterns: relay address handling with `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`internal/relay/provision.go`).
+
+### Build
+- **Schema (in `069_alerts.sql`):**
+  - `alert_channels (id, name, type IN ('webhook','email'), scope_filter IN ('all','platform','tenant'), min_severity, enabled, url TEXT NULL, encrypted_secret, secret_nonce, recipients TEXT[] NULL, created_*, updated_*)`;
+  - `alert_deliveries (id, event_id, channel_id, attempt, status, http_status NULL, error TEXT NULL, at)` — append-only.
+- **Payload v1** (exactly the D-52 fields): `version`, `event_id`, `event_type`, `status`, `severity`, `scope`, `tenant_id`, `target {type,id,name}`, `summary`, `started_at`, `timestamp`, `console_url`. Tenant names only for channels allowed to see tenant alerts. No secrets, tokens or tenant content. A golden-file test pins the schema.
+- **Webhook:** POST JSON, `X-Zecurity-Signature` over timestamp + body (reuse `auditexport.Signature`), `X-Zecurity-Event-Id` for receiver dedupe; document the replay window (receivers reject `t` older than 5 minutes).
+  - HTTPS only unless the dev flag is set; **SSRF guard**: resolve and refuse private, loopback, link-local, multicast and metadata ranges, **checked in the dialer at connect time** (DNS rebinding); no redirects; 10 s timeout; response body read capped.
+  - Secret generated server-side, shown **once** on create/rotate (`Cache-Control: no-store`), sealed at rest, never logged, audited or returned again.
+- **Email:** via the certalert `Sender`; recipients = active super-admins or the channel's explicit list; plain text with the same fields.
+- **Routing:** each fired/resolved event goes to every enabled channel whose `scope_filter` and `min_severity` match.
+- **Retries:** through the outbox with backoff; each attempt a row in `alert_deliveries`; final failure recorded and visible in A3.
+- **Channel API:** `POST /provider/alert-channels`, `PUT /provider/alert-channels/{id}`, `DELETE …`, `POST …/{id}/test`, `POST …/{id}/rotate-secret`, all with `{reason}` (test included, so it's audited); actions `alert.channel.*` super-admin only (D-53).
+
+### Tests
+- Signature verifies with the shared secret; payload golden file; tenant names stripped for a platform-only channel.
+- SSRF: private IP literal, DNS name resolving to a private address, redirect → all refused (outside dev).
+- Secret never appears in responses after create, logs or audit (test scans).
+- Retry and final failure recorded; scope filter respected.
+- **Mutation checks:** remove the connect-time check → the rebinding test fails; send tenant alerts to a platform-only channel → its test fails.
+
+---
+
+## A3 — Alerts console
+
+### Build
+- **Alerts page** (new nav entry): active alerts (severity, scope, target, since), history with filters, rules (edit params, enable/disable, reason dialog), channels (create, edit, test, rotate secret — the secret shown once, never stored in the console).
+- **Overview badge** with the count of firing alerts (`Home.tsx`, own section).
+- Relay-ops view: platform relay/pool alerts only, no management controls (server enforces; the UI only hides).
+- Every new write in `provider-console/src/api/api-surface.test.ts` (D-30 amended).
+
+### Tests
+- `npm test`, `npm run lint`, `npm run build`; reason required in dialogs; secret displayed once and cleared.
+
+---
+
+## T1 — Incident timeline (F27, stretch)
+
+Only if A1–A3 are merged with time left.
+- One read-only, time-ordered view merging `alert_events`, `provider_audit_logs` rows and relay/pool state changes; filters by relay, pool and tenant; same authz as A1 reads (relay-ops: no tenant rows or names).
+- No new data; no schema change.
+
+---
+
+## Live check (each phase)
+
+Record in `.zecurity-obs/Planning/Pending-Live-Tests.md`:
+- **X1:** SCIM at the limit, the client quota message, SCIM while suspended (per the answers).
+- **A1:** stop a relay → `relay.offline` fires after its `for` and resolves on restart; empty a pool; stop a tenant's connector → tenant alert with its `tenant_id`; relay-ops view.
+- **A2:** a local webhook receiver verifies the signature and fields; a platform-only channel gets no tenant alert; receiver down → retries, then delivered; email arrives; private URL refused outside dev.
+- **A3:** manage rules and channels from the console; badge count; audit rows with reasons and no secret.
+
+## Post-Phase Fixes
+
+_None yet._

@@ -1026,3 +1026,36 @@ Made by the product/architecture owner (Barath) for Sprint 23 (`.zecurity-obs/Sp
 - **Sprint 23**: Barath — B1 plans (F8, schema `062_`), B2 relay link capacity and headroom (F5, schema `063_`), S2 provider tenant creation (F7, after B1; schema `067_` reserved if the first-admin role needs one); Sathiya — S1 suspend/resume (F7, schema `064_`), S3 quotas (F12, after B1, schema `065_`), S4 deletion (F7, after S1, schema `066_`).
 - **Tracker**: F5, F7, F8 and F12 close only when merged and live-checked; then the Must-have list is complete (18 / 18).
 - **Open (not blocking)**: backup retention period and legal/security retention exceptions (D-46), owned by the product owner.
+
+## Decision record amendment — 2026-11-20: monitoring and alerting (F23, F26; F27 stretch)
+
+Made by the product/architecture owner (Barath) for Sprint 24 (`.zecurity-obs/Sprint24/path.md`), after review of the scope draft (`.zecurity-obs/Sprint24/Scope-Draft.md`, PR #232). It **amends D-30** (new console writes) and **extends D-40** (per-tenant relay data is tenant-identifying), and **keeps D-36 unchanged** for this sprint. Everything else stands, in particular **D-02** (single controller: the evaluator and the metric job are process-local), **D-04** (`providerquery` without `net/http`), **D-06** (super-admin only for tenant-identifying data and rule management), **D-12** (append-only audit) and **D-14** (provider actions audited in `provider_audit_logs` only). Proto changes stay **additive only**.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-48 | Sprint 24 scope | **F23** active-session timeseries, **including per-tenant relay bandwidth** (relay + additive proto change, D-54), and **F26** alert rules with email and webhook delivery; plus the Sprint 23 follow-ups (X1). **F27** incident timeline only as a stretch. Not in scope: F22 tunnel success rate, F32/F33 metering, F34 billing, F28/F29 relay config push and version pinning, F19, F31, F35, F37, F39, F40. |
+| D-49 | Metric resolution and retention | Stored in **Postgres** (no new time-series database). **1-minute samples kept 7 days; hourly roll-ups kept 400 days.** A controller job writes samples and roll-ups and prunes past retention; a gap (controller down, relay silent) stays a gap and is never filled with zeros. *(Retention approved 2026-11-20.)* |
+| D-50 | Alert scopes and recipients | Two scopes, **separate in the schema** from the start: **platform** alerts (provider infrastructure: relays, pools, control plane, platform certificates; never shown to a tenant) and **tenant** alerts (something one tenant can act on; **always carry a `tenant_id`**, enforced by a CHECK constraint). Each rule kind belongs to exactly one scope. Sprint 24 delivers both to the **provider only**: super-admins by default, optional explicit email lists and webhooks per channel; a channel can be limited to one scope. Relay-ops see platform relay alerts only, without tenant names (D-40). **Tenant-facing delivery is later**: it starts in the **admin UI only**; a tenant's own webhook is added only if customers ask for it. The schema needs no change for either. *(Decided 2026-11-20.)* |
+| D-51 | F14 daily email | **Unchanged** this sprint (D-36 stands); it may be folded into F26 as a built-in rule later. |
+| D-52 | Webhook format and security | **One generic, versioned JSON webhook; no vendor-specific integrations or SDKs** (Slack, PagerDuty and others are wired from the standard payload). Payload `version`, `event_id`, `event_type`, `status` (`firing`/`resolved`), `severity` (`critical`/`warning`/`info`), `scope`, `tenant_id` (or null), `target {type, id, name}`, `summary`, `started_at`, `timestamp`, `console_url`; **no secrets, tokens or tenant content**, tenant names only where the channel may see them (D-50). **HMAC-SHA256 over timestamp + body** (the SIEM export's `X-Zecurity-Signature` scheme) with a replay window; the secret is sealed (`pki.EncryptSecret`) and never returned after creation; **HTTPS only outside development**; an **SSRF guard** on the URL (no private, loopback or link-local targets, re-checked at connect time; a dev flag allows private targets as for relays). Retries through the outbox with backoff. *(Decided 2026-11-20.)* |
+| D-53 | Rule and channel management | **Super-admin only** (D-06 pattern), enforced in `decide()`; every create, update, enable/disable, delete and secret rotation needs a **reason** and is audited with before/after (F17, D-17 style), never with the secret. Built-in rule kinds with parameters only; **no free-form query language**. |
+| D-54 | Per-tenant relay bandwidth | The relay reports **cumulative bytes per direction and active streams per trust domain** in its heartbeat (**additive** `repeated WorkspaceTraffic workspace_traffic = 13`; no field renumbered), counted where the relay already knows the stream's workspace. The controller maps trust domain → workspace and **ignores and logs** unknown or revoked trust domains (never stored). Per-tenant relay series are **super-admin only** (D-40); relay-ops see relay totals. A relay that doesn't send field 13 reads **"Not reported"** for per-tenant series, never 0. *(Needed now, decided 2026-11-20.)* |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-30 | **Amended**: console writes add alert rule management (create, update, enable/disable, delete) and channel management (create, update, delete, test, rotate secret); each is in `api-surface.test.ts`. |
+| D-36 | **Unchanged** (D-51). |
+| D-40 | **Extended**: per-tenant relay series and tenant alerts are tenant-identifying and hidden from relay-ops, like pool membership. |
+| D-02 | Unchanged; the evaluator and the metric job run in the single controller. |
+| D-06, D-12, D-14, D-17 | Unchanged; applied to rule and channel management (D-53). |
+
+### Consequences
+
+- **Sprint 24**: Barath — R1 per-workspace relay counters (relay, proto, controller), M1 metric store (schema `068_`), M2 console charts; Sathiya — X1 Sprint 23 follow-ups, A1 alert rules and evaluator (schema `069_`), A2 delivery, A3 console; T1 (F27) if time allows.
+- **Tracker**: F23 and F26 close only when merged and live-checked.
+- **Sprint 23 follow-ups decided (2026-11-20):** (a) the SCIM mapping probe does not consume a `users` quota slot (D-47 refinement): one probe at a time per workspace, created and removed in the same flow, no login, enrollment or membership; real SCIM creates at the limit get a clear `quota_exceeded` SCIM error. (b) SCIM is a configuration mutation under D-45: refused with 403 while the tenant is suspended; the IdP reconciles after resume.
+- **Open (not blocking)**: confirming the S4 export amendment to D-45/D-46 (Sprint 23 record).
