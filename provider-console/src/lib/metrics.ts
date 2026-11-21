@@ -35,8 +35,14 @@ export function stepMs(step: MetricStep): number {
   return step === '1h' ? HOUR : MIN
 }
 
+export interface MetricWindow {
+  from: string
+  to: string
+  step: MetricStep
+}
+
 /** The window to request for `range`, ending now (seconds dropped). */
-export function rangeWindow(range: MetricRange, now: Date): { from: string; to: string; step: MetricStep } {
+export function rangeWindow(range: MetricRange, now: Date): MetricWindow {
   const def = rangeDef(range)
   const to = new Date(Math.floor(now.getTime() / 1000) * 1000)
   return { from: new Date(to.getTime() - def.ms).toISOString().replace('.000Z', 'Z'), to: to.toISOString().replace('.000Z', 'Z'), step: def.step }
@@ -119,6 +125,16 @@ export function niceMax(value: number, floor = 1): number {
 /** A value in its unit: a rate (B2 formatting) or a whole count. */
 export function formatMetric(unit: MetricUnit, v: number): string {
   return unit === 'bytes_per_sec' ? formatRate(v) : Math.round(v).toLocaleString()
+}
+
+/**
+ * Whether a relay's "Both directions" line and link-capacity ceiling are
+ * drawn for `range`: 1-minute ranges only. An hourly point is the mean of
+ * the minutes that had a sample, so a sum of hourly means hides the minutes
+ * the link was full and would show headroom that wasn't there.
+ */
+export function showsLinkCeiling(range: MetricRange): boolean {
+  return rangeDef(range).step === '1m'
 }
 
 /**

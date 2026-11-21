@@ -64,14 +64,23 @@ const PAD_BOTTOM = 4
 
 function timeLabel(t: number, range: MetricRange): string {
   const d = new Date(t)
-  return rangeDef(range).step === '1h'
-    ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  if (rangeDef(range).step === '1h') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  // Beyond 1 h both ends can share a clock time (24 h): add the day.
+  return range === '1h'
+    ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
 }
+
+// The ceiling is drawn to scale only while the data reaches a quarter of it;
+// below that, scaling to the ceiling would press every line onto the
+// baseline (reading as zero), so the chart scales to the data and the
+// ceiling is named as off scale.
+const CEILING_IN_SCALE = 0.25
 
 /**
  * A line chart of one or more series sharing a unit. `ceiling` draws a
- * dashed reference line (e.g. the relay's link capacity, B2). `empty` is
+ * dashed reference line (e.g. the relay's link capacity, B2) when the data
+ * comes within CEILING_IN_SCALE of it; otherwise it is labelled off scale. `empty` is
  * shown when no series has a point in the range.
  */
 export function MetricChart({
@@ -144,7 +153,9 @@ export function MetricChart({
   const flat = runs.map((r) => r.flat())
   const hasPoints = flat.some((f) => f.length > 0)
   const summaries = data.map((d) => summarize(d.points))
-  const top = niceMax(Math.max(0, ...summaries.map((s) => s?.max ?? 0), ceiling?.value ?? 0))
+  const dataMax = Math.max(0, ...summaries.map((s) => s?.max ?? 0))
+  const ceilingInScale = !!ceiling && dataMax >= ceiling.value * CEILING_IN_SCALE
+  const top = niceMax(Math.max(dataMax, ceilingInScale ? ceiling.value : 0))
   const x = (t: number) => ((t - from) / (to - from)) * W
   const y = (v: number) => PAD_TOP + (1 - v / top) * (H - PAD_TOP - PAD_BOTTOM)
   const summaryText = lines
@@ -197,7 +208,7 @@ export function MetricChart({
           {[0, 0.5, 1].map((f) => (
             <line key={f} x1={0} x2={W} y1={y(top * f)} y2={y(top * f)} stroke="var(--color-border)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
           ))}
-          {ceiling && (
+          {ceiling && ceilingInScale && (
             <line
               data-ceiling
               x1={0}
@@ -240,7 +251,9 @@ export function MetricChart({
         </svg>
         <span className="pointer-events-none absolute right-0 top-0 font-mono text-[11px] text-muted-foreground">{formatMetric(unit, top)}</span>
         {hoverAt !== null && hover && (
-          <div role="status" className="pointer-events-none absolute left-2 top-2 rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs shadow-sm">
+          // Not a live region: it changes on every pointer move; the
+          // figcaption carries the summary for screen readers.
+          <div data-tooltip aria-hidden className="pointer-events-none absolute left-2 top-2 rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs shadow-sm">
             <div className="text-muted-foreground">{new Date(hoverAt).toLocaleString()}</div>
             {lines.map((l, i) => (
               <div key={l.label} className="font-mono tabular-nums">
@@ -251,9 +264,13 @@ export function MetricChart({
           </div>
         )}
       </div>
-      <div className="flex justify-between text-[11px] text-muted-foreground">
+      <div data-axis className="flex justify-between text-[11px] text-muted-foreground">
         <span>{timeLabel(from, range)}</span>
-        {ceiling && <span className="text-warning-text">— {ceiling.label}</span>}
+        {ceiling && (
+          <span className="text-warning-text" data-ceiling-label>
+            {ceilingInScale ? `— ${ceiling.label}` : `${ceiling.label} (above this scale)`}
+          </span>
+        )}
         <span>{timeLabel(to, range)}</span>
       </div>
       <figcaption className="sr-only">{summaryText}</figcaption>
@@ -261,14 +278,21 @@ export function MetricChart({
   )
 }
 
-/** A small trend line with the latest value, for the Overview. */
+/**
+ * A small trend line with the latest stored value, for the Overview. The
+ * value is labelled with its time: it is a stored sample, not a live count.
+ */
 export function Sparkline({ label, unit, state, note }: { label: string; unit: MetricUnit; state: MetricState; note: string }) {
   if (state.status === 'loading') return <Skeleton className="h-12 w-full" />
   if (state.status !== 'ready') return <span className="text-[12.5px] text-muted-foreground">Couldn’t load {label.toLowerCase()}.</span>
   const d = state.data
   const runs = segments(d.points, d.step)
   const s = summarize(d.points)
-  if (!s) return <span className="text-[12.5px] text-muted-foreground">No data yet.</span>
+  // The latest drawable point (segments drops unparseable times): its value
+  // and time are shown together, from the same point.
+  const last = runs.at(-1)?.at(-1)
+  if (!s || !last) return <span className="text-[12.5px] text-muted-foreground">No data yet.</span>
+  const latestAt = new Date(last.t).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
   const from = Date.parse(d.from)
   const to = Date.parse(d.to)
   const top = niceMax(s.max)
@@ -276,8 +300,8 @@ export function Sparkline({ label, unit, state, note }: { label: string; unit: M
   const y = (v: number) => 2 + (1 - v / top) * 36
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[26px] font-semibold leading-tight tracking-[-0.02em]">{formatMetric(unit, s.latest)}</span>
-      <svg viewBox="0 0 200 40" preserveAspectRatio="none" className="h-10 w-full" role="img" aria-label={`${label}, ${note}: latest ${formatMetric(unit, s.latest)}, high ${formatMetric(unit, s.max)}`}>
+      <span className="text-[26px] font-semibold leading-tight tracking-[-0.02em]">{formatMetric(unit, last.v)}</span>
+      <svg viewBox="0 0 200 40" preserveAspectRatio="none" className="h-10 w-full" role="img" aria-label={`${label}, ${note}: latest ${formatMetric(unit, last.v)} at ${latestAt}, high ${formatMetric(unit, s.max)}`}>
         {runs.map((seg, i) =>
           seg.length === 1 ? (
             <circle key={i} cx={x(seg[0].t)} cy={y(seg[0].v)} r={1.5} fill="var(--color-primary)" />
@@ -286,7 +310,9 @@ export function Sparkline({ label, unit, state, note }: { label: string; unit: M
           ),
         )}
       </svg>
-      <span className="text-[12.5px] text-muted-foreground">{note}</span>
+      <span className="text-[12.5px] text-muted-foreground">
+        {note} · latest point {latestAt}
+      </span>
     </div>
   )
 }

@@ -169,6 +169,16 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 - **Mutation checks, all caught (8):** a gap drawn as a connected line; a missing direction summed as 0; relay-ops asking for fleet sessions; the capacity drawn against one direction; the hourly band dropped; the 24 h range read hourly; an empty range drawn as a chart instead of "Not reported"; the trend tile never reading its series.
 - **Gates (2026-11-21):** provider console `npm test` **703 passed** (51 files), `npm run lint` clean, `npm run build` clean. No controller, schema or admin change.
 - **Live check:** pending, together with R1 and M1 (charts on relay detail, tenant detail and Overview for each range; a stopped relay shows a break; relay-ops see no tenant charts).
+- **Review fixes (Sathiya's review of #240, 2026-11-21):**
+  1. **"Both directions" and the link-capacity ceiling on 1-minute ranges only** (`showsLinkCeiling`): an hourly point is the mean of the minutes that had a sample, so a sum of hourly means hides the minutes the link was full and showed headroom that wasn't there. On 7 d / 30 d a note says capacity is compared on 1 h and 24 h.
+  2. **Scale to the data:** the ceiling is drawn to scale only while the data reaches a quarter of it (`CEILING_IN_SCALE`); below that it is labelled "(above this scale)", so small traffic on a large link never reads as a zero line.
+  3. **Overview trend tile labelled as a trend** ("Relay connections, 24 h" / "Active sessions, 24 h") with the time of its latest point: it is a stored sample, apart from the live relay-connections tile.
+  4. **The trend is not read until the role is known** (`useMetricSeries(null, …)` stays loading): one read per visit, for the right series.
+  5. **The hover tooltip is not a live region** (`aria-hidden`, no `role="status"`); the figcaption carries the summary.
+  6. **24 h axis ends show the day** (both ends no longer read the same clock time).
+  7. **One window per page** (`useMetricWindow(range, round)`): every chart on a page reads the same `from`/`to`; the page's Refresh counter stays in the query key, so a Refresh within the same second still reads once more.
+  - Tests added for each; **mutation checks, all caught (9):** ceiling on hourly ranges, ceiling always in scale, tooltip as a live region, Refresh counter dropped from the key, 24 h labels without the day, per-series windows, old tile label, sparkline without its time, trend read before the role is known. Gates: `npm test` **716 passed** (after merging main), lint, typecheck and build clean.
+  - **Second review (#242, 2026-11-21):** the Sparkline took its headline and time from different lists and could crash on points with a value but an unparseable time (now: the latest drawable point for both, else "No data yet"); the Overview trend window is taken when the role is known, not at mount; the Sparkline gets the plain series name (", 24 h" stays on the tile label); `useMetricWindow` holds the window in state, not a memo (React may drop a memo, which would re-send every read). Tests added; 5 mutation checks caught. `npm test` **720 passed**, lint, typecheck and build clean.
 
 ---
 

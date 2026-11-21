@@ -1,7 +1,7 @@
 import { Card } from '@/components/ui/card'
 import { MetricChart, RangePicker } from '@/components/MetricChart'
 import type { MetricRange } from '@/lib/metrics'
-import { useMetricSeries } from '@/lib/useMetricSeries'
+import { useMetricSeries, useMetricWindow } from '@/lib/useMetricSeries'
 
 // Tenant detail "History" (Sprint 24 M2, F23): stored sessions, agents
 // online and the tenant's relay traffic (R1). Tenant series are super-admin
@@ -9,11 +9,12 @@ import { useMetricSeries } from '@/lib/useMetricSeries'
 // are not audited: changing the range writes no tenant.read entry.
 
 export function TenantHistory({ tenantId, range, onRange }: { tenantId: string; range: MetricRange; onRange: (r: MetricRange) => void }) {
-  const sessions = useMetricSeries('tenant.active_sessions', tenantId, range)
-  const connectors = useMetricSeries('tenant.connectors_online', tenantId, range)
-  const shields = useMetricSeries('tenant.shields_online', tenantId, range)
-  const toClients = useMetricSeries('tenant.relay_bytes_to_clients_per_sec', tenantId, range)
-  const toConnectors = useMetricSeries('tenant.relay_bytes_to_connectors_per_sec', tenantId, range)
+  const win = useMetricWindow(range)
+  const sessions = useMetricSeries('tenant.active_sessions', tenantId, win)
+  const connectors = useMetricSeries('tenant.connectors_online', tenantId, win)
+  const shields = useMetricSeries('tenant.shields_online', tenantId, win)
+  const toClients = useMetricSeries('tenant.relay_bytes_to_clients_per_sec', tenantId, win)
+  const toConnectors = useMetricSeries('tenant.relay_bytes_to_connectors_per_sec', tenantId, win)
   return (
     <Card role="region" aria-labelledby="tenant-history" className="flex flex-col gap-5 px-5 py-5">
       <div className="flex flex-wrap items-center justify-between gap-3">

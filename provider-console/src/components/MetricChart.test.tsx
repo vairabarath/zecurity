@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { MetricSeriesData } from '@/api/metrics'
 import { MetricChart, Sparkline } from '@/components/MetricChart'
@@ -41,12 +41,43 @@ describe('MetricChart', () => {
     expect(container.querySelector('[data-band]')).not.toBeNull()
   })
 
-  it('draws the link capacity as a dashed ceiling with its label', () => {
+  it('draws the link capacity as a dashed ceiling with its label when the data comes near it', () => {
     const { container } = render(
-      <MetricChart title="Bandwidth" unit="bytes_per_sec" range="1h" lines={[{ label: 'Both directions', state: ready([pt(0, 1), pt(1, 2)]) }]} ceiling={{ value: 125_000_000, label: 'Link capacity 1 Gbps' }} />,
+      <MetricChart title="Bandwidth" unit="bytes_per_sec" range="1h" lines={[{ label: 'Both directions', state: ready([pt(0, 40_000_000), pt(1, 90_000_000)]) }]} ceiling={{ value: 125_000_000, label: 'Link capacity 1 Gbps' }} />,
     )
     expect(container.querySelector('[data-ceiling]')).not.toBeNull()
-    expect(screen.getByText(/Link capacity 1 Gbps/)).toBeInTheDocument()
+    expect(container.querySelector('[data-ceiling-label]')).toHaveTextContent('— Link capacity 1 Gbps')
+  })
+
+  it('far below the capacity, scales to the data and names the ceiling as off scale (small traffic never reads as zero)', () => {
+    const { container } = render(
+      <MetricChart title="Bandwidth" unit="bytes_per_sec" range="1h" lines={[{ label: 'Both directions', state: ready([pt(0, 1_000_000), pt(1, 2_000_000)]) }]} ceiling={{ value: 1_250_000_000, label: 'Link capacity 10 Gbps' }} />,
+    )
+    expect(container.querySelector('[data-ceiling]')).toBeNull()
+    expect(container.querySelector('[data-ceiling-label]')).toHaveTextContent('Link capacity 10 Gbps (above this scale)')
+    const ys = container.querySelector('polyline')!.getAttribute('points')!.split(' ').map((p) => Number(p.split(',')[1]))
+    // The higher point sits in the upper half of the 150-unit-tall chart, not on the baseline.
+    expect(Math.min(...ys)).toBeLessThan(75)
+  })
+
+  it('the hover tooltip is not a live region (it changes on every pointer move)', () => {
+    const { container } = render(<MetricChart title="Connections" unit="count" range="1h" lines={[{ label: 'Connections', state: ready([pt(0, 1), pt(1, 2)]) }]} />)
+    const svg = container.querySelector('svg')!
+    svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 600, height: 150, right: 600, bottom: 150, x: 0, y: 0, toJSON: () => ({}) })
+    fireEvent.pointerMove(svg, { clientX: 5 })
+    const tip = container.querySelector('[data-tooltip]')
+    expect(tip).not.toBeNull()
+    expect(tip).toHaveAttribute('aria-hidden', 'true')
+    expect(tip).not.toHaveAttribute('role')
+  })
+
+  it('on 24 h the axis ends show the day, so they differ', () => {
+    const { container } = render(
+      <MetricChart title="Connections" unit="count" range="24h" lines={[{ label: 'Connections', state: ready([pt(0, 1), pt(1, 2)], { from: '2026-11-20T11:00:00Z', to: TO }) }]} />,
+    )
+    const labels = [...container.querySelectorAll('[data-axis] > span')].map((s) => s.textContent)
+    expect(labels).toHaveLength(2)
+    expect(labels[0]).not.toBe(labels[1])
   })
 
   it('no point in the range shows the empty text, never a zero line', () => {
@@ -73,6 +104,17 @@ describe('Sparkline', () => {
     const { container } = render(<Sparkline label="Active sessions" unit="count" state={ready([pt(0, 2), pt(1, 3), pt(20, 7), pt(21, 9)])} note="Last 24 hours" />)
     expect(screen.getByText('9')).toBeInTheDocument()
     expect(container.querySelectorAll('[data-segment]')).toHaveLength(2)
+    // A stored sample, not a live count: its time is shown.
+    expect(screen.getByText(/Last 24 hours · latest point /)).toBeInTheDocument()
+  })
+  it('points with unparseable times are not drawable: "No data yet", no crash', () => {
+    render(<Sparkline label="Active sessions" unit="count" state={ready([{ ts: 'not-a-time', value: 4 }, { ts: '', value: 5 }])} note="Last 24 hours" />)
+    expect(screen.getByText('No data yet.')).toBeInTheDocument()
+  })
+  it('the headline and its time come from the same (latest drawable) point', () => {
+    render(<Sparkline label="Active sessions" unit="count" state={ready([pt(0, 2), pt(1, 3), { ts: 'bad', value: 99 }])} note="Last 24 hours" />)
+    expect(screen.getByText('3')).toBeInTheDocument()
+    expect(screen.queryByText('99')).not.toBeInTheDocument()
   })
   it('no data yet says so', () => {
     render(<Sparkline label="Active sessions" unit="count" state={ready([])} note="Last 24 hours" />)
