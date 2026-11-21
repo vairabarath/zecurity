@@ -30,6 +30,10 @@ Merged features whose tracker box stays unticked until a live check on the lab p
 | F7 (S4) | Tenant deletion (D-46, migration `066_tenant_deletion.sql`) | #229 | ☑ 2026-11-18/19 on the branch (two runs: local export, crash and resume, legal hold, cancel, both download routes; export to the tenant's S3 sink with real agents); merged S4 code = tested code |
 | F12 (S3) | Per-tenant quotas (D-47, migration `065_tenant_quotas.sql`) | #224 | ☑ 2026-11-19 (Sprint 23 live session) |
 | Sprint 23 | Cross-feature checks on merged `main` (B1 × S3, S2 × S3, S1 × S2, S1 × B2) | — | ☑ 2026-11-19 |
+| F23 (R1) | Per-workspace relay counters (D-54, refined 2026-11-21; proto field 13, relay change) | #237 | ☐ |
+| F23 (M1) | Metric store, sampler and read API (D-49, migration `068_metric_samples.sql`) | #239 | ☐ |
+| F23 (M2) | Console history charts | #240 | ☐ |
+| Sprint 24 | Cross-feature: B2 capacity × A1 `relay.over_capacity` × M2 ceiling × T1/D-55 timeline | — | ☐ |
 
 Add each Must-have item here as it merges.
 
@@ -215,6 +219,50 @@ Reset DB (schema change). A lab tenant on the Free plan (3 remote networks, 10 c
 2. **S2 × S3:** a tenant whose plan allows users 1 and that already has a pending first-admin invitation → re-issuing the invitation still works (it frees its own slot); a provider create on a plan with users 0 → refused with `quota_exceeded`.
 3. **S1 × S2:** suspend T2 → re-issuing its first-admin invitation is refused (`tenant_not_active`) and a pending first-admin sign-in is refused with the suspended message; resume → re-issue works.
 4. **S1 × B2:** suspending T1 empties its relay list; the relay's measured rate falls and headroom rises at the next sample; nothing else changes on the relay.
+
+## Sprint 24 live session: F23 (R1, M1, M2)
+
+One session on a **reset DB** and current `main` (R1 #237, M1 #239, M2 #240 merged; last merge `867ae827` or later). Record the Git SHA and `ls controller/migrations | tail -6` (expect `068_` … `070_`) in the results log. Sathiya's A1–A3 and T1 already passed on their branches (results log, 2026-11-20/21); this session covers F23 and the one A1 kind not run live (`relay.over_capacity`).
+
+**Setup**
+1. `git pull` on `main`; rebuild the controller, provider console, **relay (R1 changes the relay)**, connector and client from the same SHA. A relay built before R1 still works but reports no per-tenant traffic (D-54 refined: not supported).
+2. Recreate the DB; check the controller log applied every migration through `070_` without errors. Bootstrap the super-admin and enrol TOTP; create a relay-ops operator (TOTP too).
+3. Controller env: `ENV=development RELAY_DEV_ALLOW_PRIVATE_ADDR=true RELAY_HEARTBEAT_DB_WRITE_INTERVAL=1m ALERT_EVAL_INTERVAL=10s`. With a 1-minute write window, rates refresh every minute and an R1 view counts as fresh for 3 minutes (2 windows + 1 min).
+4. Rebuild the client with the new platform root (`ZECURITY_PLATFORM_ROOT_PEM_FILE`); a second client uses its own `XDG_CONFIG_HOME`, never the real `client.conf`.
+5. Lab: one R1 relay; check which hosts are up first (AT23 ran the relay on 192.168.1.41, the connector on luffy .37). Each tenant's connector forced onto the relay path (`LAN_ADDR` set to TEST-NET), as in the F5 run. ufw rules tagged `zecurity-live-test` for 8080/9090 and the relay UDP port; remove them afterwards.
+6. Tenants: **T1** and **T2**, each with a connector, a resource behind it and a client; **T3** with nothing running (idle). Traffic probes every 2 s on T1 and T2.
+
+**Order:** R1 → M1 → M2 → cross-feature → retention (restarts the controller, so last).
+
+## F23 (R1): Per-workspace relay counters (#237)
+1. Relay and controller logs after the first heartbeats: no errors; no `ignoring unknown or inactive trust domain` for T1 or T2.
+2. Download a large file through T1's client **and** T2's client at the same time (note bytes and durations). After two write windows, read the stored minute (DB, read-only):
+   `SELECT series, subject_id, ts, value FROM metric_samples WHERE series IN ('relay.bytes_to_clients_per_sec','tenant.relay_bytes_to_clients_per_sec') ORDER BY ts DESC LIMIT 12;`
+   **Pass:** at the same `ts`, T1 + T2 ≈ the relay's `relay.bytes_to_clients_per_sec` (all bridged traffic belongs to a tenant; small differences only from window timing), and each tenant's rate matches its client's measured download.
+3. **Pass:** `tenant.relay_streams` equals the open downloads per tenant (falls to 0 when they end); T3 has `tenant.relay_bytes_to_clients_per_sec = 0` rows (idle = 0), not missing rows.
+4. Stop the relay service. **Pass:** after eviction (≈ 1.5–2.5 min) the relay is `inactive`; no new relay rows and no new tenant relay rows for those minutes (a gap, never 0). Start it again: rows resume; the first window after the restart has no rate (no spike, nothing negative), then rates return.
+
+## F23 (M1): Metric store and read API (#239)
+1. After a few minutes: every row's `ts` is on the minute; one row per series, subject and minute (`SELECT series, subject_id, ts, count(*) FROM metric_samples GROUP BY 1,2,3 HAVING count(*) > 1` → none).
+2. **Pass (values):** `relay.connections` matches the relay's connection count in the console; `tenant.active_sessions` matches the signed-in clients (sign one out: the next minute drops by one); `tenant.connectors_online` / `tenant.shields_online` match the tenant page; the fleet rows are the sums.
+3. **Roll-up:** after an hour boundary passes (or restart the controller after it: the first tick rolls up the previous two hours), compare
+   `SELECT min, max, avg, count FROM metric_rollups WHERE series = 'relay.connections' AND ts = '<hour>';` with `SELECT min(value), max(value), avg(value), count(*) FROM metric_samples WHERE series = 'relay.connections' AND ts >= '<hour>' AND ts < '<hour>' + interval '1 hour';` **Pass:** equal; a controller restart in the same minute adds no duplicate sample.
+4. **Roles over the API** (optional with curl and a provider token; the console checks in M2 cover it): relay-ops `GET /provider/metrics/relay.connections?subject=<relay>` → 200; `GET /provider/metrics/tenant.active_sessions?subject=<T1>` and `fleet.active_sessions` → 403; unknown series → 404.
+
+## F23 (M2): Console history charts (#240)
+1. **Relay detail → History** (super-admin, then relay-ops): Connections and Bandwidth charts for 1 h; the relay-stop window from R1 step 4 shows as a **break**, never a drop to 0; hovering shows the time and value ("no data" in the gap).
+2. Set a link capacity (B2, e.g. 100 Mbps): **Pass:** "Both directions" appears with the dashed "Link capacity 100 Mbps" ceiling; during the downloads the sum line sits at the measured total.
+3. Ranges: 24 h shows minute points; 7 d / 30 d show hourly points with a min–max band once at least one hour is rolled up (a fresh DB shows only that hour); the range stays selected across Refresh.
+4. **Tenant detail → History** (super-admin): sessions, agents online and relay traffic for T1; T3's relay traffic reads 0, and "Not reported" while the relay is stopped. Change the range three times: **Pass:** no new `tenant.read` audit row (count before and after); only Refresh writes one.
+5. **Overview:** super-admin tile "Active sessions" (last 24 hours); relay-ops tile "Relay connections". **Pass:** relay-ops can open relay detail charts, have no tenant pages, and never request a tenant or fleet-session series (browser network panel).
+
+## Sprint 24 cross-feature check (B2 × A1 × M2 × T1)
+1. With T1 downloading, lower the relay's link capacity below the measured traffic (reason). **Pass:** within `for` + one evaluation the A1 `relay.over_capacity` alert fires (Alerts page, and the webhook/email channel if configured); the relay chart's "Both directions" line is above the ceiling; the Overview lists the relay as over capacity (B2).
+2. Raise the capacity again: the alert **resolves** once (no repeat while it was firing).
+3. Timeline (T1, D-55): relay-ops see the two `relay.capacity.set` rows with actor and reason, and the alert fired/resolved; no tenant names.
+
+## F23 retention (last: restarts the controller)
+Restart the controller with `METRIC_SAMPLE_RETENTION=5m` (keep the other env). **Pass:** on the first tick, samples older than 5 minutes are deleted (`SELECT min(ts) FROM metric_samples` moves up); roll-ups are untouched. Restart with the default (unset) afterwards.
 
 ## Relay pools findings (live run 2026-11-17)
 - **F10-1 (defect, blocks F10): connector does not recover from a refused migration.** Moving a tenant into a residency pool, the controller pushes the new relay list at once, but the residency relay learns that the workspace is allowed only at its next heartbeat. The connector dialled `manoj-lt` at 04:52:07; the relay refused it ("refusing Relay peer: workspace policy") and applied policy v23 (workspace allowed) at 04:52:15. The connector's `migrate()` logged "Migration could not find a usable target; remaining on current relay" and never retried: it stayed on `local-a` (no longer listed; its placement rejected), with no relay path for 10+ minutes, through the 300 s background reprobe (the unlisted active relay keeps its old score, so no "meaningful improvement"). Reproduced twice more (05:04:15, ~05:12:50). Evidence: scratchpad `lt/evidence-f10-step1/` and on the lab host `~/zecurity-lt/connector-f10-*.log`, `relay-at-repro2.log`. Fix: separate connector PR (bounded retry while the active relay is unlisted; unlisted active relay never wins a score comparison); acceptance = reproduce the race with the connector left running and see it recover with no restart. **Fixed in PR #210 (merged 2026-11-17), retested live:** same race at 05:40:19, refused at :19/:24/:34, relay allowed the workspace at 05:40:49, connector registered on its own at 05:40:54 (no restart); details in `Relay-Pools-Implementation-Plan.md` → Post-PR fixes. F10 closed.
