@@ -56,6 +56,26 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 - Controller: rate from two samples; restart → no rate; unknown trust domain ignored; relay without field 13 → not reported (not 0).
 - **Mutation checks:** count a stream into the wrong workspace → the sum/split test fails; store an unknown trust domain → its test fails.
 
+### R1 implementation record (branch `feat/sprint24-r1-workspace-traffic`)
+- **D-54 refined (2026-11-21, decided by Barath):** proto3 can't tell a `repeated` field that wasn't sent from an empty one. Pre-production, every relay is rebuilt with R1, so **an empty field 13 = no tenant traffic (0)**; "Not reported" = the relay isn't reporting (silent, revoked, stale sample). No support flag; field 13 is the only proto change. Updated in the Decision Record, `path.md`, this file and `CLAUDE.md`.
+- **Proto:** `message WorkspaceTraffic {trust_domain = 1; bytes_client_to_connector = 2; bytes_connector_to_client = 3; active_streams = 4}` and `repeated WorkspaceTraffic workspace_traffic = 13` in `HeartbeatRequest`. `buf generate`: only internal message indexes shifted in `relay.pb.go`; no field renumbered.
+- **Relay:**
+  - `relay/src/traffic.rs` (new): `TRAFFIC`, a `DashMap` from trust domain to `Arc<WorkspaceCounters>` (atomics; the bridge takes no lock after opening its stream).
+  - `open_stream(trust_domain, workspace_id)` counts the stream **while holding the entry's map lock**, so `prune` either sees the open stream or ran before the entry existed: a bridge never counts into an entry that already left the table.
+  - `session.rs`: `handle_lookup_stream` opens the guard next to `ACTIVE_STREAMS` (same span); `counted_copy` adds each chunk to the per-bridge count, the process-wide F5 counter **and** the workspace counter. `handle_connection` → `spawn_lookup` → `handle_lookup_stream` take the `workspace_id` the listener already derives for the revocation check and the D-40 policy.
+  - `heartbeat.rs`: sends `TRAFFIC.snapshot()` (entries with traffic or open streams), then, after applying the policy, `prune`s idle entries whose workspace the policy refuses, against a **copy** of the policy (`WorkspacePolicy::snapshot`, no longer test-only; new `workspace_policy::allows`), so the policy lock is never taken inside the table's locks.
+- **Controller:**
+  - `internal/relay/workspace_traffic.go` (new): `WorkspaceTrafficTracker` (in memory, D-02) with `Record` and `Snapshot`. Rates on the **heartbeat DB-write cadence** (the B2 window), with B2's restart rules: a counter that went down or an uptime shorter than the gap (5 s slack) → no rate for that window; a workspace's first sample has no rate; a late heartbeat changes nothing. `ActiveStreams` is always the latest value.
+  - `RelayWorkspaceTraffic {RelayID, MeasuredAt, WindowSeconds, Workspaces map[workspace id]WorkspaceRate}`; a workspace missing from a relay's view had no traffic there. **M1 must treat an old `MeasuredAt` as not reported.**
+  - `Store.ActiveWorkspacesByTrustDomain`: `status = 'active'` only (a suspended tenant keeps `'active'`, D-45, and is included); unknown, deleted and inactive trust domains are absent.
+  - `Service.recordWorkspaceTraffic`, called after a successful `RecordHeartbeat` (same cadence as B2): unknown trust domains are **logged and dropped, never stored**; a lookup failure records nothing for that window. Off unless `WithWorkspaceTraffic` is set; `main.go` wires `relayWorkspaceTraffic` for M1's sampler.
+- **Tests:**
+  - Relay: `traffic.rs` (4: separation, idle not reported, prune only idle and disallowed, lower-cased ids); `session.rs` `bridged_bytes_count_for_the_workspace_and_the_total` (exact per direction, open count, cumulative after close) and `lookup_bridges_count_for_their_own_workspace` (two workspaces through the real Register + Lookup handshakes); `heartbeat.rs` asserts the request carries field 13.
+  - Controller: `workspace_traffic_test.go` (rates from two samples, restart by uptime and by counter decrease, slack, new workspace, late sample, idle relay, snapshot copy, heartbeat mapping with an unknown trust domain, empty field 13, lookup failure, off by default); `workspace_traffic_db_test.go` (lookup: active and suspended in, deleted and unknown out).
+  - **Mutation checks, all caught (8):** client bytes into the wrong direction; a stream counted into another workspace; workspace counter never incremented; prune dropping an entry with an open stream; an unknown trust domain stored; restart by short uptime ignored; counter decrease ignored; inactive workspace returned by the lookup.
+- **Gates (2026-11-21):** relay `cargo build`, `cargo test` (**151 passed**), `cargo clippy` (no warning in the R1 files); controller `go build ./...` and `go vet ./...` clean, full `go test ./...` with every DB env set **2,022 passed, 0 failed** (2 known skips: `TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`).
+- **Live check:** pending (two tenants downloading through one relay at once; per-tenant rates sum to the relay total; a stopped relay reads "Not reported").
+
 ---
 
 ## M1 — Metric store and read API — D-49
@@ -95,7 +115,7 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 ### Build
 - A small chart component (no heavy library unless already in the console; check `provider-console/package.json`), ranges **1 h / 24 h / 7 d / 30 d**, gaps drawn as gaps, units as in B2 (bytes/s formatting reused).
 - **Relay detail:** connections; bandwidth to clients / to connectors, with link capacity (B2) as a reference line when configured.
-- **Tenant detail** (super-admin): active sessions, connectors and shields online, relay bandwidth (R1) — "Not reported" when no data.
+- **Tenant detail** (super-admin): active sessions, connectors and shields online, relay bandwidth (R1) — "Not reported" when no relay is reporting (a gap), 0 when reporting relays carried none of its traffic.
 - **Overview** (`provider-console/src/pages/Home.tsx`): fleet sessions sparkline (own section; A3 adds the alerts badge).
 - Read-only: no new console writes; `api-surface.test.ts` unchanged except new GETs if the test lists reads.
 
@@ -107,7 +127,7 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 ## Live check (each phase)
 
 Record in `.zecurity-obs/Planning/Pending-Live-Tests.md`:
-- **R1:** two tenants' clients download through one relay at once; per-tenant rates sum to the relay total (B2) and match each client's measured rate; an older relay build reads "Not reported".
+- **R1:** two tenants' clients download through one relay at once; per-tenant rates sum to the relay total (B2) and match each client's measured rate; a stopped relay reads "Not reported" (a gap), an idle one 0.
 - **M1:** stored samples match the live values; roll-up after an hour (or test interval); retention pruning with a test setting; relay-ops 403 on tenant series.
 - **M2:** charts on relay detail, tenant detail and Overview for each range.
 

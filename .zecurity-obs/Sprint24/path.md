@@ -39,7 +39,7 @@ Decided by the product owner (Barath) after review of the scope draft; full text
 | **D-51** | F14 daily email unchanged (D-36). | — |
 | **D-52** | **One generic versioned JSON webhook**, no vendor SDKs; HMAC-SHA256 over timestamp + body with replay window; sealed secret, never returned; HTTPS outside dev; SSRF guard (re-checked at connect); outbox retries. | A2 |
 | **D-53** | Rules and channels: **super-admin only**, reason + before/after audit, never the secret; built-in rule kinds only. | A1, A2, A3 |
-| **D-54** | Relay reports cumulative bytes and active streams **per trust domain** (additive proto field 13); unknown/revoked trust domains ignored and logged; per-tenant relay series super-admin only; older relays "Not reported". | R1, M1 |
+| **D-54** | Relay reports cumulative bytes and active streams **per trust domain** (additive proto field 13); unknown/revoked trust domains ignored and logged; per-tenant relay series super-admin only. **Refined 2026-11-21:** pre-production, every relay runs R1, so an empty field 13 = no tenant traffic (0); "Not reported" = the relay isn't reporting (silent, revoked, stale sample). | R1, M1 |
 
 **Amended:** D-30 (new console writes). **Extended:** D-40 (per-tenant relay data hidden from relay-ops). **Unchanged:** D-02, D-06, D-12, D-14, D-17, D-36.
 
@@ -101,7 +101,7 @@ Sathiya: X1 ──► A1 (rules, evaluator) ──► A2 (delivery) ──► A3
 ## Rules (this sprint)
 
 - Decisions **D-48 … D-54 are binding**, with D-01 … D-47. If a phase needs another architectural choice, stop and ask; don't decide it in code.
-- **Proto changes are additive only** (R1: field 13). Older relays must keep working against the new controller and read "Not reported".
+- **Proto changes are additive only** (R1: field 13). Older relays must keep working against the new controller (they aren't treated specially: D-54 refined 2026-11-21).
 - **Tenant boundary (D-50):** tenant alert rows always carry `tenant_id`; every tenant-scoped read filters by it; platform data never reaches a tenant-scoped query. Relay-ops never see tenant names or per-tenant series (D-40).
 - **Every new console write**: server-side authorization in `decide()`; a **reason**; audit with before/after (F17); an entry in `api-surface.test.ts`. Never log, audit or return webhook secrets, SMTP credentials or signing keys.
 - **Webhooks (D-52):** sealed secret, HMAC over timestamp + body, HTTPS outside dev, SSRF guard checked at connect time (DNS rebinding), bounded response read, short timeouts; the payload carries no secrets or tenant content.
@@ -132,7 +132,7 @@ Live run on a **reset lab DB with current `main`**. Record the Git SHA and lates
 
 - **F23:**
   - drive relay traffic for **two tenants at once**: per-tenant relay rates add up to the relay total (B2) and match each client's measured download;
-  - a relay built before R1 reads "Not reported" for per-tenant series;
+  - a stopped or silent relay reads "Not reported" for per-tenant series (a gap, never 0); an idle R1 relay reads 0;
   - stored 1-minute samples match the live values; the hourly roll-up is correct; samples older than the retention are pruned (test retention setting);
   - relay detail, tenant detail and Overview charts show 1 h / 24 h / 7 d / 30 d;
   - relay-ops see relay series but no per-tenant series or tenant names.

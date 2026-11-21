@@ -9,7 +9,7 @@
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
 **Sprint 24 is the active sprint: Provider Dashboard, monitoring and alerting (F23, F26; F27 stretch).** Starts the Can-have list (Must have is 18 / 18 since Sprint 23). Decisions **D-48 … D-54** are made (Decision Record amendment **2026-11-20**); the Sprint 24 documents were **signed off by the product owner (Barath) on 2026-11-20**; implementation may start in the phase order below.
-- **R1 — per-workspace relay counters (F23, D-54)**, Barath: the relay reports cumulative bytes per direction and active streams **per trust domain** in the heartbeat (**additive** proto field 13, `WorkspaceTraffic`); the controller maps trust domain → workspace (unknown/revoked ignored, never stored); older relays read "Not reported".
+- **R1 — per-workspace relay counters (F23, D-54)**, Barath: the relay reports cumulative bytes per direction and active streams **per trust domain** in the heartbeat (**additive** proto field 13, `WorkspaceTraffic`); the controller maps trust domain → workspace (unknown/revoked ignored, never stored); an empty field 13 = no tenant traffic, "Not reported" = the relay isn't reporting (D-54 refined 2026-11-21, pre-production: all relays run R1).
 - **M1 — metric store + read API (F23, D-49)**, Barath: Postgres, 1-min samples kept 7 days, hourly roll-ups kept 400 days, gaps never zero-filled; `GET /provider/metrics/{series}`; per-tenant series super-admin only (D-40 extended).
 - **M2 — console charts (F23)**, Barath, after M1: relay detail, tenant detail, Overview sparkline (1 h / 24 h / 7 d / 30 d).
 - **X1 — Sprint 23 follow-ups**, Sathiya: client quota message; SCIM mapping probe exempt from the users quota (one probe at a time, no enrollment rights; real creates get a clear `quota_exceeded` SCIM error); SCIM refused with 403 while suspended; the S4 export amendment is confirmed (D-46 refinement, 2026-11-20).
@@ -135,7 +135,7 @@ Sprint 24 specific:
 - The Decision Record (all amendments through **2026-11-20**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
 - No phase before its dependencies are merged (M1 before M2; A1 before A2 before A3).
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
-- **Proto (R1, D-54):** additive only — `repeated WorkspaceTraffic workspace_traffic = 13`; never renumber; an older relay must keep working and read "Not reported" (never 0).
+- **Proto (R1, D-54):** additive only — `repeated WorkspaceTraffic workspace_traffic = 13`; never renumber; an older relay must keep working; a relay that isn't reporting reads "Not reported" (never 0).
 - **Alert scopes (D-50):** platform and tenant alerts are separate in the schema; tenant rows always carry `tenant_id` (DB CHECK); tenant-scoped reads always filter by it. Relay-ops never see tenant names, tenant alerts or per-tenant series (D-40 extended).
 - **Webhooks (D-52):** one generic versioned JSON payload, no vendor SDKs; HMAC over timestamp + body; secret sealed, shown once, never logged/audited/returned; HTTPS outside dev; SSRF guard checked at connect time; no secrets or tenant content in the payload.
 - **Rules and channels (D-53):** super-admin only, reason + before/after audit; built-in rule kinds, no query language.

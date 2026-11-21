@@ -294,6 +294,10 @@ func main() {
 		log.Fatalf("RELAY_POLICY_LEASE=%s is below the minimum %s (four heartbeat intervals)", relayPolicyLease, relay.MinPolicyLease)
 	}
 	relaySvc.WithPolicyLease(relayPolicyLease)
+	// Sprint 24 R1 (D-54): per-workspace relay traffic from heartbeat field
+	// 13, kept in memory (D-02). M1's sampler reads relayWorkspaceTraffic.
+	relayWorkspaceTraffic := relay.NewWorkspaceTrafficTracker()
+	relaySvc.WithWorkspaceTraffic(relayWorkspaceTraffic, relayStore)
 	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
 		rs, err := relayStore.ListRevokedRelaySerials(ctx)
 		if err != nil {

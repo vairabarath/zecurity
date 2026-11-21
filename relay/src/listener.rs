@@ -219,8 +219,14 @@ pub async fn run_listener(
                     return;
                 }
             };
-            if let Err(error) =
-                session::handle_connection(connection, identity, state, session_limits).await
+            if let Err(error) = session::handle_connection(
+                connection,
+                identity,
+                workspace_id,
+                state,
+                session_limits,
+            )
+            .await
             {
                 warn!(error = %error, "Relay session ended with error");
             }
