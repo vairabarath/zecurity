@@ -138,6 +138,15 @@ var RelayOpsTimelineAuditActions = []string{
 	"relay_pool.failback", // relay.ActionPoolFailback (system)
 }
 
+// Metrics (Sprint 24 M1, F23, D-49; D-40 extended). Relay and fleet relay
+// series are relay.* (relay-ops and super-admin); per-tenant series and
+// fleet totals of tenant data are tenant.* (super-admin only). Two actions,
+// so decide()'s prefix rules settle it without per-series logic there.
+const (
+	ActionRelayMetricsRead  = "relay.metrics.read"
+	ActionTenantMetricsRead = "tenant.metrics.read"
+)
+
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
 // perform.
 var relayOpsAlsoAllowed = map[string]bool{
@@ -314,6 +323,15 @@ func (a *Authz) CanReadTenants(actor Actor, target Target) error {
 
 // CanReadAlerts gates GET /provider/alerts and /provider/alert-events
 // (super-admin; relay-ops filtered to relay and pool alerts).
+// CanReadMetricSeries gates GET /provider/metrics/{series}: tenantData
+// series need tenant.metrics.read (super-admin), the rest relay.metrics.read.
+func (a *Authz) CanReadMetricSeries(actor Actor, series string, tenantData bool) error {
+	if tenantData {
+		return decide(actor, ActionTenantMetricsRead, Target{Type: "metric", ID: series})
+	}
+	return decide(actor, ActionRelayMetricsRead, Target{Type: "metric", ID: series})
+}
+
 func (a *Authz) CanReadAlerts(actor Actor) error {
 	return decide(actor, ActionAlertRead, Target{Type: "alert"})
 }

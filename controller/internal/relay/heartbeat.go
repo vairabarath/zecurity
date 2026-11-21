@@ -144,6 +144,9 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if err := s.markRelayHeartbeatDBWritten(ctx, relayID); err != nil {
 		log.Printf("relay heartbeat: mark db write %s: %v", relayID, err)
 	}
+	// Sprint 24 R1 (D-54): per-workspace traffic on the same cadence and
+	// window as the relay totals above (B2).
+	s.recordWorkspaceTraffic(ctx, relayID, receivedAt, req)
 
 	transition, evalErr := s.store.EvaluateCapacityLabel(ctx, relayID, s.labelHoldDown)
 	if evalErr != nil {

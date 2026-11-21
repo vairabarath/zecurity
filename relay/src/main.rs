@@ -14,6 +14,7 @@ mod state;
 #[cfg(test)]
 mod test_support;
 mod tls;
+mod traffic;
 mod workspace_policy;
 
 pub mod relay {

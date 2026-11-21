@@ -248,3 +248,29 @@ func TestDecide_AlertChannelMatrix(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 24 M1 (D-40 extended): relay metric series for relay-ops and
+// super-admin; tenant series (and fleet totals of tenant data) super-admin only.
+func TestDecide_MetricsMatrix(t *testing.T) {
+	a := NewAuthz()
+	for _, c := range []struct {
+		role       string
+		tenantData bool
+		allow      bool
+	}{
+		{RoleSuperAdmin, false, true},
+		{RoleSuperAdmin, true, true},
+		{RoleRelayOps, false, true},
+		{RoleRelayOps, true, false},
+		{"admin", false, false},
+		{"", false, false},
+	} {
+		err := a.CanReadMetricSeries(Actor{Role: c.role}, "s", c.tenantData)
+		if c.allow != (err == nil) {
+			t.Errorf("%q tenantData=%v: err %v, want allow=%v", c.role, c.tenantData, err, c.allow)
+		}
+		if err != nil && !errors.Is(err, ErrForbidden) {
+			t.Errorf("%q: %v is not ErrForbidden", c.role, err)
+		}
+	}
+}

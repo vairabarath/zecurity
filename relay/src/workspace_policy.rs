@@ -102,6 +102,12 @@ fn decide(policy: Option<&Policy>, workspace_id: &str, now: i64) -> Result<(), &
     }
 }
 
+/// Whether `policy` lets `workspace_id` use the relay at `now` (Sprint 24 R1:
+/// which idle traffic counters to keep). Same rule as admission.
+pub fn allows(policy: Option<&Policy>, workspace_id: &str, now: i64) -> bool {
+    decide(policy, workspace_id, now).is_ok()
+}
+
 /// What applying a heartbeat response did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Applied {
@@ -229,7 +235,8 @@ impl WorkspacePolicy {
         lock(&self.current).as_ref().map_or(0, |p| p.version)
     }
 
-    #[cfg(test)]
+    /// A copy of the applied policy. Sprint 24 R1 prunes traffic counters
+    /// against a copy, so it never holds the policy lock inside the table's.
     pub fn snapshot(&self) -> Option<Policy> {
         lock(&self.current).clone()
     }

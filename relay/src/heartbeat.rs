@@ -210,6 +210,8 @@ async fn run_connected<T: HeartbeatTransport>(
             // Relay pools PR 3 (D-40).
             workspace_policy_supported: true,
             workspace_policy_version_applied: policy.applied_version(),
+            // Sprint 24 R1 (D-54).
+            workspace_traffic: crate::traffic::TRAFFIC.snapshot(),
         };
         let response = transport.send(&mut conn, request).await?;
         // Connector-revocation Phase D: drop revoked connectors (sticky set).
@@ -224,6 +226,18 @@ async fn run_connected<T: HeartbeatTransport>(
         // D-40: apply the pool's workspace policy (a failed heartbeat never
         // gets here, so the lease keeps running down).
         policy.apply(&response, unix_now());
+        // R1: forget idle workspaces this relay may no longer serve, so the
+        // per-workspace table stays bounded. Reported first, then pruned.
+        let applied = policy.snapshot();
+        let now = unix_now();
+        let pruned = crate::traffic::TRAFFIC
+            .prune(|ws| crate::workspace_policy::allows(applied.as_ref(), ws, now));
+        if pruned > 0 {
+            tracing::debug!(
+                pruned,
+                "dropped idle traffic counters of disallowed workspaces"
+            );
+        }
 
         info!(
             server_time_unix = response.server_time_unix,
@@ -334,6 +348,8 @@ mod tests {
         revoked: Vec<String>,
         sent_ids: Arc<Mutex<Vec<Vec<String>>>>,
         sent_bytes: Arc<Mutex<Vec<SentBytes>>>,
+        /// Sprint 24 R1: field 13 as sent.
+        sent_traffic: Arc<Mutex<Vec<Vec<crate::relay::v1::WorkspaceTraffic>>>>,
     }
 
     impl HeartbeatTransport for RevokingTransport {
@@ -352,6 +368,10 @@ mod tests {
                 request.bytes_client_to_connector,
                 request.bytes_connector_to_client,
             ));
+            self.sent_traffic
+                .lock()
+                .unwrap()
+                .push(request.workspace_traffic.clone());
             self.sent_ids
                 .lock()
                 .unwrap()
@@ -571,7 +591,13 @@ mod tests {
             revoked: vec![revoked.clone()],
             sent_ids: Arc::default(),
             sent_bytes: Arc::default(),
+            sent_traffic: Arc::default(),
         };
+        // Sprint 24 R1: a workspace with traffic and an open stream.
+        let open = crate::traffic::TRAFFIC.open_stream("r1-heartbeat.zecurity.in", "aaaa");
+        open.counters()
+            .connector_to_client
+            .fetch_add(42, std::sync::atomic::Ordering::Relaxed);
         // F5: the counters are process-wide and only grow (other tests bridge
         // bytes concurrently), so the request carries at least these values.
         let floor = (
@@ -605,6 +631,20 @@ mod tests {
             up.is_some_and(|v| v >= floor.0) && down.is_some_and(|v| v >= floor.1),
             "F5: request carries both byte counters, got {up:?} / {down:?}"
         );
+        let traffic = transport.sent_traffic.lock().unwrap()[0].clone();
+        let mine = traffic
+            .iter()
+            .find(|w| w.trust_domain == "r1-heartbeat.zecurity.in")
+            .expect("R1: field 13 carries the workspace");
+        assert_eq!(
+            (
+                mine.bytes_connector_to_client,
+                mine.bytes_client_to_connector,
+                mine.active_streams
+            ),
+            (42, 0, 1)
+        );
+        drop(open);
         assert!(state.is_revoked(&revoked));
         assert!(c2.close_reason().is_none(), "unlisted connector untouched");
     }
