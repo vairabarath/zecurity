@@ -42,6 +42,7 @@ type Service struct {
 	// Sprint 24 R1 (D-54): per-workspace traffic, when enabled.
 	workspaceTraffic *WorkspaceTrafficTracker
 	workspaceLookup  workspaceLookup
+	usageSink        WorkspaceUsageSink
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {

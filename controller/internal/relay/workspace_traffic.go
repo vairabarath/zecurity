@@ -222,4 +222,24 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 		samples[ws] = cur
 	}
 	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples)
+	if s.usageSink != nil {
+		// Sprint 25 U1 (F32, D-59): the usage collector counts exact bytes
+		// from the cumulative counters. A failed lookup above skips this
+		// heartbeat; the counters are cumulative, so the next one counts the
+		// whole span once.
+		s.usageSink.RecordRelayCounters(ctx, relayID, at, req.GetUptimeSeconds(), samples)
+	}
+}
+
+// WorkspaceUsageSink receives every heartbeat's per-workspace cumulative
+// counters (Sprint 25 U1, F32). Implemented by the usage collector; an
+// interface so this package doesn't depend on it.
+type WorkspaceUsageSink interface {
+	RecordRelayCounters(ctx context.Context, relayID string, at time.Time, uptimeSeconds uint64, counters map[string]WorkspaceTrafficSample)
+}
+
+// WithUsageSink sets the usage collector (Sprint 25 U1).
+func (s *Service) WithUsageSink(sink WorkspaceUsageSink) *Service {
+	s.usageSink = sink
+	return s
 }

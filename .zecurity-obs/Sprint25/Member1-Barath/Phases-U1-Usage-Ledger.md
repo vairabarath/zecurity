@@ -84,8 +84,72 @@ Order: **U1a (schema, merged first) → U1b (collector)**. U1a is the contract w
 - Stop the controller for 5 minutes: those minutes unmetered, the hour incomplete.
 - A client on the direct path: its bytes are not counted (D-57).
 
-### Implementation record
-_Fill in when built (branch, choices, tests, gates, mutation checks)._
+### Implementation record (U1a + U1b, branch `feat/sprint25-u1a-usage-schema`, 2026-11-21)
+Built by Sathiya (with Claude Code) while Barath ran the Sprint 24 acceptance run; Barath reviews.
+- **U1a, `071_usage.sql`:**
+  - Tables: `usage_hourly`, `usage_collector_minutes`, `usage_active_users`, `usage_active_user_counts`, `usage_tenants`, `usage_relay_baselines`.
+  - Time checks are zone-independent: on the hour and on the minute by epoch, the month on day 1.
+  - Quantities and counts are non-negative.
+  - No foreign keys, because usage outlives a purge.
+  - Privileges: 053's default privileges already give `ztna_app` full DML, so the file only **revokes UPDATE on `usage_collector_minutes`** (a collected minute is never rewritten). Granting is not enough here.
+- **Completeness:** `usage_collector_minutes`, one row per collected minute fleet-wide (the recommended option above). Missing usage rows in a complete hour mean 0.
+- **Shared definitions:** `providerquery/activity.go` (`CountedTenantSQL`, `LiveClientSessionSQL`, `ActiveConnectorSQL`, `ActiveShieldSQL`), used by M1's `tenantCounts` and the collector. One definition each.
+- **Bytes** (`usage.Collector.RecordRelayCounters`, called from `relay.recordWorkspaceTraffic` through the `relay.WorkspaceUsageSink` interface):
+  - One transaction per relay heartbeat.
+  - A per-relay **run marker** row (tenant id = nil UUID) in `usage_relay_baselines`, locked `FOR UPDATE`.
+  - Same run = R1's rule (`uptime + 5 s >= gap`).
+  - Deltas:
+    - first sight of a relay (no marker): baseline only, 0 counted;
+    - a new run (relay restart): the counters themselves (everything since the restart is new; only the bytes between the last counted heartbeat and the restart are lost);
+    - a tenant new in a watched run, or its counters lower (entry re-created): the counters themselves;
+    - otherwise the difference.
+  - A late or repeated heartbeat counts nothing.
+  - Bytes go to the hour the heartbeat arrived in.
+  - **Refinement of the phase plan:** a relay restart counts the new run's counters instead of 0. That loses less, and it stays within D-59: exact, never negative or doubled, at most the bytes after the last heartbeat before the restart lost.
+- **Minutes** (`CollectMinute`, on its own minute ticker, `usage-collector` worker):
+  - One transaction under a transaction-scoped advisory lock.
+  - Writes the minute's `usage_collector_minutes` row first (a conflict means already counted: nothing written).
+  - Adds `session_minutes`, `connector_minutes` and `shield_minutes` (zero counts not stored).
+  - Inserts each live-session user into `usage_active_users` for the UTC month.
+  - Upserts `usage_tenants` only when the name, slug or plan changed, never after a purge.
+- **Purge (D-58):**
+  - `usage.FreezeTenant` runs in `tenantlifecycle.Purger.destroy`'s transaction, before `tenant_purge`.
+  - It writes or freezes the snapshot (`purged_at`) and turns `usage_active_users` into `usage_active_user_counts`.
+  - It takes the same advisory lock as the minute collection, so no minute can add user ids for the tenant after the freeze.
+- **Retention:** `Prune` runs hourly with the collector: 25 months by default (`USAGE_RETENTION` overrides). It also removes old baselines and the snapshots of purged tenants with no usage left.
+- **Tests:**
+  - `internal/usage/schema_db_test.go`: constraints in a +05:30 session time zone, upsert, uniqueness, `ztna_app` privileges.
+  - `internal/usage/collector_db_test.go`:
+    - exact deltas across two relays, two tenants and an hour boundary;
+    - first sight, late and repeated heartbeats;
+    - relay restart and counter reset;
+    - controller restart (new process) and a failed write;
+    - minutes counted once per minute, with deleted workspaces not metered;
+    - active users distinct per UTC month;
+    - freeze keeps the name and drops user ids;
+    - retention.
+  - `tenantlifecycle` purge end state: the snapshot is frozen with the tombstone's slug, and no active-user rows remain.
+- **Mutation checks, all caught (20):**
+  - U1a (7): meter CHECK, on-the-hour CHECK, non-negative quantity, on-the-minute CHECK, month on day 1, the UPDATE revoke, the active-user primary key.
+  - U1b (13):
+    - first sight counting the counters;
+    - a restart or reset taking the difference;
+    - a late heartbeat counted;
+    - same-run detection inverted;
+    - the baseline not persisted;
+    - minute idempotence removed;
+    - the live-session definition loosened;
+    - the counted-tenant definition loosened (the first test missed this; the deleted workspace now has live sessions and agents);
+    - active users not distinct;
+    - the freeze keeping user ids;
+    - the snapshot rewritten after purge;
+    - pruning inside the retention;
+    - the purge not calling the freeze.
+- **Gates (2026-11-21):**
+  - `go build ./... && go vet ./...` clean.
+  - Full `go test ./...` with `PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL` (`/15`), `ENROLLMENT_`, `RESOURCE_`, `SHIELD_` and `AUTH_TEST_DATABASE_URL`: 0 failures, only the 2 known skips (`TestUpdateScimConfig_NoCrossConnectionProofReuse`, `TestCSRHasSPIFFEURI`).
+  - Note: without the extra `*_TEST_DATABASE_URL` variables, about 226 DB tests in `graph/resolvers`, `connector`, `resource` and `shield` skip; set them all.
+- **Live check:** pending (lab, after the Sprint 24 acceptance run): the U1 live check above.
 
 ---
 
