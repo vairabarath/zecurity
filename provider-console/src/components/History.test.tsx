@@ -54,14 +54,35 @@ describe('Relay history', () => {
     expect(screen.getByRole('button', { name: '7 d' })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('with a link capacity, adds "Both directions" against a dashed ceiling (no extra request)', async () => {
+  it('with a link capacity, adds "Both directions" against the ceiling (no extra request)', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch(metricRoutes(RELAY_SERIES))
     const { container } = render(<Relay cap={125_000_000} />)
     expect(await screen.findByText('Both directions')).toBeInTheDocument()
-    expect(screen.getByText(/Link capacity 1 Gbps/)).toBeInTheDocument()
-    expect(container.querySelector('[data-ceiling]')).not.toBeNull()
+    // The sample traffic (3 B/s) is far below 1 Gbps: named, off scale.
+    expect(container.querySelector('[data-ceiling-label]')).toHaveTextContent('Link capacity 1 Gbps')
     expect(metricCalls(calls)).toHaveLength(3)
+  })
+
+  it('every chart on the page reads the same window', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch(metricRoutes(RELAY_SERIES))
+    render(<Relay cap={null} />)
+    await waitFor(() => expect(metricCalls(calls)).toHaveLength(3))
+    const windows = new Set(metricCalls(calls).map((c) => { const q = new URLSearchParams(c.search); return `${q.get('from')}|${q.get('to')}` }))
+    expect(windows.size).toBe(1)
+  })
+
+  it('on hourly ranges, no "Both directions" line or ceiling: hourly means would hide a full link', async () => {
+    signedInAs(superAdminMe)
+    mockFetch(metricRoutes(RELAY_SERIES))
+    const { container } = render(<Relay cap={125_000_000} />)
+    await screen.findByText('Both directions')
+    await userEvent.setup().click(screen.getByRole('button', { name: '7 d' }))
+    expect(await screen.findByText(/compared on the 1 h and 24 h ranges/)).toBeInTheDocument()
+    expect(screen.queryByText('Both directions')).not.toBeInTheDocument()
+    expect(container.querySelector('[data-ceiling]')).toBeNull()
+    expect(container.querySelector('[data-ceiling-label]')).toBeNull()
   })
 
   it('without a capacity, no ceiling and no sum line', async () => {

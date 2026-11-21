@@ -1,4 +1,7 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { useSessionStore } from '@/auth/session'
+import { Home } from '@/pages/Home'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry, CertificateExpiryResult, Page, RelaySummary } from '@/api/types'
@@ -132,6 +135,8 @@ describe('Overview', () => {
     expect(screen.queryByText('Certificates needing action')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Recent operator activity' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Control plane' })).not.toBeInTheDocument()
+    // The stored trend is labelled as one, apart from the live count tile.
+    expect(await screen.findByText('Relay connections, 24 h')).toBeInTheDocument()
   })
 
   it('reads every relay page by cursor', async () => {
@@ -180,6 +185,21 @@ describe('Overview', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: 'Refresh overview' }))
     await waitFor(() => expect(calls).toHaveLength(14))
     expect(paths(calls.slice(7)).sort()).toEqual(['GET /provider/alerts', 'GET /provider/audit', 'GET /provider/certificates', 'GET /provider/health', 'GET /provider/metrics/fleet.active_sessions', 'GET /provider/relay-pools', 'GET /provider/relays'])
+  })
+
+  it('the trend is not read until the role is known: one metrics read, for the right series', async () => {
+    useSessionStore.getState().startSession('tok-full', 900, false)
+    const { calls } = mockFetch(routes)
+    render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    )
+    await act(async () => {})
+    expect(calls.filter((c) => c.path.startsWith('/provider/metrics/'))).toHaveLength(0)
+    act(() => useSessionStore.getState().setMe(superAdminMe))
+    await screen.findByText('Active sessions, 24 h')
+    await waitFor(() => expect(calls.filter((c) => c.path.startsWith('/provider/metrics/')).map((c) => c.path)).toEqual(['/provider/metrics/fleet.active_sessions']))
   })
 
   it('a failed source shows Retry without hiding the rest', async () => {

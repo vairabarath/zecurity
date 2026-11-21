@@ -20,7 +20,7 @@ import { formatLinkSpeed, formatUtilization, NEAR_CAPACITY } from '@/lib/capacit
 import { formatDateTime, formatRate } from '@/lib/format'
 import { fetchFleet, MAX_RELAY_PAGES, RELAY_PAGE_LIMIT, type Fleet } from '@/lib/fleet'
 import { Sparkline } from '@/components/MetricChart'
-import { useMetricSeries, type MetricState } from '@/lib/useMetricSeries'
+import { useMetricSeries, useMetricWindow, type MetricState } from '@/lib/useMetricSeries'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
 import { cn } from '@/lib/utils'
 
@@ -72,8 +72,10 @@ export function Home() {
   const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
   const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
   // F23 trend (Sprint 24 M2): read here, not in the tile, so the tile
-  // remounting inside FleetTiles never sends a second request.
-  const trend = useMetricSeries(isSuperAdmin ? 'fleet.active_sessions' : 'fleet.connections', undefined, '24h', round)
+  // remounting inside FleetTiles never sends a second request; not read
+  // until the role is known (the series depends on it: one read per visit).
+  const trendWindow = useMetricWindow('24h', round)
+  const trend = useMetricSeries(me ? (isSuperAdmin ? 'fleet.active_sessions' : 'fleet.connections') : null, undefined, trendWindow, round)
 
   if (!me) return null
   const refresh = () => setRound((n) => n + 1)
@@ -255,7 +257,9 @@ function FleetTiles({ state, onRetry, children }: { state: DetailState<Fleet>; o
 // Super-admins see sessions (tenant data, super-admin only); relay-ops see
 // relay connections (relay data they may read, D-40 extended).
 function FleetTrendTile({ superAdmin, state }: { superAdmin: boolean; state: MetricState }) {
-  const label = superAdmin ? 'Active sessions' : 'Relay connections'
+  // Named as a trend: the live relay-connections count is its own tile, and
+  // this one shows the latest stored sample, which can be older.
+  const label = superAdmin ? 'Active sessions, 24 h' : 'Relay connections, 24 h'
   return (
     <Tile label={label}>
       <Sparkline label={label} unit="count" state={state} note="Last 24 hours" />

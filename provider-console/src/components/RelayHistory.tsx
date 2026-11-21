@@ -2,14 +2,15 @@ import type { RelaySummary } from '@/api/types'
 import { Card } from '@/components/ui/card'
 import { MetricChart, RangePicker } from '@/components/MetricChart'
 import { formatLinkSpeed } from '@/lib/capacity'
-import { sumSeries, type MetricRange } from '@/lib/metrics'
-import { useMetricSeries, type MetricState } from '@/lib/useMetricSeries'
+import { showsLinkCeiling, sumSeries, type MetricRange } from '@/lib/metrics'
+import { useMetricSeries, useMetricWindow, type MetricState } from '@/lib/useMetricSeries'
 
 // Relay detail "History" (Sprint 24 M2, F23): stored connections and
 // bandwidth over a range. Relay series: both roles (relay.metrics.read).
 // With a link capacity (B2), a "Both directions" line is drawn against it:
 // both flows share the link (D-42), so the capacity bounds their sum, never
-// one direction alone.
+// one direction alone. 1-minute ranges only: an hourly mean hides the
+// minutes the link was full (showsLinkCeiling).
 
 function both(a: MetricState, b: MetricState): MetricState {
   if (a.status !== 'ready') return a
@@ -26,10 +27,12 @@ export function RelayHistory({
   range: MetricRange
   onRange: (r: MetricRange) => void
 }) {
-  const conns = useMetricSeries('relay.connections', relay.id, range)
-  const toClients = useMetricSeries('relay.bytes_to_clients_per_sec', relay.id, range)
-  const toConnectors = useMetricSeries('relay.bytes_to_connectors_per_sec', relay.id, range)
+  const win = useMetricWindow(range)
+  const conns = useMetricSeries('relay.connections', relay.id, win)
+  const toClients = useMetricSeries('relay.bytes_to_clients_per_sec', relay.id, win)
+  const toConnectors = useMetricSeries('relay.bytes_to_connectors_per_sec', relay.id, win)
   const cap = relay.link_capacity_bps
+  const withCeiling = cap !== null && showsLinkCeiling(range)
   return (
     <Card role="region" aria-labelledby="relay-history" className="flex flex-col gap-5 px-5 py-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -49,10 +52,15 @@ export function RelayHistory({
         lines={[
           { label: 'To clients', state: toClients },
           { label: 'To connectors', state: toConnectors, tone: 'info' },
-          ...(cap !== null ? [{ label: 'Both directions', state: both(toClients, toConnectors), tone: 'warning' as const }] : []),
+          ...(withCeiling ? [{ label: 'Both directions', state: both(toClients, toConnectors), tone: 'warning' as const }] : []),
         ]}
-        ceiling={cap !== null ? { value: cap, label: `Link capacity ${formatLinkSpeed(cap)}` } : null}
+        ceiling={withCeiling ? { value: cap, label: `Link capacity ${formatLinkSpeed(cap)}` } : null}
       />
+      {cap !== null && !withCeiling && (
+        <p className="text-[12.5px] text-muted-foreground">
+          Link capacity ({formatLinkSpeed(cap)}) is compared on the 1 h and 24 h ranges: hourly averages would hide the minutes the link was full.
+        </p>
+      )}
     </Card>
   )
 }
