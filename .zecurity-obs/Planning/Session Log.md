@@ -3988,3 +3988,19 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Barath approved D-55 and the commit; T1 PR opened. After merge: tick T1 in `path.md` and F27 in the tracker.
 - The A3 tick in `path.md` is committed on its own in the same branch.
+
+## 2026-11-21 — Claude Code (Sathiya, Sprint 24 close-out and Sprint 25 planning)
+
+**What was done:**
+- Merged T1 #238 (after merging main: R1 #237, M1 #239 conflicts in `CLAUDE.md` and `authz.go`, both sides kept). Local DB reset for `068_`.
+- Reviewed Barath's M2 (#240); it merged before the fixes landed, so the 7 findings were fixed in #242 (link ceiling on 1-minute ranges only, scale to data, trend tile label and timing, tooltip not a live region, 24 h axis day, one window per page) plus 4 second-review findings (sparkline crash on unparseable times, trend window at role, plain sparkline label, window in state); merged `cb441cc9`. T1 tick #243 merged.
+- Sprint 25 (usage metering, F32/F33 + usage alerts) planned: scope draft, `Sprint25/path.md`, both phase files, Decision Record amendment 2026-11-21 (usage, D-56 … D-61), `CLAUDE.md` switched to Sprint 25 (PR #244).
+
+**Key decisions (Barath, 2026-11-21):**
+- Active users per month is a meter; a purged tenant's usage is kept with its id and name (amends D-46); usage thresholds raise warning-only tenant alerts (D-61).
+- Usage is a separate exact ledger (not derived from M1); only relayed traffic is metered; super-admin only (`tenant.usage.read`).
+- U1a (schema) merges first as the contract; `usage_relay_baselines` persisted with the usage so a controller restart loses no bytes.
+
+**What's next:**
+- Sprint 24 acceptance run (both, reset lab DB, current `main`); findings → X2; tick F23, F26, F27.
+- Barath: U1a `071_usage` → U1b collector. Sathiya: X2 → U2 (after U1a) → U3 → U4 (`072_usage_alert_kind`).

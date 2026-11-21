@@ -2,7 +2,7 @@
 type: sprint
 sprint: 25
 title: Provider Dashboard — usage metering and reports (F32, F33; usage alerts)
-status: DRAFT pending Barath's sign-off (2026-11-21) — implementation may not start until the checklist's sign-off box is ticked and D-56 … D-61 are in the Decision Record
+status: decided and signed off by Barath (2026-11-21); implementation may start (X2 after the Sprint 24 acceptance run, U2 after U1a)
 created: 2026-11-21
 team:
   - Person 1 = Barath (M2): F32 — U1 usage ledger and collector
@@ -23,13 +23,13 @@ Sprint 24 made the fleet observable (F23 charts, F26 alerts, F27 timeline). Spri
 | **F26** usage alerts | F26 has built-in tenant rule kinds (A1) and delivery (A2) | **U4** `tenant.usage_over` rule kind (Sathiya) |
 | Sprint 24 follow-ups | Sprint 24 acceptance run not yet done | **X2** (Sathiya) |
 
-Tracker: `.zecurity-obs/Planning/Provider-Dashboard-Features.md`. **Binding decisions (after sign-off):** `docs/provider-dashboard-architecture-decisions.md` → amendment **2026-11-2x (D-56 … D-61)**, on top of D-01 … D-55. Scope discussion: `Sprint25/Scope-Draft.md` (PR #244).
+Tracker: `.zecurity-obs/Planning/Provider-Dashboard-Features.md`. **Binding decisions (after sign-off):** `docs/provider-dashboard-architecture-decisions.md` → amendment **2026-11-21, usage (D-56 … D-61)**, on top of D-01 … D-55. Scope discussion: `Sprint25/Scope-Draft.md` (PR #244).
 
 ---
 
-## Decisions (Phase 0 — proposed, awaiting sign-off)
+## Decisions (Phase 0 — done 2026-11-21)
 
-The three review questions were answered on 2026-11-21 (marked ✔). The rest is proposed until Barath signs off; full text goes into the Decision Record.
+Decided by the product owner (Barath) after review of the scope draft (PR #244); the three review questions were answered on 2026-11-21 (marked ✔). Full text in the Decision Record.
 
 | ID | Decision | Phase |
 |---|---|---|
@@ -46,8 +46,8 @@ The three review questions were answered on 2026-11-21 (marked ✔). The rest is
 
 ## Team assignments
 
-**Person 1 — Barath (M2):** U1. Phase file: `Member1-Barath/Phases-U1-Usage-Ledger.md` (written after sign-off).
-**Person 2 — Sathiya (M1):** X2 → U2 → U3 → U4. Phase file: `Member2-Sathiya/Phases-X2-U2-U4-Usage-Report.md` (written after sign-off).
+**Person 1 — Barath (M2):** U1. Phase file: `Member1-Barath/Phases-U1-Usage-Ledger.md`.
+**Person 2 — Sathiya (M1):** X2 → U2 → U3 → U4. Phase file: `Member2-Sathiya/Phases-X2-U2-U4-Usage-Report.md`.
 
 Both: review each other's PRs; the Sprint 24 acceptance run **before** U1/U2 start; the Sprint 25 acceptance run at the end (live, on a reset lab DB, current `main`).
 
@@ -56,7 +56,7 @@ Both: review each other's PRs; the Sprint 24 acceptance run **before** U1/U2 sta
 | Phase | Owner | Feature | Depends on | Migration |
 |---|---|---|---|---|
 | **X2** Sprint 24 follow-ups | Sathiya | F23, F26, F27 | the Sprint 24 acceptance run | none expected |
-| **U1a** Usage schema | Barath | F32 | D-57, D-58 | `071_usage.sql` (`usage_hourly`, `usage_active_users`, `usage_tenants`) |
+| **U1a** Usage schema | Barath | F32 | D-57, D-58 | `071_usage.sql` (`usage_hourly`, `usage_collector_minutes`, `usage_active_users`, `usage_active_user_counts`, `usage_tenants`, `usage_relay_baselines`; see the phase file) |
 | **U1b** Usage collector | Barath | F32 | U1a merged, D-59 | none |
 | **U2** Usage read API | Sathiya | F33 | U1a merged (the table is the contract), D-60 | none |
 | **U3** Usage console + export | Sathiya | F33 | U2 merged | none |
@@ -91,7 +91,7 @@ Sathiya: X2 ──► U2 (API, against U1a's table) ──► U3 (console) ─�
 
 ## Rules (this sprint)
 
-- Decisions **D-56 … D-61 are binding after sign-off**, with D-01 … D-55. If a phase needs another architectural choice, stop and ask; don't decide it in code.
+- Decisions **D-56 … D-61 are binding**, with D-01 … D-55. If a phase needs another architectural choice, stop and ask; don't decide it in code.
 - **Counts, not estimates (D-59):** usage is counted at the source; never derived from M1 rates or roll-ups, never interpolated, never back-filled. A gap stays a gap and is marked incomplete.
 - **Exactly once:** every write to the ledger is idempotent per (tenant, meter, minute) for time meters and per relay heartbeat for byte deltas; a controller restart, a re-run of a minute or a crash between accumulate and flush never counts twice. Tested with mutation checks.
 - **Never negative:** a relay restart or counter reset starts a new baseline; it never produces a negative or huge delta.
@@ -146,8 +146,8 @@ Tracker: F32 and F33 ticked only after their live checks.
 ## Checklist
 
 - [ ] Sprint 24 acceptance run (both) done; follow-ups recorded as X2; tracker F23, F26, F27 ticked
-- [ ] Phase 0: D-56 … D-61 decided and written into the Decision Record
-- [ ] Documents reviewed (scope draft, Sprint 25 path, phase files, Decision Record amendment) — signed off by Barath; implementation may start
+- [x] Phase 0: D-56 … D-61 decided and written into the Decision Record (amendment 2026-11-21, usage)
+- [x] Documents reviewed (scope draft, Sprint 25 path, phase files, Decision Record amendment) — signed off by Barath 2026-11-21; implementation may start
 - [ ] X2 — Sprint 24 follow-ups (Sathiya)
 - [ ] U1a — Usage schema `071_usage` (Barath)
 - [ ] U1b — Usage collector (Barath)

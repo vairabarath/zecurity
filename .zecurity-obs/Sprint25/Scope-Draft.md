@@ -2,7 +2,7 @@
 type: sprint-scope-draft
 sprint: 25
 title: Provider Dashboard — usage metering and reports (F32, F33)
-status: DRAFT for Barath's sign-off (2026-11-21) — the three review questions are answered (below); nothing is binding until sign-off; then Sprint25/path.md, the phase files and a Decision Record amendment (D-56 … D-61)
+status: SIGNED OFF by Barath 2026-11-21 — superseded by Sprint25/path.md, the phase files and the Decision Record amendment 2026-11-21 (usage, D-56 … D-61); kept as the scope discussion record
 baseline: main cb441cc9 (Sprint 24 merged: X1, A1–A3, T1, R1, M1, M2 + review fixes; Sprint 24 acceptance run still to do)
 ---
 
