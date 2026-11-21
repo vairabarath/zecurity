@@ -206,11 +206,22 @@ func TestDecide_AlertMatrix(t *testing.T) {
 		{RoleRelayOps, ActionAlertRuleDelete, false},
 		{"admin", ActionAlertRead, false},
 		{"", ActionAlertRead, false},
+		// D-55: relay-ops may read the timeline's relay and pool audit rows,
+		// never the full provider audit log.
+		{RoleSuperAdmin, ActionTimelineRelayAudit, true},
+		{RoleRelayOps, ActionTimelineRelayAudit, true},
+		{"admin", ActionTimelineRelayAudit, false},
+		{RoleRelayOps, ActionAuditView, false},
 	} {
 		var err error
-		if c.action == ActionAlertRead {
+		switch c.action {
+		case ActionAlertRead:
 			err = a.CanReadAlerts(Actor{Role: c.role})
-		} else {
+		case ActionTimelineRelayAudit:
+			err = a.CanReadTimelineRelayAudit(Actor{Role: c.role})
+		case ActionAuditView:
+			err = a.CanViewProviderAudit(Actor{Role: c.role})
+		default:
 			err = a.CanManageAlertRules(Actor{Role: c.role}, c.action, Target{Type: "alert_rule"})
 		}
 		if c.allow != (err == nil) {

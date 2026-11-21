@@ -826,6 +826,9 @@ func main() {
 	mux.Handle("GET /provider/alert-events/{id}/deliveries", requireProvider(http.HandlerFunc(alertChannelHandler.Deliveries)))
 	mux.Handle("GET /provider/alerts", requireProvider(http.HandlerFunc(alertHandler.ListActive)))
 	mux.Handle("GET /provider/alert-events", requireProvider(http.HandlerFunc(alertHandler.ListEvents)))
+	// T1 (F27): read-only incident timeline (alert events + provider audit).
+	timelineHandler := &alerting.TimelineHandler{DB: db.Pool, Authz: providerAuthz}
+	mux.Handle("GET /provider/timeline", requireProvider(http.HandlerFunc(timelineHandler.List)))
 	mux.Handle("GET /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.ListRules)))
 	mux.Handle("POST /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.CreateRule)))
 	mux.Handle("PATCH /provider/alert-rules/{id}", requireProvider(http.HandlerFunc(alertHandler.UpdateRule)))

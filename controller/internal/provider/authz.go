@@ -109,10 +109,40 @@ const (
 	ActionAlertChannelRotate = "alert.channel.rotate_secret"
 )
 
+// ActionTimelineRelayAudit (Sprint 24 T1, D-55) lets the incident timeline
+// show relay and pool operation audit rows (RelayOpsTimelineAuditActions
+// only, with actor and reason, never the raw details). It is not audit.view:
+// the full provider audit log stays super-admin only. Deliberately outside
+// relay.*, so the grant to relay-ops is explicit (relayOpsAlsoAllowed).
+const ActionTimelineRelayAudit = "timeline.relay_audit"
+
+// RelayOpsTimelineAuditActions are the provider audit actions a relay-ops
+// timeline may show (D-55): relay and pool operations only. An allowlist on
+// purpose: relay.placement_rejected targets a relay but records a tenant
+// (a tenant event), and tenant.relay_pool.assign targets a tenant; a new
+// relay or pool action is hidden from relay-ops until it is added here.
+var RelayOpsTimelineAuditActions = []string{
+	ActionRelayCreate,
+	ActionRelayIssueToken,
+	ActionRelayRevoke,
+	ActionRelayDelete,
+	ActionRelayDrain,
+	ActionRelayResume,
+	ActionRelayMove,
+	ActionRelayCapacitySet,
+	ActionRelayPoolCreate,
+	ActionRelayPoolUpdate,
+	ActionRelayPoolSetPlacement,
+	ActionRelayPoolDelete,
+	"relay_pool.failover", // relay.ActionPoolFailover (system)
+	"relay_pool.failback", // relay.ActionPoolFailback (system)
+}
+
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
 // perform.
 var relayOpsAlsoAllowed = map[string]bool{
-	ActionAlertRead: true,
+	ActionAlertRead:          true,
+	ActionTimelineRelayAudit: true,
 }
 
 // superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform:
@@ -286,6 +316,12 @@ func (a *Authz) CanReadTenants(actor Actor, target Target) error {
 // (super-admin; relay-ops filtered to relay and pool alerts).
 func (a *Authz) CanReadAlerts(actor Actor) error {
 	return decide(actor, ActionAlertRead, Target{Type: "alert"})
+}
+
+// CanReadTimelineRelayAudit gates the relay and pool audit rows of the
+// incident timeline (D-55): super-admin and relay-ops.
+func (a *Authz) CanReadTimelineRelayAudit(actor Actor) error {
+	return decide(actor, ActionTimelineRelayAudit, Target{Type: "timeline"})
 }
 
 // CanManageAlertRules gates the alert rule API (ActionAlertRuleRead,
