@@ -108,6 +108,36 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 - DB-backed tests run (no skip).
 - **Mutation checks:** write 0 for an unknown value → the gap test fails; allow relay-ops tenant series → the authz test fails.
 
+### M1 implementation record (branch `feat/sprint24-m1-metric-store`)
+- **Choices agreed with Barath (2026-11-21):**
+  1. **Two actions:** `relay.metrics.read` (relay-ops and super-admin) and `tenant.metrics.read` (super-admin only), so `decide()`'s prefix rules settle it, instead of one `metrics.read` with per-series logic.
+  2. **Fleet totals** are the sum over the relays that report; a gap only when none does (not a gap whenever any relay is silent).
+  3. **Two tables**, `metric_samples` (1 minute) and `metric_rollups` (hourly, with min / max / avg / count), rather than one with a resolution column.
+- **Schema `068_metric_samples.sql`:**
+  - primary key `(series, subject_id, ts)`; `subject_type` is the series' prefix (CHECK); fleet rows use the nil UUID (primary key columns can't be NULL; CHECK ties it to `fleet`);
+  - samples on the minute and roll-ups on the hour, checked on the **epoch** (not `date_trunc`, which follows the session time zone: in Asia/Kolkata an hour starts at :30 UTC; tested);
+  - values finite (`<> 'NaN'`: Postgres treats NaN as equal to NaN); roll-ups `min <= avg <= max` (the roll-up clamps the mean, because a float mean can round past its max: avg(0.1, 0.1, 0.1) = 0.10000000000000002; tested);
+  - `ts` indexes for retention; app role: samples SELECT/INSERT/DELETE, roll-ups also UPDATE (upsert); no foreign keys.
+- **Series (15)** in `providerquery/metrics.go` (registry with subject, unit and whether it is tenant data):
+  - relay: `relay.connections`, `relay.bytes_to_clients_per_sec`, `relay.bytes_to_connectors_per_sec`;
+  - tenant: `tenant.active_sessions`, `tenant.connectors_online`, `tenant.shields_online`, `tenant.relay_bytes_to_clients_per_sec`, `tenant.relay_bytes_to_connectors_per_sec`, `tenant.relay_streams`;
+  - fleet: `fleet.connections`, `fleet.bytes_to_clients_per_sec`, `fleet.bytes_to_connectors_per_sec` (relay data: relay-ops too), `fleet.active_sessions`, `fleet.connectors_online`, `fleet.shields_online` (tenant data: super-admin only).
+- **Sampler `internal/metricstore`** (writes; `providerquery` stays read-only):
+  - every minute (`Run`/`Tick`), timestamps on the minute, `ON CONFLICT DO NOTHING` (a restart in the same minute keeps the first sample);
+  - relays from the shared reader `providerquery.RelayLoads` (as A1): only `status = 'active'` relays are sampled (inactive = offline = gap); a rate is written only when known; a truncated relay list gives no fleet relay totals;
+  - tenants (`workspaces.status = 'active'`, so suspended tenants included): live sessions = devices not revoked with `session_idle_until` and `session_max_until` in the future; connectors and shields with `status = 'active'`;
+  - per-tenant relay series from R1's tracker: only views of **active** relays no older than `TrafficMaxAge` (main.go: 2 × `RELAY_HEARTBEAT_DB_WRITE_INTERVAL` + 1 min); no fresh view → no tenant relay sample (not reported); a workspace missing from a fresh view = 0 there (D-54 refined); a rate unknown on a fresh view (restart window) → no byte sample for that tenant (streams still written);
+  - each new hour: roll up the previous **two** hours (upsert, so a restart near the boundary still covers the hour) and prune (`METRIC_SAMPLE_RETENTION`, `METRIC_ROLLUP_RETENTION`, defaults 7 d / 400 d); a failed step is retried next tick; `Collect` returns what it read with the first error.
+- **Read API** `GET /provider/metrics/{series}?subject=&from=&to=&step=` (`provider/metrics_read.go`, query in `providerquery`, no `net/http`):
+  - unknown series → 404 (before authorization: it reveals nothing); authorization per series (`CanReadMetricSeries`); `from`/`to` RFC 3339 (default the last 24 h);
+  - step `1m` or `1h`, default `1m` up to 24 h, `1h` beyond; codes `invalid_subject` (relay/tenant need a UUID, fleet takes none), `invalid_range` (from ≥ to, beyond 400 days, or `1m` before the 7-day retention), `invalid_step`, `too_many_points` (> 2,000);
+  - response `{series, subject (null for fleet), unit, step, from, to, points[]}`; hourly points add `min`, `max`, `count`; **a missing point is a gap**. Not audited (aggregates, like the relay list).
+- **Tests:** `metricstore/sampler_test.go` (6: active-only and known-rate relay samples, fleet gap and truncation, tenant counts, R1 sums over fresh active relays, not reported with no fresh view, every registered series is written with its subject); `metricstore/sampler_db_test.go` (6, real DB: write on the minute and idempotent, schema refusals incl. NaN and an offset time zone, roll-up min/max/avg/count and re-run, mean clamp, retention boundary, `Collect` from real relay/tenant/device/agent rows); `provider/metrics_read_test.go` (4: role matrix over all subject kinds incl. tenant JWT 401, minute points with a gap, hourly roll-ups and auto step, every refusal); `authz_test.go` `TestDecide_MetricsMatrix`.
+- **Mutation checks, all caught (12):** unknown relay rate written as 0; offline relay sampled; stale R1 view used; partial tenant sum with an unknown rate; tenant relay 0 with no reporting relay; fleet gap written as 0; roll-up mean not clamped; same-minute rewrite replacing the sample; expired sessions counted; relay-ops allowed tenant series; 1-minute read past 7 days; fleet sessions readable by relay-ops.
+- **Open question (not decided here):** per-tenant series of a **purged** tenant (S4, D-46) stay until the retention prunes them (≤ 400 days). They hold only counts and rates keyed by the tenant id, not tenant content, but D-46 destroys tenant data. Deleting them in the purge would touch S4's purge functions: for Barath to decide.
+- **Gates (2026-11-21):** controller `go build ./...` and `go vet ./...` clean; full `go test ./...` with every DB env set **2,039 passed, 0 failed** (2 known skips: `TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`). No console change.
+- **Live check:** pending (stored samples match live values; a roll-up after an hour; retention with a test setting; relay-ops 403 on tenant series).
+
 ---
 
 ## M2 — Console charts
