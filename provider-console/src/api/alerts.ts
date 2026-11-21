@@ -187,3 +187,49 @@ export function testAlertChannel(id: string, reason: string): Promise<ChannelTes
 export function rotateAlertChannelSecret(id: string, reason: string): Promise<{ secret: string }> {
   return request<{ secret: string }>('POST', `/provider/alert-channels/${encodeURIComponent(id)}/rotate-secret`, { body: { reason } })
 }
+
+// Incident timeline (Sprint 24 T1, F27): read-only. Alert events and provider
+// audit rows (operator actions, pool failover/failback) in one time-ordered
+// list. The controller adds audit rows for super-admins only; relay-ops get
+// relay and pool alert rows only.
+
+export type TimelineSource = 'alert' | 'audit'
+
+export interface TimelineItem {
+  id: string
+  source: TimelineSource
+  at: string
+  target_type: string
+  target_id: string
+  target_name: string
+  tenant_id: string | null
+  // Alert rows.
+  kind?: string
+  transition?: AlertEvent['transition']
+  severity?: AlertSeverity
+  summary?: string
+  started_at?: string
+  // Audit rows.
+  action?: string
+  actor?: string
+  reason?: string
+  details?: unknown
+}
+
+/** At most one of relay_id, pool_id, tenant_id. */
+export interface TimelineParams {
+  relay_id?: string
+  pool_id?: string
+  tenant_id?: string
+  source?: '' | TimelineSource
+  since?: string
+  until?: string
+  cursor?: string
+  limit?: number
+}
+
+const TIMELINE_KEYS = ['relay_id', 'pool_id', 'tenant_id', 'source', 'since', 'until', 'cursor', 'limit'] as const
+
+export function listTimeline(params?: TimelineParams): Promise<Page<TimelineItem>> {
+  return request<Page<TimelineItem>>('GET', '/provider/timeline' + buildQuery(params, TIMELINE_KEYS))
+}

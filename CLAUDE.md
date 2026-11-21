@@ -18,7 +18,7 @@
 - **A3 — Alerts console (F26)**, Sathiya, after A2. **T1 — incident timeline (F27)**, stretch.
 - **Not in Sprint 24:** F22 tunnel success rate, tenant-facing alert delivery (later: admin UI first, tenant webhooks only on demand), vendor integrations, F32/F33 metering, F34 billing, F28/F29, F19, F31, F35, F37, F39, F40.
 
-Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) and **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)**. The plan is `.zecurity-obs/Sprint24/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
+Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)** and **2026-11-21 (D-55: relay-ops see relay and pool operation audit rows in the incident timeline; extends D-40)**. The plan is `.zecurity-obs/Sprint24/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
 
 **Database (pre-production rule):**
 - Schema changes are new numbered SQL files in `controller/migrations/`, run by Postgres only when its volume is first created.
@@ -136,7 +136,7 @@ Sprint 24 specific:
 - No phase before its dependencies are merged (M1 before M2; A1 before A2 before A3).
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
 - **Proto (R1, D-54):** additive only — `repeated WorkspaceTraffic workspace_traffic = 13`; never renumber; an older relay must keep working; a relay that isn't reporting reads "Not reported" (never 0).
-- **Alert scopes (D-50):** platform and tenant alerts are separate in the schema; tenant rows always carry `tenant_id` (DB CHECK); tenant-scoped reads always filter by it. Relay-ops never see tenant names, tenant alerts or per-tenant series (D-40 extended).
+- **Alert scopes (D-50):** platform and tenant alerts are separate in the schema; tenant rows always carry `tenant_id` (DB CHECK); tenant-scoped reads always filter by it. Relay-ops never see tenant names, tenant alerts or per-tenant series (D-40 extended). In the incident timeline relay-ops also see the allowlisted relay and pool operation audit rows (actor and reason, no details; `timeline.relay_audit`, D-55), never the full audit log.
 - **Webhooks (D-52):** one generic versioned JSON payload, no vendor SDKs; HMAC over timestamp + body; secret sealed, shown once, never logged/audited/returned; HTTPS outside dev; SSRF guard checked at connect time; no secrets or tenant content in the payload.
 - **Rules and channels (D-53):** super-admin only, reason + before/after audit; built-in rule kinds, no query language.
 - **Metrics (D-49):** Postgres, 1-min 7 days, hourly 400 days; an unknown value is a gap, never 0. Evaluator read errors never resolve an alert.
