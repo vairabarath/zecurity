@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { RelayHistory } from '@/components/RelayHistory'
 import { TenantHistory } from '@/components/TenantHistory'
 import { DEFAULT_RANGE, type MetricRange } from '@/lib/metrics'
@@ -71,6 +71,23 @@ describe('Relay history', () => {
     await waitFor(() => expect(metricCalls(calls)).toHaveLength(3))
     const windows = new Set(metricCalls(calls).map((c) => { const q = new URLSearchParams(c.search); return `${q.get('from')}|${q.get('to')}` }))
     expect(windows.size).toBe(1)
+  })
+
+  it('a re-render later (same range) keeps the window: no second read', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-11-21T12:00:00Z'))
+      signedInAs(superAdminMe)
+      const { calls } = mockFetch(metricRoutes(RELAY_SERIES))
+      const { rerender } = render(<Relay cap={null} />)
+      await waitFor(() => expect(metricCalls(calls)).toHaveLength(3))
+      vi.setSystemTime(new Date('2026-11-21T12:03:00Z'))
+      rerender(<Relay cap={125_000_000} />)
+      await screen.findByText('Both directions')
+      expect(metricCalls(calls)).toHaveLength(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('on hourly ranges, no "Both directions" line or ceiling: hourly means would hide a full link', async () => {

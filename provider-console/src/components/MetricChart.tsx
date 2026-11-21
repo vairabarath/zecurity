@@ -288,8 +288,11 @@ export function Sparkline({ label, unit, state, note }: { label: string; unit: M
   const d = state.data
   const runs = segments(d.points, d.step)
   const s = summarize(d.points)
-  if (!s) return <span className="text-[12.5px] text-muted-foreground">No data yet.</span>
-  const latestAt = new Date(runs[runs.length - 1].at(-1)!.t).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  // The latest drawable point (segments drops unparseable times): its value
+  // and time are shown together, from the same point.
+  const last = runs.at(-1)?.at(-1)
+  if (!s || !last) return <span className="text-[12.5px] text-muted-foreground">No data yet.</span>
+  const latestAt = new Date(last.t).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
   const from = Date.parse(d.from)
   const to = Date.parse(d.to)
   const top = niceMax(s.max)
@@ -297,8 +300,8 @@ export function Sparkline({ label, unit, state, note }: { label: string; unit: M
   const y = (v: number) => 2 + (1 - v / top) * 36
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[26px] font-semibold leading-tight tracking-[-0.02em]">{formatMetric(unit, s.latest)}</span>
-      <svg viewBox="0 0 200 40" preserveAspectRatio="none" className="h-10 w-full" role="img" aria-label={`${label}, ${note}: latest ${formatMetric(unit, s.latest)} at ${latestAt}, high ${formatMetric(unit, s.max)}`}>
+      <span className="text-[26px] font-semibold leading-tight tracking-[-0.02em]">{formatMetric(unit, last.v)}</span>
+      <svg viewBox="0 0 200 40" preserveAspectRatio="none" className="h-10 w-full" role="img" aria-label={`${label}, ${note}: latest ${formatMetric(unit, last.v)} at ${latestAt}, high ${formatMetric(unit, s.max)}`}>
         {runs.map((seg, i) =>
           seg.length === 1 ? (
             <circle key={i} cx={x(seg[0].t)} cy={y(seg[0].v)} r={1.5} fill="var(--color-primary)" />

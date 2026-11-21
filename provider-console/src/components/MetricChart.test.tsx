@@ -107,6 +107,15 @@ describe('Sparkline', () => {
     // A stored sample, not a live count: its time is shown.
     expect(screen.getByText(/Last 24 hours · latest point /)).toBeInTheDocument()
   })
+  it('points with unparseable times are not drawable: "No data yet", no crash', () => {
+    render(<Sparkline label="Active sessions" unit="count" state={ready([{ ts: 'not-a-time', value: 4 }, { ts: '', value: 5 }])} note="Last 24 hours" />)
+    expect(screen.getByText('No data yet.')).toBeInTheDocument()
+  })
+  it('the headline and its time come from the same (latest drawable) point', () => {
+    render(<Sparkline label="Active sessions" unit="count" state={ready([pt(0, 2), pt(1, 3), { ts: 'bad', value: 99 }])} note="Last 24 hours" />)
+    expect(screen.getByText('3')).toBeInTheDocument()
+    expect(screen.queryByText('99')).not.toBeInTheDocument()
+  })
   it('no data yet says so', () => {
     render(<Sparkline label="Active sessions" unit="count" state={ready([])} note="Last 24 hours" />)
     expect(screen.getByText('No data yet.')).toBeInTheDocument()

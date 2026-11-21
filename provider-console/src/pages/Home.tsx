@@ -74,7 +74,8 @@ export function Home() {
   // F23 trend (Sprint 24 M2): read here, not in the tile, so the tile
   // remounting inside FleetTiles never sends a second request; not read
   // until the role is known (the series depends on it: one read per visit).
-  const trendWindow = useMetricWindow('24h', round)
+  // The window is taken when the read can be sent (role known), not at mount.
+  const trendWindow = useMetricWindow('24h', `${round}|${me ? 'me' : ''}`)
   const trend = useMetricSeries(me ? (isSuperAdmin ? 'fleet.active_sessions' : 'fleet.connections') : null, undefined, trendWindow, round)
 
   if (!me) return null
@@ -259,10 +260,10 @@ function FleetTiles({ state, onRetry, children }: { state: DetailState<Fleet>; o
 function FleetTrendTile({ superAdmin, state }: { superAdmin: boolean; state: MetricState }) {
   // Named as a trend: the live relay-connections count is its own tile, and
   // this one shows the latest stored sample, which can be older.
-  const label = superAdmin ? 'Active sessions, 24 h' : 'Relay connections, 24 h'
+  const series = superAdmin ? 'Active sessions' : 'Relay connections'
   return (
-    <Tile label={label}>
-      <Sparkline label={label} unit="count" state={state} note="Last 24 hours" />
+    <Tile label={`${series}, 24 h`}>
+      <Sparkline label={series} unit="count" state={state} note="Last 24 hours" />
     </Tile>
   )
 }

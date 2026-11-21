@@ -178,6 +178,7 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
   6. **24 h axis ends show the day** (both ends no longer read the same clock time).
   7. **One window per page** (`useMetricWindow(range, round)`): every chart on a page reads the same `from`/`to`; the page's Refresh counter stays in the query key, so a Refresh within the same second still reads once more.
   - Tests added for each; **mutation checks, all caught (9):** ceiling on hourly ranges, ceiling always in scale, tooltip as a live region, Refresh counter dropped from the key, 24 h labels without the day, per-series windows, old tile label, sparkline without its time, trend read before the role is known. Gates: `npm test` **716 passed** (after merging main), lint, typecheck and build clean.
+  - **Second review (#242, 2026-11-21):** the Sparkline took its headline and time from different lists and could crash on points with a value but an unparseable time (now: the latest drawable point for both, else "No data yet"); the Overview trend window is taken when the role is known, not at mount; the Sparkline gets the plain series name (", 24 h" stays on the tile label); `useMetricWindow` holds the window in state, not a memo (React may drop a memo, which would re-send every read). Tests added; 5 mutation checks caught. `npm test` **720 passed**, lint, typecheck and build clean.
 
 ---
 

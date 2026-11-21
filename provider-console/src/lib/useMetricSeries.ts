@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useState } from 'react'
 import { getMetricSeries, type MetricSeriesData } from '@/api/metrics'
 import { rangeWindow, type MetricRange, type MetricWindow } from '@/lib/metrics'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
@@ -12,14 +12,21 @@ import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
 export type MetricState = DetailState<MetricSeriesData>
 
 /**
- * The window for `range`, computed once per range (and per `round`, the
- * page's Refresh counter) so every chart on a page reads the same window:
- * one set of x-axis bounds, and the hover compares like with like.
+ * The window for `range`, taken once per range and `reset` (the page's
+ * Refresh counter, or anything else that should start a new window) so
+ * every chart on a page reads the same window: one set of x-axis bounds,
+ * and the hover compares like with like. Held in state, not a memo: React
+ * may drop a memo, and a new window would send every chart's read again.
  */
-export function useMetricWindow(range: MetricRange, round = 0): MetricWindow {
-  // round only forces a fresh window on Refresh.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => rangeWindow(range, new Date()), [range, round])
+export function useMetricWindow(range: MetricRange, reset: string | number = 0): MetricWindow {
+  const key = `${range}|${reset}`
+  const [held, setHeld] = useState(() => ({ key, win: rangeWindow(range, new Date()) }))
+  if (held.key === key) return held.win
+  // A new range or reset: adjust state during render (React's pattern for
+  // state derived from props).
+  const next = { key, win: rangeWindow(range, new Date()) }
+  setHeld(next)
+  return next.win
 }
 
 const skip = () => Promise.resolve(null)
