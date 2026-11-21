@@ -152,6 +152,24 @@ Order: **R1 and M1 in parallel → M2** (after M1 is merged). Per-tenant relay s
 ### Tests
 - `npm test`, `npm run lint`, `npm run build`; chart renders gaps; relay-ops view hides tenant charts.
 
+### M2 implementation record (branch `feat/sprint24-m2-console-charts`)
+- **Choices agreed with Barath (2026-11-21):**
+  1. **Hand-written SVG chart, no library** (the console has none; ~0 bundle cost; gaps under our control).
+  2. **Overview trend per role:** super-admins see **fleet sessions** (tenant data); relay-ops see **fleet relay connections** (relay data they may read), so relay-ops never get a 403 tile.
+  3. **One range picker per page** (1 h / 24 h / 7 d / 30 d): every chart on the page follows it.
+- **Refresh (correction to the first proposal):** charts are read once when they appear, again on a range change and on the page's Refresh, **no auto-refresh**: the console's no-polling rule (every page reads once per visit). Metric reads aren't audited, so changing the range on tenant detail writes no `tenant.read` entry (tested). The range lives in the page's top-level component, so a Refresh (which remounts the view) keeps it.
+- **Code:**
+  - `api/metrics.ts` (`getMetricSeries`, allowlisted query keys); `lib/metrics.ts` (ranges: 1 h and 24 h read 1-minute points, 7 d and 30 d hourly; `segments` breaks a line wherever a step is missing; `nearestIndex`, `summarize`, `niceMax`, `formatMetric` (B2 rate formatting), `sumSeries`); `lib/useMetricSeries.ts` (on `useDetailQuery`: StrictMode-safe, one request per key).
+  - `components/MetricChart.tsx`: `MetricChart` (lines per series, gaps as breaks, a single point as a dot, hourly min–max band, dashed ceiling, hover tooltip with time and value or "no data", screen-reader summary with latest / low / high, skeleton while loading, "Not available for your role" / "Couldn't load" / an empty text instead of a zero line), `RangePicker` (`aria-pressed`), `Sparkline`.
+  - `components/RelayHistory.tsx` on relay detail (not for a pending relay): connections; bandwidth to clients and to connectors. With a link capacity (B2), a **"Both directions"** line (the sum, only for minutes where both directions have a point) is drawn against the dashed **link capacity** ceiling: both flows share the link (D-42), so the capacity bounds their sum, never one direction.
+  - `components/TenantHistory.tsx` on tenant detail: active sessions; connectors and shields online; relay traffic (R1), "Not reported: no relay reported this tenant's traffic in this range" when empty.
+  - `pages/Home.tsx`: the trend tile next to the firing-alerts tile; its series is read in `Home` (like the other tiles), because `FleetTiles` remounts its children when the relay list arrives, which sent a second request when the tile read it itself (caught by the request pins).
+  - `api-surface.test.ts`: `GET /provider/metrics/{series}` added to the reads on purpose; no write.
+- **Tests:** `lib/metrics.test.ts` (gaps, hourly step with min/max, unparseable points, range windows, helpers, sums), `components/MetricChart.test.tsx` (segments per run, screen-reader summary, band, ceiling, empty, refusal and failure texts, skeleton, sparkline), `components/History.test.tsx` (relay series with subject and step, 1 h → 7 d switches to hourly, both directions and ceiling only with a capacity and without an extra request; tenant series, a range change never reads `/provider/tenants`, "Not reported"). Pins updated on purpose: relay and tenant detail button lists include the four range buttons; the Overview request pins include the trend read, per role (relay-ops never asks for fleet sessions).
+- **Mutation checks, all caught (8):** a gap drawn as a connected line; a missing direction summed as 0; relay-ops asking for fleet sessions; the capacity drawn against one direction; the hourly band dropped; the 24 h range read hourly; an empty range drawn as a chart instead of "Not reported"; the trend tile never reading its series.
+- **Gates (2026-11-21):** provider console `npm test` **703 passed** (51 files), `npm run lint` clean, `npm run build` clean. No controller, schema or admin change.
+- **Live check:** pending, together with R1 and M1 (charts on relay detail, tenant detail and Overview for each range; a stopped relay shows a break; relay-ops see no tenant charts).
+
 ---
 
 ## Live check (each phase)

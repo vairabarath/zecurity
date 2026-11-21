@@ -19,6 +19,8 @@ import { bucketFor, formatRelative } from '@/lib/expiry'
 import { formatLinkSpeed, formatUtilization, NEAR_CAPACITY } from '@/lib/capacity'
 import { formatDateTime, formatRate } from '@/lib/format'
 import { fetchFleet, MAX_RELAY_PAGES, RELAY_PAGE_LIMIT, type Fleet } from '@/lib/fleet'
+import { Sparkline } from '@/components/MetricChart'
+import { useMetricSeries, type MetricState } from '@/lib/useMetricSeries'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
 import { cn } from '@/lib/utils'
 
@@ -69,6 +71,9 @@ export function Home() {
   const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchSoonCertificates : skip)
   const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
   const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
+  // F23 trend (Sprint 24 M2): read here, not in the tile, so the tile
+  // remounting inside FleetTiles never sends a second request.
+  const trend = useMetricSeries(isSuperAdmin ? 'fleet.active_sessions' : 'fleet.connections', undefined, '24h', round)
 
   if (!me) return null
   const refresh = () => setRound((n) => n + 1)
@@ -88,6 +93,7 @@ export function Home() {
 
       <FleetTiles state={fleet.state} onRetry={refresh}>
         <FiringAlertsTile state={firing.state} />
+        <FleetTrendTile superAdmin={isSuperAdmin} state={trend} />
         {isSuperAdmin && <CertificateTile state={certs.state} />}
       </FleetTiles>
 
@@ -242,6 +248,18 @@ function FleetTiles({ state, onRetry, children }: { state: DetailState<Fleet>; o
       </Tile>
       {children}
     </div>
+  )
+}
+
+// F23 trend (Sprint 24 M2): the last 24 hours of a stored fleet series.
+// Super-admins see sessions (tenant data, super-admin only); relay-ops see
+// relay connections (relay data they may read, D-40 extended).
+function FleetTrendTile({ superAdmin, state }: { superAdmin: boolean; state: MetricState }) {
+  const label = superAdmin ? 'Active sessions' : 'Relay connections'
+  return (
+    <Tile label={label}>
+      <Sparkline label={label} unit="count" state={state} note="Last 24 hours" />
+    </Tile>
   )
 }
 

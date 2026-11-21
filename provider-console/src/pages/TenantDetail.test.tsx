@@ -249,7 +249,7 @@ describe('Tenant detail: content', () => {
     renderApp(`/tenants/${ID}`)
     await screen.findByRole('heading', { name: 'Acme', level: 1 })
     const main = screen.getByRole('main')
-    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', 'Suspend tenant', 'Place legal hold', 'Delete tenant', 'Change plan', ...Array(6).fill('Change'), 'Change pool'])
+    expect(within(main).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Refresh (records an audit entry)', '1 h', '24 h', '7 d', '30 d', 'Suspend tenant', 'Place legal hold', 'Delete tenant', 'Change plan', ...Array(6).fill('Change'), 'Change pool'])
     expect(calls.every((c) => c.method === 'GET')).toBe(true)
     // S4 (D-46) adds Delete tenant on purpose; nothing else destructive.
     expect(within(main).queryByText(/\b(revoke|edit|create)\b/i)).not.toBeInTheDocument()

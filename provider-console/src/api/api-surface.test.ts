@@ -3,6 +3,7 @@ import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as alertsApi from './alerts'
 import * as authApi from './auth'
+import * as metricsApi from './metrics'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
 import * as poolsApi from './pools'
@@ -25,6 +26,7 @@ import * as tenantsApi from './tenants'
 // PUT /provider/relays/{id}/link-capacity. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose. Alerts (Sprint 24 A3, F26; D-53 amends
 // D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads.
+// Metrics (Sprint 24 M2, F23) add one read, GET /provider/metrics/{series}, and no write.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -81,6 +83,7 @@ const ALLOWED_READS = [
   'GET /provider/certificates',
   'GET /provider/health',
   'GET /provider/me',
+  'GET /provider/metrics/{series}',
   'GET /provider/pki',
   'GET /provider/plans',
   'GET /provider/plans/{id}',
@@ -96,6 +99,7 @@ const ALLOWED_READS = [
 const API_MODULES: Record<string, Record<string, unknown>> = {
   alerts: alertsApi,
   auth: authApi,
+  metrics: metricsApi,
   operators: operatorsApi,
   plans: plansApi,
   pools: poolsApi,
@@ -112,6 +116,7 @@ const normalize = (path: string) =>
   path
     .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events))/${ID}(?=/|$)`), '$1/{id}')
     .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
+    .replace(new RegExp(`^/provider/metrics/${ID}$`), '/provider/metrics/{series}')
 
 describe('API surface', () => {
   it('writes are exactly the allowed writes, reads exactly the allowed reads, all under /provider/', async () => {
@@ -143,6 +148,7 @@ describe('API surface', () => {
       [`POST /provider/relays/${ID}/resume`]: { status: 204 },
       [`DELETE /provider/relays/${ID}`]: { status: 204 },
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
+      [`GET /provider/metrics/${ID}`]: { status: 200, body: { points: [] } },
       [`POST /provider/relays/${ID}/pool`]: { status: 204 },
       [`PUT /provider/relays/${ID}/link-capacity`]: { status: 204 },
       'GET /provider/relay-pools': { status: 200, body: { items: [] } },
@@ -208,6 +214,7 @@ describe('API surface', () => {
     const { calls } = mockFetch({
       'GET /provider/relays': page,
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
+      [`GET /provider/metrics/${ID}`]: { status: 200, body: { points: [] } },
       'GET /provider/relay-pools': { status: 200, body: { items: [] } },
       [`GET /provider/relay-pools/${ID}`]: { status: 200, body: {} },
       'GET /provider/tenants': page,
