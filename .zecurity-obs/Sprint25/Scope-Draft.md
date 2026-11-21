@@ -75,8 +75,8 @@ The Sprint 24 acceptance run (both, on a reset lab DB) happens before Sprint 25 
 - `GET /provider/usage?tenant_id=&from=&to=&granularity=hour|day|month` → per meter, per bucket, with `complete` per bucket; month and day buckets are UTC calendar boundaries (D-57). `active_users` is returned for month buckets only.
 - Works for a **purged** tenant too (its usage and snapshot name, marked deleted).
 - `GET /provider/usage/tenants?month=YYYY-MM&meter=&sort=` → the fleet: each tenant's month-to-date (or that month's) usage, sortable, keyset-paged.
-- Super-admin only (tenant data, D-40 extended); relay-ops get **403**. New `decide()` action `usage.read` (D-60).
-- A read of one tenant's usage is audited like a tenant detail view (`tenant.usage_read`, OQ-1); the fleet list writes one `usage.fleet_read` row per request (D-60).
+- Super-admin only (tenant data, D-40 extended); relay-ops get **403**. New `decide()` action `tenant.usage.read` (D-60; super-admin only by the existing rule).
+- A read of one tenant's usage is audited like a tenant detail view (`tenant.usage.read`, OQ-1); the fleet list writes one `usage.fleet.read` row per request (D-60).
 
 ### U3 — F33 console
 - **Tenant detail → Usage:** this month so far and the last 12 months per meter (bytes shown as GB, time as hours), a daily chart for the selected month (incomplete days marked), the tenant's plan beside it.
@@ -100,7 +100,7 @@ The Sprint 24 acceptance run (both, on a reset lab DB) happens before Sprint 25 
 | **D-57** | What is metered, and how | Meters: relay bytes per direction (exact, from R1 cumulative counters), session-minutes, connector-minutes, shield-minutes, and **active users per month** (distinct users with a live session in the month; answered 2026-11-21). **UTC** hours, days and calendar months. **Only relayed traffic is metered:** a client that reaches its connector **directly** (Sprint 20 direct path) sends no bytes through a relay, so those bytes are not counted. Metering direct traffic would need connector byte counters (an agent change) — not this sprint. |
 | **D-58** | Storage, retention, deletion | Postgres table `usage_hourly`, integer quantities. Kept **25 months** (a full year back plus the current year for disputes; longer than D-49's 400 days because these are billable quantities). When a tenant is **purged** (S4), its usage is **kept with its id and name** (snapshot in `usage_tenants`) until retention ends, because a later invoice or dispute needs to name it (answered 2026-11-21); per-user active-user rows are reduced to the monthly count. **Amends D-46** (the purge keeps this one record). |
 | **D-59** | Gaps and accuracy | A minute the controller didn't collect is **unmetered** (lower usage, never estimated); a relay restart loses at most the bytes since its last heartbeat; reports mark incomplete hours and days. No back-fill from M1 (estimates must not mix with counts). |
-| **D-60** | Who sees usage, and audit | **Super-admin only** (`usage.read`; relay-ops 403, D-40 extended). Reading one tenant's usage is audited like a tenant detail view (`tenant.usage_read`, OQ-1); the fleet usage list is not audited per tenant (one `usage.fleet_read` row per request). **Tenant-facing usage** (in the admin UI) is a later feature; the API is shaped so it can be added with a tenant filter. |
+| **D-60** | Who sees usage, and audit | **Super-admin only** (`tenant.usage.read`; relay-ops 403, D-40 extended). Reading one tenant's usage is audited like a tenant detail view (`tenant.usage.read`, OQ-1); the fleet usage list is not audited per tenant (one `usage.fleet.read` row per request). **Tenant-facing usage** (in the admin UI) is a later feature; the API is shaped so it can be added with a tenant filter. |
 | **D-61** | Usage alerts | New built-in tenant rule kind `tenant.usage_over` (meter + monthly threshold), fires once per tenant per month, resolves at month rollover, provider-only delivery (D-50), super-admin managed (D-53); **warns only, never enforces** (answered 2026-11-21). |
 
 **Answered (2026-11-21):**
@@ -121,7 +121,7 @@ U1 and U2 share one contract: the `usage_hourly` table and meter names. Proposal
 
 **Migrations (to reserve):** `071_usage` (U1: `usage_hourly`, `usage_active_users`, `usage_tenants`); U4 adds a rule kind, and `069_alerts`' `alert_rules_kind_scope` CHECK lists the kinds, so U4 needs `072_usage_alert_kind` (a new file; never edit 069). Latest today: `070_alert_delivery_queue`. Check `ls controller/migrations | tail -3` before adding; no migration framework; `[schema: reset DB]`.
 
-**Conflict zones:** `controller/internal/relay/workspace_traffic.go` (U1 reads the cumulative counters; R1 code), `controller/internal/metricstore/sampler.go` (U1 runs on its tick), `controller/cmd/server/main.go` (job and routes), `controller/internal/provider/authz.go` (`usage.read`), the A1 evaluator and rule-kind registry (U4), the S4 purge (U1's D-58 exception), `provider-console/src/api/api-surface.test.ts`, `TenantDetail.tsx`, the provider navigation (`roles.ts`, `Layout.tsx`).
+**Conflict zones:** `controller/internal/relay/workspace_traffic.go` (U1 reads the cumulative counters; R1 code), `controller/internal/metricstore/sampler.go` (U1 runs on its tick), `controller/cmd/server/main.go` (job and routes), `controller/internal/provider/authz.go` (`tenant.usage.read`), the A1 evaluator and rule-kind registry (U4), the S4 purge (U1's D-58 exception), `provider-console/src/api/api-surface.test.ts`, `TenantDetail.tsx`, the provider navigation (`roles.ts`, `Layout.tsx`).
 
 ## Not in Sprint 25 (proposed)
 - **F34** billing plans and invoicing (prices, invoices, payment): needs its own decision; Sprint 25's usage is its input.
