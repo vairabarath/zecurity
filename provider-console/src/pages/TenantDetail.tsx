@@ -21,6 +21,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { formatRelative } from '@/lib/expiry'
 import { agentSummary, formatDateTime } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
+import { DEFAULT_RANGE, type MetricRange } from '@/lib/metrics'
+import { TenantHistory } from '@/components/TenantHistory'
 
 // Tenant detail (Phase P, tenant.read: super-admin only).
 //
@@ -70,6 +72,8 @@ function TenantDetailFetch({ id }: { id: string }) {
   const { state, reload } = useDetailQuery(id, getTenant)
   // The outcome of a pool change; kept here because the reload replaces the view.
   const [notice, setNotice] = useState<RelayActionNotice | null>(null)
+  // The History range (M2); kept here so a Refresh keeps it.
+  const [range, setRange] = useState<MetricRange>(DEFAULT_RANGE)
 
   switch (state.status) {
     case 'loading':
@@ -104,6 +108,8 @@ function TenantDetailFetch({ id }: { id: string }) {
         <TenantView
           tenant={state.data}
           notice={notice}
+          range={range}
+          onRange={setRange}
           onRefresh={() => {
             setNotice(null)
             reload()
@@ -149,11 +155,15 @@ function CountTile({ label, value, children }: { label: string; value: ReactNode
 function TenantView({
   tenant: t,
   notice,
+  range,
+  onRange,
   onRefresh,
   onActionDone,
 }: {
   tenant: TenantDetailDTO
   notice: RelayActionNotice | null
+  range: MetricRange
+  onRange: (r: MetricRange) => void
   onRefresh: () => void
   onActionDone: (notice: RelayActionNotice) => void
 }) {
@@ -231,6 +241,8 @@ function TenantView({
           {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks
         </CountTile>
       </section>
+
+      <TenantHistory tenantId={t.id} range={range} onRange={onRange} />
 
       <TenantSuspensionSection tenant={t} onDone={onActionDone} />
 

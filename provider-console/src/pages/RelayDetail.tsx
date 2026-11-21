@@ -10,6 +10,7 @@ import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { RelayDangerZone, type RelayActionNotice } from '@/components/RelayDangerZone'
 import { RelayDrainCard } from '@/components/RelayDrainCard'
 import { RelayPoolCard } from '@/components/RelayPoolCard'
+import { RelayHistory } from '@/components/RelayHistory'
 import { PoolLink } from '@/components/PoolBadges'
 import { StatusBadge } from '@/components/StatusBadge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -21,6 +22,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime, formatScope } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
+import { DEFAULT_RANGE, type MetricRange } from '@/lib/metrics'
 
 // Relay detail (Phase P, relay.read). One request when the page opens;
 // Refresh and Retry are the only other reads. The writes are Move to pool
@@ -105,6 +107,8 @@ export function RelayDetail() {
   // The outcome of a revoke/delete (Phase X). Kept here because the reload
   // that follows replaces the view; tied to the relay it is about.
   const [notice, setNotice] = useState<(RelayActionNotice & { id: string }) | null>(null)
+  // The History range (M2); kept here so a Refresh keeps it.
+  const [range, setRange] = useState<MetricRange>(DEFAULT_RANGE)
 
   const back = (
     <Link to="/relays" className="inline-flex items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-primary">
@@ -153,6 +157,8 @@ export function RelayDetail() {
           relay={state.data}
           back={back}
           notice={notice?.id === id ? notice : null}
+          range={range}
+          onRange={setRange}
           onRefresh={() => {
             setNotice(null)
             reload()
@@ -170,12 +176,16 @@ function RelayView({
   relay: r,
   back,
   notice,
+  range,
+  onRange,
   onRefresh,
   onActionDone,
 }: {
   relay: RelayDetailDTO
   back: ReactNode
   notice: RelayActionNotice | null
+  range: MetricRange
+  onRange: (r: MetricRange) => void
   onRefresh: () => void
   onActionDone: (notice: RelayActionNotice) => void
 }) {
@@ -290,6 +300,8 @@ function RelayView({
         </Card>
         <RelayCapacityCard relay={r} onDone={onActionDone} />
       </div>
+
+      {r.status !== 'pending' && <RelayHistory relay={r} range={range} onRange={onRange} />}
 
       <Section title="Allowlists">
         <div className="grid gap-6 sm:grid-cols-2">
