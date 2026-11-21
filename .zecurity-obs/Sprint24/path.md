@@ -160,8 +160,8 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - [x] A1 — Alert rules + evaluator (Sathiya) — merged (#234) — live-checked 2026-11-20 (PASS)
 - [x] A2 — Delivery: webhook, email (Sathiya) — merged (#235) — live-checked 2026-11-20 (PASS)
 - [x] A3 — Alerts console (Sathiya) — merged (#236) — live-checked 2026-11-20 (PASS)
-- [ ] T1 — Incident timeline (Sathiya, stretch)
-- [ ] Sprint acceptance run (both); tracker F23, F26
+- [x] T1 — Incident timeline (Sathiya, stretch) — merged (#238, `5ecc75da`) — live-checked 2026-11-21 (PASS)
+- [ ] Sprint acceptance run (both); tracker F23, F26, F27
 
 ## Post-Sprint Fixes
 
