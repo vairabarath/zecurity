@@ -1080,3 +1080,27 @@ Made by the product/architecture owner (Barath) on 2026-11-21, during Sprint 24 
 | D-14 | **Refined**: provider audit rows are read through `audit.view` (super-admin, full log) or, for the timeline's relay and pool allowlist only, `timeline.relay_audit` (super-admin, relay-ops). |
 | D-06, D-50 | Unchanged. |
 | D-30 | Unchanged; the timeline adds one read and no console write. |
+
+## Decision record amendment — 2026-11-21: usage metering and reports (F32, F33; usage alerts)
+
+Made by the product/architecture owner (Barath) for Sprint 25 (`.zecurity-obs/Sprint25/path.md`), after review of the scope draft (`.zecurity-obs/Sprint25/Scope-Draft.md`, PR #244). It **extends D-40** (usage is tenant data), **extends D-50** (a new built-in tenant rule kind) and **amends D-46** (the purge keeps a usage record). D-49 (the M1 metric store) is unchanged: usage is a separate ledger, not derived from it.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-56 | Sprint 25 scope | **F32** usage collection and **F33** per-tenant usage report, plus **usage-threshold alerts** on F26 (D-61), plus the Sprint 24 acceptance follow-ups (X2). Sprint 25 **measures, reports and warns**: **no pricing, invoicing or enforcement** (F34 billing is a later feature with its own decision). **No agent change.** |
+| D-57 | What is metered | Per tenant, in **UTC** hours, days and calendar months: `relay_bytes_to_clients` and `relay_bytes_to_connectors` — **exact** bytes from R1's **cumulative** per-trust-domain counters (D-54): the controller adds the delta between two heartbeats of the same relay run, never an integrated rate; `session_minutes` — for each minute, the tenant's client devices with a live session, added up; `connector_minutes`, `shield_minutes` — for each minute, the tenant's active connectors / shields, added up; **`active_users`** — distinct users of the tenant with a live client session at any minute of the calendar month (a monthly figure; not stored per day). The definitions of "live session", "active connector" and "active shield" are the ones M1's sampler uses (one definition, shared). **Only relayed traffic is metered:** a client that reaches its connector directly (Sprint 20 direct path) sends no bytes through a relay, so those bytes are not counted; metering them would need connector byte counters (an agent change, not decided). |
+| D-58 | Storage, retention, deletion | A Postgres **usage ledger** separate from M1: `usage_hourly` (tenant, meter, UTC hour, integer quantity, completeness), `usage_active_users` (tenant, month, user) and `usage_tenants` (a snapshot of the tenant's id, name, slug and plan name). Kept **25 months**, then pruned. When a tenant is **purged** (S4), its usage is **kept with its id and name** until retention ends, so a report or a later invoice can still name it; its per-user `usage_active_users` rows are reduced to the monthly count at purge, so **no user ids of a deleted tenant are kept**. |
+| D-59 | Gaps and accuracy | Usage is **counted, never estimated**: a minute the controller didn't collect is unmetered (never back-filled from M1 or interpolated); a relay restart (uptime shorter than the gap, or a counter going down) starts a new baseline and loses at most the bytes since that relay's last heartbeat, never producing a negative or doubled amount; an unknown or revoked trust domain's bytes are not stored (D-54). Every write is **idempotent** (per tenant, meter and minute for time meters; per relay heartbeat for byte deltas), so a restart or re-run never counts twice. An hour with a missed minute is marked **incomplete**, and so are the days and months that contain it; reports show it. |
+| D-60 | Who sees usage | Usage is **tenant data**: **super-admin only** through `tenant.usage.read` (relay-ops 403; D-40 extended). A read of one tenant's usage writes a **`tenant.usage.read`** provider audit row, as a tenant detail view does (OQ-1); the fleet usage list writes one **`usage.fleet.read`** row per request. No new console writes. **Tenant-facing usage** (admin UI) is a later feature; the API takes a tenant filter so it can be added without a redesign. |
+| D-61 | Usage alerts | A built-in **tenant** rule kind **`tenant.usage_over`** with parameters `meter` (one of D-57's meters) and a monthly `threshold`. One rule applies to every tenant; several rules may exist. It **fires once per tenant per month** when the month-to-date usage crosses the threshold and **resolves at the UTC month rollover**; an incomplete or failed read never resolves it (A1). Scope **tenant** (`tenant_id` set, D-50), delivered to the provider only; relay-ops never see it. Managed like every rule: super-admin only, reason and before/after audit (D-53). **Warns only:** no code path uses usage to refuse, slow or limit anything. |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-40 | **Extended**: usage (all meters, per tenant and fleet lists) is tenant-identifying and super-admin only; relay-ops get 403 and see no usage alerts. |
+| D-46 | **Amended**: the purge of a deleted tenant keeps its usage ledger rows and `usage_tenants` snapshot (id, name, slug, plan name) until the 25-month retention ends; per-user active-user rows are reduced to counts. Everything else the purge deletes stays deleted. |
+| D-50 | **Extended**: `tenant.usage_over` is a tenant-scope rule kind (new file `072_usage_alert_kind`; `069_` is not edited). |
+| D-49 | **Unchanged**: M1 stays the source for charts; usage is never derived from it. |
