@@ -58,6 +58,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
+	"github.com/yourorg/ztna/controller/internal/metricstore"
 	"github.com/yourorg/ztna/controller/internal/mfa"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
@@ -68,6 +69,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
+	"github.com/yourorg/ztna/controller/internal/providerquery"
 	"github.com/yourorg/ztna/controller/internal/quotaadmin"
 	"github.com/yourorg/ztna/controller/internal/rbac"
 	"github.com/yourorg/ztna/controller/internal/relay"
@@ -280,10 +282,11 @@ func main() {
 	relayStore := relay.NewStore(db.Pool)
 	providerStore := provider.NewStore(db.Pool)
 	bootstrapProviderAdmin(ctx, providerStore)
+	relayHeartbeatDBWrite := mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute)
 	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
-			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
+			relayHeartbeatDBWrite,
 		).WithProvisioningAuth(mustEnv("JWT_SECRET")).
 		WithPrivateRelayAddrs(devAllowPrivateRelayAddrs())
 	// D-40 (relay pools PR 3): how long a relay may keep using its workspace
@@ -875,6 +878,8 @@ func main() {
 	mux.Handle("GET /provider/relay-pools", requireProvider(http.HandlerFunc(providerReads.ListRelayPools)))
 	mux.Handle("GET /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelayPool)))
 	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
+	// Sprint 24 M1 (F23): stored metric series (relay/fleet relay: relay-ops too; tenant: super-admin).
+	mux.Handle("GET /provider/metrics/{series}", requireProvider(http.HandlerFunc(providerReads.GetMetricSeries)))
 	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
@@ -1162,6 +1167,21 @@ func main() {
 	} else {
 		log.Printf("alert evaluator: disabled (ALERTS_ENABLED=false)")
 	}
+
+	// Metric sampler (Sprint 24 M1, F23, D-49): every minute it stores relay,
+	// tenant and fleet values (unknown = no row, a gap), rolls up finished
+	// hours and prunes by retention (1-minute 7 days, hourly 400 days;
+	// METRIC_SAMPLE_RETENTION / METRIC_ROLLUP_RETENTION shorten them for
+	// tests). An R1 view older than two heartbeat DB-write windows plus a
+	// minute counts as not reported.
+	metricSampler := &metricstore.Sampler{
+		DB:              db.Pool,
+		Traffic:         relayWorkspaceTraffic,
+		TrafficMaxAge:   2*relayHeartbeatDBWrite + time.Minute,
+		SampleRetention: mustDuration("METRIC_SAMPLE_RETENTION", providerquery.SampleRetention),
+		RollupRetention: mustDuration("METRIC_ROLLUP_RETENTION", providerquery.RollupRetention),
+	}
+	workers.Go("metric-sampler", func() { metricSampler.Run(ctx) })
 
 	workers.Go("hourly-ticker", func() {
 
