@@ -884,6 +884,9 @@ func main() {
 	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
 	// Sprint 24 M1 (F23): stored metric series (relay/fleet relay: relay-ops too; tenant: super-admin).
 	mux.Handle("GET /provider/metrics/{series}", requireProvider(http.HandlerFunc(providerReads.GetMetricSeries)))
+	// Usage (Sprint 25 U2, F33, D-60): super-admin only, audited.
+	mux.Handle("GET /provider/usage", requireProvider(http.HandlerFunc(providerReads.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", requireProvider(http.HandlerFunc(providerReads.ListFleetUsage)))
 	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))

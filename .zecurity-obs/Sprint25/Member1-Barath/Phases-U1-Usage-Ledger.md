@@ -147,7 +147,7 @@ Built by Sathiya (with Claude Code) while Barath ran the Sprint 24 acceptance ru
     - the purge not calling the freeze.
 - **Gates (2026-11-21):**
   - `go build ./... && go vet ./...` clean.
-  - Full `go test ./...` with `PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL` (`/15`), `ENROLLMENT_`, `RESOURCE_`, `SHIELD_` and `AUTH_TEST_DATABASE_URL`: 0 failures, only the 2 known skips (`TestUpdateScimConfig_NoCrossConnectionProofReuse`, `TestCSRHasSPIFFEURI`).
+  - Full `go test ./...` with `PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL` (`/15`), `ENROLLMENT_`, `RESOURCE_`, `SHIELD_` and `AUTH_TEST_DATABASE_URL`: 0 failures, only the 2 known skips (`TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`).
   - Note: without the extra `*_TEST_DATABASE_URL` variables, about 226 DB tests in `graph/resolvers`, `connector`, `resource` and `shield` skip; set them all.
 - **Live check:** pending (lab, after the Sprint 24 acceptance run): the U1 live check above.
 
