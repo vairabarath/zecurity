@@ -39,6 +39,9 @@ type Service struct {
 	allowPrivateAddrs bool
 	// policyLease is sent with every workspace policy (D-40, PR 3).
 	policyLease time.Duration
+	// Sprint 24 R1 (D-54): per-workspace traffic, when enabled.
+	workspaceTraffic *WorkspaceTrafficTracker
+	workspaceLookup  workspaceLookup
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {

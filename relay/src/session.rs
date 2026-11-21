@@ -54,9 +54,13 @@ impl SessionLimits {
     }
 }
 
+/// `workspace_id` is the peer's workspace, as the listener derived it for the
+/// revocation check and the D-40 policy; bridged traffic is counted under it
+/// (Sprint 24 R1).
 pub async fn handle_connection(
     connection: Connection,
     identity: ParsedSpiffe,
+    workspace_id: String,
     state: Arc<RelayState>,
     limits: SessionLimits,
 ) -> Result<()> {
@@ -175,6 +179,7 @@ pub async fn handle_connection(
                 connection.clone(),
                 connector_id,
                 identity.clone(),
+                workspace_id.clone(),
                 state.clone(),
                 limits.clone(),
             );
@@ -202,6 +207,7 @@ pub async fn handle_connection(
                     connection.clone(),
                     connector_id,
                     identity.clone(),
+                    workspace_id.clone(),
                     state.clone(),
                     limits.clone(),
                 );
@@ -211,12 +217,14 @@ pub async fn handle_connection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_lookup(
     send: SendStream,
     recv: RecvStream,
     client_connection: Connection,
     connector_id: String,
     identity: ParsedSpiffe,
+    workspace_id: String,
     state: Arc<RelayState>,
     limits: SessionLimits,
 ) {
@@ -243,6 +251,7 @@ fn spawn_lookup(
             &client_connection,
             &connector_id,
             &identity,
+            &workspace_id,
             &state,
         )
         .await
@@ -258,6 +267,7 @@ async fn handle_lookup_stream(
     client_connection: &Connection,
     connector_id: &str,
     identity: &ParsedSpiffe,
+    workspace_id: &str,
     state: &RelayState,
 ) -> Result<()> {
     let connector = match state.lookup_connector(connector_id) {
@@ -293,6 +303,9 @@ async fn handle_lookup_stream(
         "bridging Client to Connector through Relay"
     );
     ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+    // Sprint 24 R1 (D-54): the same stream, counted for its workspace. The
+    // trust domains were checked equal above.
+    let workspace = crate::traffic::TRAFFIC.open_stream(&identity.trust_domain, workspace_id);
     let result = pipe_streams(
         client_send,
         client_recv,
@@ -300,8 +313,10 @@ async fn handle_lookup_stream(
         connector_recv,
         client_connection,
         &connector.connection,
+        workspace.counters(),
     )
     .await;
+    drop(workspace);
     ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
     result
 }
@@ -437,6 +452,7 @@ async fn pipe_streams(
     mut connector_recv: RecvStream,
     client_connection: &Connection,
     connector_connection: &Connection,
+    workspace: &crate::traffic::WorkspaceCounters,
 ) -> Result<()> {
     // Per-direction byte counts and which direction finished first, logged
     // when the bridge ends (live E2E run 2026-10-30, F-7: relayed flows ended
@@ -450,6 +466,7 @@ async fn pipe_streams(
             &mut connector_send,
             &up,
             &BYTES_CLIENT_TO_CONNECTOR,
+            &workspace.client_to_connector,
         )
         .await
         .map_err(|e| ("pipe Client to Connector", e))?;
@@ -470,6 +487,7 @@ async fn pipe_streams(
             &mut client_send,
             &down,
             &BYTES_CONNECTOR_TO_CLIENT,
+            &workspace.connector_to_client,
         )
         .await
         .map_err(|e| ("pipe Connector to Client", e))?;
@@ -546,6 +564,7 @@ async fn counted_copy(
     writer: &mut SendStream,
     count: &std::sync::atomic::AtomicU64,
     total: &AtomicU64,
+    workspace_total: &AtomicU64,
 ) -> std::result::Result<(), PipeError> {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -565,6 +584,7 @@ async fn counted_copy(
         }
         count.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
         total.fetch_add(n as u64, Ordering::Relaxed);
+        workspace_total.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
 
@@ -600,6 +620,7 @@ mod tests {
     use crate::config::RuntimeLimits;
 
     const CONNECTOR_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const TEST_WORKSPACE_ID: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 
     fn connector_identity() -> ParsedSpiffe {
         ParsedSpiffe {
@@ -717,6 +738,7 @@ mod tests {
         let task = tokio::spawn(handle_connection(
             server,
             connector_identity(),
+            TEST_WORKSPACE_ID.to_owned(),
             state.clone(),
             limits(),
         ));
@@ -749,6 +771,7 @@ mod tests {
         let task = tokio::spawn(handle_connection(
             server,
             connector_identity(),
+            TEST_WORKSPACE_ID.to_owned(),
             state.clone(),
             limits(),
         ));
@@ -769,6 +792,7 @@ mod tests {
         let task = tokio::spawn(handle_connection(
             server,
             connector_identity(),
+            TEST_WORKSPACE_ID.to_owned(),
             state.clone(),
             limits(),
         ));
@@ -803,6 +827,7 @@ mod tests {
         tokio::spawn(handle_connection(
             server,
             connector_identity(),
+            TEST_WORKSPACE_ID.to_owned(),
             state.clone(),
             limits(),
         ));
@@ -860,6 +885,11 @@ mod tests {
     /// A real client <-> relay <-> connector bridge: two QUIC pairs, one
     /// stream on each, joined by pipe_streams.
     async fn bridge() -> Bridge {
+        bridge_for("test-bridge.zecurity.in").await
+    }
+
+    /// A bridge whose bytes count for `trust_domain` (Sprint 24 R1).
+    async fn bridge_for(trust_domain: &'static str) -> Bridge {
         let (client, relay_client_side) = crate::test_support::quic_pair().await;
         let (relay_connector_side, connector) = crate::test_support::quic_pair().await;
         let (mut client_send, client_recv) = client.open_bi().await.unwrap();
@@ -876,6 +906,7 @@ mod tests {
         let (watch_client, watch_connector) =
             (relay_client_side.clone(), relay_connector_side.clone());
         let pipe = tokio::spawn(async move {
+            let workspace = crate::traffic::TRAFFIC.open_stream(trust_domain, TEST_WORKSPACE_ID);
             pipe_streams(
                 relay_client_send,
                 relay_client_recv,
@@ -883,6 +914,7 @@ mod tests {
                 relay_connector_recv,
                 &watch_client,
                 &watch_connector,
+                workspace.counters(),
             )
             .await
         });
@@ -1082,6 +1114,138 @@ mod tests {
         assert!(
             matches!(end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == 0x4243),
             "connector saw {end:?}"
+        );
+    }
+
+    /// The snapshot entry for `trust_domain`, if any.
+    fn traffic_of(trust_domain: &str) -> Option<crate::relay::v1::WorkspaceTraffic> {
+        crate::traffic::TRAFFIC
+            .snapshot()
+            .into_iter()
+            .find(|w| w.trust_domain == trust_domain)
+    }
+
+    /// Sprint 24 R1: a bridge adds exactly its bytes to its workspace, per
+    /// direction, while the stream is open, and the same bytes to the
+    /// process-wide F5 counters.
+    #[tokio::test]
+    async fn bridged_bytes_count_for_the_workspace_and_the_total() {
+        const TD: &str = "r1-bridge.zecurity.in";
+        let mut b = bridge_for(TD).await;
+        let up0 = BYTES_CLIENT_TO_CONNECTOR.load(Ordering::Relaxed);
+        let down0 = BYTES_CONNECTOR_TO_CLIENT.load(Ordering::Relaxed);
+        let body = vec![9u8; 128 * 1024];
+        b.connector_send.write_all(&body).await.unwrap();
+        let mut got = vec![0u8; body.len()];
+        timeout(Duration::from_secs(5), b.client_recv.read_exact(&mut got))
+            .await
+            .unwrap()
+            .unwrap();
+        b.client_send.write_all(b"1234567").await.unwrap();
+        let mut seven = [0u8; 7];
+        timeout(
+            Duration::from_secs(5),
+            b.connector_recv.read_exact(&mut seven),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let w = traffic_of(TD).expect("reported");
+        assert_eq!(w.bytes_connector_to_client, body.len() as u64);
+        assert_eq!(w.bytes_client_to_connector, 7);
+        assert_eq!(w.active_streams, 1, "open while the bridge runs");
+        assert!(BYTES_CONNECTOR_TO_CLIENT.load(Ordering::Relaxed) - down0 >= body.len() as u64);
+        assert!(BYTES_CLIENT_TO_CONNECTOR.load(Ordering::Relaxed) - up0 >= 7);
+        b.client_send.finish().unwrap();
+        b.connector_send.finish().unwrap();
+        let _ = drain(&mut b.client_recv).await;
+        let _ = drain(&mut b.connector_recv).await;
+        timeout(Duration::from_secs(5), b.pipe)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let w = traffic_of(TD).expect("still reported");
+        assert_eq!(w.active_streams, 0, "closed");
+        assert_eq!(w.bytes_connector_to_client, body.len() as u64, "cumulative");
+    }
+
+    /// Sprint 24 R1, through the real Register and Lookup handshakes: two
+    /// workspaces bridging through one relay are counted apart, each under
+    /// its own trust domain.
+    #[tokio::test]
+    async fn lookup_bridges_count_for_their_own_workspace() {
+        async fn run(td: &'static str, connector_id: &str, client_id: &str, bytes: usize) {
+            let state = RelayState::new();
+            let connector = ParsedSpiffe {
+                uri: format!("spiffe://{td}/connector/{connector_id}"),
+                trust_domain: td.to_owned(),
+                role: "connector".to_owned(),
+                entity_id: connector_id.to_owned(),
+            };
+            let (conn_peer, conn_relay) = crate::test_support::quic_pair().await;
+            tokio::spawn(handle_connection(
+                conn_relay,
+                connector.clone(),
+                format!("{td}-ws"),
+                state.clone(),
+                limits(),
+            ));
+            assert!(register(&conn_peer, &connector).await.ok);
+
+            let client = ParsedSpiffe {
+                uri: format!("spiffe://{td}/client/{client_id}"),
+                trust_domain: td.to_owned(),
+                role: "client".to_owned(),
+                entity_id: client_id.to_owned(),
+            };
+            let (client_peer, client_relay) = crate::test_support::quic_pair().await;
+            tokio::spawn(handle_connection(
+                client_relay,
+                client,
+                format!("{td}-ws"),
+                state.clone(),
+                limits(),
+            ));
+            let (mut send, mut recv) = client_peer.open_bi().await.unwrap();
+            let msg = encode_message(&HandshakeMsg::Lookup {
+                connector_id: connector_id.to_owned(),
+            })
+            .unwrap();
+            send.write_all(&msg).await.unwrap();
+            let ack: RelayAck = read_message(&mut recv, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert!(ack.ok, "lookup refused: {:?}", ack.error);
+            send.write_all(b"ping").await.unwrap(); // announces the connector stream
+            let (mut c_send, mut c_recv) = conn_peer.accept_bi().await.unwrap();
+            let mut ping = [0u8; 4];
+            c_recv.read_exact(&mut ping).await.unwrap();
+            c_send.write_all(&vec![1u8; bytes]).await.unwrap();
+            let mut got = vec![0u8; bytes];
+            timeout(Duration::from_secs(5), recv.read_exact(&mut got))
+                .await
+                .unwrap()
+                .unwrap();
+            let w = traffic_of(td).expect("reported");
+            assert_eq!(w.bytes_client_to_connector, 4, "{td}");
+            assert_eq!(w.bytes_connector_to_client, bytes as u64, "{td}");
+            assert_eq!(w.active_streams, 1, "{td}");
+            drop((send, recv, c_send, c_recv, conn_peer, client_peer));
+        }
+        tokio::join!(
+            run(
+                "r1-lookup-a.zecurity.in",
+                "11111111-1111-4111-8111-111111111111",
+                "aaaaaaaa-1111-4111-8111-111111111111",
+                3000
+            ),
+            run(
+                "r1-lookup-b.zecurity.in",
+                "22222222-2222-4222-8222-222222222222",
+                "bbbbbbbb-2222-4222-8222-222222222222",
+                70_000
+            ),
         );
     }
 
