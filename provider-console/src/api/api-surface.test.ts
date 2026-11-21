@@ -25,8 +25,9 @@ import * as tenantsApi from './tenants'
 // re-invite; S4 (D-46) adds delete, cancel delete and legal hold. Relay link capacity (Sprint 23 B2, D-42) adds
 // PUT /provider/relays/{id}/link-capacity. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose. Alerts (Sprint 24 A3, F26; D-53 amends
-// D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads.
-// Metrics (Sprint 24 M2, F23) add one read, GET /provider/metrics/{series}, and no write.
+// D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads. The
+// incident timeline (Sprint 24 T1, F27) adds one read and no write. Metrics (Sprint 24 M2, F23) add one read,
+// GET /provider/metrics/{series}, and no write.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -93,6 +94,7 @@ const ALLOWED_READS = [
   'GET /provider/relays/{id}',
   'GET /provider/tenants',
   'GET /provider/tenants/{id}',
+  'GET /provider/timeline',
   'GET /provider/users',
 ]
 
@@ -183,6 +185,7 @@ describe('API surface', () => {
       [`GET /provider/alert-events/${ID}/deliveries`]: { status: 200, body: { items: [] } },
       'GET /provider/alert-rules': { status: 200, body: { items: [] } },
       'GET /provider/alert-channels': { status: 200, body: { items: [] } },
+      'GET /provider/timeline': page,
       [`PATCH /provider/alert-rules/${ID}`]: { status: 200, body: {} },
       'POST /provider/alert-channels': { status: 201, body: { channel: {}, secret: 'whsec_x' } },
       [`PATCH /provider/alert-channels/${ID}`]: { status: 200, body: {} },

@@ -3972,3 +3972,19 @@ serves on `127.0.0.1:9102`.
 - Barath: R1 and M1 (`068_metric_samples`) in parallel, then M2.
 - Sathiya: X1 (client quota message first; items 1, 3, 4 wait for Barath's answers), then A1 (`069_alerts`).
 - Lab cleanup from Sprint 23 still pending (hosts .75 and .37 offline).
+
+## 2026-11-21 — Claude Code (Sathiya, Sprint 24 T1)
+
+**What was done:**
+- T1 (F27 incident timeline) built on local branch `feat/t1-incident-timeline` (uncommitted): `GET /provider/timeline` merges `alert_events` and provider audit rows (relay, pool, tenant, alert rule/channel targets; reads excluded), filters by one relay, pool or tenant, source and time range; console page **Timeline** for both roles.
+- Open point checked: pool failover/failback is audited; relay active/inactive is current state only, so the `relay.offline` alert events stand in for it.
+- D-55 (approved by Barath 2026-11-21): relay-ops also see allowlisted relay and pool operation audit rows (actor and reason, no details) via `timeline.relay_audit`; full audit log stays super-admin. Decision Record amendment 2026-11-21 and CLAUDE.md updated.
+- Tests: timeline DB tests (no skips), authz matrix, 7 console tests; console 686 tests, lint, build clean; mutation checks recorded in the phase file. Live check PASS on the AT23 lab DB (both roles), recorded in Pending-Live-Tests.
+
+**Key decisions:**
+- Relay-ops audit rows are an action allowlist, not "every row about a relay": `relay.placement_rejected` and `tenant.relay_pool.assign` are tenant events.
+- Relay, pool and tenant detail pages untouched (Barath's M2 works there).
+
+**What's next:**
+- Barath approved D-55 and the commit; T1 PR opened. After merge: tick T1 in `path.md` and F27 in the tracker.
+- The A3 tick in `path.md` is committed on its own in the same branch.

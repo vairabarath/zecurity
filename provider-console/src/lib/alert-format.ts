@@ -81,3 +81,47 @@ export function parseRecipients(v: string): string[] | null {
   if (list.length > 50) return null
   return list.every((e) => EMAIL_RE.test(e)) ? list : null
 }
+
+// Incident timeline (Sprint 24 T1, F27).
+/** Readable names for the audit actions the timeline shows; others as stored. */
+export const ACTION_LABELS: Record<string, string> = {
+  'relay.create': 'Relay created',
+  'relay.revoke': 'Relay revoked',
+  'relay.delete': 'Relay deleted',
+  'relay.drain': 'Relay drained',
+  'relay.resume': 'Relay resumed',
+  'relay.move': 'Relay moved to another pool',
+  'relay.capacity.set': 'Relay link capacity changed',
+  'relay.issue_token': 'Relay provisioning token issued',
+  'relay.placement_rejected': 'Relay placement rejected',
+  'relay.pool.create': 'Pool created',
+  'relay.pool.update': 'Pool changed',
+  'relay.pool.delete': 'Pool deleted',
+  'relay.pool.set_placement': 'Pool region or residency changed',
+  'relay_pool.failover': 'Pool failed over',
+  'relay_pool.failback': 'Pool failed back',
+  'tenant.create': 'Tenant created',
+  'tenant.suspend': 'Tenant suspended',
+  'tenant.resume': 'Tenant resumed',
+  'tenant.delete': 'Tenant deletion scheduled',
+  'tenant.delete.cancel': 'Tenant deletion cancelled',
+  'tenant.purged': 'Tenant purged',
+  'tenant.legal_hold.set': 'Tenant legal hold changed',
+  'tenant.plan.assign': 'Tenant plan changed',
+  'tenant.quota.set': 'Tenant quota override changed',
+  'tenant.relay_pool.assign': 'Tenant relay pool changed',
+  'tenant.first_admin.reinvite': 'Tenant first admin re-invited',
+  'tenant_export.download': 'Tenant export downloaded',
+  'alert.rule.create': 'Alert rule created',
+  'alert.rule.update': 'Alert rule changed',
+  'alert.rule.delete': 'Alert rule deleted',
+  'alert.channel.create': 'Alert channel created',
+  'alert.channel.update': 'Alert channel changed',
+  'alert.channel.delete': 'Alert channel deleted',
+  'alert.channel.test': 'Alert channel tested',
+  'alert.channel.rotate_secret': 'Alert channel secret rotated',
+}
+
+export function actionLabel(action: string): string {
+  return ACTION_LABELS[action] ?? action
+}

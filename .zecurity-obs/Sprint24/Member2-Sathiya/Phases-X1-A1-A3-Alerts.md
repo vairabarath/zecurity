@@ -242,6 +242,45 @@ Only if A1–A3 are merged with time left.
 - One read-only, time-ordered view merging `alert_events`, `provider_audit_logs` rows and relay/pool state changes; filters by relay, pool and tenant; same authz as A1 reads (relay-ops: no tenant rows or names).
 - No new data; no schema change.
 
+### T1 build record (branch `feat/t1-incident-timeline`, 2026-11-21)
+- **Open point checked first: is relay and pool state stored as history?**
+  - Pool failover and failback: yes. The system writes provider audit rows `relay_pool.failover` and `relay_pool.failback` (actor `system:relay-pool-failover`) in the switch's transaction.
+  - Relay active/inactive: no. `relays.status` is current state only (`EvictRelays`, `RecordHeartbeat`). The timeline shows the `relay.offline` alert events instead (after the rule's `for` delay) and never invents a transition.
+  - Pools without a failover pool: only the `pool.no_eligible_relay` alert events.
+- **API:** `GET /provider/timeline?relay_id=|pool_id=|tenant_id=&source=alert|audit&since=&until=&cursor=&limit=` returns `Page[TimelineItem]`, newest first.
+  - The query is `providerquery.QueryTimeline`: one statement, a `UNION ALL` of `alert_events` and `provider_audit_logs`, keyset on (time, id).
+  - The handler is `alerting.TimelineHandler`.
+  - No schema change and no write.
+- **Filters:**
+  - At most one of relay, pool or tenant; otherwise 400 `invalid_filter`.
+  - `pool_id` also matches the relays now in the pool (membership is current state).
+  - `tenant_id` matches the tenant's alert events and the audit rows that target that tenant or workspace.
+- **Audit rows shown:**
+  - Only targets `relay`, `relay_pool`, `tenant`, `workspace`, `alert_rule` and `alert_channel`.
+  - `*.read` actions are left out: every tenant-detail view writes `tenant.read` (OQ-1).
+  - The name is the recorded one, else the target's current name.
+- **Authz:**
+  - `alert.read` is required.
+  - Alert rows follow A1: relay-ops get platform relay and pool kinds only, and a `tenant_id` request gets no rows.
+  - Super-admins (`audit.view`) get every incident-relevant audit row.
+  - **Amended by D-55 (2026-11-21):** relay-ops (`timeline.relay_audit`, a separate `decide()` action given to relay-ops) also get relay and pool operation audit rows from the allowlist `provider.RelayOpsTimelineAuditActions`, with action, actor and reason but no raw details. Tenant events that touch a relay or pool stay hidden (`relay.placement_rejected`, `tenant.relay_pool.assign`), as do tenant, operator-account and read rows. relay-ops still get 403 on `GET /provider/audit`. The console shows them the source chips; tenant focus and links stay super-admin only.
+- **Console:**
+  - `src/pages/Timeline.tsx` and a nav section **Timeline** for both roles (`roles.ts`, History icon).
+  - Source chips (All / Alerts / Operator actions) for super-admin only.
+  - Rows link to the relay, pool, tenant or Alerts tab; **focus** sets `relay_id`, `pool_id` or `tenant_id` in the URL, and a chip clears it. A malformed id in the URL is ignored. relay-ops get no tenant focus or links.
+  - Action labels are in `lib/alert-format.ts`. `listTimeline` is in `api/alerts.ts`; `GET /provider/timeline` is in `api-surface.test.ts` `ALLOWED_READS` on purpose (no new write).
+  - Relay, pool and tenant detail pages are untouched (M2 works on them).
+- **Tests:**
+  - `TestTimelineDB_SuperAdmin`, `_Paging` (across a same-instant alert/audit tie), `_RelayOps`, `_BadRequests`.
+  - `src/pages/Timeline.test.tsx` (7). Console: 686 tests, lint and build clean.
+- **Mutation checks**, each making a test fail:
+  - no relay-ops action allowlist (D-55);
+  - audit details returned to relay-ops (D-55);
+  - `timeline.relay_audit` not granted to relay-ops (D-55);
+  - no `audit.view` gate;
+  - no relay-ops kind filter;
+  - `*.read` rows kept.
+
 ---
 
 ## Live check (each phase)

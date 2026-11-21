@@ -20,6 +20,7 @@ import { RelayPools } from '@/pages/RelayPools'
 import { Relays } from '@/pages/Relays'
 import { TenantDetail } from '@/pages/TenantDetail'
 import { Tenants } from '@/pages/Tenants'
+import { Timeline } from '@/pages/Timeline'
 
 // Route table. Guards steer navigation only; the controller authorizes every
 // request. Sections behind a role use <RequireRole roles={...}> with the
@@ -44,6 +45,9 @@ export function AppRoutes() {
           <Route index element={<Home />} />
           <Route element={<RequireRole roles={rolesFor('alerts')} />}>
             <Route path="alerts" element={<Alerts />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('timeline')} />}>
+            <Route path="timeline" element={<Timeline />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('relays')} />}>
             <Route path="relays" element={<Relays />} />
