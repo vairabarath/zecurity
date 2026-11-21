@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { TenantMonthUsage, TenantUsage } from '@/api/usage'
 import { HOURLY_METERS } from '@/api/usage'
-import { addMonths, fleetUsageCSV, formatBytes, formatMeter, formatMinutesAsHours, monthKey, monthStart, tenantUsageCSV } from './usage-format'
+import { addMonths, fleetUsageCSV, parseThreshold, thresholdToDisplay, formatBytes, formatMeter, formatMinutesAsHours, monthKey, monthStart, tenantUsageCSV } from './usage-format'
 
 // Sprint 25 U3 (F33): units, UTC months, and exports that keep raw
 // quantities, mark incomplete periods and neutralise formula cells.
@@ -54,5 +54,17 @@ describe('usage format', () => {
     const lines = fleetUsageCSV('2026-11', false, rows, HOURLY_METERS).trimEnd().split('\r\n')
     expect(lines[0]).toBe('month,month_complete,tenant_id,tenant_name,tenant_slug,deleted,plan,relay_bytes_to_clients,relay_bytes_to_connectors,session_minutes,connector_minutes,shield_minutes,active_users')
     expect(lines[1]).toBe(`2026-11,false,t1,"'=HYPERLINK(""x"")",evil,true,,0,0,0,0,60,1`)
+  })
+
+  it('usage alert thresholds: display units in, raw units out (U4)', () => {
+    expect(parseThreshold('relay_bytes_to_clients', '500')).toBe(500_000_000_000)
+    expect(parseThreshold('relay_bytes_to_connectors', '0.5')).toBe(500_000_000)
+    expect(parseThreshold('session_minutes', '1.5')).toBe(90)
+    expect(parseThreshold('active_users', '50')).toBe(50)
+    for (const bad of ['', '0', '-1', '1e9', 'abc', '1.2345']) expect(parseThreshold('relay_bytes_to_clients', bad)).toBeNull()
+    expect(parseThreshold('active_users', '2.5')).toBeNull()
+    expect(parseThreshold('relay_bytes_to_clients', '9999999999')).toBeNull() // over 10^18 bytes
+    expect(thresholdToDisplay('relay_bytes_to_clients', 500_000_000_000)).toBe('500')
+    expect(thresholdToDisplay('shield_minutes', 90)).toBe('1.5')
   })
 })

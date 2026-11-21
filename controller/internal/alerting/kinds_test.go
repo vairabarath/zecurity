@@ -30,6 +30,16 @@ func TestParseParams(t *testing.T) {
 		{KindConnectorOffline, `{"bogus": 1}`, false, nil},
 		{KindConnectorOffline, `[]`, false, nil},
 		{KindConnectorOffline, `{} {}`, false, nil},
+		// tenant.usage_over (Sprint 25 U4, D-61): meter and threshold, both required.
+		{KindTenantUsageOver, `{"meter": "relay_bytes_to_clients", "threshold": 500000000000}`, true, func(p Params) bool { return p.Meter == "relay_bytes_to_clients" && p.Threshold == 500_000_000_000 }},
+		{KindTenantUsageOver, `{"meter": "active_users", "threshold": 50}`, true, nil},
+		{KindTenantUsageOver, `{"meter": "bytes", "threshold": 5}`, false, nil},
+		{KindTenantUsageOver, `{"meter": "session_minutes"}`, false, nil},
+		{KindTenantUsageOver, `{"threshold": 5}`, false, nil},
+		{KindTenantUsageOver, `{"meter": "session_minutes", "threshold": -1}`, false, nil},
+		{KindTenantUsageOver, `{"meter": "session_minutes", "threshold": 1000000000000000001}`, false, nil},
+		{KindTenantUsageOver, `{"meter": "session_minutes", "threshold": 5, "days": 3}`, false, nil},
+		{KindTenantOverQuota, `{"meter": "session_minutes"}`, false, nil},
 		{"nope", `{}`, false, nil},
 	} {
 		p, err := ParseParams(c.kind, []byte(c.raw))
@@ -62,8 +72,8 @@ func TestKindScopes(t *testing.T) {
 			t.Errorf("kind %s has no scope", k)
 		}
 	}
-	if platform != 5 || tenant != 4 {
-		t.Fatalf("platform=%d tenant=%d, want 5 and 4", platform, tenant)
+	if platform != 5 || tenant != 5 {
+		t.Fatalf("platform=%d tenant=%d, want 5 and 5", platform, tenant)
 	}
 	for _, k := range RelayOpsKinds() {
 		if ScopeOf(k) != ScopePlatform {
