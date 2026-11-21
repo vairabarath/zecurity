@@ -23,6 +23,7 @@ import { agentSummary, formatDateTime } from '@/lib/format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 import { DEFAULT_RANGE, type MetricRange } from '@/lib/metrics'
 import { TenantHistory } from '@/components/TenantHistory'
+import { TenantUsage } from '@/components/TenantUsage'
 
 // Tenant detail (Phase P, tenant.read: super-admin only).
 //
@@ -243,6 +244,8 @@ function TenantView({
       </section>
 
       <TenantHistory tenantId={t.id} range={range} onRange={onRange} />
+
+      <TenantUsage tenantId={t.id} />
 
       <TenantSuspensionSection tenant={t} onDone={onActionDone} />
 

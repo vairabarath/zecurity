@@ -1,5 +1,5 @@
 import type { ComponentType, SVGProps } from 'react'
-import { Bell, Building2, ChevronsUpDown, Gauge, History, KeyRound, Layers, LayoutGrid, LogOut, RadioTower, ScrollText, ShieldCheck, Users } from 'lucide-react'
+import { BarChart3, Bell, Building2, ChevronsUpDown, Gauge, History, KeyRound, Layers, LayoutGrid, LogOut, RadioTower, ScrollText, ShieldCheck, Users } from 'lucide-react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { signOut } from '@/auth/flows'
 import { ROLE_LABELS, SECTIONS, sectionsFor, type Section } from '@/auth/roles'
@@ -24,6 +24,7 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   'relay-pools': Layers,
   tenants: Building2,
   plans: Gauge,
+  usage: BarChart3,
   certificates: ShieldCheck,
   audit: ScrollText,
   users: Users,
