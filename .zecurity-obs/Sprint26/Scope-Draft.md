@@ -2,13 +2,13 @@
 type: sprint-scope-draft
 sprint: 26
 title: Provider Dashboard — billing plans and invoicing (F34)
-status: DRAFT — theme chosen 2026-11-23 (F34 billing); D-62 … D-68 are proposals until Barath answers the review questions and signs off; Sprint26/path.md and the phase files drafted 2026-11-23 (pending sign-off)
+status: SIGNED OFF 2026-11-23 (by Sathiya, overriding the product-owner sign-off step; Barath reviews in PR #249) — superseded by Sprint26/path.md, the phase files and the Decision Record amendment 2026-11-23 (billing, D-62 … D-70); kept as the scope discussion record. All six questions answered 2026-11-23 (see "Answered"); the answers changed D-64, D-65, D-67, D-68 and added D-69 (tax) and D-70 (who), so the proposals below are partly outdated
 baseline: Sprint 25 stack (PR #244 docs, #245 U1, #246 U2, #247 U3, #248 U4; code complete, not merged); main cb441cc9
 ---
 
 # Sprint 26 — scope draft
 
-> **Status: draft.** Theme chosen on 2026-11-23: **F34 billing plans and invoicing**, built on the Sprint 25 usage ledger. Decisions D-62 … D-68 below are **proposals**; nothing here is binding until Barath signs off. The binding plan will be `Sprint26/path.md`, the phase files, and a Decision Record amendment.
+> **Status: signed off 2026-11-23; kept as the discussion record.** The binding versions are `Sprint26/path.md`, the phase files and the Decision Record amendment **2026-11-23, billing (D-62 … D-70)**. The proposals below are from before the answers; where they differ, the binding documents win.
 >
 > **Prerequisites before any Sprint 26 code:** the Sprint 25 stack (#244 → #248) merged in order, the Sprint 24 acceptance run done (its findings are Sprint 25 X2), and the **Sprint 25 acceptance run** done (its findings become Sprint 26 **X3**). F34 prices the ledger's numbers, so the ledger must be live-checked first.
 
@@ -103,16 +103,13 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
 | **D-67** | Retention and purge | Invoices and their lines are **financial records**. They are kept **N years** (proposal: 8) and are **not deleted by the S4 purge** (amends D-46). They are not pruned with the ledger (D-58), because lines hold their own quantities. A tenant purged in the month gets a final invoice for it, named from `usage_tenants`. *Open question Q4 (retention period: a legal and operations choice owned by the product owner).* |
 | **D-68** | Who, and console writes | Super-admin only (tenant data, D-40/D-60 pattern; relay-ops 403). Card writes reuse B1's plan actions; new actions `invoice.read`, `invoice.write`. Writes carry a reason and before/after audit (D-53). **Amends D-30:** card prices and included quantities, and invoice issue, mark paid, void and regenerate are console writes. A separate `billing` role is F19 (not this sprint). |
 
-**Answered (2026-11-23):**
-- **Q1:** editable **plan cards** are the right shape (create a card, edit its price and included quantities any time; the card at month close bills the month) → D-63.
-
-**Review questions for Barath (answer before sign-off):**
-1. ~~**Q1 price model:** are editable **plan cards** (limits + base fee + included quantity and per-unit price per meter, edited any time, the card at month close bills the month) the right shape? Should any meter be **per seat** instead (e.g. bill every active user, with nothing included)?~~ **Answered:** editable plan cards.
-2. **Q2 currency:** one currency for the whole provider? Which one (USD, INR, …)?
-3. **Q3 plan change mid-month:** bill the whole month at the plan held at month close (recommended), or prorate by day?
-4. **Q4 invoice retention:** how many years? (Proposal: 8. This is a legal choice.)
-5. **Q5 invoice delivery:** provider-only this sprint (export and print), or also **email the invoice** to the tenant's admins? (Recommended: provider-only. Tenant contact details and tenant-facing billing come later.)
-6. **Q6 tax:** confirm that no tax is calculated (invoice shows net amounts and a "tax not included" note). Or is a single configurable tax rate wanted?
+**Answered (2026-11-23), all six:**
+1. **Q1 price model:** editable **plan cards** are the right shape (create a card; edit its price, included quantities and limits any time; the card at month close prices the month) → D-63.
+2. **Q2 currency:** **editable**, default **USD** (United States). It can be set to e.g. **INR** for India. Changing the country or currency **switches every plan card** to that currency (amounts aren't converted) → D-64.
+3. **Q3 plan change mid-month:** the **month-start plan** bills the whole month and the new plan bills **from the next month**. The month-start plan is preserved (`tenant_billing_plans`). Limits still change immediately → D-65.
+4. **Q4 retention:** **8 years by default, editable** (1–30) → D-67.
+5. **Q5 delivery:** also **email invoices to the tenant's admins** on issue (and a void notice). This is an editable setting, default on → D-68.
+6. **Q6 tax:** **no tax by default** ("Tax not included"). **Editable:** one tax rate and label (e.g. GST 18 %) → D-69.
 
 ## Suggested split (two members, as in Sprint 25)
 
@@ -163,6 +160,6 @@ The contract between the two members is the `plan_prices` and `invoices` / `invo
   - Console: plan cards (create, edit, history), Invoices page, detail, tenant Invoices, export and print. Relay-ops get 403 and see no billing pages.
 
 ## Next steps
-1. Barath answers Q2–Q6 (Q1 answered) and signs off D-62 … D-68, the retention period and the split.
-2. On sign-off: write `Sprint26/path.md` and the two phase files, amend the Decision Record (D-62 …), switch `CLAUDE.md` to Sprint 26, add a Session Log entry.
+1. ~~Answer Q1–Q6 and sign off~~: done 2026-11-23.
+2. ~~Write `Sprint26/path.md`, the phase files, the Decision Record amendment (D-62 … D-70), the `CLAUDE.md` switch and the Session Log entry~~: done 2026-11-23.
 3. Before P1 starts: merge the Sprint 25 stack, run the Sprint 25 acceptance run and record its findings as X3.

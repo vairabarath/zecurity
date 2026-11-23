@@ -69,7 +69,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
 | F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); live check after merge |
 | F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); live check after merge |
-| F34 | Billing plans and invoicing | ⬜ Not started | Sprint 26 theme (2026-11-23): scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed, awaiting sign-off |
+| F34 | Billing plans and invoicing | ⬜ Not started | Sprint 26 (signed off 2026-11-23, D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices emailed to tenants, optional tax; `Sprint26/path.md` |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
@@ -256,3 +256,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-17: F11 completed: F11-1 (PR #213, "no relay path" display and audit) and F11-2 (PR #215, D-39 refinement: never held on an empty failover pool while the primary has an eligible relay) merged; full live re-run on a reset DB (`main` 883fed1c, migration 061) passed with traffic probes. Ticked F11. Progress 17 / 40 (Must have 14 / 18). Remaining Must-have items: F5 headroom, F7 (D-34), F8 plan, F12 quotas.
 - 2026-11-18: Sprint 23 merges: B1 plans #222 (F8), B2 headroom #226 (F5), S1 suspend/resume #223 and S2 tenant creation #225 (F7; S2 handed from Barath to Sathiya), S3 quotas #224 (F12). Snapshot rows set to 🧪 / ◐; nothing ticked until live-checked. S4 deletion remains.
 - 2026-11-23: snapshot refreshed. Sprint 24 merged: F23 (M1 #240, M2 #242), F26 (A1–A3 #234–#236), F27 (T1 #238) → 🧪, ticked after the Sprint 24 acceptance run. Sprint 25 code complete as a stacked set (#244 docs, #245 U1, #246 U2, #247 U3, #248 U4): F32, F33 → 🚧. Sprint 26 theme chosen: **F34 billing** (scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed). Progress unchanged at 21 / 40.
+- 2026-11-23: Sprint 26 (F34) signed off (by Sathiya, overriding the product-owner sign-off step; Barath reviews in PR #249). Decision Record amendment 2026-11-23, billing (D-62 … D-70); plan `Sprint26/path.md`.
