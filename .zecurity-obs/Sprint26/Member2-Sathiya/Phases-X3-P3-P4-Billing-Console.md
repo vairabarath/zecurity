@@ -220,6 +220,52 @@ Then tick F32 and F33 in the tracker.
 - Relay-ops see no Billing settings, card prices or editing, Invoices page or tenant Invoices section (and the API refuses them anyway).
 - `npm test`, `npm run lint`, `npm run build`.
 
+### Implementation record
+- **Foundations started 2026-11-23** on `feat/sprint26-p4-console-foundations` (based on `feat/sprint25-u4-usage-alerts`). These are pure functions and components with tests; **not wired** into routes, navigation, `src/api/billing.ts` or `api-surface.test.ts`, because the endpoints don't exist until P1b / P3. The API calls are passed in as props.
+  - **`src/api/types.ts`:** billing shapes from this phase file (`PlanPrice`, `MeterPrice`, `PlanCardSummary`, `BillingSettings`, `Invoice`, `InvoiceLine`, `InvoiceEmailDelivery`, `BILLING_METERS`); types only, no calls.
+  - **`src/lib/billing-money.ts`:**
+    - typed amounts are parsed to minor units with string arithmetic (`19.99` → 1999; too many decimals refused);
+    - money is formatted as "INR 1,991.84" with ISO 4217 exponents; it mirrors the controller's `internal/billing/money.go` (#250), using the same test values, so the console and the email print the same amounts;
+    - tax percent ↔ basis points; meter labels, units, quantities.
+  - **`src/lib/plan-price-form.ts`:** form text ↔ `PlanPrice`, plus the edit payload rule: unchanged → left out, billing off → `null`, otherwise the new price.
+  - **`src/components/PlanCard.tsx`:** a plan card showing the price or "Not billable", "50 GB included, then INR 8.00 per GB", the six limits, the tenant count and revision, and optional Edit / Duplicate / History actions.
+  - **`src/components/PlanCardDialog.tsx`:** new, edit and duplicate in one dialog.
+    - The existing name, description and limits fields, plus a **Price** section: billing on or off, the monthly fee, and per meter "Bill …" with included quantity, unit and price.
+    - Reason required; one save = one call. The edit view says how many tenants use the card and how price changes reach invoices.
+    - Scrolls inside the viewport.
+  - **`src/components/BillingSettingsForm.tsx`:**
+    - country (fills in the currency) and currency; a currency change states that all N cards switch with no conversion, and needs the "I'll review the card prices" acknowledgement;
+    - tax "No tax" or a name and rate; retention 1–30 years; the email-to-tenants toggle;
+    - reason; sends only the changed fields.
+    - Countries come from `src/lib/billing-countries.ts`, a **placeholder** until the P1b settings API serves the list.
+  - **`src/lib/invoiceExport.ts`:** invoices CSV, lines CSV and JSON. Amounts are decimal text with a currency column; formula cells are neutralised by reusing the audit export's `csvCell`.
+  - **`src/components/InvoicePrint.tsx`** plus an `@media print` block in `index.css`: prints only the invoice, black on white. Drafts carry a DRAFT watermark; a void invoice notes it doesn't need paying; "Tax not included."; the incomplete-hours note; a deleted tenant is marked.
+  - `useWrite` moved from `PlanDialogs.tsx` to `src/lib/useWrite.ts` (lint: component files export components only). No behaviour change.
+- **UI review** with the `web-design-guidelines` skill (Vercel, pinned snapshot). Fixed:
+  - long names now wrap;
+  - `overscroll-contain` on the scrolling dialog;
+  - explicit text colour on native selects (Windows dark mode);
+  - `name` on every control;
+  - example placeholders ending in "…";
+  - `aria-live` on the fee error;
+  - a heading for the printed invoice;
+  - `translate="no"` on the invoice number;
+  - the issued date via `Intl.DateTimeFormat`.
+- **Kept on purpose:**
+  - money is formatted by hand, not with `Intl.NumberFormat`: integer minor units, identical to the email;
+  - the console's disable-until-valid submit pattern;
+  - the unsaved-changes guard belongs with the page wiring.
+- `frontend-design` guidance was followed for wording (sentence case, plain verbs, errors that say how to fix them) and restraint: the components match the console's existing look rather than adding a new style.
+- **Tests:** billing-money 50, price form 6, PlanCard 4, PlanCardDialog 8, BillingSettingsForm 7, invoice export 4, InvoicePrint 3.
+- **Mutation checks**, each caught by a test: float parsing; extra decimals accepted; an unchanged price still sent; billing off not sending `null`; a currency change without acknowledgement; the tax rate rounded to a whole percent; formula cells not neutralised; the draft watermark missing.
+- **Gates:** `npm test` (62 files, 818 tests), `npm run lint` (clean), `npm run build` (ok).
+- **Still to do after P1b / P3:**
+  - `src/api/billing.ts` and the `api-surface.test.ts` entries;
+  - the pages (Plans as cards, Billing settings, Invoices, invoice detail with actions and email status, tenant Invoices section), routes and navigation (super-admin only);
+  - the unsaved-changes guard;
+  - countries from the settings API;
+  - the live check below.
+
 ### Live check (P4)
 - In the console:
   - switch the country to India: the cards show INR and the warning appeared;
