@@ -2,7 +2,7 @@
 type: sprint-scope-draft
 sprint: 26
 title: Provider Dashboard — billing plans and invoicing (F34)
-status: DRAFT — theme chosen 2026-11-23 (F34 billing); D-62 … D-68 are proposals until Barath answers the review questions and signs off
+status: DRAFT — theme chosen 2026-11-23 (F34 billing); D-62 … D-68 are proposals until Barath answers the review questions and signs off; Sprint26/path.md and the phase files drafted 2026-11-23 (pending sign-off)
 baseline: Sprint 25 stack (PR #244 docs, #245 U1, #246 U2, #247 U3, #248 U4; code complete, not merged); main cb441cc9
 ---
 
@@ -16,22 +16,22 @@ baseline: Sprint 25 stack (PR #244 docs, #245 U1, #246 U2, #247 U3, #248 U4; cod
 
 Sprint 25 made each tenant's usage **measurable** (F32, F33). Sprint 26 makes it **billable**: the provider gives each plan a price, and at each UTC month close the controller turns the month's plan and usage into an **invoice** per tenant. The provider reviews it, issues it and records it as paid or void.
 
-- **Price book:** each plan (B1, D-43) gets a monthly base fee and, per meter, an included allowance and a unit price for usage above it. Prices are versioned. An invoice keeps the prices it used.
+- **Plan cards:** each plan (B1, D-43) becomes a **card**: limits plus a monthly base fee and, per meter, an included quantity and a unit price for usage above it. The provider **creates new cards and edits the price and included quantities whenever it wants**. Every edit is kept in a revision history, and an issued invoice keeps the prices it used.
 - **Invoices:** one per tenant per UTC month, built from the ledger (U2's reader, D-59 counts only). Draft, then issued (immutable, numbered in sequence), then paid or void. Each invoice says which of the month's hours were incomplete.
-- **Provider console:** the price book on each plan, an Invoices page, an invoice detail view, a tenant's invoices on tenant detail, and an export (CSV, JSON and a printable view).
+- **Provider console:** the Plans page as cards (create, edit, history), an Invoices page, an invoice detail view, a tenant's invoices on tenant detail, and an export (CSV, JSON and a printable view).
 
 **Billing records, not payments.** Sprint 26 **prices and invoices**. It does **not** collect money (no payment processor, no stored cards). It calculates **no tax**. It never **enforces**: an unpaid invoice never suspends, throttles or limits a tenant (suspension stays a manual D-45 action). D-56's rule "no agent change" still holds.
 
 | Feature | Today | Proposed phases | Size |
 |---|---|---|---|
-| **F34** Billing plans and invoicing | ⬜ Plans have limits only, no price (D-43). The ledger counts usage per tenant per hour and month (`usage_hourly`, `usage_active_user_counts`, `usage_tenants`; D-57, D-58), and U2 reads it (`ReadTenantUsage`, `ReadMonthUsage`). | **P1** price book, **P2** invoice generator, **P3** invoice API, **P4** console | 🟡 Medium to 🔴 Large (two migrations, one background job, new console writes; no agent change) |
+| **F34** Billing plans and invoicing | ⬜ Plans have limits only, no price (D-43). The ledger counts usage per tenant per hour and month (`usage_hourly`, `usage_active_user_counts`, `usage_tenants`; D-57, D-58), and U2 reads it (`ReadTenantUsage`, `ReadMonthUsage`). | **P1** plan cards, **P2** invoice generator, **P3** invoice API, **P4** console | 🟡 Medium to 🔴 Large (two migrations, one background job, new console writes; no agent change) |
 | **Sprint 25 follow-ups** | Sprint 25 acceptance run not yet done | **X3** (whatever the run finds) | 🟢 Small |
 
 ## What already exists (reuse, don't rebuild)
 
 | Building block | Where | Used by |
 |---|---|---|
-| Plans with six limit keys, one default, assignment with reason and before/after audit | `062_tenant_plans.sql`, `plans`, `workspaces.plan_id`, action `tenant.plan.assign` (D-43) | P1: a price book per plan. P2: the plan a tenant is billed for |
+| Plans with six limit keys, one default, assignment with reason and before/after audit | `062_tenant_plans.sql`, `plans`, `workspaces.plan_id`, action `tenant.plan.assign` (D-43) | P1: a plan becomes a card with a price. P2: the plan a tenant is billed for |
 | Usage ledger: hourly meters, collector minutes (completeness), monthly active users, tenant snapshot that survives a purge | `071_usage.sql` (D-57, D-58, D-59) | P2: invoice quantities |
 | Usage reader (one reader, used by U3 and U4): tenant window, month for the whole fleet | `providerquery/usage.go` (`ReadTenantUsage`, `ReadMonthUsage`) | P2 reads month totals and completeness through it. No second usage query |
 | Tenant snapshot for purged tenants (id, name, slug, plan name) | `usage_tenants` (D-58) | P2: a final invoice for a tenant purged mid-month |
@@ -39,24 +39,30 @@ Sprint 25 made each tenant's usage **measurable** (F32, F33). Sprint 26 makes it
 | Provider audit with reason and before/after | `provider.WithChange` (F17, D-53) | P1, P3 writes |
 | Background job on the controller (single instance, D-02) | U1b collector, A1 evaluator | P2 month-close job |
 | Client-side CSV/JSON export (formula cells neutralised, row cap) | console audit export (F38), usage export (U3) | P4 export |
-| Usage alerts (warn only) | `tenant.usage_over` (D-61) | Unchanged; can be set at a plan's included allowance |
+| Usage alerts (warn only) | `tenant.usage_over` (D-61) | Unchanged; can be set at a plan's included quantity |
 
 ## Proposed phases
 
 ### X3 — Sprint 25 follow-ups (first, small)
 Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 starts. Anything it finds lands here, as X1 and X2 did. Then tick F32 and F33 in the tracker.
 
-### P1 — Price book (controller + migration `073_billing_prices`)
-- **Table** `plan_prices (id, plan_id, currency, base_fee_minor BIGINT, meters JSONB, effective_from DATE, created_at, created_by)`. One row is one **version** of a plan's price. `effective_from` is the first day of a UTC month. A new version applies from that month. A version is never edited once an invoice has used it, and one already in effect can't be changed in place either: you add a new version instead.
-  - `meters`: one entry per billable meter (D-63): `{included: BIGINT, unit_price_minor: BIGINT, unit: BIGINT}`. Example: relay bytes are priced **per GB** (`unit` = 10⁹ bytes) with 50 GB included. Active users are priced **per user** with 5 included. A meter left out is not billed. Usage above the allowance is rounded **up to whole units** (D-64).
+### P1 — Plan cards (controller + migration `073_plan_cards`)
+- A **plan card** is the B1 plan (name, description, six limits) plus an optional **price**: `plan_prices (plan_id PK, currency, base_fee_minor BIGINT, meters JSONB, updated_at, updated_by)`, one row per plan.
+  - `meters`: one entry per billable meter (D-63): `{included: BIGINT, unit_price_minor: BIGINT, unit: BIGINT}`. Example: relay bytes are priced **per GB** (`unit` = 10⁹ bytes) with 50 GB included. Active users are priced **per user** with 5 included. A meter left out is not billed. Usage above the included quantity is rounded **up to whole units** (D-64).
   - Money is **integers in minor units** (cents or paise). No floats anywhere.
-- A plan **without a price** is not billable: its tenants get no invoice (D-62). The Free and Legacy seeds start with no price.
-- **API:** `GET /provider/plans/{id}/prices`, `POST /provider/plans/{id}/prices` (adds a version; super-admin only, reason, audited before/after). New `decide()` action `plan.price.write` (super-admin only by the existing rule).
-- **Tests:** DB-backed: version selection at month boundaries, a version already used by an invoice can't be changed, integer overflow guard, unknown meter refused, negative values refused, a plan with no price is not billable.
+- **Create and edit any time:** a new card is a new plan with or without a price. An edit can change the price, any included quantity, the limits or the name, in one transaction. Each edit raises `plans.revision` and adds a row to the append-only `plan_card_revisions` history. A custom deal is a new card assigned to that tenant.
+- A card **without a price** is not billable: its tenants get no invoice (D-62). The Free and Legacy seeds start with no price.
+- **API:** B1's plan create and update gain an optional `price`; `GET /provider/plans/{id}/revisions` lists the history. Super-admin only (B1's plan actions), reason, audited before/after.
+- **Tests:** DB-backed:
+  - create and edit (price only, included quantity only, limits and price together), one revision per edit;
+  - a failed edit changes nothing;
+  - integer overflow guard;
+  - unknown meter refused, negative values refused;
+  - a card with no price is not billable.
 
 ### P2 — Invoice generator (controller + migration `074_invoices`)
 - **Tables:**
-  - `invoices (id, number, tenant_id, month, status draft|issued|paid|void, currency, plan_name, price_version_id, subtotal_minor, incomplete_hours, generated_at, issued_at, issued_by, paid_at, void_reason, …)`
+  - `invoices (id, number, tenant_id, month, status draft|issued|paid|void, currency, plan_name, plan_revision, subtotal_minor, incomplete_hours, generated_at, issued_at, issued_by, paid_at, void_reason, …)`
   - `invoice_lines (invoice_id, kind base|meter, meter, quantity, included, billable_units, unit_price_minor, amount_minor)`
   - Unique `(tenant_id, month)` for non-void invoices.
 - **Month-close job:** runs on the controller (D-02) after the UTC month ends plus a **settling delay** (proposed 6 hours, so the last hour's collector minutes and relay deltas are flushed). For each tenant on a priced plan it creates or **regenerates** a **draft**. This is idempotent: a re-run replaces the draft and never creates a second invoice.
@@ -66,7 +72,7 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
   - **Paid** records a date and a reference (a note, never card data).
   - **Void** needs a reason. A corrected invoice is a new invoice: a voided invoice is never edited.
 - **Purged tenants (D-67):** a tenant purged during the month gets a final draft for that month, named from `usage_tenants`. Invoices are **financial records**: they are not deleted by the purge (amends D-46 again) and are kept beyond the ledger's 25 months (D-58), because their lines hold the quantities.
-- **Tests:** DB-backed: month boundaries in UTC, allowance and rounding, a draft regenerated twice is still one invoice, issued invoice unchangeable (mutation check), numbering gap-free under concurrent issue, purged tenant final invoice, incomplete hours stated, plan change mid-month (D-65), tenant on an unpriced plan gets nothing.
+- **Tests:** DB-backed: month boundaries in UTC, included quantity and rounding, a draft regenerated twice is still one invoice, issued invoice unchangeable (mutation check), numbering gap-free under concurrent issue, purged tenant final invoice, incomplete hours stated, plan change mid-month (D-65), tenant on an unpriced plan gets nothing.
 
 ### P3 — Invoice API (controller)
 - `GET /provider/invoices?month=&status=&tenant_id=&cursor=`: the fleet list, keyset-paged. `GET /provider/invoices/{id}`: the invoice with its lines.
@@ -79,7 +85,7 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
 - **Invoices are tenant data** (D-60 pattern): super-admin only, `decide()` actions `invoice.read` and `invoice.write`, and relay-ops get **403**. A read of one invoice is audited `invoice.read`. The list writes one `invoice.fleet.read` row per request.
 
 ### P4 — Billing console (provider console)
-- **Plans → Prices:** price versions per plan, add a version (reason).
+- **Plans page as cards:** create a card; edit its price, included quantities and limits; duplicate it as a custom card; see its revision history (reason on every change).
 - **Invoices page** (super-admin navigation): by month and status, totals per currency. Detail view with lines, incomplete hours, status history and actions (issue, mark paid, void with reason).
 - **Tenant detail → Invoices:** the tenant's invoices. Purged tenants keep their name and a "Deleted" badge (as in U3).
 - **Export:** CSV and JSON of a month's invoices, plus a **printable invoice view** (browser print to PDF). No server-side PDF.
@@ -89,16 +95,19 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
 
 | Proposed ID | Question | Recommendation |
 |---|---|---|
-| **D-62** | Scope of Sprint 26 | **F34** price book and invoices (+ X3). **No payment collection** (no payment processor, no card data), **no tax calculation**, **no enforcement** on non-payment, **no tenant-facing invoices**. No agent change. A plan without a price is not billable. |
-| **D-63** | Price model | Per plan: a **monthly base fee** plus, per meter, an **included allowance** and a **unit price above it** (overage). Billable meters: the D-57 meters (`relay_bytes_to_clients`, `relay_bytes_to_connectors`, `session_minutes`, `connector_minutes`, `shield_minutes`, `active_users`). Each plan chooses which meters it prices. Prices are **versioned**, starting on a UTC month. *Open question Q1.* |
+| **D-62** | Scope of Sprint 26 | **F34** plan cards and invoices (+ X3). **No payment collection** (no payment processor, no card data), **no tax calculation**, **no enforcement** on non-payment, **no tenant-facing invoices**. No agent change. A plan without a price is not billable. |
+| **D-63** | Price model | Plans become **cards** the provider creates and edits whenever it wants: limits plus a **monthly base fee** and, per meter, an **included quantity** and a **unit price above it** (overage). Billable meters: the D-57 meters (`relay_bytes_to_clients`, `relay_bytes_to_connectors`, `session_minutes`, `connector_minutes`, `shield_minutes`, `active_users`). Each card chooses which meters it prices. Every edit is kept in a revision history. The card as it reads at month close bills the month (D-65), and issued invoices never change. ✔ *Q1 answered 2026-11-23: editable plan cards are the right shape.* |
 | **D-64** | Money and rounding | **One currency per provider** (set once in config, e.g. `BILLING_CURRENCY=USD`). Integer **minor units** throughout. Overage is rounded **up to whole units** per meter per invoice. Line amount = billable units × unit price. No floating point. *Open question Q2 (which currency).* |
-| **D-65** | Plan change in the month | The plan assigned at **month close** sets the base fee and prices for the **whole month** (no proration). Simple, and the plan assignment audit already shows the history. *Alternative:* prorate the base fee by day, which needs a plan-assignment history table. *Open question Q3.* |
+| **D-65** | Plan change in the month | The plan assigned at **month close**, as its card reads then, sets the base fee, included quantities and prices for the **whole month** (no proration). A card edit during the month applies to that month. Simple, and the plan assignment audit already shows the history. *Alternative:* prorate the base fee by day, which needs a plan-assignment history table. *Open question Q3.* |
 | **D-66** | Invoice lifecycle | Draft (regenerable) → **issued** (immutable, number from a **gap-free sequence**, e.g. `INV-2026-000123`) → **paid** or **void** (reason). Corrections are a void plus a new invoice, never an edit. Generated after the UTC month close plus a **6-hour settling delay**. Incomplete hours are billed as counted and stated on the invoice (D-59). |
 | **D-67** | Retention and purge | Invoices and their lines are **financial records**. They are kept **N years** (proposal: 8) and are **not deleted by the S4 purge** (amends D-46). They are not pruned with the ledger (D-58), because lines hold their own quantities. A tenant purged in the month gets a final invoice for it, named from `usage_tenants`. *Open question Q4 (retention period: a legal and operations choice owned by the product owner).* |
-| **D-68** | Who, and console writes | Super-admin only (tenant data, D-40/D-60 pattern; relay-ops 403). New actions `plan.price.write`, `invoice.read`, `invoice.write`. Writes carry a reason and before/after audit (D-53). **Amends D-30:** price versions and invoice issue, mark paid, void and regenerate are console writes. A separate `billing` role is F19 (not this sprint). |
+| **D-68** | Who, and console writes | Super-admin only (tenant data, D-40/D-60 pattern; relay-ops 403). Card writes reuse B1's plan actions; new actions `invoice.read`, `invoice.write`. Writes carry a reason and before/after audit (D-53). **Amends D-30:** card prices and included quantities, and invoice issue, mark paid, void and regenerate are console writes. A separate `billing` role is F19 (not this sprint). |
+
+**Answered (2026-11-23):**
+- **Q1:** editable **plan cards** are the right shape (create a card, edit its price and included quantities any time; the card at month close bills the month) → D-63.
 
 **Review questions for Barath (answer before sign-off):**
-1. **Q1 price model:** is "base fee + included allowance + per-unit overage" the right shape? Should any meter be **per seat** instead (e.g. bill every active user, with no allowance)?
+1. ~~**Q1 price model:** are editable **plan cards** (limits + base fee + included quantity and per-unit price per meter, edited any time, the card at month close bills the month) the right shape? Should any meter be **per seat** instead (e.g. bill every active user, with nothing included)?~~ **Answered:** editable plan cards.
 2. **Q2 currency:** one currency for the whole provider? Which one (USD, INR, …)?
 3. **Q3 plan change mid-month:** bill the whole month at the plan held at month close (recommended), or prorate by day?
 4. **Q4 invoice retention:** how many years? (Proposal: 8. This is a legal choice.)
@@ -109,19 +118,19 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
 
 | Member | Phases | Order |
 |---|---|---|
-| **Barath (M2)** | **P1** price book (schema + API), **P2** invoice generator (builds on his U1 ledger) | P1a schema first (the contract with P3/P4), then P1 API, then P2 |
+| **Barath (M2)** | **P1** plan cards (schema + API), **P2** invoice generator (builds on his U1 ledger) | P1a schema first (`073_` and `074_` together: the contract with P3/P4), then P1b API and P2 |
 | **Sathiya (M1)** | **X3**, **P3** invoice API, **P4** console (builds on U2/U3) | X3 → P3 (after P2's `074_` schema) → P4 |
 
 The contract between the two members is the `plan_prices` and `invoices` / `invoice_lines` schema. Proposal: Barath merges `073_` and `074_` (schema only, with constraint tests) first. P3 is then built and tested against rows its tests insert, while the generator is still in progress (as U1a/U2 worked in Sprint 25).
 
-**Migrations (to reserve):** `073_billing_prices` (P1), `074_invoices` (P2). Latest after the Sprint 25 stack: `072_usage_alert_kind`. Check `ls controller/migrations | tail -3` before adding. No migration framework. `[schema: reset DB]`.
+**Migrations (to reserve):** `073_plan_cards` (P1), `074_invoices` (P2). Latest after the Sprint 25 stack: `072_usage_alert_kind`. Check `ls controller/migrations | tail -3` before adding. No migration framework. `[schema: reset DB]`.
 
 **Conflict zones:**
 - `controller/internal/providerquery/usage.go`: P2 reads through it and must not add a second usage query.
 - `controller/internal/tenantlifecycle/purge.go`: the D-67 exception only.
 - `controller/cmd/server/main.go`: job and routes.
 - `controller/internal/provider/authz.go`: new actions.
-- Plans handlers (B1): P1 adds prices beside them and doesn't change limits.
+- Plans handlers (B1): P1 extends create and update with the card's price; limits rules don't change.
 - `provider-console/src/api/api-surface.test.ts`: new writes, on purpose.
 - `TenantDetail.tsx`, the Plans page, and the provider navigation (`roles.ts`, `Layout.tsx`).
 
@@ -129,7 +138,7 @@ The contract between the two members is the `plan_prices` and `invoices` / `invo
 - **Payment collection** (Stripe or any processor), dunning, automatic suspension for non-payment. Any enforcement on usage or billing.
 - **Tax** calculation and tax IDs (unless Q6 says otherwise). **Multi-currency.**
 - **Tenant-facing billing** (invoices and usage in the admin UI, invoice email to tenants; unless Q5 says otherwise).
-- Discounts, coupons, credits and trials. Annual plans. Custom per-tenant prices (a per-tenant price override, like the D-47 quota override, could come later).
+- Discounts, coupons, credits and trials. Annual plans. (A custom price for one tenant is its own card, not an override.)
 - Direct-path traffic metering (connector counters, agent change).
 - F19 roles (incl. a `billing` role), F20, F22, F28/F29, F31, F35, F37, F39, F40.
 
@@ -145,15 +154,15 @@ The contract between the two members is the `plan_prices` and `invoices` / `invo
   - relay-ops reading invoices (must be 403);
   - an unpriced plan producing an invoice.
 - **Live acceptance on the lab:**
-  - Two tenants on two priced plans, known usage in a month (relay bytes over the allowance for one, under it for the other). After the month close (test clock), each draft's lines match U3's usage report and the price book exactly.
+  - Two tenants on two priced plans, known usage in a month (relay bytes over the included quantity for one, under it for the other). After the month close (test clock), each draft's lines match U3's usage report and the cards exactly.
   - A tenant on an unpriced plan gets no invoice.
   - The controller stopped for 5 minutes in the month: the invoice states the incomplete hours and bills what was counted.
   - Regenerate a draft twice: still one invoice. Issue it: number assigned. An attempt to change it is refused. Mark paid. Void another with a reason: it stays visible as void.
-  - A new price version from next month doesn't change this month's invoice.
+  - Create a card and a custom card. Edit a card's price and included quantity mid-month: the month's draft (after regenerate) uses the edited card, an issued invoice doesn't change, and the history shows both revisions.
   - Purge a tenant mid-month: its final invoice is generated with its kept name. Its invoices survive the purge.
-  - Console: price book, Invoices page, detail, tenant Invoices, export and print. Relay-ops get 403 and see no billing pages.
+  - Console: plan cards (create, edit, history), Invoices page, detail, tenant Invoices, export and print. Relay-ops get 403 and see no billing pages.
 
 ## Next steps
-1. Barath answers Q1–Q6 and signs off D-62 … D-68, the retention period and the split.
+1. Barath answers Q2–Q6 (Q1 answered) and signs off D-62 … D-68, the retention period and the split.
 2. On sign-off: write `Sprint26/path.md` and the two phase files, amend the Decision Record (D-62 …), switch `CLAUDE.md` to Sprint 26, add a Session Log entry.
 3. Before P1 starts: merge the Sprint 25 stack, run the Sprint 25 acceptance run and record its findings as X3.
