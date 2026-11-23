@@ -58,18 +58,18 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F20 | Break-glass account | ◐ Partly | `recover-admin` CLI exists; decide whether it counts |
 | F21 | MFA on the provider console | ✅ Done | — |
 | F22 | Tunnel success rate per relay/tenant | ⬜ Not started | Needs relay/connector counters (large) |
-| F23 | Active-session timeseries | 🧪 Merged | Sprint 24 M1 #240, M2 #242 (charts, per-tenant relay bandwidth, R1); Sprint 24 acceptance run pending |
+| F23 | Active-session timeseries | 🧪 Merged, live ◐ | Sprint 24 R1 #237, M1 #239, M2 #240, fixes #242. Live run 2026-11-23 (Barath, `main` `2ae68355`; results on `docs/sprint24-f23-live-results`, no PR yet): **R1 fail** (defects R1-1 first window has no tenant rate, R1-2 non-continuous window writes 0; fix PR not authorized), M1 pass (M1-1 low), M2 pass except design questions M2-1 … M2-3, cross-feature pass; R1-3 open |
 | F24 | Connector online/offline roster | ✅ Done | — |
 | F25 | Control-plane health | ✅ Done | — (Overview card over `GET /provider/health`, PR #190; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
-| F26 | Alert rules + webhook/email | 🧪 Merged | Sprint 24 A1 #234, A2 #235, A3 #236; usage alerts U4 #248 (Sprint 25, open); Sprint 24 acceptance run pending |
-| F27 | Incident timeline | 🧪 Merged | Sprint 24 T1 #238 (D-55 relay-ops rows); Sprint 24 acceptance run pending |
+| F26 | Alert rules + webhook/email | 🧪 Merged, live ✓ | Sprint 24 A1 #234, A2 #235, A3 #236 (live PASS 2026-11-20); usage alerts U4 #248 (Sprint 25, in review). Tick after the Sprint 24 acceptance |
+| F27 | Incident timeline | 🧪 Merged, live ✓ | Sprint 24 T1 #238 + D-55 (live PASS 2026-11-21). Tick after the Sprint 24 acceptance |
 | F28 | Relay config push, staged rollout | ⬜ Not started | Large |
 | F29 | Relay version pinning and rollback | ⬜ Not started | Large |
-| F30 | Tenant migration between pools | ⬜ Not started | Decided (D-38): an assignment change with make-before-break (PR 1); no bulk/scheduled migration |
+| F30 | Tenant migration between pools | ◐ Check | Probably done already: relay pools #200 (D-38) added pool reassignment with graceful or immediate migration (make-before-break), live PASS with F9 on 2026-11-17. Confirm it covers F30 (no bulk or scheduled migration, by D-38), then tick |
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
-| F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); live check after merge |
-| F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); live check after merge |
-| F34 | Billing plans and invoicing | ⬜ Not started | Sprint 26 (signed off 2026-11-23, D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices emailed to tenants, optional tax; `Sprint26/path.md` |
+| F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); not merged, no live check yet. R1-1 doesn't affect it: usage counts a tenant new in a watched relay run from zero |
+| F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); not merged, no live check yet |
+| F34 | Billing plans and invoicing | 🚧 In progress | Sprint 26 (signed off 2026-11-23, D-62 … D-70; `Sprint26/path.md`). Drafts: #250 invoice email + delivery worker (P3 part, live check 14/14 on the branch), #251 console foundations (P4 part). Barath's P1a schema, P1b card/settings API and P2 invoice generator not started |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
@@ -208,23 +208,23 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 | F20 | Break-glass account with forced audit entry | ◐ | ⚖️ 🟢 | `zecurity-controller provider recover-admin` (Phase T) on the controller host, audited as `provider_user.recover_admin`. Decide whether this counts, or a standing break-glass account is wanted. | |
 | F21 | MFA enforcement on provider console | ✅ | — | Super-admin TOTP, Phase T (PR #138); live AT-T PASS (PR #147). | |
 | F22 | Tunnel establishment success rate per relay and per tenant | ⬜ | 🔴 | Needs success/failure counters reported by relays/connectors. | |
-| F23 | Active session count timeseries | ⬜ | 🟡 / 🔴 | Relay connection count is in each heartbeat; `connector_active_streams` and relay connection gauges are exported to Prometheus (PENDING-10), but not stored or shown in the console; per-tenant sessions need agent data. | |
+| F23 | Active session count timeseries | 🧪 | 🟡 / 🔴 | Merged in Sprint 24 (R1 #237 per-workspace relay counters, proto field 13; M1 #239 metric store `068_`, 1-min 7 days, hourly 400 days; M2 #240 charts; fixes #242). Live 2026-11-23: R1 fail (R1-1, R1-2), M1 pass, M2 pass except M2-1/M2-2, cross-feature pass; see `Pending-Live-Tests.md` "F23 findings" on `docs/sprint24-f23-live-results`. | Barath |
 | F24 | Connector online/offline roster per tenant | ✅ | — | Tenant detail lists connectors with status and last heartbeat (Sprint 21). | |
 | F25 | Control-plane health | ✅ | — | Health subsystem with `/livez`, `/readyz`, `/healthz`, `/health` and internal diagnostics (PENDING-10); Overview **Control plane** card over `GET /provider/health` (super-admin, sanitized messages) merged (PR #190). | |
-| F26 | Alert rules + webhook/email dispatch | ⬜ | 🟡 | Needs rule storage, an evaluator and dispatch (SMTP config exists for invites). | |
-| F27 | Incident timeline view | ⬜ | 🟡 | Could combine provider audit, relay/connector events and alerts (after F26). | |
+| F26 | Alert rules + webhook/email dispatch | 🧪 | — | Merged in Sprint 24: A1 rules + evaluator (`069_alerts`, D-50, D-53), A2 signed webhook + email delivery (`070_`, D-52), A3 Alerts console; all live PASS. Sprint 25 U4 adds `tenant.usage_over` (#248, in review). | Sathiya |
+| F27 | Incident timeline view | 🧪 | — | Merged in Sprint 24: T1 timeline of alerts and provider audit, relay-ops see relay and pool rows (D-55); live PASS. | Sathiya |
 | F28 | Relay config push with staged rollout | ⬜ | 🔴 | No relay config/command channel or release workflow. | |
 | F29 | Relay version pinning and rollback | ⬜ | 🔴 | Relay version is reported; no pinning or update control. | |
-| F30 | Tenant migration between relay pools | ⬜ | ⚖️ 🔴 | Depends on F9 (pools). | |
+| F30 | Tenant migration between relay pools | ◐ | — | Relay pools #200 (D-38): pool reassignment with graceful or immediate migration; live PASS 2026-11-17 with F9. Check and tick. | |
 | F31 | Read-only tenant support view (impersonation, audited) | ◐ | ⚖️ 🔴 | Read-only tenant detail exists and every view is audited. Impersonation needs the support-access decision (decisions doc Q9). | |
-| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | ⬜ | 🔴 | Nothing is metered today. | |
-| F33 | Per-tenant usage report | ⬜ | 🔴 | Depends on F32. | |
+| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | 🚧 | 🟡 | Sprint 25 U1 #245: exact relayed bytes from cumulative counters, session/connector/shield minutes, monthly active users, completeness; not merged or live-checked. | Barath |
+| F33 | Per-tenant usage report | 🚧 | 🟢 | Sprint 25 U2 #246 (`GET /provider/usage`, fleet list, audited), U3 #247 (tenant Usage, fleet Usage page, export); not merged or live-checked. | Sathiya |
 
 ### Can have (Phase 3)
 
 | ID | Feature | Status | Effort for what's left | Evidence / what's missing | Owner |
 |----|---------|--------|------------------------|---------------------------|-------|
-| F34 | Billing plans and invoicing | ⬜ | ⚖️ 🔴 | No plan/billing model. | |
+| F34 | Billing plans and invoicing | 🚧 | 🔴 | Sprint 26 (D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices with a gap-free number, emailed to tenant admins, optional tax. Drafts #250 (email) and #251 (console foundations); P1a/P1b/P2 not started. | Barath, Sathiya |
 | F35 | Provider API + API keys | ◐ | ⚖️ 🟡 | Provider REST API exists (session tokens). API keys need an auth decision (must not mint sessions outside `IssueSession`). | |
 | F36 | Tenant self-signup / provisioning workflow | ◐ | 🟡 | First sign-in creates a workspace with its admin and CA. No provider-side provisioning workflow. | |
 | F37 | Multi-provider / reseller hierarchy | ⬜ | ⚖️ 🔴 | Single provider today (decisions doc Q1). | |
@@ -257,3 +257,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-18: Sprint 23 merges: B1 plans #222 (F8), B2 headroom #226 (F5), S1 suspend/resume #223 and S2 tenant creation #225 (F7; S2 handed from Barath to Sathiya), S3 quotas #224 (F12). Snapshot rows set to 🧪 / ◐; nothing ticked until live-checked. S4 deletion remains.
 - 2026-11-23: snapshot refreshed. Sprint 24 merged: F23 (M1 #240, M2 #242), F26 (A1–A3 #234–#236), F27 (T1 #238) → 🧪, ticked after the Sprint 24 acceptance run. Sprint 25 code complete as a stacked set (#244 docs, #245 U1, #246 U2, #247 U3, #248 U4): F32, F33 → 🚧. Sprint 26 theme chosen: **F34 billing** (scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed). Progress unchanged at 21 / 40.
 - 2026-11-23: Sprint 26 (F34) signed off (by Sathiya, overriding the product-owner sign-off step; Barath reviews in PR #249). Decision Record amendment 2026-11-23, billing (D-62 … D-70); plan `Sprint26/path.md`.
+- 2026-11-23: Can-have status refreshed. F23: Barath's live run today (results on `docs/sprint24-f23-live-results`, no PR yet) — R1 fail (R1-1, R1-2), M1 and cross-feature pass, M2 pass with design questions. F26 and F27 live-checked, waiting for the Sprint 24 acceptance tick. F30 probably done by relay pools #200 (to confirm and tick). F32/F33 still in review (#245–#248), not live-checked. F34 in progress (drafts #250, #251). Not started: F22, F28, F29, F37, F39, F40; partly done, each needing a decision: F19, F20, F31, F35, F36, F38. Progress unchanged at 21 / 40.
