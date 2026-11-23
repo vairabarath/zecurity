@@ -81,7 +81,8 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
 - **`invoice_number_counters (year INTEGER PRIMARY KEY, last BIGINT NOT NULL)`**: the gap-free counter.
 - **`invoice_emails`**, the delivery queue for D-68:
   - `invoice_id`, `kind (issued|voided|resend)`, `seq` (1 for issued/voided, n for the n-th resend);
-  - `status (pending|sent|failed|not_delivered)`, `recipients_count`, `attempts`, `next_attempt_at`, `last_error` (sanitized, no addresses), `sent_at`;
+  - `status (pending|sending|sent|failed|not_delivered)` (`sending` = claimed by the worker; a row left in `sending` by a restart becomes `failed`, never re-sent automatically), `recipients_count`, `attempts`, `next_attempt_at`, `last_error` (sanitized, no addresses), `sent_at`, `created_at`;
+  - an index on `(status, next_attempt_at)` for the worker's claim;
   - `PRIMARY KEY (invoice_id, kind, seq)`.
   - Sathiya's P3 owns the sender; the table is here so the contract lands with P1a.
 - **Triggers (D-66):**

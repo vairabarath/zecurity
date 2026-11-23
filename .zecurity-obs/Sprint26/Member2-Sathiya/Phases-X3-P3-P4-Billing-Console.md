@@ -79,7 +79,12 @@ Then tick F32 and F33 in the tracker.
     - the incomplete-hours note when it applies;
     - for a void notice, the reason.
     - No console link, no secrets, no other tenant's data.
-  - **Retries:** exponential backoff up to 24 h, then `failed` (visible in the console; resend is possible). Each row is sent at most once (status moves in a transaction before and after the send). A send error never changes the invoice.
+  - **Retries:** backoff 1 min doubling, capped at 6 h, at most 12 attempts (about a day), then `failed` (visible in the console; resend is possible). A send error never changes the invoice.
+  - **At most once:**
+    - a row is claimed `pending → sending` before the send and finished after it;
+    - a row left in `sending` by a restart becomes `failed` ("delivery unknown") and is never re-sent automatically;
+    - only "every recipient refused" is retried;
+    - a partial send, or a send that timed out (it may still go out), is `failed` without retry, and a super-admin can resend.
   - Recipient addresses are never written to the provider audit or the logs (only the count).
 
 ### Tests (DB-backed)
@@ -106,6 +111,25 @@ Then tick F32 and F33 in the tracker.
   - an email sent to another tenant's admins;
   - an email sent twice;
   - recipient addresses in the audit.
+
+### Implementation record
+- **Started 2026-11-23** on `feat/sprint26-p3-invoice-email` (based on the Sprint 25 stack top `feat/sprint25-u4-usage-alerts`; rebase on `main` after the stack and P1a merge). This is the part that doesn't need P1a's tables.
+  - `invitation.Emailer.SendMultipart`: multipart/alternative, plain text plus HTML, quoted-printable UTF-8, RFC 2047 subject. It refuses multi-line headers. In dev mode (no `SMTP_HOST`) it logs the subject only.
+  - `internal/billing/money.go`: integer money formatting with ISO 4217 exponents (0, 2 or 3 digits), rate as a percentage, meter quantities (GB rounded down, minutes, users) and price units.
+  - `internal/billing/email.go`: `ComposeInvoiceEmail(kind, invoice snapshot)`.
+    - Content: invoice or void notice (a resend follows the invoice's status); lines; subtotal; tax line or "Tax not included."; total; incomplete-hours note.
+    - Safety: `html/template` escaping; tenant and operator text kept to one line and capped; no console link.
+  - `internal/billing/emailworker.go`: `EmailWorker` over an `EmailStore` interface (`ClaimDue`, `FailInterrupted`, `LoadInvoice`, `TenantAdmins`, `Finish`) and a `Mailer`. It follows the at-most-once rules above; SMTP errors are stored with addresses replaced by `<address>`.
+- **Tests:**
+  - `internal/invitation` multipart parse-back and header-injection tests;
+  - `internal/billing` unit tests for formatting, content, escaping, void and resend, own-tenant recipients, not delivered, retry with backoff, max attempts, partial and timeout not retried, transient errors, sanitized errors.
+- **Mutation checks**, each caught by a test: timeout retried; partial retried; address not sanitized; no-admin case sending; max attempts ignored; void showing the invoice; HTML rendered with `text/template`; unsanitized subject.
+- **Gates:** `go build ./...`, `go vet`, `gofmt`; the full `go test ./...` with the DB and Valkey env passed (50 packages ok).
+- **Live check (part, 2026-11-23): Pass, 14/14.** Run against a local capture SMTP server plus one real Gmail SMTP send (`[LIVE CHECK]` subject, sender mailbox to itself); recorded in `Planning/Pending-Live-Tests.md` (section "F34 (P3, part)" and the results log). The full suite skipped only the 2 known hard-coded tests.
+- **Still to do after P1a/P2:**
+  - the SQL `EmailStore` on `invoice_emails` / `invoices` / `users`, with DB-backed tests (claim, interrupted rows, own-tenant admins only);
+  - wiring in `main.go` (`BILLING_PROVIDER_NAME`, worker interval);
+  - the invoice read API and write handlers.
 
 ### Live check (P3)
 - On the P2 drafts: list and detail match. Issue → the tenant's admin mailbox gets the invoice (HTML and text). Resend → one more email. Void → the void notice. Mark paid.
