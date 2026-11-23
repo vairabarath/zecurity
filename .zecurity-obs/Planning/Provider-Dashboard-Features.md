@@ -1,7 +1,7 @@
 ---
 type: tracker
 title: Provider Dashboard — Feature Tracker
-updated: 2026-11-20
+updated: 2026-11-23
 owners: [Barath (M2), Sathiya (M1)]
 source: Feature list from Barath, 2026-10-26 (Phase 1 / 2 / 3)
 baseline: main c79a75e1 (Sprint 22 T, A, E, X, D merged; FU-1 … FU-19 done except FU-11, mitigated; quick wins #190, F17 #192, F5 #193, F14 #195 merged and live-checked 2026-11-12)
@@ -58,18 +58,18 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F20 | Break-glass account | ◐ Partly | `recover-admin` CLI exists; decide whether it counts |
 | F21 | MFA on the provider console | ✅ Done | — |
 | F22 | Tunnel success rate per relay/tenant | ⬜ Not started | Needs relay/connector counters (large) |
-| F23 | Active-session timeseries | ⬜ Not started | Prometheus exports some of the data (PENDING-10); nothing stores or shows it over time |
+| F23 | Active-session timeseries | 🧪 Merged | Sprint 24 M1 #240, M2 #242 (charts, per-tenant relay bandwidth, R1); Sprint 24 acceptance run pending |
 | F24 | Connector online/offline roster | ✅ Done | — |
 | F25 | Control-plane health | ✅ Done | — (Overview card over `GET /provider/health`, PR #190; live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197)) |
-| F26 | Alert rules + webhook/email | ⬜ Not started | Medium: rules, evaluator, dispatch |
-| F27 | Incident timeline | ⬜ Not started | Medium, after F26 |
+| F26 | Alert rules + webhook/email | 🧪 Merged | Sprint 24 A1 #234, A2 #235, A3 #236; usage alerts U4 #248 (Sprint 25, open); Sprint 24 acceptance run pending |
+| F27 | Incident timeline | 🧪 Merged | Sprint 24 T1 #238 (D-55 relay-ops rows); Sprint 24 acceptance run pending |
 | F28 | Relay config push, staged rollout | ⬜ Not started | Large |
 | F29 | Relay version pinning and rollback | ⬜ Not started | Large |
 | F30 | Tenant migration between pools | ⬜ Not started | Decided (D-38): an assignment change with make-before-break (PR 1); no bulk/scheduled migration |
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
-| F32 | Usage collection | ⬜ Not started | Large: nothing is metered |
-| F33 | Per-tenant usage report | ⬜ Not started | After F32 |
-| F34 | Billing plans and invoicing | ⬜ Not started | Needs a decision |
+| F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); live check after merge |
+| F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); live check after merge |
+| F34 | Billing plans and invoicing | ⬜ Not started | Sprint 26 theme (2026-11-23): scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed, awaiting sign-off |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
@@ -255,3 +255,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-17: relay pools live run on the lab ([[Pending-Live-Tests]]): F4/F9 (PR #200) and F11 (PR #201) PASS; F10 (PR #202) failed at step 1 on a connector recovery defect (F10-1: a refused migration was never retried), fixed in PR #210 and retested live (recovered on its own, no restart). Ticked F4, F9, F10. F11 ◐: failover passed, but F11-1 (console/audit when both pools are down) is open; tick it with that fix. Progress 16 / 40 (Must have 13 / 18). Remaining Must-have items: F5 headroom, F7 (D-34), F8 plan, F12 quotas.
 - 2026-11-17: F11 completed: F11-1 (PR #213, "no relay path" display and audit) and F11-2 (PR #215, D-39 refinement: never held on an empty failover pool while the primary has an eligible relay) merged; full live re-run on a reset DB (`main` 883fed1c, migration 061) passed with traffic probes. Ticked F11. Progress 17 / 40 (Must have 14 / 18). Remaining Must-have items: F5 headroom, F7 (D-34), F8 plan, F12 quotas.
 - 2026-11-18: Sprint 23 merges: B1 plans #222 (F8), B2 headroom #226 (F5), S1 suspend/resume #223 and S2 tenant creation #225 (F7; S2 handed from Barath to Sathiya), S3 quotas #224 (F12). Snapshot rows set to 🧪 / ◐; nothing ticked until live-checked. S4 deletion remains.
+- 2026-11-23: snapshot refreshed. Sprint 24 merged: F23 (M1 #240, M2 #242), F26 (A1–A3 #234–#236), F27 (T1 #238) → 🧪, ticked after the Sprint 24 acceptance run. Sprint 25 code complete as a stacked set (#244 docs, #245 U1, #246 U2, #247 U3, #248 U4): F32, F33 → 🚧. Sprint 26 theme chosen: **F34 billing** (scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed). Progress unchanged at 21 / 40.
