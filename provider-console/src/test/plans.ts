@@ -1,4 +1,4 @@
-import type { PlanSummary, TenantPlan, TenantQuota } from '@/api/types'
+import type { PlanCardSummary, PlanSummary, TenantPlan, TenantQuota } from '@/api/types'
 
 // Plan fixtures shared by the page tests (Sprint 23 B1, D-43).
 
@@ -39,3 +39,21 @@ export const FREE_QUOTAS: TenantQuota[] = (Object.keys(FREE_LIMITS) as (keyof ty
   used: 0,
   over: false,
 }))
+
+// ---- Sprint 26 plan cards ----
+
+export function planCard(over: Partial<PlanCardSummary> = {}): PlanCardSummary {
+  return {
+    ...planSummary({ id: PRO_PLAN_ID, name: 'Team', description: 'For growing teams.', is_default: false, tenants: 4 }),
+    price: {
+      currency: 'INR',
+      base_fee_minor: 100000,
+      meters: {
+        relay_bytes_to_clients: { included: 50_000_000_000, unit: 1_000_000_000, unit_price_minor: 800 },
+        active_users: { included: 5, unit: 1, unit_price_minor: 30000 },
+      },
+    },
+    revision: 3,
+    ...over,
+  }
+}

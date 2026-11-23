@@ -11,11 +11,11 @@ import {
   limitInputs,
   parseLimitInputs,
   PLAN_LIMIT_LABELS,
-  planErrorMessage,
   sameLimits,
   type LimitInputs,
 } from '@/lib/plan-format'
 import { reasonValid } from '@/lib/pool-format'
+import { useWrite } from '@/lib/useWrite'
 
 // Plan dialogs (Sprint 23 B1, D-43). Super-admin only; the controller
 // decides. Every limit is a whole number or "Unlimited" (sent as null): a
@@ -76,24 +76,6 @@ function PlanDialog({
       </DialogContent>
     </Dialog>
   )
-}
-
-/** Runs one write; keeps the dialog open with a message on failure. */
-function useWrite() {
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  async function run(fn: () => Promise<void>) {
-    setPending(true)
-    setError(null)
-    try {
-      await fn()
-    } catch (err) {
-      setError(planErrorMessage(err))
-    } finally {
-      setPending(false)
-    }
-  }
-  return { pending, error, run }
 }
 
 export function LimitsFields({ value, onChange }: { value: LimitInputs; onChange: (v: LimitInputs) => void }) {
@@ -268,7 +250,7 @@ export function DeletePlanDialog({ plan, onCancel, onDone }: { plan: PlanSummary
   )
 }
 
-function PlanTextFields({
+export function PlanTextFields({
   name,
   description,
   onName,
