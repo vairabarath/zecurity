@@ -1132,3 +1132,32 @@ Made for Sprint 26 (`.zecurity-obs/Sprint26/path.md`) after review of the scope 
 | D-43 | **Extended**: plans become priced cards with a revision history; limits, default and assignment rules are unchanged. Plan assignment also records the month-start plan for billing (D-65). |
 | D-46 | **Amended**: the purge keeps the tenant's invoices (and their email delivery records) until the D-67 retention ends. |
 | D-45, D-47, D-57 … D-61 | **Unchanged**: no billing outcome suspends or limits a tenant; quotas and the usage ledger stay as they are. |
+
+## Decision record amendment — 2026-11-23: provider access and API (F19, F20, F35)
+
+Made for Sprint 27 (`.zecurity-obs/Sprint27/path.md`) after review of the scope draft (`.zecurity-obs/Sprint27/Scope-Draft.md`, PR #252). The six review questions were answered on 2026-11-23. **Sign-off:** given on 2026-11-23 by Sathiya, as for Sprint 26; the product owner (Barath) reviews it in PR #252. Sprint 27 is **planned**: it starts after Sprint 26 (F34) is merged and live-checked. This amendment **amends D-05, D-06, D-30, D-31 and D-68/D-70**, and **extends D-26, D-28 and D-50**.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-71 | Sprint 27 scope | **F19** roles `auditor`, `billing`, `support` with an explicit role matrix; **F20** loud break-glass; **F35** read-only provider API keys with an expiry alert; plus the Sprint 26 acceptance follow-ups (X4). **Not in scope:** agent changes, external provider IdPs (D-29), impersonation or support grants (F31), partner scoping (F37), several roles per operator, step-up beyond today's TOTP, keys that write. |
+| D-72 | Role matrix | One role per operator. `decide()` uses an **explicit role → actions table** instead of the `relay.*` prefix rule and its exception lists. Existing roles keep exactly today's permissions (proved by a full action × role table test). An action without a table entry is **denied to every role except `super-admin`**, and a test fails when an action constant has no entry or no read/write classification. `decide()` stays the only chokepoint; console visibility is never the control. |
+| D-73 | New roles | **`auditor`**: every read the console has, including tenants, usage, invoices, plan cards, billing settings and the provider audit log; no writes. **`billing`**: plan cards (create, edit, including price), billing settings, invoices (issue, mark paid, void, regenerate, resend), usage reads, the tenant list and tenant plan assignment; no relay, pool, tenant lifecycle, quota, alert or operator actions. **`support`**: tenant reads (list; detail with connectors, shields, devices and agent status), the tenant's alerts and timeline rows, health; no billing, usage or plan-card reads, no provider audit log, no writes. Every tenant read by these roles is audited as for super-admins (OQ-1). `relay-ops` still never sees tenant data (D-40). |
+| D-74 | TOTP for the new roles | TOTP is **mandatory** for `auditor`, `billing` and `support`, as for `super-admin` (D-28); `relay-ops` stays optional. No session is minted for them without `otp` in `amr`. |
+| D-75 | Break-glass | `zecurity-controller provider recover-admin` **on the controller host** is the only break-glass path: no standing break-glass account and no console or API route. It requires `--reason`. Every use raises a critical **platform** alert `provider.break_glass_used` (no secrets in the payload), emails every active super-admin, and shows a console banner to super-admins until one acknowledges it with a note (audited). The temporary password stays stdout-only. |
+| D-76 | Provider API keys | Keys `zpk_<id>_<secret>` (256-bit secret, SHA-256 at rest, constant-time compare), **shown once** and never logged, audited or returned again. **One role per key** from `relay-ops`, `auditor`, `billing`, `support`; **never `super-admin`**. **Read-only:** a key may use only its role's read actions; `decide()` refuses every write for an `api_key` actor. **Every key expires, at most 365 days**; optional source CIDR allowlist; per-key rate limit that fails closed. A key is an actor of kind `api_key`: it **never goes through `IssueSession`**, never yields a session, and is refused on auth, TOTP, operator-management and API-key routes. Reads audited for people are audited for keys with the key as the actor. A platform alert `api_key.expiring` fires once per key 14 days before expiry and resolves when the key is revoked, expires or is replaced (no secret in the payload). Only super-admins create and revoke keys, with a reason and before/after audit. |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-05 | **Amended**: the `relay.*` prefix rule is replaced by the explicit role matrix (D-72); `super-admin` and `relay-ops` permissions are unchanged. |
+| D-06 | **Amended**: tenant reads are open to `auditor` and `support`, the tenant list and plan assignment to `billing`; tenant lifecycle (create, suspend, resume, delete, legal hold), quotas and pools stay super-admin only. |
+| D-31 | **Amended in form only**: relay revoke and delete stay super-admin only, now as matrix entries rather than an exception list. |
+| D-68, D-70 | **Amended**: plan cards, billing settings and invoice actions are open to `billing`; invoice and usage reads to `auditor`. |
+| D-30 | **Amended**: API key create and revoke, and break-glass acknowledgement, are console writes. |
+| D-26, ADR-029 | **Extended**: `recover-admin` requires a reason and is announced by alert, email and banner. |
+| D-28 | **Extended**: TOTP mandatory for `auditor`, `billing`, `support`. |
+| D-50 | **Extended**: platform kinds `provider.break_glass_used` and `api_key.expiring` (new file `077_provider_alert_kinds`; `069_` and `072_` are not edited). |
+| D-24 … D-27, D-29, D-40 | **Unchanged**. |

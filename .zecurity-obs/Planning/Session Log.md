@@ -4021,3 +4021,20 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Merge the Sprint 25 stack (#244 → #248), run the Sprint 24 and Sprint 25 acceptance runs (findings → X2 / X3).
 - Barath: P1a (`073_plan_cards`, `074_invoices`) → P1b and P2. Sathiya: X3 → P3 (after P1a) → P4.
+
+## 2026-11-23 — Claude Code (Sathiya, Sprint 26 work and Sprint 27 planning)
+
+**What was done:**
+- Sprint 26 P3 part: invoice email and delivery worker (#250, draft; live check 14/14 against a capture SMTP server plus one real Gmail send). P4 part: billing console foundations (#251, draft; reviewed with the `web-design-guidelines` skill, previewed in a browser).
+- Checked Barath's Sprint 24 F23 live run (branch `docs/sprint24-f23-live-results`, no PR yet): R1 fail (R1-1, R1-2), M1 and cross-feature pass, M2 design questions. Usage counting (U1) isn't affected by R1-1. Tracker refreshed (#249).
+- Sprint 27 planned: provider access and API (F19, F20, F35). Scope draft, `Sprint27/path.md`, both phase files and the Decision Record amendment 2026-11-23, provider access (D-71 … D-76) (PR #252). `CLAUDE.md` lists Sprint 27 as planned; Sprint 26 stays active.
+
+**Key decisions (answered by Sathiya, 2026-11-23):**
+- Roles `auditor`, `billing` and `support` now, with an explicit role → actions matrix; `billing` may assign a tenant's plan; TOTP mandatory for all three.
+- API keys are read-only first, one role each (never super-admin), every key expires within 365 days, with an `api_key.expiring` alert this sprint.
+- Break-glass stays the `recover-admin` CLI on the controller host only; every use raises an alert, emails super-admins and shows a banner.
+- Sign-off for Sprint 27 given by Sathiya as for Sprint 26; Barath reviews in #252.
+
+**What's next:**
+- Barath: open a PR for the F23 results; decide on the R1 fix PR and the design questions; review and merge #244 → #248, then #249; start Sprint 26 P1a.
+- Sprint 25 live run: paused, waiting for how the lab hosts (.41, .53, .46, enrolled to Barath's controller) are shared.

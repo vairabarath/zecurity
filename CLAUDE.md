@@ -27,6 +27,11 @@
 - **P4 — billing console**, Sathiya, after P1b and P3: Billing settings, Plans as cards (create, edit, duplicate, history), Invoices page and detail, tenant Invoices, export, print view.
 - **Not in Sprint 26:** payment collection, any enforcement, tenant-facing billing pages, tax IDs or per-country tax rules, multi-currency at once or amount conversion, proration, discounts or credits, direct-path metering, F19 (billing role), F20, F22, F28/F29, F31, F35, F37, F39, F40.
 
+**Planned next: Sprint 27, provider access and API (F19, F20, F35)**: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252), Decision Record amendment **2026-11-23, provider access (D-71 … D-76)**. Starts only after Sprint 26 is merged and live-checked; until then Sprint 26 stays the active sprint.
+- **O1** role matrix + roles `auditor`, `billing`, `support` (`075_provider_roles`) and **G1** loud break-glass (`recover-admin --reason` on the controller host → critical alert, email to super-admins, console banner; `077_provider_alert_kinds`): Barath.
+- **X4** Sprint 26 follow-ups, **K1** read-only provider API keys (`zpk_…`, one role, never super-admin, expire ≤ 365 days, never a session; `api_key.expiring` alert; `076_provider_api_keys`), **K2** keys console, **O2** console per role: Sathiya.
+- Plan: `.zecurity-obs/Sprint27/path.md`.
+
 Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)** , **2026-11-21 (D-55: relay-ops see relay and pool operation audit rows in the incident timeline; extends D-40)** , **2026-11-21, usage (D-56 … D-61; extends D-40 and D-50, amends D-46)** and **2026-11-23, billing (D-62 … D-70; extends D-43, D-40/D-60, amends D-30, D-46)**. The plan is `.zecurity-obs/Sprint26/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
 
 **Database (pre-production rule):**
@@ -62,6 +67,7 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | `.zecurity-obs/Sprint26/Member1-Barath/Phases-P1-P2-Prices-Invoices.md` | Barath's phases P1a, P1b, P2 (F34) |
 | `.zecurity-obs/Sprint26/Member2-Sathiya/Phases-X3-P3-P4-Billing-Console.md` | Sathiya's phases X3, P3, P4 (F34) |
 | `.zecurity-obs/Sprint26/Scope-Draft.md` | Sprint 26 scope discussion (signed off 2026-11-23) |
+| `.zecurity-obs/Sprint27/path.md` | **Planned** next sprint (F19, F20, F35; D-71 … D-76); phase files in `Sprint27/Member1-Barath/` and `Sprint27/Member2-Sathiya/` |
 | `.zecurity-obs/Sprint25/path.md` | Previous sprint record (usage ledger F32, usage report F33, usage alerts; stack #244 → #248, acceptance run pending) |
 | `.zecurity-obs/Sprint24/path.md` | Previous sprint record (metrics F23, alerts F26, incident timeline F27; acceptance run pending) |
 | `.zecurity-obs/Sprint23/path.md` | Previous sprint record (plans, headroom, tenant lifecycle, quotas; Post-Sprint Fixes) |

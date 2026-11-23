@@ -54,8 +54,8 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 
 | ID | Feature | Status | What's left |
 |---|---|---|---|
-| F19 | Provider admin roles | ◐ Partly | Two roles today; more need a decision |
-| F20 | Break-glass account | ◐ Partly | `recover-admin` CLI exists; decide whether it counts |
+| F19 | Provider admin roles | ◐ Partly | Two roles today. **Sprint 27 (planned, D-72/D-73):** role matrix + `auditor`, `billing`, `support` |
+| F20 | Break-glass account | ◐ Partly | `recover-admin` CLI exists. **Sprint 27 (planned, D-75):** CLI on the controller host is the only path; reason, alert, email, banner |
 | F21 | MFA on the provider console | ✅ Done | — |
 | F22 | Tunnel success rate per relay/tenant | ⬜ Not started | Needs relay/connector counters (large) |
 | F23 | Active-session timeseries | 🧪 Merged, live ◐ | Sprint 24 R1 #237, M1 #239, M2 #240, fixes #242. Live run 2026-11-23 (Barath, `main` `2ae68355`; results on `docs/sprint24-f23-live-results`, no PR yet): **R1 fail** (defects R1-1 first window has no tenant rate, R1-2 non-continuous window writes 0; fix PR not authorized), M1 pass (M1-1 low), M2 pass except design questions M2-1 … M2-3, cross-feature pass; R1-3 open |
@@ -70,7 +70,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); not merged, no live check yet. R1-1 doesn't affect it: usage counts a tenant new in a watched relay run from zero |
 | F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); not merged, no live check yet |
 | F34 | Billing plans and invoicing | 🚧 In progress | Sprint 26 (signed off 2026-11-23, D-62 … D-70; `Sprint26/path.md`). Drafts: #250 invoice email + delivery worker (P3 part, live check 14/14 on the branch), #251 console foundations (P4 part). Barath's P1a schema, P1b card/settings API and P2 invoice generator not started |
-| F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
+| F35 | Provider API + API keys | ◐ Partly | REST API exists. **Sprint 27 (planned, D-76):** read-only keys, one role, ≤ 365 days, expiry alert |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
 | F38 | Compliance export | ◐ Partly | Audit export CSV/JSON (client-side, ≤ 10,000 rows, PR #190) live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197); full SOC 2 bundle is larger |
@@ -258,3 +258,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-23: snapshot refreshed. Sprint 24 merged: F23 (M1 #240, M2 #242), F26 (A1–A3 #234–#236), F27 (T1 #238) → 🧪, ticked after the Sprint 24 acceptance run. Sprint 25 code complete as a stacked set (#244 docs, #245 U1, #246 U2, #247 U3, #248 U4): F32, F33 → 🚧. Sprint 26 theme chosen: **F34 billing** (scope draft `Sprint26/Scope-Draft.md`, D-62 … D-68 proposed). Progress unchanged at 21 / 40.
 - 2026-11-23: Sprint 26 (F34) signed off (by Sathiya, overriding the product-owner sign-off step; Barath reviews in PR #249). Decision Record amendment 2026-11-23, billing (D-62 … D-70); plan `Sprint26/path.md`.
 - 2026-11-23: Can-have status refreshed. F23: Barath's live run today (results on `docs/sprint24-f23-live-results`, no PR yet) — R1 fail (R1-1, R1-2), M1 and cross-feature pass, M2 pass with design questions. F26 and F27 live-checked, waiting for the Sprint 24 acceptance tick. F30 probably done by relay pools #200 (to confirm and tick). F32/F33 still in review (#245–#248), not live-checked. F34 in progress (drafts #250, #251). Not started: F22, F28, F29, F37, F39, F40; partly done, each needing a decision: F19, F20, F31, F35, F36, F38. Progress unchanged at 21 / 40.
+- 2026-11-23: Sprint 27 planned and signed off (provider access: F19, F20, F35; D-71 … D-76; PR #252). Starts after Sprint 26 closes.

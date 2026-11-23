@@ -2,7 +2,7 @@
 type: sprint-scope-draft
 sprint: 27
 title: Provider Dashboard — provider access and API (F19, F20, F35)
-status: DRAFT — theme chosen 2026-11-23 (provider access); Q1–Q6 answered 2026-11-23; D-71 … D-76 are proposals until signed off
+status: SIGNED OFF 2026-11-23 (by Sathiya; Barath reviews in PR #252) — superseded by Sprint27/path.md, the phase files and the Decision Record amendment 2026-11-23 (provider access, D-71 … D-76); kept as the scope discussion record
 baseline: Sprint 26 docs (#249, D-62 … D-70); Sprint 25 stack #244 … #248 and Sprint 26 code not merged yet
 ---
 
@@ -228,6 +228,6 @@ Latest expected after Sprint 26: `074_invoices`. Check `ls controller/migrations
     - the secret appears only in the create response.
 
 ## Next steps
-1. ~~Answer Q1–Q6~~ (done 2026-11-23); sign off D-71 … D-76 and the split.
-2. On sign-off: write `Sprint27/path.md` and the two phase files, amend the Decision Record (D-71 …), switch `CLAUDE.md` to Sprint 27, add a Session Log entry.
+1. ~~Answer Q1–Q6 and sign off~~: done 2026-11-23.
+2. ~~Write `Sprint27/path.md`, the phase files, the Decision Record amendment (D-71 … D-76), the Session Log entry~~: done 2026-11-23. `CLAUDE.md` lists Sprint 27 as **planned**; it becomes the active sprint when Sprint 26 closes.
 3. Before O1 starts: Sprint 26 merged and its acceptance run done (findings → X4).
