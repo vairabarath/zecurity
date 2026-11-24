@@ -128,8 +128,8 @@ function EditImpact({ plan }: { plan: PlanCardSummary }) {
   if (plan.tenants === 0) return <>No tenant uses this card yet.</>
   return (
     <>
-      {plural(plan.tenants, 'tenant')} use{plan.tenants === 1 ? 's' : ''} this card. Limits change at once. Price changes apply to this
-      month’s invoices at month close (and to drafts when they’re regenerated). Issued invoices don’t change.
+      {plural(plan.tenants, 'tenant')} use{plan.tenants === 1 ? 's' : ''} this card. Limits change at once. Price changes apply from next
+      month: this month is billed at the card as it was on the 1st (D-63). Issued invoices don’t change.
     </>
   )
 }

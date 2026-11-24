@@ -76,7 +76,7 @@ describe('PlanCardDialog: edit', () => {
   it('says who is affected and how price changes reach invoices', () => {
     render(<PlanCardDialog mode="edit" plan={planCard()} currency="INR" onUpdate={vi.fn()} onCancel={vi.fn()} onDone={vi.fn()} />)
     expect(
-      screen.getByText(/4 tenants use this card\. Limits change at once\. Price changes apply to this month’s invoices at month close/),
+      screen.getByText(/4 tenants use this card\. Limits change at once\. Price changes apply from next month: this month is billed at the card as it was on the 1st/),
     ).toBeInTheDocument()
     expect(screen.getByText(/Issued invoices don’t change\./)).toBeInTheDocument()
   })
