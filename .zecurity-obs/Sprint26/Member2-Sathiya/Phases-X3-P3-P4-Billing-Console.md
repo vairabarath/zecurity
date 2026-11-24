@@ -162,12 +162,12 @@ Then tick F32 and F33 in the tracker.
     - Default / Legacy badges.
   - **New card:**
     - name, description, the six limits (number or Unlimited);
-    - an optional price: base fee, and for each meter a "Billed" toggle with included quantity, unit and unit price.
+    - an optional price: base fee, and for each meter a "Billed" toggle with included quantity, unit and unit price. **Every meter starts off** in a new card (session minutes are never billed by default; the minutes meters are an editable choice per card).
     - Bytes are entered as GB (unit = 10⁹), minutes as hours or minutes, users as users. Amounts are entered in the major unit and converted to minor units **as integers** (string parsing, no float math).
     - Reason required. Saved in one call.
   - **Edit card:**
     - The same form, prefilled; any field in any combination; one call; reason required.
-    - When tenants use it: "N tenants use this card. Changes apply to this month's invoices at month close (drafts when regenerated). Issued invoices don't change."
+    - When tenants use it: "N tenants use this card. Changes apply from next month; this month is billed at the card as it was on the 1st. Issued invoices don't change." (D-63, changed 2026-11-24)
   - **Remove price** (confirmation, reason), **History** (revisions: who, when, reason, what changed), **Duplicate** (for a custom card; assign it with B1's plan assignment).
   - **Plan assignment dialog** (B1, extended text only): "Limits change now. Billing changes from next month; this month is billed at <month-start card>."
 - **Invoices page** (`/invoices`, super-admin nav):

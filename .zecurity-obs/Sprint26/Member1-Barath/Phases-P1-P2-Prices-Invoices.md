@@ -161,6 +161,7 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
   - assign twice in one month → the row keeps the plan from the start of the month;
   - a change in the next month records that month's start plan;
   - a tenant created mid-month and never changed → `PlanForMonth` = creation plan;
+  - a card edited mid-month (e.g. Starter ₹499 / 50 GB / ₹2 per GB → ₹599 / 100 GB / ₹1 on the 15th) → that month's draft uses ₹499 / 50 GB / ₹2, the next month's uses the new terms; a currency change mid-month applies from the next month too; a card created mid-month → its first revision;
   - a purged tenant → the frozen plan.
 - Relay-ops 403; audit rows carry the reason and before/after.
 - **Mutation checks:**
@@ -199,7 +200,7 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
      - read `ReadMonthUsage(M)` and the settings;
      - for each tenant:
        - plan = `PlanForMonth(tenant, M)` (**month-start plan**, D-65);
-       - card = `CardFor(plan)` **as it reads now** (D-63), with its currency and revision;
+       - card = `CardForMonth(plan, M)`: the revision **in force at the start of M** (D-63, changed 2026-11-24) — the latest `plan_card_revisions` row with `changed_at < M`, else the card's first revision (a card created during M) — with that revision's price, currency and revision number. Never the card as it reads now;
        - no price → skip; a non-void invoice already exists → skip;
        - otherwise insert a **draft** with its lines in one transaction (`ON CONFLICT` on the unique index = no-op).
    - Tenants created after `M` get nothing. A priced tenant with zero usage gets the base fee.
@@ -238,6 +239,7 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
   - tax truncated;
   - quantities read outside `ReadMonthUsage`;
   - plan taken as the current plan instead of `PlanForMonth`;
+  - card taken as it reads now instead of the month-start revision (`CardForMonth`);
   - no unique index;
   - `SEQUENCE` numbering;
   - the trigger allowing an issued invoice to change;
