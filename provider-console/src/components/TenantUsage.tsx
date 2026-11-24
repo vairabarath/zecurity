@@ -126,18 +126,29 @@ function MonthsTable({ data, selected, onSelect }: { data: TenantUsageData; sele
                   <button type="button" className={cn('hover:underline', key === selected ? 'font-semibold text-primary' : 'text-primary')} onClick={() => onSelect(key)}>
                     {monthLabel(new Date(b.start))}
                   </button>
-                  {!b.complete && (
-                    <Badge variant="warning" className="ml-2">
-                      Incomplete
+                  {b.collected_minutes === 0 ? (
+                    // Live finding A: a month with no counted minute (before
+                    // metering started, or the controller was down all month)
+                    // was never metered — not an incomplete month of zeros.
+                    <Badge variant="secondary" className="ml-2">
+                      Not metered
                     </Badge>
+                  ) : (
+                    !b.complete && (
+                      <Badge variant="warning" className="ml-2">
+                        Incomplete
+                      </Badge>
+                    )
                   )}
                 </TableCell>
                 {HOURLY_METERS.map((m) => (
                   <TableCell key={m} className="text-right font-mono text-xs tabular-nums">
-                    {formatMeter(m, b.meters[m] ?? 0)}
+                    {b.collected_minutes === 0 ? <NotMetered /> : formatMeter(m, b.meters[m] ?? 0)}
                   </TableCell>
                 ))}
-                <TableCell className="text-right font-mono text-xs tabular-nums">{formatMeter('active_users', b.active_users ?? 0)}</TableCell>
+                <TableCell className="text-right font-mono text-xs tabular-nums">
+                  {b.collected_minutes === 0 ? <NotMetered /> : formatMeter('active_users', b.active_users ?? 0)}
+                </TableCell>
               </TableRow>
             )
           })}
@@ -193,5 +204,14 @@ function ExportButtons({ data }: { data: TenantUsageData }) {
         JSON
       </Button>
     </div>
+  )
+}
+
+/** A cell of a month that was never metered: no figure, not a zero. */
+function NotMetered() {
+  return (
+    <span className="text-muted-foreground" aria-label="Not metered">
+      —
+    </span>
   )
 }

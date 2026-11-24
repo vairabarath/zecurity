@@ -158,7 +158,12 @@ Tracker: F32 and F33 ticked only after their live checks.
 
 ## Post-Sprint Fixes
 
-_None yet._
+From the acceptance run on 2026-11-24 (results: `Planning/Pending-Live-Tests.md`), branch `fix/sprint25-live-findings`:
+- **F32-1 (U1):** relay usage is recorded on every heartbeat, not only the 5-minute DB-write cadence, so a restart loses at most one heartbeat's bytes (D-59). `controller/internal/relay/heartbeat.go`, `workspace_traffic.go`. Details in the U1 phase file.
+- **A (U3):** months with no counted minute read "Not metered", not "Incomplete 0 B". `TenantUsage.tsx`.
+- **B (U3):** the counted share of an incomplete month is never rounded to "0%" or "100%" (`formatCountedShare`). `pages/Usage.tsx`, `lib/usage-format.ts`.
+- **C (lab):** don't run a tenant's client on the host of that tenant's connector (it captures the connector's resource traffic). Recorded in the live-test notes.
+- **Q-1 (decided 2026-11-24, Sathiya):** session minutes stay counted as defined (a valid session, D-57); whether they are billed is a per-card option in F34, off by default (Sprint 26).
 
 ## Out of scope
 

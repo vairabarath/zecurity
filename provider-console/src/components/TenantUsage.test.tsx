@@ -65,6 +65,30 @@ describe('Tenant usage', () => {
     expect(screen.getByText(/Plan: Free\./)).toBeInTheDocument()
   })
 
+  it('a month with no counted minute reads "Not metered", never "Incomplete 0 B" (live finding A)', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({
+      'GET /provider/usage': (c: RecordedCall) => {
+        const r = body(c)
+        if (new URLSearchParams(c.search).get('granularity') === 'month') {
+          r.body.buckets = r.body.buckets.map((b, i) => (i < 10 ? { ...b, collected_minutes: 0, complete: false } : b))
+        }
+        return r
+      },
+    })
+    render(<TenantUsage tenantId={TENANT} />)
+    const table = await screen.findByRole('table', { name: 'Usage by month' })
+    const rows = within(table).getAllByRole('row').slice(1)
+    const oldest = rows[rows.length - 1]
+    expect(within(oldest).getByText('Not metered')).toBeInTheDocument()
+    expect(within(oldest).queryByText('Incomplete')).not.toBeInTheDocument()
+    expect(within(oldest).queryByText('0 B')).not.toBeInTheDocument()
+    expect(within(oldest).getAllByLabelText('Not metered').length).toBeGreaterThan(5)
+    // A metered month keeps its figures and its Incomplete mark.
+    expect(within(rows[0]).getByText('Incomplete')).toBeInTheDocument()
+    expect(within(rows[0]).queryByText('Not metered')).not.toBeInTheDocument()
+  })
+
   it('days: incomplete days marked, uncounted days not shown as 0', async () => {
     signedInAs(superAdminMe)
     mockFetch({ 'GET /provider/usage': body })

@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { addMonths, fleetUsageCSV, fleetUsageJSON, formatMeter, METER_LABELS, monthKey, monthLabel, monthStart } from '@/lib/usage-format'
+import { addMonths, fleetUsageCSV, fleetUsageJSON, formatCountedShare, formatMeter, METER_LABELS, monthKey, monthLabel, monthStart } from '@/lib/usage-format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 
 // Fleet usage (Sprint 25 U3, F33; D-57, D-59, D-60): every tenant's usage for
@@ -107,7 +107,7 @@ function FleetTable({ month, sort, round }: { month: string; sort: UsageMeter; r
           <>
             <Badge variant="warning">Incomplete</Badge>
             <span>
-              {Math.round((p.collected_minutes / p.minutes) * 100)}% of the month’s minutes counted so far: figures are at least what was counted.
+              {formatCountedShare(p.collected_minutes, p.minutes)} of the month’s minutes counted so far: figures are at least what was counted.
             </span>
           </>
         )}

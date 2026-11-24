@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { TenantMonthUsage, TenantUsage } from '@/api/usage'
 import { HOURLY_METERS } from '@/api/usage'
-import { addMonths, fleetUsageCSV, parseThreshold, thresholdToDisplay, formatBytes, formatMeter, formatMinutesAsHours, monthKey, monthStart, tenantUsageCSV } from './usage-format'
+import { addMonths, fleetUsageCSV, parseThreshold, thresholdToDisplay, formatBytes, formatCountedShare, formatMeter, formatMinutesAsHours, monthKey, monthStart, tenantUsageCSV } from './usage-format'
 
 // Sprint 25 U3 (F33): units, UTC months, and exports that keep raw
 // quantities, mark incomplete periods and neutralise formula cells.
@@ -66,5 +66,24 @@ describe('usage format', () => {
     expect(parseThreshold('relay_bytes_to_clients', '9999999999')).toBeNull() // over 10^18 bytes
     expect(thresholdToDisplay('relay_bytes_to_clients', 500_000_000_000)).toBe('500')
     expect(thresholdToDisplay('shield_minutes', 90)).toBe('1.5')
+  })
+})
+
+describe('formatCountedShare (live finding B)', () => {
+  it('never shows a counted sliver as 0% or an almost-whole month as 100%', () => {
+    expect(formatCountedShare(76, 43200)).toBe('0.1%')
+    expect(formatCountedShare(30, 43200)).toBe('<0.1%')
+    expect(formatCountedShare(1, 43200)).toBe('<0.1%')
+    expect(formatCountedShare(43199, 43200)).toBe('>99.9%')
+  })
+  it('shows one decimal under 10% and whole percents above, rounding down', () => {
+    expect(formatCountedShare(2000, 43200)).toBe('4.6%')
+    expect(formatCountedShare(21600, 43200)).toBe('50%')
+    expect(formatCountedShare(43150, 43200)).toBe('99%')
+  })
+  it('gives the exact ends', () => {
+    expect(formatCountedShare(0, 43200)).toBe('0%')
+    expect(formatCountedShare(43200, 43200)).toBe('100%')
+    expect(formatCountedShare(5, 0)).toBe('0%')
   })
 })
