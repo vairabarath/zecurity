@@ -172,6 +172,63 @@ Tenant usage and fleet page against the U1 live numbers; export opened; a purged
 ### Live check (U4)
 A small `relay_bytes_to_clients` threshold: the tenant that crosses it gets one alert (email and webhook, `scope: tenant`, its `tenant_id`); the other tenant none; no repeat that month.
 
+### U4 build record (branch `feat/sprint25-u4-usage-alerts`, stacked on U3 #247, 2026-11-21)
+- **`072_usage_alert_kind.sql`:**
+  - Replaces `alert_rules_kind_scope` (drop and re-add; `069_` untouched) with `tenant.usage_over` added to the tenant kinds.
+  - Seeds one rule like the other tenant rules: `00000000-0000-0000-0002-000000000010`, "Tenant usage over threshold", **disabled**, warning, `{"meter": "relay_bytes_to_clients", "threshold": 500000000000}`.
+  - `alert_states` and `alert_events` have no kind list of their own.
+- **Kinds** (`alerting/kinds.go`):
+  - New kind `KindTenantUsageOver`, scope tenant.
+  - New `Params.Meter` and `Params.Threshold`, both required. The meter must be one of D-57's meters (`providerquery.IsUsageMeter`); the threshold must be 1..10^18 in the meter's unit.
+  - `only()` now takes several allowed fields.
+- **Signal** (`alerting/signals.go`, `tenantUsageOver`):
+  - Reads U2's `providerquery.ReadMonthUsage` for the UTC month of `now` (one reader, never M1).
+  - Watches only active, unsuspended tenants (`activeTenant`); purged tenants are skipped.
+  - Fires at **≥** the threshold. Summary example: "Tenant acme used 1.5 kB relayed to clients in November 2026 (threshold 1.0 kB)".
+  - No new state logic: usage only grows within a month, so the A1 state machine keeps the alert firing (no repeat unless the rule sets re-notify). At the UTC month rollover usage restarts at 0, the observation disappears and the alert resolves.
+  - A read error leaves states unchanged (A1).
+- **D-61 "several rules may exist":** the controller's existing `POST /provider/alert-rules` (super-admin, D-53) can create more `tenant.usage_over` rules. The console edits the seeded rule only and adds **no new console write**, as the phase file says.
+- **Console:**
+  - `KIND_LABELS`, plus `AlertRuleParams.meter` and `threshold`.
+  - The rules list shows "· Relayed to clients from 500 GB a month".
+  - The edit dialog has a Meter select and "Monthly threshold (GB | hours | users)" in display units, converted to the raw unit (`parseThreshold` / `thresholdToDisplay`). Users must be whole; 0, negatives, more than 3 decimals or over 10^18 raw are refused.
+  - Meter and threshold are sent together, because the controller replaces `params` whole.
+- **Tests:**
+  - `kinds_test.go`: params cases; the scope count is now 5 platform and 5 tenant.
+  - `usage_alert_db_test.go` (real ledger, real evaluator):
+    - the seeded rule is disabled;
+    - it fires once for the tenant over the threshold, and at exactly the threshold;
+    - it never fires for suspended or purged tenants, and last month's usage doesn't count;
+    - it doesn't repeat as usage grows;
+    - both alerts resolve at the December rollover, and it fires again in the new month;
+    - rule update through the API is validated, and relay-ops get 403.
+  - `Alerts.test.tsx`: list text; editing in display units sends raw `{meter, threshold}`; invalid thresholds keep Save disabled.
+  - `usage-format.test.ts`: threshold conversion.
+- **Mutation checks, all caught (16):**
+  - Go (10):
+    - not firing at exactly the threshold;
+    - unwatched tenants alerted;
+    - purged tenants alerted;
+    - the wrong month read;
+    - never resolving at the rollover;
+    - no threshold floor;
+    - meter not validated;
+    - platform scope;
+    - the seed enabled;
+    - the constraint without the kind.
+  - Console (6):
+    - the GB factor;
+    - the hours factor;
+    - fractional users accepted;
+    - meter not sent;
+    - threshold not validated (survived the first test, which made no other change; it now toggles Enabled too);
+    - the list text.
+- **Gates (2026-11-21):**
+  - Provider console: `npm test` **736 passed**, lint and build clean.
+  - Go: `go build` and `go vet` clean.
+  - The first full `go test ./...` failed 3 alerting tests: two A1 tests counted the seeded rules (9, now 10 with 072), and the rollover test assumed an event order the evaluator doesn't guarantee (now sorted). My earlier runs had selected only the new tests.
+  - After the fixes, the whole `internal/alerting` package passes 3 runs in a row; the other 48 packages passed in the full run, with the 2 known skips.
+
 ---
 
 ## Post-Phase Fixes

@@ -13,6 +13,7 @@ export const KIND_LABELS: Record<string, string> = {
   'shield.offline': 'Shield offline',
   'tenant.no_relay_path': 'Tenant without a relay path',
   'tenant.over_quota': 'Tenant over quota',
+  'tenant.usage_over': 'Tenant usage over threshold',
 }
 
 export function kindLabel(kind: string): string {

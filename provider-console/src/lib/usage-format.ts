@@ -99,3 +99,34 @@ export function fleetUsageCSV(month: string, complete: boolean, rows: readonly T
 export function fleetUsageJSON(month: string, complete: boolean, rows: readonly TenantMonthUsage[]): string {
   return JSON.stringify({ month, complete, note: INCOMPLETE_NOTE, tenants: rows }, null, 2)
 }
+
+// Usage alert thresholds (Sprint 25 U4, D-61): entered in display units
+// (GB for bytes, hours for minutes, users as a count), stored in the
+// meter's raw unit (bytes, minutes, users).
+const MAX_THRESHOLD = 1e18
+
+export function thresholdUnit(meter: UsageMeter): string {
+  if (meter === 'relay_bytes_to_clients' || meter === 'relay_bytes_to_connectors') return 'GB'
+  if (meter === 'active_users') return 'users'
+  return 'hours'
+}
+
+function unitFactor(meter: UsageMeter): number {
+  const u = thresholdUnit(meter)
+  return u === 'GB' ? 1e9 : u === 'hours' ? 60 : 1
+}
+
+/** A raw threshold in the display unit, e.g. 500000000000 bytes → "500". */
+export function thresholdToDisplay(meter: UsageMeter, raw: number): string {
+  return String(Math.round((raw / unitFactor(meter)) * 1000) / 1000)
+}
+
+/** The raw threshold for a display value, or null when invalid (not a
+ * positive number, users not whole, or out of range). */
+export function parseThreshold(meter: UsageMeter, input: string): number | null {
+  const t = input.trim()
+  if (!/^\d{1,15}(\.\d{1,3})?$/.test(t)) return null
+  if (meter === 'active_users' && t.includes('.')) return null
+  const raw = Math.round(Number(t) * unitFactor(meter))
+  return raw >= 1 && raw <= MAX_THRESHOLD ? raw : null
+}

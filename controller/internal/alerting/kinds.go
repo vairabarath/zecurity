@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/yourorg/ztna/controller/internal/providerquery"
 	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
@@ -47,6 +48,9 @@ const (
 	KindShieldOffline       = "shield.offline"
 	KindTenantNoRelayPath   = "tenant.no_relay_path"
 	KindTenantOverQuota     = "tenant.over_quota"
+	// KindTenantUsageOver (Sprint 25 U4, D-61): a tenant's month-to-date
+	// usage of one meter at or above a threshold. Warns only.
+	KindTenantUsageOver = "tenant.usage_over"
 )
 
 var kindScope = map[string]string{
@@ -59,6 +63,7 @@ var kindScope = map[string]string{
 	KindShieldOffline:       ScopeTenant,
 	KindTenantNoRelayPath:   ScopeTenant,
 	KindTenantOverQuota:     ScopeTenant,
+	KindTenantUsageOver:     ScopeTenant,
 }
 
 // Kinds returns every kind, sorted.
@@ -106,7 +111,14 @@ type Params struct {
 	Components []string `json:"components,omitempty"`
 	// tenant.over_quota: only these quota keys (empty = every key).
 	Keys []string `json:"keys,omitempty"`
+	// tenant.usage_over (D-61): the usage meter (D-57) and its monthly
+	// threshold in the meter's unit (bytes, minutes or users). Both required.
+	Meter     string `json:"meter,omitempty"`
+	Threshold int64  `json:"threshold,omitempty"`
 }
+
+// MaxUsageThreshold bounds tenant.usage_over's threshold (an exabyte).
+const MaxUsageThreshold = int64(1_000_000_000_000_000_000)
 
 // Defaults applied when a parameter is left out.
 const (
@@ -130,15 +142,21 @@ func ParseParams(kind string, raw json.RawMessage) (Params, error) {
 			return Params{}, fmt.Errorf("%w: trailing data", ErrInvalidParams)
 		}
 	}
-	only := func(allowed string) error {
+	only := func(allowed ...string) error {
 		set := map[string]bool{
 			"threshold_percent": p.ThresholdPercent != 0,
 			"days":              p.Days != 0,
 			"components":        p.Components != nil,
 			"keys":              p.Keys != nil,
+			"meter":             p.Meter != "",
+			"threshold":         p.Threshold != 0,
+		}
+		ok := map[string]bool{}
+		for _, a := range allowed {
+			ok[a] = true
 		}
 		for name, given := range set {
-			if given && name != allowed {
+			if given && !ok[name] {
 				return fmt.Errorf("%w: %s doesn't take %s", ErrInvalidParams, kind, name)
 			}
 		}
@@ -186,8 +204,18 @@ func ParseParams(kind string, raw json.RawMessage) (Params, error) {
 				return Params{}, fmt.Errorf("%w: unknown quota key %q", ErrInvalidParams, k)
 			}
 		}
+	case KindTenantUsageOver:
+		if err := only("meter", "threshold"); err != nil {
+			return Params{}, err
+		}
+		if !providerquery.IsUsageMeter(p.Meter) {
+			return Params{}, fmt.Errorf("%w: meter must be one of the usage meters", ErrInvalidParams)
+		}
+		if p.Threshold < 1 || p.Threshold > MaxUsageThreshold {
+			return Params{}, fmt.Errorf("%w: threshold must be 1..%d", ErrInvalidParams, MaxUsageThreshold)
+		}
 	case KindRelayOffline, KindPoolNoEligibleRelay, KindConnectorOffline, KindShieldOffline, KindTenantNoRelayPath:
-		if err := only(""); err != nil {
+		if err := only(); err != nil {
 			return Params{}, err
 		}
 	default:

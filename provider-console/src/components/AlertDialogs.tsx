@@ -32,6 +32,8 @@ import {
   SEVERITY_LABELS,
 } from '@/lib/alert-format'
 import { reasonValid } from '@/lib/pool-format'
+import { METER_LABELS, parseThreshold, thresholdToDisplay, thresholdUnit } from '@/lib/usage-format'
+import { USAGE_METERS, type UsageMeter } from '@/api/usage'
 
 // Alert rule and channel dialogs (Sprint 24 A3, F26; D-52, D-53).
 // Super-admin only; the controller decides. Every write needs a reason
@@ -145,6 +147,11 @@ export function EditRuleDialog({ rule, onCancel, onDone }: { rule: AlertRule; on
   const [renotify, setRenotify] = useState(String(rule.renotify_seconds))
   const [threshold, setThreshold] = useState(String(rule.params.threshold_percent ?? ''))
   const [days, setDays] = useState(String(rule.params.days ?? ''))
+  const isUsage = rule.kind === 'tenant.usage_over'
+  const [meter, setMeter] = useState<UsageMeter>(rule.params.meter ?? 'relay_bytes_to_clients')
+  const [usageThreshold, setUsageThreshold] = useState(
+    rule.params.threshold !== undefined ? thresholdToDisplay(rule.params.meter ?? 'relay_bytes_to_clients', rule.params.threshold) : '',
+  )
   const [reason, setReason] = useState('')
   const { pending, error, run } = useWrite()
 
@@ -152,8 +159,11 @@ export function EditRuleDialog({ rule, onCancel, onDone }: { rule: AlertRule; on
   const renotifyV = parseSeconds(renotify, 300, 604800, true)
   const thresholdV = rule.kind === 'relay.over_capacity' ? parseSeconds(threshold, 1, 1000, false) : null
   const daysV = rule.kind === 'certificate.expiring' ? parseSeconds(days, 1, 365, false) : null
+  const usageV = isUsage ? parseThreshold(meter, usageThreshold) : null
   const paramsOk =
-    (rule.kind !== 'relay.over_capacity' || thresholdV !== null) && (rule.kind !== 'certificate.expiring' || daysV !== null)
+    (rule.kind !== 'relay.over_capacity' || thresholdV !== null) &&
+    (rule.kind !== 'certificate.expiring' || daysV !== null) &&
+    (!isUsage || usageV !== null)
 
   const change: RuleChange = {}
   if (enabled !== rule.enabled) change.enabled = enabled
@@ -162,6 +172,8 @@ export function EditRuleDialog({ rule, onCancel, onDone }: { rule: AlertRule; on
   if (renotifyV !== null && renotifyV !== rule.renotify_seconds) change.renotify_seconds = renotifyV
   if (thresholdV !== null && thresholdV !== rule.params.threshold_percent) change.params = { threshold_percent: thresholdV }
   if (daysV !== null && daysV !== rule.params.days) change.params = { days: daysV }
+  // Both usage params are sent together: the controller replaces params whole.
+  if (usageV !== null && (meter !== rule.params.meter || usageV !== rule.params.threshold)) change.params = { meter, threshold: usageV }
   const valid = forV !== null && renotifyV !== null && paramsOk && Object.keys(change).length > 0 && reasonValid(reason)
 
   return (
@@ -202,6 +214,32 @@ export function EditRuleDialog({ rule, onCancel, onDone }: { rule: AlertRule; on
         <Field id="rule-days" label="Days before expiry" hint="Platform CAs within this many days. Relay and controller certificates: within 24 hours.">
           <Input id="rule-days" inputMode="numeric" value={days} aria-invalid={daysV === null} onChange={(e) => setDays(e.target.value)} />
         </Field>
+      )}
+      {isUsage && (
+        <>
+          <Field id="rule-meter" label="Meter">
+            <select id="rule-meter" className={SELECT_CLASS} value={meter} onChange={(e) => setMeter(e.target.value as UsageMeter)}>
+              {USAGE_METERS.map((m) => (
+                <option key={m} value={m}>
+                  {METER_LABELS[m]}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field
+            id="rule-usage-threshold"
+            label={`Monthly threshold (${thresholdUnit(meter)})`}
+            hint="Fires once per tenant when its usage so far this UTC month reaches this; resolves when the month rolls over. Warns only: nothing is limited."
+          >
+            <Input
+              id="rule-usage-threshold"
+              inputMode="decimal"
+              value={usageThreshold}
+              aria-invalid={usageV === null}
+              onChange={(e) => setUsageThreshold(e.target.value)}
+            />
+          </Field>
+        </>
       )}
       <Field id="rule-for" label="Fire after (seconds)" hint={forV !== null ? `The condition must hold ${formatSeconds(forV)}. 0 to 86400.` : '0 to 86400.'}>
         <Input id="rule-for" inputMode="numeric" value={forS} aria-invalid={forV === null} onChange={(e) => setForS(e.target.value)} />
