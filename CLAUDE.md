@@ -39,10 +39,38 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → d
 
 ---
 
+## Sync with `origin/main` before building (every agent, every session)
+
+Before you build, fix or change anything, bring the checkout up to date with `origin/main`. Nobody may start a feature on a stale `main`.
+
+1. **Fetch:** `git fetch origin --prune`.
+2. **Check whether `main` moved:** `git rev-list --left-right --count main...origin/main`. The second number is how many commits `origin/main` is ahead. If it's 0, go to step 5.
+3. **Say what moved** before pulling. Tell the human in a few lines:
+   - the merged PRs: `git log --oneline --first-parent main..origin/main`;
+   - the areas they touched: `git diff --stat main origin/main`.
+   
+   Call out especially:
+   - **new files in `controller/migrations/`**: recreate the local DB (`cd controller && docker compose down -v && docker compose up -d`);
+   - **`CLAUDE.md`, `AGENTS.md`, `agent.md`, the active sprint's `path.md` or the Decision Record**: read them again before going on; the rules or the active sprint may have changed;
+   - **`proto/` or `controller/graph/*.graphqls`**: regenerate (`buf generate`, gqlgen, `npm run codegen`).
+4. **Update local `main`:** `git switch main && git pull --ff-only`. If it can't fast-forward (local commits on `main`), stop and ask; never reset `main`.
+5. **Update the working branch** (if you're on, or about to use, a feature branch):
+   - **uncommitted changes:** commit them or `git stash push -m "<why>"` first, and say so. Never discard someone's work;
+   - **a pushed or shared branch:** `git merge origin/main`; never rewrite pushed history;
+   - **a local-only branch:** `git rebase origin/main` is fine;
+   - **a stacked branch** (based on another open PR's branch): update its base branch first, then merge the base into it;
+   - **conflicts:** resolve only where the intent of both sides is clear (e.g. keep both table rows); otherwise stop and ask. Re-run the build and tests after resolving.
+6. **New work starts from the updated `main`:** `git switch -c <branch> main`.
+
+Check again before opening or updating a PR (`git fetch origin` plus step 2): if `main` moved meanwhile, merge it in and re-run the gates, so the PR is tested against what it will merge into. Pushing, PRs and merges still need the product owner's explicit go.
+
+---
+
 ## Your First Step
 
 When a team member starts a session, they will tell you who they are (Sathiya / M1 or Barath / M2). When they do:
 
+0. **Sync with `origin/main`** (section above): fetch, say what moved, fast-forward `main`, update the working branch.
 1. Read `agent.md` (project root) — full conventions, code style, build commands
 2. Read `.zecurity-obs/Sprint26/path.md` — decisions (D-62 … D-70), order, conflict zones, rules, test gates and acceptance
 3. Read their phase file and pick the **first unchecked phase** whose dependencies are merged (Barath: P1a → P1b and P2; Sathiya: X3 → P3 (after P1a; writes after P2) → P4). If the documents aren't signed off yet (`path.md` checklist), don't start implementation
