@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { BILLING_METERS, type BillingMeter, type PlanCardSummary, type PlanLimits, type PlanPrice } from '@/api/types'
+import { BILLING_METERS, type BillingMeter, type NewPlanCard, type PlanCardChange, type PlanCardSummary } from '@/api/types'
 import { LimitsFields, PlanTextFields } from '@/components/PlanDialogs'
 import { ReasonField } from '@/components/ReasonField'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -19,20 +19,7 @@ import { cn } from '@/lib/utils'
 // description, six limits) plus an optional price. Every save is one request
 // with a reason; the API calls are passed in (the P1b endpoints wire them).
 
-export interface NewPlanCard {
-  name: string
-  description: string
-  limits: PlanLimits
-  price: PlanPrice | null
-}
-
-/** Only the changed fields; `price: null` removes the price, a missing `price` leaves it. */
-export interface PlanCardChange {
-  name?: string
-  description?: string
-  limits?: PlanLimits
-  price?: PlanPrice | null
-}
+export type { NewPlanCard, PlanCardChange } from '@/api/types'
 
 type Props =
   | { mode: 'create'; currency: string; onCreate: (card: NewPlanCard, reason: string) => Promise<void>; onCancel: () => void; onDone: (text: string) => void }

@@ -3,6 +3,7 @@ import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as alertsApi from './alerts'
 import * as authApi from './auth'
+import * as billingApi from './billing'
 import * as metricsApi from './metrics'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
@@ -30,6 +31,9 @@ import * as usageApi from './usage'
 // incident timeline (Sprint 24 T1, F27) adds one read and no write. Metrics (Sprint 24 M2, F23) add one read,
 // GET /provider/metrics/{series}, and no write. Usage (Sprint 25 U3, F33) adds two reads, GET /provider/usage and
 // GET /provider/usage/tenants, and no write.
+// Billing (Sprint 26 P4, F34; D-70 amends D-30) adds the settings write (PATCH /provider/billing/settings) and the
+// invoice writes (issue, mark paid, void, regenerate, resend); plan cards reuse the plan create and update
+// writes. Reads: billing settings, invoices list and detail, and a card's revisions.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -38,6 +42,7 @@ const ALLOWED_WRITES = [
   'DELETE /provider/relays/{id}',
   'PATCH /provider/alert-channels/{id}',
   'PATCH /provider/alert-rules/{id}',
+  'PATCH /provider/billing/settings',
   'PATCH /provider/plans/{id}',
   'PATCH /provider/relay-pools/{id}',
   'PATCH /provider/users/{id}',
@@ -50,6 +55,11 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/totp/enroll',
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
+  'POST /provider/invoices/regenerate',
+  'POST /provider/invoices/{id}/issue',
+  'POST /provider/invoices/{id}/mark-paid',
+  'POST /provider/invoices/{id}/resend',
+  'POST /provider/invoices/{id}/void',
   'POST /provider/plans',
   'POST /provider/plans/{id}/default',
   'POST /provider/relay-pools',
@@ -83,13 +93,17 @@ const ALLOWED_READS = [
   'GET /provider/alert-rules',
   'GET /provider/alerts',
   'GET /provider/audit',
+  'GET /provider/billing/settings',
   'GET /provider/certificates',
   'GET /provider/health',
+  'GET /provider/invoices',
+  'GET /provider/invoices/{id}',
   'GET /provider/me',
   'GET /provider/metrics/{series}',
   'GET /provider/pki',
   'GET /provider/plans',
   'GET /provider/plans/{id}',
+  'GET /provider/plans/{id}/revisions',
   'GET /provider/relay-pools',
   'GET /provider/relay-pools/{id}',
   'GET /provider/relays',
@@ -104,6 +118,7 @@ const ALLOWED_READS = [
 
 const API_MODULES: Record<string, Record<string, unknown>> = {
   alerts: alertsApi,
+  billing: billingApi,
   auth: authApi,
   metrics: metricsApi,
   operators: operatorsApi,
@@ -121,7 +136,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 const ID = 'a'
 const normalize = (path: string) =>
   path
-    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events|invoices))/${ID}(?=/|$)`), '$1/{id}')
     .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
     .replace(new RegExp(`^/provider/metrics/${ID}$`), '/provider/metrics/{series}')
 
@@ -193,6 +208,16 @@ describe('API surface', () => {
       'GET /provider/timeline': page,
       'GET /provider/usage': { status: 200, body: { buckets: [] } },
       'GET /provider/usage/tenants': page,
+      'GET /provider/billing/settings': { status: 200, body: {} },
+      'PATCH /provider/billing/settings': { status: 204 },
+      [`GET /provider/plans/${ID}/revisions`]: { status: 200, body: { items: [] } },
+      'GET /provider/invoices': { status: 200, body: { items: [], totals: {}, currency: 'USD', next_cursor: null } },
+      [`GET /provider/invoices/${ID}`]: { status: 200, body: {} },
+      [`POST /provider/invoices/${ID}/issue`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/mark-paid`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/void`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/resend`]: { status: 204 },
+      'POST /provider/invoices/regenerate': { status: 200, body: { regenerated: 0 } },
       [`PATCH /provider/alert-rules/${ID}`]: { status: 200, body: {} },
       'POST /provider/alert-channels': { status: 201, body: { channel: {}, secret: 'whsec_x' } },
       [`PATCH /provider/alert-channels/${ID}`]: { status: 200, body: {} },

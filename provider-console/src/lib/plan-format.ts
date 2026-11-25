@@ -64,6 +64,12 @@ const PLAN_ERRORS: Record<string, string> = {
   plan_not_found: 'That plan no longer exists. Reload and try again.',
   reason_required: 'Enter a reason.',
   reason_too_long: 'Keep the reason to 500 characters or fewer.',
+  invalid_price: 'Check the price: whole amounts of 0 or more, a unit for every billed meter.',
+  currency_mismatch: 'The billing currency changed. Reload the page and enter the price again.',
+  price_overflow: 'An amount is too large.',
+  invalid_settings: 'Check the settings and try again.',
+  invalid_currency: 'Choose a currency from the list.',
+  invalid_country: 'Choose a country from the list, or a currency for it.',
   forbidden: 'Only super-admins can change plans.',
   not_found: 'This plan or tenant no longer exists.',
 }

@@ -4,11 +4,14 @@ import { rolesFor } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
 import { Alerts } from '@/pages/Alerts'
+import { BillingSettings } from '@/pages/BillingSettings'
 import { Audit } from '@/pages/Audit'
 import { Certificates } from '@/pages/Certificates'
 import { ChangePassword } from '@/pages/ChangePassword'
 import { Forbidden } from '@/pages/Forbidden'
 import { Home } from '@/pages/Home'
+import { InvoiceDetail } from '@/pages/InvoiceDetail'
+import { Invoices } from '@/pages/Invoices'
 import { Login } from '@/pages/Login'
 import { Mfa } from '@/pages/Mfa'
 import { NotFound } from '@/pages/NotFound'
@@ -67,6 +70,13 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireRole roles={rolesFor('plans')} />}>
             <Route path="plans" element={<Plans />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('invoices')} />}>
+            <Route path="invoices" element={<Invoices />} />
+            <Route path="invoices/:id" element={<InvoiceDetail />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('billing-settings')} />}>
+            <Route path="billing/settings" element={<BillingSettings />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('audit')} />}>
             <Route path="audit" element={<Audit />} />

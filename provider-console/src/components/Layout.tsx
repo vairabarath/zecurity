@@ -1,5 +1,5 @@
 import type { ComponentType, SVGProps } from 'react'
-import { BarChart3, Bell, Building2, ChevronsUpDown, Gauge, History, KeyRound, Layers, LayoutGrid, LogOut, RadioTower, ScrollText, ShieldCheck, Users } from 'lucide-react'
+import { BarChart3, Bell, Building2, ChevronsUpDown, Gauge, History, KeyRound, Layers, LayoutGrid, LogOut, RadioTower, ReceiptText, ScrollText, Settings2, ShieldCheck, Users } from 'lucide-react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { signOut } from '@/auth/flows'
 import { ROLE_LABELS, SECTIONS, sectionsFor, type Section } from '@/auth/roles'
@@ -25,6 +25,8 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   tenants: Building2,
   plans: Gauge,
   usage: BarChart3,
+  invoices: ReceiptText,
+  'billing-settings': Settings2,
   certificates: ShieldCheck,
   audit: ScrollText,
   users: Users,
