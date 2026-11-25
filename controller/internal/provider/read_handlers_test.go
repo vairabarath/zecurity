@@ -257,6 +257,8 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("GET /provider/pki", rp(http.HandlerFunc(h.PKI)))
 	mux.Handle("GET /provider/health", rp(http.HandlerFunc(h.Health)))
 	mux.Handle("GET /provider/metrics/{series}", rp(http.HandlerFunc(h.GetMetricSeries)))
+	mux.Handle("GET /provider/usage", rp(http.HandlerFunc(h.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", rp(http.HandlerFunc(h.ListFleetUsage)))
 	env.health = &fakeHealth{report: leakyReport(now), critical: map[string]bool{"database": true, "valkey": true, "pki": true, "outbox": false}}
 	h.SetHealth(env.health)
 	noop := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})

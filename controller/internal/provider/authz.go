@@ -147,6 +147,16 @@ const (
 	ActionTenantMetricsRead = "tenant.metrics.read"
 )
 
+// Usage (Sprint 25 U2, F33, D-60): usage is tenant data, so every usage read
+// is tenant.usage.read (super-admin only by decide()'s rule; relay-ops 403).
+// A read of one tenant's usage is audited as tenant.usage.read (as a tenant
+// detail view, OQ-1); the fleet list as one usage.fleet.read row per request.
+// Both end in ".read", so the incident timeline leaves them out (T1).
+const (
+	ActionTenantUsageRead = "tenant.usage.read"
+	ActionUsageFleetRead  = "usage.fleet.read"
+)
+
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
 // perform.
 var relayOpsAlsoAllowed = map[string]bool{
@@ -330,6 +340,12 @@ func (a *Authz) CanReadMetricSeries(actor Actor, series string, tenantData bool)
 		return decide(actor, ActionTenantMetricsRead, Target{Type: "metric", ID: series})
 	}
 	return decide(actor, ActionRelayMetricsRead, Target{Type: "metric", ID: series})
+}
+
+// CanReadUsage gates GET /provider/usage and /provider/usage/tenants
+// (tenant.usage.read: super-admin only; D-60).
+func (a *Authz) CanReadUsage(actor Actor) error {
+	return decide(actor, ActionTenantUsageRead, Target{Type: "usage"})
 }
 
 func (a *Authz) CanReadAlerts(actor Actor) error {

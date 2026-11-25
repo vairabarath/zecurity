@@ -26,9 +26,11 @@ import (
 //	GET /provider/certificates    cert.read   (super-admin)
 //	GET /provider/pki             cert.read   (super-admin; CA tree + CRL status)
 //	GET /provider/health          health.read (super-admin; health_read.go)
+//	GET /provider/usage           tenant.usage.read (super-admin), audited (usage_read.go)
+//	GET /provider/usage/tenants   tenant.usage.read (super-admin), audited (usage_read.go)
 //
-// Only a successful tenant detail read is audited. Lists, relay, audit and
-// certificate reads, and 400/403/404 responses write nothing.
+// Only a successful tenant detail or usage read is audited. Lists, relay,
+// audit and certificate reads, and 400/403/404 responses write nothing.
 
 // ReadDB is what the read handlers need from the database: reads, plus
 // transactions for the audited tenant detail. *pgxpool.Pool satisfies it.

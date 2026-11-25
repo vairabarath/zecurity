@@ -51,6 +51,46 @@ Filled in after the Sprint 24 acceptance run (both, reset lab DB, current `main`
 ### Live check (U2)
 Usage of two tenants after a known download (U1 live check), read per hour, day and month; relay-ops 403; audit rows present.
 
+### U2 build record (branch `feat/sprint25-u2-usage-api`, stacked on U1 #245, 2026-11-21)
+- **Query layer** (`providerquery/usage.go`):
+  - `NewUsageWindow` widens `from` down and `to` up to whole UTC buckets. Limits: hour ≤ 31 days, day ≤ 400 days, month ≤ 25 months. Error codes: `invalid_granularity`, `invalid_range`.
+  - `ReadUsageTenant` names the tenant from its workspace, else from its `usage_tenants` snapshot (marked `purged`); `ErrNotFound` when neither exists.
+  - `ReadTenantUsage` returns **every** bucket of the window (zeros included) with `collected_minutes`, `minutes` and `complete` (all minutes collected, from `usage_collector_minutes`), and `active_users` on month buckets (rows for a live tenant, kept counts for a purged one).
+  - `ReadMonthUsage` returns every tenant's usage for a UTC month, plus the month's completeness. It lists every counted tenant (zeros included) and every tenant with usage in the month (purged ones by snapshot). **U4's month-to-date reader.**
+  - `PageFleetUsage` sorts by a meter, largest first, ties by tenant id. The keyset cursor is base64 of `value|tenant id`. Sorting is in Go: one month of every tenant is a small set before production; revisit if the fleet grows large.
+- **Handlers** (`provider/usage_read.go`):
+  - `GET /provider/usage?tenant_id=&from=&to=&granularity=`: default the current UTC month by day.
+  - `GET /provider/usage/tenants?month=YYYY-MM&sort=&cursor=&limit=`.
+  - `CanReadUsage` uses `tenant.usage.read`, so relay-ops get 403.
+  - Both reads are **audited and fail closed** like tenant detail (OQ-1): the read, the serialization and the audit row run in one REPEATABLE READ transaction, and the body is written only after COMMIT.
+  - Audit rows: `tenant.usage.read` (target tenant; details view, granularity, from, to) and `usage.fleet.read` (target `usage`/month; details month, sort). 400, 403 and 404 responses are not audited.
+  - Routes are added in `main.go` and the read-handler test mux.
+- **Tests** (`provider/usage_read_test.go`):
+  - super-admin only (relay-ops 403, tenant JWT 401, no audit on refusal);
+  - hour buckets with one complete and one incomplete hour; another tenant's usage never shown;
+  - the day window aligned to UTC;
+  - month active users;
+  - a purged tenant named by its snapshot, with kept counts;
+  - unknown tenant 404, not audited;
+  - every bad request returns 400 with its code and no audit row;
+  - fail-closed when the audit insert fails (500, no data);
+  - fleet sorted, paged without repeats, only the month counted, one audit row per request;
+  - sort by active users.
+- **Mutation checks, all caught (11):**
+  - completeness ignored;
+  - tenant filter dropped;
+  - relay-ops allowed;
+  - audit row missing;
+  - fleet month without an upper bound (survived the first test, whose out-of-month row was on the already-first tenant; values now checked);
+  - cursor repeating a row;
+  - purged counts omitted;
+  - purged tenant not named;
+  - hour limit raised;
+  - a 404 audited;
+  - audit failure ignored (fail-open).
+- **Gates (2026-11-21):** `go build ./... && go vet ./...` clean; full `go test ./...` with every test DB env set: 49 packages ok, 0 failures, the 2 known skips (`TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`).
+- **Live check:** pending (after U1's live check on the lab).
+
 ---
 
 ## U3 — Usage console + export
