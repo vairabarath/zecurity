@@ -266,6 +266,56 @@ Then tick F32 and F33 in the tracker.
   - countries from the settings API;
   - the live check below.
 
+- **Part 2 started 2026-11-25** on `feat/sprint26-p4-part2` (based on `feat/sprint26-p4-console-foundations`). The console is wired end to end against the P1b and P3 contract; **it merges only after P1b and P3**, whose endpoints answer it.
+  - **`src/api/billing.ts`:** `getBillingSettings`, `updateBillingSettings`, `listPlanCards`, `createPlanCard`, `updatePlanCard`, `listPlanRevisions`, `listInvoices`, `getInvoice`, `issueInvoice`, `markInvoicePaid`, `voidInvoice`, `regenerateInvoices`, `resendInvoice`.
+    - All are in `api-surface.test.ts`.
+    - Writes added: `PATCH /provider/billing/settings`, `POST /provider/invoices/{id}/issue | mark-paid | void | resend`, `POST /provider/invoices/regenerate`.
+    - Reads added: billing settings, invoices list and detail, plan revisions.
+  - **Pages and sections:**
+    - Plans as a card grid: new, edit, duplicate, history, remove price, make default, delete. Creating and editing wait for the settings currency.
+    - **Billing settings** page.
+    - **Invoices** page: month (default last month), status filter, totals per status, keyset pages, Regenerate drafts listing the drafts, export.
+    - **Invoice detail:** the print view, status history, email deliveries, and the actions per status (Issue; Mark paid with date/reference/reason; Void with typed number; Resend).
+    - **Tenant detail → Invoices.**
+    - The plan-change dialog says "Limits change now. Billing changes from next month; this month is billed at the <month-start> card as it was on the 1st."
+    - Navigation: a super-admin **Billing** group (Invoices, Billing settings).
+  - **Contract details the console assumes** (P1b and P3 must answer these; anything open in this phase file is fixed here):
+    - **Settings:** `GET /provider/billing/settings` → `BillingSettings` plus optional `countries: [{code, name, currency}]`. The console falls back to its built-in list when `countries` is absent.
+    - **Plan create:** `POST /provider/plans` body `{name, description, limits, price, reason}`.
+    - **Plan update:** `PATCH /provider/plans/{id}` body: the changed fields plus `reason`. `price: null` removes the price; an absent `price` keeps it.
+    - **Plan revisions:** `GET /provider/plans/{id}/revisions` → `{items: [{revision, changed_at, changed_by, reason, card: {name, description, limits, price}}]}`. `changed_by` is the operator email or `system`. The console computes "what changed" from consecutive revisions.
+    - **Tenant detail:** gains `billing_plan: {id, name}`, the plan this month is billed at (`PlanForMonth`, D-65). The console names the current plan when it is absent.
+    - **Invoice list:** `GET /provider/invoices` → `{items: [Invoice + last_email_status], totals: {draft|issued|paid|void: {count, subtotal_minor, tax_minor, total_minor}}, currency, next_cursor}`.
+    - **Invoice detail:** `GET /provider/invoices/{id}` → the `Invoice` plus `lines`, `emails` (no addresses), `history: [{status, at, actor, reason}]`, `email_tenants` (the D-68 setting at read time) and `provider_name`.
+    - **Regenerate:** `POST /provider/invoices/regenerate` → `{regenerated: n}`.
+    - **Issue:** `POST …/issue` body `{}` or `{reason}`.
+    - **Mark paid:** `POST …/mark-paid` body `{paid_at: "YYYY-MM-DD", reference, reason}`.
+    - **Error codes shown** (invoices):
+      - `invoice_not_draft`, `invoice_not_issued`, `month_open`;
+      - `reason_required`, `reason_too_long`, `reference_too_long`;
+      - `invalid_paid_at`, `invoice_not_found`.
+    - **Error codes shown** (cards and settings):
+      - `invalid_price`, `currency_mismatch`, `price_overflow`;
+      - `invalid_settings`, `invalid_currency`, `invalid_country`.
+    - **Export** reads each invoice's detail for its lines, one audited `invoice.read` each, capped at 500 per export. A `?include=lines` on the list would cut this to the list reads: a P3 option, not needed for the cap.
+  - **Tests:** 25 new across the Plans, Invoices, invoice detail, Billing settings, tenant Invoices and plan-change tests.
+  - **Mutation checks**, each caught:
+    - void without the typed number;
+    - Mark paid / Void shown for a draft;
+    - Remove price not sending `null`;
+    - Regenerate without the month;
+    - the month-start card not named;
+    - unpriced cards counted in the currency switch;
+    - a future paid date accepted;
+    - the Deleted badge missing.
+  - **Visual check** in the browser with the billing calls answered in the page (no controller endpoints yet):
+    - the Invoices list, invoice detail, Plans grid and Billing settings render as designed;
+    - one fix: the settings form was double-wrapped in a card.
+  - **Gates:** `npm test` (65 files, 843 tests), `npm run lint` (clean), `npm run build` (ok).
+  - **Still to do:**
+    - the unsaved-changes guard on the settings and card forms;
+    - the live check below, once P1b, P2 and P3 are merged.
+
 ### Live check (P4)
 - In the console:
   - switch the country to India: the cards show INR and the warning appeared;
