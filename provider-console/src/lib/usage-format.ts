@@ -27,6 +27,22 @@ export function formatBytes(bytes: number): string {
   return `${v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })} ${BYTE_UNITS[i]}`
 }
 
+/**
+ * The share of a period's minutes that were counted, for an incomplete
+ * period (Sprint 25 live finding B): never rounds a counted share down to
+ * "0%" or up to "100%". One decimal under 10%, "<0.1%" for a sliver,
+ * ">99.9%" just short of the whole.
+ */
+export function formatCountedShare(collected: number, total: number): string {
+  if (total <= 0 || collected <= 0) return '0%'
+  if (collected >= total) return '100%'
+  const pct = (collected / total) * 100
+  if (pct < 0.1) return '<0.1%'
+  if (pct < 10) return `${(Math.floor(pct * 10) / 10).toFixed(1)}%`
+  if (pct > 99.9) return '>99.9%'
+  return `${Math.floor(pct)}%`
+}
+
 /** Minutes as hours, one decimal ("12.5 h"). */
 export function formatMinutesAsHours(minutes: number): string {
   return `${(Math.max(0, minutes) / 60).toLocaleString(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 })} h`
