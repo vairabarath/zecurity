@@ -21,6 +21,7 @@ import { Relays } from '@/pages/Relays'
 import { TenantDetail } from '@/pages/TenantDetail'
 import { Tenants } from '@/pages/Tenants'
 import { Timeline } from '@/pages/Timeline'
+import { Usage } from '@/pages/Usage'
 
 // Route table. Guards steer navigation only; the controller authorizes every
 // request. Sections behind a role use <RequireRole roles={...}> with the
@@ -48,6 +49,9 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireRole roles={rolesFor('timeline')} />}>
             <Route path="timeline" element={<Timeline />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('usage')} />}>
+            <Route path="usage" element={<Usage />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('relays')} />}>
             <Route path="relays" element={<Relays />} />

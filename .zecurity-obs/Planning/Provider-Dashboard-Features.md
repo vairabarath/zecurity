@@ -67,8 +67,8 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F29 | Relay version pinning and rollback | ⬜ Not started | Large |
 | F30 | Tenant migration between pools | ◐ Check | Probably done already: relay pools #200 (D-38) added pool reassignment with graceful or immediate migration (make-before-break), live PASS with F9 on 2026-11-17. Confirm it covers F30 (no bulk or scheduled migration, by D-38), then tick |
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
-| F32 | Usage collection | 🚧 In review | Sprint 25 U1 #245 (ledger `071_usage` + collector, D-57 … D-59); not merged, no live check yet. R1-1 doesn't affect it: usage counts a tenant new in a watched relay run from zero |
-| F33 | Per-tenant usage report | 🚧 In review | Sprint 25 U2 #246 (API), U3 #247 (console + export); not merged, no live check yet |
+| F32 | Usage collection | ✅ Done | — (Sprint 25 U1, #245 + F32-1 fix #253; live PASS 2026-11-24 ([[Pending-Live-Tests]]); usage alerts U4 #248) |
+| F33 | Per-tenant usage report | ✅ Done | — (Sprint 25 U2 #246, U3 #247 + fixes #253; live PASS 2026-11-24) |
 | F34 | Billing plans and invoicing | 🚧 In progress | Sprint 26 (signed off 2026-11-23, D-62 … D-70; `Sprint26/path.md`). Drafts: #250 invoice email + delivery worker (P3 part, live check 14/14 on the branch), #251 console foundations (P4 part). Barath's P1a schema, P1b card/settings API and P2 invoice generator not started |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
@@ -143,8 +143,8 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 - [ ] **F31** Read-only tenant support view (impersonation, audited) ◐ (audited read-only detail, no impersonation)
 
 *Metering*
-- [ ] **F32** Usage collection — session-seconds, bytes relayed, connector-hours ⬜
-- [ ] **F33** Per-tenant usage report ⬜
+- [x] **F32** Usage collection — session-seconds, bytes relayed, connector-hours ✅
+- [x] **F33** Per-tenant usage report ✅
 
 ### Can have (Phase 3)
 
@@ -217,8 +217,8 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 | F29 | Relay version pinning and rollback | ⬜ | 🔴 | Relay version is reported; no pinning or update control. | |
 | F30 | Tenant migration between relay pools | ◐ | — | Relay pools #200 (D-38): pool reassignment with graceful or immediate migration; live PASS 2026-11-17 with F9. Check and tick. | |
 | F31 | Read-only tenant support view (impersonation, audited) | ◐ | ⚖️ 🔴 | Read-only tenant detail exists and every view is audited. Impersonation needs the support-access decision (decisions doc Q9). | |
-| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | 🚧 | 🟡 | Sprint 25 U1 #245: exact relayed bytes from cumulative counters, session/connector/shield minutes, monthly active users, completeness; not merged or live-checked. | Barath |
-| F33 | Per-tenant usage report | 🚧 | 🟢 | Sprint 25 U2 #246 (`GET /provider/usage`, fleet list, audited), U3 #247 (tenant Usage, fleet Usage page, export); not merged or live-checked. | Sathiya |
+| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | ✅ | 🔴 | Sprint 25 (D-56 … D-61): exact relayed bytes, session/connector/shield minutes, monthly active users; only relayed traffic is metered. Merged #245, #253; live PASS 2026-11-24. | |
+| F33 | Per-tenant usage report | ✅ | 🔴 | Tenant Usage section, fleet Usage page, CSV/JSON export (#246, #247, #253); live PASS 2026-11-24. | |
 
 ### Can have (Phase 3)
 

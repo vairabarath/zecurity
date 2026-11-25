@@ -82,6 +82,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/tenantexport"
 	"github.com/yourorg/ztna/controller/internal/tenantlifecycle"
 	"github.com/yourorg/ztna/controller/internal/transport"
+	"github.com/yourorg/ztna/controller/internal/usage"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
@@ -883,6 +884,9 @@ func main() {
 	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
 	// Sprint 24 M1 (F23): stored metric series (relay/fleet relay: relay-ops too; tenant: super-admin).
 	mux.Handle("GET /provider/metrics/{series}", requireProvider(http.HandlerFunc(providerReads.GetMetricSeries)))
+	// Usage (Sprint 25 U2, F33, D-60): super-admin only, audited.
+	mux.Handle("GET /provider/usage", requireProvider(http.HandlerFunc(providerReads.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", requireProvider(http.HandlerFunc(providerReads.ListFleetUsage)))
 	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
@@ -1185,6 +1189,15 @@ func main() {
 		RollupRetention: mustDuration("METRIC_ROLLUP_RETENTION", providerquery.RollupRetention),
 	}
 	workers.Go("metric-sampler", func() { metricSampler.Run(ctx) })
+
+	// Usage collector (Sprint 25 U1, F32, D-57 … D-59): every minute it counts
+	// session, connector and shield minutes and monthly active users; each
+	// relay heartbeat adds the exact bytes from R1's cumulative counters.
+	// Counted, never estimated; kept 25 months (USAGE_RETENTION shortens it
+	// for tests).
+	usageCollector := &usage.Collector{DB: db.Pool, Retention: mustDuration("USAGE_RETENTION", 0)}
+	relaySvc.WithUsageSink(usageCollector)
+	workers.Go("usage-collector", func() { usageCollector.Run(ctx) })
 
 	workers.Go("hourly-ticker", func() {
 

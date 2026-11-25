@@ -51,6 +51,46 @@ Filled in after the Sprint 24 acceptance run (both, reset lab DB, current `main`
 ### Live check (U2)
 Usage of two tenants after a known download (U1 live check), read per hour, day and month; relay-ops 403; audit rows present.
 
+### U2 build record (branch `feat/sprint25-u2-usage-api`, stacked on U1 #245, 2026-11-21)
+- **Query layer** (`providerquery/usage.go`):
+  - `NewUsageWindow` widens `from` down and `to` up to whole UTC buckets. Limits: hour ≤ 31 days, day ≤ 400 days, month ≤ 25 months. Error codes: `invalid_granularity`, `invalid_range`.
+  - `ReadUsageTenant` names the tenant from its workspace, else from its `usage_tenants` snapshot (marked `purged`); `ErrNotFound` when neither exists.
+  - `ReadTenantUsage` returns **every** bucket of the window (zeros included) with `collected_minutes`, `minutes` and `complete` (all minutes collected, from `usage_collector_minutes`), and `active_users` on month buckets (rows for a live tenant, kept counts for a purged one).
+  - `ReadMonthUsage` returns every tenant's usage for a UTC month, plus the month's completeness. It lists every counted tenant (zeros included) and every tenant with usage in the month (purged ones by snapshot). **U4's month-to-date reader.**
+  - `PageFleetUsage` sorts by a meter, largest first, ties by tenant id. The keyset cursor is base64 of `value|tenant id`. Sorting is in Go: one month of every tenant is a small set before production; revisit if the fleet grows large.
+- **Handlers** (`provider/usage_read.go`):
+  - `GET /provider/usage?tenant_id=&from=&to=&granularity=`: default the current UTC month by day.
+  - `GET /provider/usage/tenants?month=YYYY-MM&sort=&cursor=&limit=`.
+  - `CanReadUsage` uses `tenant.usage.read`, so relay-ops get 403.
+  - Both reads are **audited and fail closed** like tenant detail (OQ-1): the read, the serialization and the audit row run in one REPEATABLE READ transaction, and the body is written only after COMMIT.
+  - Audit rows: `tenant.usage.read` (target tenant; details view, granularity, from, to) and `usage.fleet.read` (target `usage`/month; details month, sort). 400, 403 and 404 responses are not audited.
+  - Routes are added in `main.go` and the read-handler test mux.
+- **Tests** (`provider/usage_read_test.go`):
+  - super-admin only (relay-ops 403, tenant JWT 401, no audit on refusal);
+  - hour buckets with one complete and one incomplete hour; another tenant's usage never shown;
+  - the day window aligned to UTC;
+  - month active users;
+  - a purged tenant named by its snapshot, with kept counts;
+  - unknown tenant 404, not audited;
+  - every bad request returns 400 with its code and no audit row;
+  - fail-closed when the audit insert fails (500, no data);
+  - fleet sorted, paged without repeats, only the month counted, one audit row per request;
+  - sort by active users.
+- **Mutation checks, all caught (11):**
+  - completeness ignored;
+  - tenant filter dropped;
+  - relay-ops allowed;
+  - audit row missing;
+  - fleet month without an upper bound (survived the first test, whose out-of-month row was on the already-first tenant; values now checked);
+  - cursor repeating a row;
+  - purged counts omitted;
+  - purged tenant not named;
+  - hour limit raised;
+  - a 404 audited;
+  - audit failure ignored (fail-open).
+- **Gates (2026-11-21):** `go build ./... && go vet ./...` clean; full `go test ./...` with every test DB env set: 49 packages ok, 0 failures, the 2 known skips (`TestUpdateScimConfig_CanonicalKeyMismatchFailsClosed`, `TestEnroll_CSRSignatureInvalid`).
+- **Live check:** pending (after U1's live check on the lab).
+
 ---
 
 ## U3 — Usage console + export
@@ -71,6 +111,44 @@ Usage of two tenants after a known download (U1 live check), read per hour, day 
 
 ### Live check (U3)
 Tenant usage and fleet page against the U1 live numbers; export opened; a purged tenant shown with its name.
+
+### U3 build record (branch `feat/sprint25-u3-usage-console`, stacked on U2 #246, 2026-11-21)
+- **`api/usage.ts`:** `getTenantUsage` and `listFleetUsage`. Both are added to `api-surface.test.ts` as reads on purpose; there are no writes.
+- **`lib/usage-format.ts`:**
+  - Labels: bytes in decimal units, minutes as hours, users as a count.
+  - UTC month helpers.
+  - CSV and JSON exports: raw quantities, `complete` per row (tenant) or `month,month_complete` on every row (fleet), formula cells neutralised with F38's `csvCell`.
+  - No `#` comment lines in the CSV: they aren't standard and break some parsers. Completeness is a column instead.
+- **Tenant detail, `components/TenantUsage.tsx`:**
+  - Two reads when the section opens: the last 12 months by month, and the selected month by day. One read per month change. "Now" is taken once per visit.
+  - The months table lists the newest month first, marks incomplete months with a badge and names the plan.
+  - Daily bars per meter: incomplete days are hatched and labelled "(incomplete)"; days with no counted minute are left empty and labelled "not counted", never shown as 0.
+  - CSV and JSON export of the shown month.
+  - The tenant detail button pin is updated on purpose (month navigation and meter chips; reads only).
+- **Fleet page, `pages/Usage.tsx` at `/usage`:**
+  - Navigation entry "Usage" in the Fleet group, super-admin only (`roles.ts`, the `BarChart3` icon, the `App.tsx` route).
+  - The month (`?month=YYYY-MM`; a future or malformed month falls back to this month) and the sort meter (`?sort=`) live in the URL.
+  - Refresh is labelled as recording an audit entry.
+  - The completeness banner shows the share of the month's minutes counted.
+  - Deleted tenants show their kept name and a "Deleted" badge, with no link.
+  - Cursor pages.
+  - Export collects every page (200 per page, at most 10,000 tenants) into CSV or JSON.
+- **Tests:**
+  - `lib/usage-format.test.ts`: units, UTC months, both CSVs, formula neutralising.
+  - `components/TenantUsage.test.tsx`: the two reads and their parameters, incomplete months, day labels (incomplete and not counted), one read per month change, Next disabled at the current month, CSV export with no extra read.
+  - `pages/Usage.test.tsx`: order, deleted tenant without a link, incomplete banner, one read each for page, sort and month, future-month fallback, export of every page, relay-ops forbidden and no nav entry.
+- **Mutation checks, all caught (10):**
+  - incomplete month badge hidden;
+  - uncounted day shown as 0;
+  - incomplete day unmarked;
+  - deleted tenant linked;
+  - Usage in the relay-ops nav;
+  - a future month accepted;
+  - CSV formula cells not neutralised;
+  - export stopping after one page;
+  - incomplete month banner hidden;
+  - a 13-month read instead of 12.
+- **Gates (2026-11-21):** provider console `npm test` **733 passed**, `npm run lint` clean, `npm run build` clean. No controller change.
 
 ---
 
@@ -94,8 +172,73 @@ Tenant usage and fleet page against the U1 live numbers; export opened; a purged
 ### Live check (U4)
 A small `relay_bytes_to_clients` threshold: the tenant that crosses it gets one alert (email and webhook, `scope: tenant`, its `tenant_id`); the other tenant none; no repeat that month.
 
+### U4 build record (branch `feat/sprint25-u4-usage-alerts`, stacked on U3 #247, 2026-11-21)
+- **`072_usage_alert_kind.sql`:**
+  - Replaces `alert_rules_kind_scope` (drop and re-add; `069_` untouched) with `tenant.usage_over` added to the tenant kinds.
+  - Seeds one rule like the other tenant rules: `00000000-0000-0000-0002-000000000010`, "Tenant usage over threshold", **disabled**, warning, `{"meter": "relay_bytes_to_clients", "threshold": 500000000000}`.
+  - `alert_states` and `alert_events` have no kind list of their own.
+- **Kinds** (`alerting/kinds.go`):
+  - New kind `KindTenantUsageOver`, scope tenant.
+  - New `Params.Meter` and `Params.Threshold`, both required. The meter must be one of D-57's meters (`providerquery.IsUsageMeter`); the threshold must be 1..10^18 in the meter's unit.
+  - `only()` now takes several allowed fields.
+- **Signal** (`alerting/signals.go`, `tenantUsageOver`):
+  - Reads U2's `providerquery.ReadMonthUsage` for the UTC month of `now` (one reader, never M1).
+  - Watches only active, unsuspended tenants (`activeTenant`); purged tenants are skipped.
+  - Fires at **≥** the threshold. Summary example: "Tenant acme used 1.5 kB relayed to clients in November 2026 (threshold 1.0 kB)".
+  - No new state logic: usage only grows within a month, so the A1 state machine keeps the alert firing (no repeat unless the rule sets re-notify). At the UTC month rollover usage restarts at 0, the observation disappears and the alert resolves.
+  - A read error leaves states unchanged (A1).
+- **D-61 "several rules may exist":** the controller's existing `POST /provider/alert-rules` (super-admin, D-53) can create more `tenant.usage_over` rules. The console edits the seeded rule only and adds **no new console write**, as the phase file says.
+- **Console:**
+  - `KIND_LABELS`, plus `AlertRuleParams.meter` and `threshold`.
+  - The rules list shows "· Relayed to clients from 500 GB a month".
+  - The edit dialog has a Meter select and "Monthly threshold (GB | hours | users)" in display units, converted to the raw unit (`parseThreshold` / `thresholdToDisplay`). Users must be whole; 0, negatives, more than 3 decimals or over 10^18 raw are refused.
+  - Meter and threshold are sent together, because the controller replaces `params` whole.
+- **Tests:**
+  - `kinds_test.go`: params cases; the scope count is now 5 platform and 5 tenant.
+  - `usage_alert_db_test.go` (real ledger, real evaluator):
+    - the seeded rule is disabled;
+    - it fires once for the tenant over the threshold, and at exactly the threshold;
+    - it never fires for suspended or purged tenants, and last month's usage doesn't count;
+    - it doesn't repeat as usage grows;
+    - both alerts resolve at the December rollover, and it fires again in the new month;
+    - rule update through the API is validated, and relay-ops get 403.
+  - `Alerts.test.tsx`: list text; editing in display units sends raw `{meter, threshold}`; invalid thresholds keep Save disabled.
+  - `usage-format.test.ts`: threshold conversion.
+- **Mutation checks, all caught (16):**
+  - Go (10):
+    - not firing at exactly the threshold;
+    - unwatched tenants alerted;
+    - purged tenants alerted;
+    - the wrong month read;
+    - never resolving at the rollover;
+    - no threshold floor;
+    - meter not validated;
+    - platform scope;
+    - the seed enabled;
+    - the constraint without the kind.
+  - Console (6):
+    - the GB factor;
+    - the hours factor;
+    - fractional users accepted;
+    - meter not sent;
+    - threshold not validated (survived the first test, which made no other change; it now toggles Enabled too);
+    - the list text.
+- **Gates (2026-11-21):**
+  - Provider console: `npm test` **736 passed**, lint and build clean.
+  - Go: `go build` and `go vet` clean.
+  - The first full `go test ./...` failed 3 alerting tests: two A1 tests counted the seeded rules (9, now 10 with 072), and the rollover test assumed an event order the evaluator doesn't guarantee (now sorted). My earlier runs had selected only the new tests.
+  - After the fixes, the whole `internal/alerting` package passes 3 runs in a row; the other 48 packages passed in the full run, with the 2 known skips.
+
 ---
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: A — months before metering read "Incomplete 0 B" (U3, live run 2026-11-24)
+**Issue:** the tenant Usage table showed months before metering started as "Incomplete" with 0 B, which reads as if usage was measured and was zero.
+
+**Fix Applied:** `provider-console/src/components/TenantUsage.tsx` — a month with `collected_minutes === 0` shows a "Not metered" badge and "—" in every meter cell (`aria-label="Not metered"`); a metered month keeps its figures and its "Incomplete" mark. Test: `TenantUsage.test.tsx` "a month with no counted minute reads "Not metered"".
+
+### Fix: B — "0% of the month counted" when less than 1% was counted (U3, live run 2026-11-24)
+**Issue:** the fleet Usage page rounded the counted share to whole percents, so early in a month it read "0%".
+
+**Fix Applied:** `formatCountedShare(collected, total)` in `provider-console/src/lib/usage-format.ts`, used by `pages/Usage.tsx`: one decimal under 10%, "<0.1%" for a sliver, ">99.9%" just short of the whole, never "0%" or "100%" for a partly counted month (rounds down). Tests in `usage-format.test.ts`.

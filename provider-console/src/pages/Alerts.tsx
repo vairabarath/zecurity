@@ -37,6 +37,7 @@ import { formatSeconds, kindLabel, SCOPE_FILTER_LABELS, SEVERITY_LABELS, severit
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
+import { formatMeter, METER_LABELS } from '@/lib/usage-format'
 
 // Alerts (Sprint 24 A3, F26; D-50, D-52, D-53). Four tabs:
 //   Active and History — both roles; the controller gives relay-ops relay and
@@ -419,6 +420,9 @@ function RulesTab({ round, onDone }: { round: number; onDone: (text: string) => 
                     {kindLabel(r.kind)}
                     {r.params.threshold_percent !== undefined && ` · at ${r.params.threshold_percent}%`}
                     {r.params.days !== undefined && ` · within ${r.params.days} days`}
+                    {r.params.meter !== undefined &&
+                      r.params.threshold !== undefined &&
+                      ` · ${METER_LABELS[r.params.meter]} from ${formatMeter(r.params.meter, r.params.threshold)} a month`}
                   </span>
                 </span>
               </TableCell>

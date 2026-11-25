@@ -287,6 +287,23 @@ func (e *env) assertPurged(t *testing.T, id, dir string, providerRowsBefore int)
 	if !strings.Contains(arc["audit_log.jsonl"], `"resource.create"`) || !strings.Contains(arc["connector_certificates.jsonl"], `"serial-`) {
 		t.Fatalf("archive misses the tenant's audit or certificate rows: %v", m.Files)
 	}
+	// Usage (Sprint 25 U1, D-58 amends D-46): the tenant's usage snapshot is
+	// kept with its name and slug and frozen; no user ids are kept.
+	var uslug, uname string
+	var purgedAt *time.Time
+	if err := e.pool.QueryRow(context.Background(), `SELECT slug, name, purged_at FROM usage_tenants WHERE tenant_id = $1`, id).
+		Scan(&uslug, &uname, &purgedAt); err != nil {
+		t.Fatalf("usage snapshot: %v", err)
+	}
+	var tslug string
+	e.scalar(t, &tslug, `SELECT slug FROM workspace_tombstones WHERE workspace_id = $1`, id)
+	if uslug != tslug || uname == "" || purgedAt == nil {
+		t.Fatalf("usage snapshot slug=%q name=%q purged_at=%v, want slug %q, a name, frozen", uslug, uname, purgedAt, tslug)
+	}
+	e.scalar(t, &n, `SELECT count(*) FROM usage_active_users WHERE tenant_id = $1`, id)
+	if n != 0 {
+		t.Fatalf("%d active-user rows kept for a purged tenant", n)
+	}
 	// provider_audit_logs is untouched: earlier rows stay, one tenant.purged row added.
 	var after int
 	e.scalar(t, &after, `SELECT count(*) FROM provider_audit_logs`)

@@ -149,16 +149,21 @@ Tracker: F32 and F33 ticked only after their live checks.
 - [x] Phase 0: D-56 … D-61 decided and written into the Decision Record (amendment 2026-11-21, usage)
 - [x] Documents reviewed (scope draft, Sprint 25 path, phase files, Decision Record amendment) — signed off by Barath 2026-11-21; implementation may start
 - [ ] X2 — Sprint 24 follow-ups (Sathiya)
-- [ ] U1a — Usage schema `071_usage` (Barath)
-- [ ] U1b — Usage collector (Barath)
-- [ ] U2 — Usage read API (Sathiya)
-- [ ] U3 — Usage console + export (Sathiya)
-- [ ] U4 — Usage alerts `tenant.usage_over` (Sathiya)
-- [ ] Sprint acceptance run (both); tracker F32, F33
+- [x] U1a — Usage schema `071_usage` (Barath)
+- [x] U1b — Usage collector (Barath)
+- [x] U2 — Usage read API (Sathiya)
+- [x] U3 — Usage console + export (Sathiya)
+- [x] U4 — Usage alerts `tenant.usage_over` (Sathiya)
+- [x] Sprint acceptance run (2026-11-24, Sathiya on the lab; stack tip 19aab7f1 + #253 fixes rechecked; merged to main 1bf7e225 on 2026-11-25); tracker F32, F33 ticked
 
 ## Post-Sprint Fixes
 
-_None yet._
+From the acceptance run on 2026-11-24 (results: `Planning/Pending-Live-Tests.md`), branch `fix/sprint25-live-findings`:
+- **F32-1 (U1):** relay usage is recorded on every heartbeat, not only the 5-minute DB-write cadence, so a restart loses at most one heartbeat's bytes (D-59). `controller/internal/relay/heartbeat.go`, `workspace_traffic.go`. Details in the U1 phase file.
+- **A (U3):** months with no counted minute read "Not metered", not "Incomplete 0 B". `TenantUsage.tsx`.
+- **B (U3):** the counted share of an incomplete month is never rounded to "0%" or "100%" (`formatCountedShare`). `pages/Usage.tsx`, `lib/usage-format.ts`.
+- **C (lab):** don't run a tenant's client on the host of that tenant's connector (it captures the connector's resource traffic). Recorded in the live-test notes.
+- **Q-1 (decided 2026-11-24, Sathiya):** session minutes stay counted as defined (a valid session, D-57); whether they are billed is a per-card option in F34, off by default (Sprint 26).
 
 ## Out of scope
 

@@ -110,6 +110,8 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	// tell the relay which of its registered connectors are revoked.
 	revoked := s.revokedConnectorSubset(ctx, relayID, req.RegisteredConnectorSpiffeIds)
 	if !shouldWriteDB {
+		// F32-1: usage counts every heartbeat, not only the DB-write cadence.
+		s.recordWorkspaceUsage(ctx, relayID, receivedAt, req)
 		metrics.RecordRelayHeartbeat("accepted")
 		return s.withWorkspacePolicy(ctx, relayID, req, &relaypb.HeartbeatResponse{
 			ServerTimeUnix:            time.Now().UTC().Unix(),

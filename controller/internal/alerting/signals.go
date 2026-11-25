@@ -75,6 +75,8 @@ func (s Sources) Observe(ctx context.Context, kind string, p Params, now time.Ti
 		obs, err = s.tenantNoRelayPath(ctx)
 	case KindTenantOverQuota:
 		obs, err = s.tenantOverQuota(ctx, p)
+	case KindTenantUsageOver:
+		obs, err = s.tenantUsageOver(ctx, p, now)
 	default:
 		return nil, fmt.Errorf("alerting: unknown kind %q", kind)
 	}
@@ -404,6 +406,95 @@ func (s Sources) tenantOverQuota(ctx context.Context, p Params) ([]Observation, 
 		})
 	}
 	return out, nil
+}
+
+// tenantUsageOver (Sprint 25 U4, D-61): a watched tenant whose usage of
+// p.Meter so far this UTC month is at or above p.Threshold. It reads the
+// ledger through U2's month reader (one reader, never M1). Usage only grows
+// within a month, so an alert stays firing until the month rolls over and
+// usage restarts at 0 (then it resolves). A read error leaves states
+// unchanged (never resolves). Warns only: nothing reads this to refuse or
+// limit anything.
+func (s Sources) tenantUsageOver(ctx context.Context, p Params, now time.Time) ([]Observation, error) {
+	m, err := providerquery.ReadMonthUsage(ctx, s.DB, now)
+	if err != nil {
+		return nil, fmt.Errorf("tenant usage: %w", err)
+	}
+	rows, err := s.DB.Query(ctx, `SELECT w.id::text, w.slug FROM workspaces w WHERE `+activeTenant)
+	if err != nil {
+		return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+	}
+	watched := map[string]string{}
+	for rows.Next() {
+		var id, slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+		}
+		watched[id] = slug
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+	}
+	var out []Observation
+	for _, t := range m.Tenants {
+		slug, ok := watched[t.Tenant.ID]
+		if !ok || t.Tenant.Purged {
+			continue // only tenants tenant rules watch (active, not suspended)
+		}
+		v := t.Value(p.Meter)
+		if v < p.Threshold {
+			continue
+		}
+		out = append(out, Observation{
+			TargetType: "tenant", TargetID: t.Tenant.ID, TargetName: t.Tenant.Name, TenantID: t.Tenant.ID,
+			Summary: fmt.Sprintf("Tenant %s used %s %s in %s (threshold %s)", slug, usageAmount(p.Meter, v),
+				usageMeterLabel(p.Meter), m.Month.Format("January 2006"), usageAmount(p.Meter, p.Threshold)),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TargetID < out[j].TargetID })
+	return out, nil
+}
+
+// usageMeterLabel names a usage meter in an alert summary.
+func usageMeterLabel(meter string) string {
+	switch meter {
+	case providerquery.UsageMeterRelayBytesToClients:
+		return "relayed to clients"
+	case providerquery.UsageMeterRelayBytesToConnectors:
+		return "relayed to connectors"
+	case providerquery.UsageMeterSessionMinutes:
+		return "of client sessions"
+	case providerquery.UsageMeterConnectorMinutes:
+		return "of connectors online"
+	case providerquery.UsageMeterShieldMinutes:
+		return "of shields online"
+	case providerquery.UsageMeterActiveUsers:
+		return "active users"
+	}
+	return meter
+}
+
+// usageAmount formats a usage quantity like the console: bytes in decimal
+// units, minutes as hours, users as a count.
+func usageAmount(meter string, v int64) string {
+	switch meter {
+	case providerquery.UsageMeterRelayBytesToClients, providerquery.UsageMeterRelayBytesToConnectors:
+		units := []string{"B", "kB", "MB", "GB", "TB", "PB", "EB"}
+		f, i := float64(v), 0
+		for f >= 1000 && i < len(units)-1 {
+			f /= 1000
+			i++
+		}
+		if i == 0 {
+			return fmt.Sprintf("%d B", v)
+		}
+		return fmt.Sprintf("%.1f %s", f, units[i])
+	case providerquery.UsageMeterActiveUsers:
+		return fmt.Sprintf("%d", v)
+	}
+	return fmt.Sprintf("%.1f h", float64(v)/60)
 }
 
 func collect(rows pgx.Rows, scan func(pgx.Rows) (Observation, error)) ([]Observation, error) {
