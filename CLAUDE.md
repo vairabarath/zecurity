@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 26 is the active sprint: Provider Dashboard, billing plans and invoicing (F34).** Decisions **D-62 … D-70** are made (Decision Record amendment **2026-11-23, billing**). The Sprint 26 documents were **signed off on 2026-11-23 by Sathiya, who instructed that this override the product-owner sign-off step; Barath reviews them in PR #249**. Sprint 25 (F32, F33, usage alerts) is code complete as a stacked set (#244 → #248); it merges first, and its acceptance run's findings become X3. Sprint 26 **prices, invoices and emails invoices**: no payment collection, no enforcement, no agent change.
+**Sprint 26 is the active sprint: Provider Dashboard, billing plans and invoicing (F34).** Decisions **D-62 … D-70** are made (Decision Record amendment **2026-11-23, billing**). The Sprint 26 documents were **signed off on 2026-11-23 by Sathiya, who instructed that this override the product-owner sign-off step; Barath reviews them in PR #249**. Sprint 25 (F32, F33, usage alerts) is **merged** (2026-11-25, #244 → #248 plus the live-run fixes #253; `main` `1bf7e225`) and live-checked; F32 and F33 are ticked (#255). Sprint 26 **prices, invoices and emails invoices**: no payment collection, no enforcement, no agent change.
 - **P1a — billing schema (F34)**, Barath, merged first (the contract with P3/P4):
   - `073_plan_cards`: `billing_settings` (country, currency, tax, retention, email), `plan_prices`, `plans.revision`, `plan_card_revisions`, `tenant_billing_plans`, `usage_tenants.plan_id`;
   - `074_invoices`: `invoices`, `invoice_lines`, `invoice_number_counters`, `invoice_emails`, immutability triggers, `prune_invoices()`.
@@ -20,7 +20,7 @@
   - month close plus a 6 h settling delay; drafts from U2's reader (counts only);
   - regenerate, issue (gap-free `INV-<year>-<n>`), mark paid, void;
   - editable retention (default 8 years); invoices survive the purge (amends D-46).
-- **X3 — Sprint 25 follow-ups**, Sathiya: whatever the Sprint 25 acceptance run finds; then tick F32, F33.
+- **X3 — Sprint 25 follow-ups**, Sathiya: **done** — the acceptance run's findings were fixed in #253 (F32-1 relay usage on every heartbeat, "Not metered" months, counted share); F32, F33 ticked.
 - **P3 — invoice API + tenant email (D-68, D-70)**, Sathiya, after P1a (writes after P2):
   - `GET/POST /provider/invoices…`; `invoice.read` / `invoice.write` (super-admin only; relay-ops 403);
   - issued invoices are emailed to the tenant's active admins (editable, default on), with a void notice and resend.
@@ -144,7 +144,7 @@ cd controller && docker compose down -v && docker compose up -d   # Recreate loc
 Sprint 26 specific:
 - Build gate passes before proceeding to the next phase (DB-backed tests must run, not skip; a skipped DB test is a failed case).
 - The Decision Record (all amendments through **2026-11-23, billing**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
-- No phase before its dependencies are merged (Sprint 25 stack first; P1a before P1b, P2 and P3; P2 before P3's writes; P1b and P3 before P4).
+- No phase before its dependencies are merged (Sprint 25 is merged; P1a before P1b, P2 and P3; P2 before P3's writes; P1b and P3 before P4).
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
 - **Money is integers (D-64):** minor units only; no floats. Overage is rounded up to whole units, and tax half up. Overflow refuses.
 - **Billing reads, never estimates:** quantities come only through U2's `ReadMonthUsage` (D-59); the billing plan only through `PlanForMonth` (month-start plan, D-65).
