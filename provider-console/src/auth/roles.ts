@@ -3,7 +3,7 @@
 // here: C-b added Operators, Phase P added Relays/Tenants/Audit/
 // Certificates; relay pools (D-37) added Relay pools; plans (D-43) added Plans;
 // alerts (Sprint 24 A3, F26) added Alerts; the incident timeline (T1, F27)
-// added Timeline.
+// added Timeline; usage (Sprint 25 U3, F33) added Usage.
 //
 // This is UX only. The controller authorizes every /provider/* request on
 // its own (decide()); hiding a section never grants or removes access.
@@ -36,6 +36,8 @@ export const SECTIONS: readonly Section[] = [
   { key: 'relay-pools', path: '/relay-pools', label: 'Relay pools', roles: PROVIDER_ROLES, group: 'Fleet' },
   { key: 'tenants', path: '/tenants', label: 'Tenants', roles: ['super-admin'], group: 'Fleet' },
   { key: 'plans', path: '/plans', label: 'Plans', roles: ['super-admin'], group: 'Fleet' },
+  // Usage (Sprint 25 U3, F33): tenant data, super-admin only (D-60).
+  { key: 'usage', path: '/usage', label: 'Usage', roles: ['super-admin'], group: 'Fleet' },
   { key: 'certificates', path: '/certificates', label: 'Certificates', roles: ['super-admin'], group: 'Trust' },
   { key: 'audit', path: '/audit', label: 'Audit log', roles: ['super-admin'], group: 'Governance' },
   { key: 'users', path: '/users', label: 'Operators', roles: ['super-admin'], group: 'Governance' },

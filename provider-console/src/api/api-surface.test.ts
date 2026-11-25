@@ -11,6 +11,7 @@ import * as quotasApi from './quotas'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
 import * as tenantsApi from './tenants'
+import * as usageApi from './usage'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
@@ -27,7 +28,8 @@ import * as tenantsApi from './tenants'
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose. Alerts (Sprint 24 A3, F26; D-53 amends
 // D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads. The
 // incident timeline (Sprint 24 T1, F27) adds one read and no write. Metrics (Sprint 24 M2, F23) add one read,
-// GET /provider/metrics/{series}, and no write.
+// GET /provider/metrics/{series}, and no write. Usage (Sprint 25 U3, F33) adds two reads, GET /provider/usage and
+// GET /provider/usage/tenants, and no write.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -95,6 +97,8 @@ const ALLOWED_READS = [
   'GET /provider/tenants',
   'GET /provider/tenants/{id}',
   'GET /provider/timeline',
+  'GET /provider/usage',
+  'GET /provider/usage/tenants',
   'GET /provider/users',
 ]
 
@@ -109,6 +113,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   reads: readsApi,
   relays: relaysApi,
   tenants: tenantsApi,
+  usage: usageApi,
 }
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
@@ -186,6 +191,8 @@ describe('API surface', () => {
       'GET /provider/alert-rules': { status: 200, body: { items: [] } },
       'GET /provider/alert-channels': { status: 200, body: { items: [] } },
       'GET /provider/timeline': page,
+      'GET /provider/usage': { status: 200, body: { buckets: [] } },
+      'GET /provider/usage/tenants': page,
       [`PATCH /provider/alert-rules/${ID}`]: { status: 200, body: {} },
       'POST /provider/alert-channels': { status: 201, body: { channel: {}, secret: 'whsec_x' } },
       [`PATCH /provider/alert-channels/${ID}`]: { status: 200, body: {} },

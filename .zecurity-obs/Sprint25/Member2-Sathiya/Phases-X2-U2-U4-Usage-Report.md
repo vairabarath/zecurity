@@ -112,6 +112,44 @@ Usage of two tenants after a known download (U1 live check), read per hour, day 
 ### Live check (U3)
 Tenant usage and fleet page against the U1 live numbers; export opened; a purged tenant shown with its name.
 
+### U3 build record (branch `feat/sprint25-u3-usage-console`, stacked on U2 #246, 2026-11-21)
+- **`api/usage.ts`:** `getTenantUsage` and `listFleetUsage`. Both are added to `api-surface.test.ts` as reads on purpose; there are no writes.
+- **`lib/usage-format.ts`:**
+  - Labels: bytes in decimal units, minutes as hours, users as a count.
+  - UTC month helpers.
+  - CSV and JSON exports: raw quantities, `complete` per row (tenant) or `month,month_complete` on every row (fleet), formula cells neutralised with F38's `csvCell`.
+  - No `#` comment lines in the CSV: they aren't standard and break some parsers. Completeness is a column instead.
+- **Tenant detail, `components/TenantUsage.tsx`:**
+  - Two reads when the section opens: the last 12 months by month, and the selected month by day. One read per month change. "Now" is taken once per visit.
+  - The months table lists the newest month first, marks incomplete months with a badge and names the plan.
+  - Daily bars per meter: incomplete days are hatched and labelled "(incomplete)"; days with no counted minute are left empty and labelled "not counted", never shown as 0.
+  - CSV and JSON export of the shown month.
+  - The tenant detail button pin is updated on purpose (month navigation and meter chips; reads only).
+- **Fleet page, `pages/Usage.tsx` at `/usage`:**
+  - Navigation entry "Usage" in the Fleet group, super-admin only (`roles.ts`, the `BarChart3` icon, the `App.tsx` route).
+  - The month (`?month=YYYY-MM`; a future or malformed month falls back to this month) and the sort meter (`?sort=`) live in the URL.
+  - Refresh is labelled as recording an audit entry.
+  - The completeness banner shows the share of the month's minutes counted.
+  - Deleted tenants show their kept name and a "Deleted" badge, with no link.
+  - Cursor pages.
+  - Export collects every page (200 per page, at most 10,000 tenants) into CSV or JSON.
+- **Tests:**
+  - `lib/usage-format.test.ts`: units, UTC months, both CSVs, formula neutralising.
+  - `components/TenantUsage.test.tsx`: the two reads and their parameters, incomplete months, day labels (incomplete and not counted), one read per month change, Next disabled at the current month, CSV export with no extra read.
+  - `pages/Usage.test.tsx`: order, deleted tenant without a link, incomplete banner, one read each for page, sort and month, future-month fallback, export of every page, relay-ops forbidden and no nav entry.
+- **Mutation checks, all caught (10):**
+  - incomplete month badge hidden;
+  - uncounted day shown as 0;
+  - incomplete day unmarked;
+  - deleted tenant linked;
+  - Usage in the relay-ops nav;
+  - a future month accepted;
+  - CSV formula cells not neutralised;
+  - export stopping after one page;
+  - incomplete month banner hidden;
+  - a 13-month read instead of 12.
+- **Gates (2026-11-21):** provider console `npm test` **733 passed**, `npm run lint` clean, `npm run build` clean. No controller change.
+
 ---
 
 ## U4 — Usage alerts (`tenant.usage_over`) — D-61, D-50, D-53
