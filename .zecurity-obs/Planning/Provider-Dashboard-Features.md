@@ -67,8 +67,8 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F29 | Relay version pinning and rollback | ⬜ Not started | Large |
 | F30 | Tenant migration between pools | ⬜ Not started | Decided (D-38): an assignment change with make-before-break (PR 1); no bulk/scheduled migration |
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
-| F32 | Usage collection | ⬜ Not started | Large: nothing is metered |
-| F33 | Per-tenant usage report | ⬜ Not started | After F32 |
+| F32 | Usage collection | ✅ Done | — (Sprint 25 U1, #245 + F32-1 fix #253; live PASS 2026-11-24 ([[Pending-Live-Tests]]); usage alerts U4 #248) |
+| F33 | Per-tenant usage report | ✅ Done | — (Sprint 25 U2 #246, U3 #247 + fixes #253; live PASS 2026-11-24) |
 | F34 | Billing plans and invoicing | ⬜ Not started | Needs a decision |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
@@ -143,8 +143,8 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 - [ ] **F31** Read-only tenant support view (impersonation, audited) ◐ (audited read-only detail, no impersonation)
 
 *Metering*
-- [ ] **F32** Usage collection — session-seconds, bytes relayed, connector-hours ⬜
-- [ ] **F33** Per-tenant usage report ⬜
+- [x] **F32** Usage collection — session-seconds, bytes relayed, connector-hours ✅
+- [x] **F33** Per-tenant usage report ✅
 
 ### Can have (Phase 3)
 
@@ -217,8 +217,8 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 | F29 | Relay version pinning and rollback | ⬜ | 🔴 | Relay version is reported; no pinning or update control. | |
 | F30 | Tenant migration between relay pools | ⬜ | ⚖️ 🔴 | Depends on F9 (pools). | |
 | F31 | Read-only tenant support view (impersonation, audited) | ◐ | ⚖️ 🔴 | Read-only tenant detail exists and every view is audited. Impersonation needs the support-access decision (decisions doc Q9). | |
-| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | ⬜ | 🔴 | Nothing is metered today. | |
-| F33 | Per-tenant usage report | ⬜ | 🔴 | Depends on F32. | |
+| F32 | Usage collection — session-seconds, bytes relayed, connector-hours | ✅ | 🔴 | Sprint 25 (D-56 … D-61): exact relayed bytes, session/connector/shield minutes, monthly active users; only relayed traffic is metered. Merged #245, #253; live PASS 2026-11-24. | |
+| F33 | Per-tenant usage report | ✅ | 🔴 | Tenant Usage section, fleet Usage page, CSV/JSON export (#246, #247, #253); live PASS 2026-11-24. | |
 
 ### Can have (Phase 3)
 
