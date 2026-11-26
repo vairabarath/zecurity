@@ -139,3 +139,26 @@
     display: none;
   }
 }
+
+/* Printable invoice (Sprint 26 P4): print only the invoice, black on white. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .invoice-print,
+  .invoice-print * {
+    visibility: visible;
+    color: #000 !important;
+    border-color: #999 !important;
+  }
+  .invoice-print {
+    position: absolute;
+    inset: 0;
+    max-width: none;
+    border: 0;
+    background: #fff !important;
+  }
+  .invoice-print .invoice-watermark {
+    opacity: 0.12;
+  }
+}
