@@ -344,7 +344,11 @@ func TestPrune_RetentionOnly(t *testing.T) {
 	if _, err := db.Exec(ctx, `INSERT INTO usage_hourly VALUES ($1, 'session_minutes', $2, 1)`, tenantB, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO usage_tenants (tenant_id, name, slug, purged_at) VALUES ($1, 'b', 'b', now()), ($2, 'a', 'a', now())`, tenantB, tenantA); err != nil {
+	// b was purged 6 months ago; c was purged last month with no usage at all:
+	// c's snapshot must stay for its final invoice (billing hold, D-67).
+	tenantC := "aaaaaaaa-0000-0000-0000-0000000000a3"
+	if _, err := db.Exec(ctx, `INSERT INTO usage_tenants (tenant_id, name, slug, purged_at) VALUES ($1, 'b', 'b', $3), ($2, 'a', 'a', $3), ($4, 'c', 'c', $5)`,
+		tenantB, tenantA, now.AddDate(0, -6, 0), tenantC, now.AddDate(0, -1, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&Collector{DB: db}).Prune(ctx, now); err != nil {
@@ -359,7 +363,7 @@ func TestPrune_RetentionOnly(t *testing.T) {
 	if n := scalar[int64](t, db, `SELECT count(*) FROM usage_active_user_counts`); n != 1 {
 		t.Fatalf("%d active-user counts left, want 1", n)
 	}
-	if s := scalar[string](t, db, `SELECT string_agg(slug, ',' ORDER BY slug) FROM usage_tenants`); s != "a" {
-		t.Fatalf("snapshots left %q, want a (b has no usage left)", s)
+	if s := scalar[string](t, db, `SELECT string_agg(slug, ',' ORDER BY slug) FROM usage_tenants`); s != "a,c" {
+		t.Fatalf("snapshots left %q, want a,c (b has no usage left and is past the billing hold; c is inside it)", s)
 	}
 }

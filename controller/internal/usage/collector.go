@@ -323,8 +323,13 @@ func putBaseline(ctx context.Context, tx pgx.Tx, relayID, tenantID string, start
 	return nil
 }
 
+// SnapshotBillingHoldMonths: a purged tenant's usage_tenants snapshot is
+// kept at least this long after the purge, so the billing month close (which
+// looks back 3 closed months) can still name its final invoice (D-67).
+const SnapshotBillingHoldMonths = 4
+
 // Prune deletes usage older than the retention (D-58), and the snapshots of
-// purged tenants with no usage left.
+// purged tenants with no usage left once the billing hold has passed.
 func (c *Collector) Prune(ctx context.Context, now time.Time) error {
 	now = now.UTC()
 	cutoff := now.AddDate(0, -DefaultRetentionMonths, 0)
@@ -349,10 +354,15 @@ func (c *Collector) Prune(ctx context.Context, now time.Time) error {
 				return fmt.Errorf("prune: %w", err)
 			}
 		}
+		// A purged tenant's snapshot also names its final invoice (D-67): the
+		// month close reads it for up to 3 closed months back, so it is kept at
+		// least SnapshotBillingHold after the purge even with no usage left.
 		if _, err := tx.Exec(ctx, `DELETE FROM usage_tenants t
 			 WHERE t.purged_at IS NOT NULL
+			   AND t.purged_at < $1
 			   AND NOT EXISTS (SELECT 1 FROM usage_hourly h WHERE h.tenant_id = t.tenant_id)
-			   AND NOT EXISTS (SELECT 1 FROM usage_active_user_counts a WHERE a.tenant_id = t.tenant_id)`); err != nil {
+			   AND NOT EXISTS (SELECT 1 FROM usage_active_user_counts a WHERE a.tenant_id = t.tenant_id)`,
+			now.AddDate(0, -SnapshotBillingHoldMonths, 0)); err != nil {
 			return fmt.Errorf("prune tenants: %w", err)
 		}
 		return nil
