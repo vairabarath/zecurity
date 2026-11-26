@@ -69,7 +69,7 @@ Checked against `main` `c79a75e1`. "Quick" = controller read API + console view 
 | F31 | Read-only support view (impersonation) | ◐ Partly | Audited read-only view exists; impersonation needs a decision |
 | F32 | Usage collection | ✅ Done | — (Sprint 25 U1, #245 + F32-1 fix #253; live PASS 2026-11-24 ([[Pending-Live-Tests]]); usage alerts U4 #248) |
 | F33 | Per-tenant usage report | ✅ Done | — (Sprint 25 U2 #246, U3 #247 + fixes #253; live PASS 2026-11-24) |
-| F34 | Billing plans and invoicing | 🚧 In progress | Sprint 26 (signed off 2026-11-23, D-62 … D-70; `Sprint26/path.md`). Drafts: #250 invoice email + delivery worker (P3 part, live check 14/14 on the branch), #251 console foundations (P4 part). Barath's P1a schema, P1b card/settings API and P2 invoice generator not started |
+| F34 | Billing plans and invoicing | ✅ Done | — (Sprint 26: P1a #257, P1b #258, P2 #259, P3 #250, P4 #251 + #254; purged-tenant snapshot fix and dev test clock in the acceptance PR; acceptance live PASS 2026-11-26 ([[Pending-Live-Tests]])) |
 | F35 | Provider API + API keys | ◐ Partly | REST API exists; API keys need a decision |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
@@ -148,7 +148,7 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 
 ### Can have (Phase 3)
 
-- [ ] **F34** Billing plans and invoicing ⬜
+- [x] **F34** Billing plans and invoicing ✅
 - [ ] **F35** Provider API + API keys ◐ (REST API exists, no API keys)
 - [ ] **F36** Tenant self-signup / provisioning workflow ◐ (first login creates a workspace)
 - [ ] **F37** Multi-provider / reseller hierarchy ⬜
@@ -224,7 +224,7 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 
 | ID | Feature | Status | Effort for what's left | Evidence / what's missing | Owner |
 |----|---------|--------|------------------------|---------------------------|-------|
-| F34 | Billing plans and invoicing | 🚧 | 🔴 | Sprint 26 (D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices with a gap-free number, emailed to tenant admins, optional tax. Drafts #250 (email) and #251 (console foundations); P1a/P1b/P2 not started. | Barath, Sathiya |
+| F34 | Billing plans and invoicing | ✅ | 🔴 | Sprint 26 (D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices with a gap-free number, emailed to tenant admins, optional tax. Merged #257, #258, #259, #250, #251, #254 (2026-11-26); acceptance live PASS 2026-11-26. | Barath, Sathiya |
 | F35 | Provider API + API keys | ◐ | ⚖️ 🟡 | Provider REST API exists (session tokens). API keys need an auth decision (must not mint sessions outside `IssueSession`). | |
 | F36 | Tenant self-signup / provisioning workflow | ◐ | 🟡 | First sign-in creates a workspace with its admin and CA. No provider-side provisioning workflow. | |
 | F37 | Multi-provider / reseller hierarchy | ⬜ | ⚖️ 🔴 | Single provider today (decisions doc Q1). | |
