@@ -322,6 +322,10 @@ type MonthUsage struct {
 	CollectedMinutes int                `json:"collected_minutes"`
 	Minutes          int                `json:"minutes"`
 	Tenants          []TenantMonthUsage `json:"-"`
+	// IncompleteHours: hours of the month with fewer than 60 collected
+	// minutes (D-59; Sprint 26 P2 states them on the invoice). Not in the
+	// JSON, so the usage API's output is unchanged.
+	IncompleteHours int `json:"-"`
 }
 
 // ReadMonthUsage reads every tenant's usage for the UTC month containing month.
@@ -375,9 +379,14 @@ SELECT t.tenant_id::text,
 	if err != nil {
 		return out, err
 	}
+	complete := 0
 	for _, n := range collected {
 		out.CollectedMinutes += n
+		if n >= 60 {
+			complete++
+		}
 	}
+	out.IncompleteHours = out.Minutes/60 - complete
 	out.Complete = out.CollectedMinutes == out.Minutes
 	return out, nil
 }
