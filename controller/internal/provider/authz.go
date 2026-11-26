@@ -167,6 +167,15 @@ const (
 	ActionInvoiceRead           = "invoice.read"
 	ActionInvoiceWrite          = "invoice.write"
 	ActionInvoicePrune          = "invoice.prune" // audit action of the retention prune (D-67)
+	// Audit actions of the invoice API (P3): reads, one row per request.
+	ActionInvoiceFleetRead = "invoice.fleet.read"
+	// Audit actions of the invoice writes (invoice.write), reason and
+	// before/after each.
+	ActionInvoiceIssue      = "invoice.issue"
+	ActionInvoiceMarkPaid   = "invoice.mark_paid"
+	ActionInvoiceVoid       = "invoice.void"
+	ActionInvoiceRegenerate = "invoice.regenerate"
+	ActionInvoiceResend     = "invoice.resend"
 )
 
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
@@ -326,6 +335,18 @@ func (a *Authz) CanReadBillingSettings(actor Actor) error {
 // (billing.settings.write: super-admin only, D-70).
 func (a *Authz) CanWriteBillingSettings(actor Actor) error {
 	return decide(actor, ActionBillingSettingsWrite, Target{Type: "billing_settings"})
+}
+
+// CanReadInvoices gates the invoice reads (invoice.read: super-admin only,
+// D-70).
+func (a *Authz) CanReadInvoices(actor Actor) error {
+	return decide(actor, ActionInvoiceRead, Target{Type: "invoice"})
+}
+
+// CanWriteInvoices gates issue, mark paid, void, regenerate and resend
+// (invoice.write: super-admin only, D-70).
+func (a *Authz) CanWriteInvoices(actor Actor, target Target) error {
+	return decide(actor, ActionInvoiceWrite, target)
 }
 
 // CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}

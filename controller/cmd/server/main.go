@@ -782,6 +782,22 @@ func main() {
 	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
 	// Sprint 26 P1b (F34, D-64, D-69, D-70): billing settings, super-admin only.
 	billingSettings := &provider.BillingSettingsHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore}
+	// Sprint 26 P2/P3 (F34, D-66, D-68, D-70): the invoice generator (month
+	// close, regenerate) and the invoice API, super-admin only.
+	billingEnabled := os.Getenv("BILLING_ENABLED") != "false"
+	billingProviderName := os.Getenv("BILLING_PROVIDER_NAME")
+	if billingProviderName == "" {
+		billingProviderName = "Zecurity"
+	}
+	invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay)}
+	invoiceAPI := &provider.InvoiceHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore, Generator: invoiceGen, ProviderName: billingProviderName}
+	mux.Handle("GET /provider/invoices", requireProvider(http.HandlerFunc(invoiceAPI.List)))
+	mux.Handle("GET /provider/invoices/{id}", requireProvider(http.HandlerFunc(invoiceAPI.Get)))
+	mux.Handle("POST /provider/invoices/regenerate", requireProvider(http.HandlerFunc(invoiceAPI.Regenerate)))
+	mux.Handle("POST /provider/invoices/{id}/issue", requireProvider(http.HandlerFunc(invoiceAPI.Issue)))
+	mux.Handle("POST /provider/invoices/{id}/mark-paid", requireProvider(http.HandlerFunc(invoiceAPI.MarkPaid)))
+	mux.Handle("POST /provider/invoices/{id}/void", requireProvider(http.HandlerFunc(invoiceAPI.Void)))
+	mux.Handle("POST /provider/invoices/{id}/resend", requireProvider(http.HandlerFunc(invoiceAPI.Resend)))
 	mux.Handle("GET /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Get)))
 	mux.Handle("PATCH /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Update)))
 	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
@@ -1209,10 +1225,10 @@ func main() {
 	// D-67): after each UTC month closes plus BILLING_SETTLE_DELAY (default
 	// 6 h), every tenant with a priced month-start card gets a draft invoice
 	// (quantities from U2's reader only). Once a day invoices past the
-	// retention setting are pruned through prune_invoices(), audited.
-	// BILLING_ENABLED=false turns both off. Billing never enforces anything.
-	if os.Getenv("BILLING_ENABLED") != "false" {
-		invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay)}
+	// retention setting are pruned through prune_invoices(), audited, and the
+	// tenant invoice emails are delivered. BILLING_ENABLED=false turns these
+	// jobs off (the API still answers). Billing never enforces anything.
+	if billingEnabled {
 		workers.Go("billing-month-close", func() { invoiceGen.Run(ctx) })
 		workers.Go("billing-invoice-prune", func() {
 			prune := func() {
@@ -1243,6 +1259,11 @@ func main() {
 				}
 			}
 		})
+		// Tenant invoice email (Sprint 26 P3, D-68): issued invoices and void
+		// notices to the tenant's active admins, through the F14 SMTP sender;
+		// at most once per (invoice, kind) unless a super-admin resends.
+		emailWorker := &billing.EmailWorker{Store: &billing.SQLEmailStore{DB: db.Pool}, Mail: inviteEmailer, ProviderName: billingProviderName}
+		workers.Go("billing-invoice-email", func() { emailWorker.Run(ctx, mustDuration("BILLING_EMAIL_INTERVAL", 30*time.Second)) })
 	}
 
 	workers.Go("hourly-ticker", func() {
