@@ -349,4 +349,9 @@ Then tick F32 and F33 in the tracker.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: invoice history paid entry (live run 2026-11-26)
+**Issue:** the invoice detail's status history showed a paid invoice as "Paid 11/25/2026, 5:30:00 AM" and "Reason: NEFT 8842".
+
+**Root cause:** `paid_at` is a calendar date; the API sends it at UTC midnight, and the page formatted it with the viewer's zone (IST adds 5:30). The paid entry's note is the payment reference, not a reason.
+
+**Fix applied** (`provider-console/src/pages/InvoiceDetail.tsx`, `History`): paid entries are formatted with `dateStyle: 'medium', timeZone: 'UTC'` (date only) and their note is labelled "Reference". Test in `InvoiceDetail.test.tsx`, run in `TZ=Asia/Kolkata`; it fails on the old code. Commit `fa8c5280` on `feat/sprint26-p4-unsaved-guard`.
