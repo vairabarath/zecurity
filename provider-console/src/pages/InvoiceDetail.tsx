@@ -154,6 +154,15 @@ export function InvoiceDetail() {
   )
 }
 
+// A paid date is a calendar date (no time): shown in UTC so it never moves a
+// day or gains a time of day in the viewer's zone. Its note is the payment
+// reference the operator entered.
+const paidDateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' })
+function formatPaidDate(at: string): string {
+  const d = new Date(at)
+  return Number.isNaN(d.getTime()) ? at : paidDateFormat.format(d)
+}
+
 function History({ inv }: { inv: InvoiceDetailData }) {
   return (
     <Card className="p-5">
@@ -167,10 +176,14 @@ function History({ inv }: { inv: InvoiceDetailData }) {
               <span className="inline-flex flex-wrap items-center gap-2">
                 <Badge variant={INVOICE_STATUS_VARIANTS[h.status]}>{INVOICE_STATUS_LABELS[h.status]}</Badge>
                 <span className="text-[13px] text-muted-foreground">
-                  {formatDateTime(h.at)} · <span className="break-all">{h.actor}</span>
+                  {h.status === 'paid' ? formatPaidDate(h.at) : formatDateTime(h.at)} · <span className="break-all">{h.actor}</span>
                 </span>
               </span>
-              {h.reason && <span className="break-words text-[13px] text-muted-foreground">Reason: {h.reason}</span>}
+              {h.reason && (
+                <span className="break-words text-[13px] text-muted-foreground">
+                  {h.status === 'paid' ? 'Reference' : 'Reason'}: {h.reason}
+                </span>
+              )}
             </li>
           ))}
         </ol>

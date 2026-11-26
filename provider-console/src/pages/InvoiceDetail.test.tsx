@@ -64,6 +64,30 @@ describe('Invoice detail', () => {
     expect(screen.getByText(/plan Team \(revision 3\)/)).toBeInTheDocument()
   })
 
+  it('a paid entry shows its calendar date (no time, no zone shift) and its payment reference', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({
+      'GET /provider/invoices/inv-1': {
+        status: 200,
+        body: detail({
+          status: 'paid',
+          paid_at: '2026-12-05',
+          paid_reference: 'NEFT 8842',
+          history: [
+            { status: 'issued', at: '2026-12-01T09:00:00Z', actor: 'admin@provider.test', reason: null },
+            { status: 'paid', at: '2026-12-05T00:00:00Z', actor: 'admin@provider.test', reason: 'NEFT 8842' },
+          ],
+        }),
+      },
+    })
+    renderApp('/invoices/inv-1')
+    const history = within(await screen.findByRole('list', { name: 'Status history' }))
+    const paid = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date('2026-12-05T00:00:00Z'))
+    expect(history.getByText(new RegExp(`^${paid} ·`))).toBeInTheDocument()
+    expect(history.getByText('Reference: NEFT 8842')).toBeInTheDocument()
+    expect(history.queryByText('Reason: NEFT 8842')).toBeNull()
+  })
+
   it('void needs a reason and the typed invoice number', async () => {
     signedInAs(superAdminMe)
     const { calls } = mockFetch({
