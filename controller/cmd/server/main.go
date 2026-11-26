@@ -779,6 +779,10 @@ func main() {
 	mux.Handle("PATCH /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Update)))
 	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
 	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
+	// Sprint 26 P1b (F34, D-64, D-69, D-70): billing settings, super-admin only.
+	billingSettings := &provider.BillingSettingsHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore}
+	mux.Handle("GET /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Get)))
+	mux.Handle("PATCH /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Update)))
 	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
 	// Per-tenant quota overrides (Sprint 23 S3, D-47): super-admin only,
 	// reason required, audited with before/after.
@@ -888,6 +892,7 @@ func main() {
 	mux.Handle("GET /provider/usage", requireProvider(http.HandlerFunc(providerReads.GetTenantUsage)))
 	mux.Handle("GET /provider/usage/tenants", requireProvider(http.HandlerFunc(providerReads.ListFleetUsage)))
 	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
+	mux.Handle("GET /provider/plans/{id}/revisions", requireProvider(http.HandlerFunc(providerReads.ListPlanRevisions)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))

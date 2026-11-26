@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/providerquery"
 )
@@ -147,6 +148,21 @@ func (h *ReadHandlers) GetPlan(w http.ResponseWriter, r *http.Request) {
 	writeReadJSON(w, p)
 }
 
+// ListPlanRevisions: GET /provider/plans/{id}/revisions (plan.read,
+// super-admin; Sprint 26 P1b, D-63): the card history, newest first.
+func (h *ReadHandlers) ListPlanRevisions(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadPlans(actor)) {
+		return
+	}
+	items, err := providerquery.ListPlanRevisions(r.Context(), h.db, r.PathValue("id"))
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, map[string]any{"items": items})
+}
+
 // GetRelayPool: GET /provider/relay-pools/{id} (relay.read). The tenant list
 // is included only for callers allowed tenant.read (super-admin, D-41);
 // relay-ops get counts only.
@@ -245,6 +261,19 @@ func (h *ReadHandlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusInternalServerError, "server_error", "read", err)
 		return
 	}
+
+	// The plan this month is billed at (D-65): the one rule, PlanForMonth.
+	bp, err := billing.PlanForMonth(ctx, tx, id, time.Now())
+	if err != nil {
+		fail(http.StatusInternalServerError, "server_error", "billing plan", err)
+		return
+	}
+	name, err := billing.PlanName(ctx, tx, bp.PlanID)
+	if err != nil {
+		fail(http.StatusInternalServerError, "server_error", "billing plan name", err)
+		return
+	}
+	detail.BillingPlan = &providerquery.TenantBillingPlan{ID: bp.PlanID, Name: name}
 
 	body, err := json.Marshal(detail) // serialize before the audit so nothing can fail after COMMIT
 	if err != nil {
