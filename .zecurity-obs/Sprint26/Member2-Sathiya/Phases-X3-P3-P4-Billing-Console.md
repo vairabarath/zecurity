@@ -126,10 +126,25 @@ Then tick F32 and F33 in the tracker.
 - **Mutation checks**, each caught by a test: timeout retried; partial retried; address not sanitized; no-admin case sending; max attempts ignored; void showing the invoice; HTML rendered with `text/template`; unsanitized subject.
 - **Gates:** `go build ./...`, `go vet`, `gofmt`; the full `go test ./...` with the DB and Valkey env passed (50 packages ok).
 - **Live check (part, 2026-11-23): Pass, 14/14.** Run against a local capture SMTP server plus one real Gmail SMTP send (`[LIVE CHECK]` subject, sender mailbox to itself); recorded in `Planning/Pending-Live-Tests.md` (section "F34 (P3, part)" and the results log). The full suite skipped only the 2 known hard-coded tests.
-- **Still to do after P1a/P2:**
-  - the SQL `EmailStore` on `invoice_emails` / `invoices` / `users`, with DB-backed tests (claim, interrupted rows, own-tenant admins only);
-  - wiring in `main.go` (`BILLING_PROVIDER_NAME`, worker interval);
-  - the invoice read API and write handlers.
+- **Completed 2026-11-26** on the same branch, after P2 was merged into it (`068f2747`, merge rather than rebase because the branch is pushed); commit `e2b11d60`, local only.
+  - `internal/providerquery/invoices.go`: `ListInvoices` (keyset on month and id, last email status, totals per status, settings currency) and `GetInvoice` (lines, deliveries without addresses, status history from the invoice's own fields).
+  - `internal/provider/invoice_handlers.go`: the 7 routes with the console contract above.
+    - Reads are audited before the body is written: `invoice.fleet.read` once per list request, `invoice.read` per invoice.
+    - Writes call `internal/billing`'s lifecycle and commit with their audit row (reason, before/after).
+    - Regenerate writes one audit row listing every draft it wrote.
+  - `internal/billing/emailstore.go`: `SQLEmailStore`.
+    - Claim: `pending → sending` with `SKIP LOCKED`; the claim time goes in `next_attempt_at`.
+    - Rows a restart left in `sending` become `failed` and are never re-sent.
+    - Recipients are the tenant's own active admins at send time.
+  - `main.go`: routes; `BILLING_PROVIDER_NAME` (default "Zecurity"); the email worker (`BILLING_EMAIL_INTERVAL`, default 30 s) on the F14 sender. The API answers even with `BILLING_ENABLED=false`.
+  - **Tests:** `internal/provider/invoice_handlers_test.go`:
+    - relay-ops 403 on all 7 routes (nothing audited);
+    - list, paging, totals and bad input;
+    - a purged tenant's snapshot; detail;
+    - the 409/400 errors; the issue, resend, paid, void, regenerate flow;
+    - no address in any audit row;
+    - the SQL store with the worker.
+  - **Mutation checks**, each caught: relay-ops allowed; read audit missing; another tenant's admins; suspended admins; a claim keeping `pending` (sent twice); an interrupted row re-sent; an address in an audit row; an audit without `before`.
 
 ### Live check (P3)
 - On the P2 drafts: list and detail match. Issue → the tenant's admin mailbox gets the invoice (HTML and text). Resend → one more email. Void → the void notice. Mark paid.
@@ -313,7 +328,12 @@ Then tick F32 and F33 in the tracker.
     - one fix: the settings form was double-wrapped in a card.
   - **Gates:** `npm test` (65 files, 843 tests), `npm run lint` (clean), `npm run build` (ok).
   - **Still to do:**
-    - the unsaved-changes guard on the settings and card forms;
+    - ~~the unsaved-changes guard on the settings and card forms~~ **done** (`feat/sprint26-p4-unsaved-guard`, `054c8f17`, local only):
+      - `src/lib/useUnsavedChanges.ts`.
+      - **Billing settings:** dirty when any setting differs from what was loaded or last saved; the reason alone doesn't count. Leaving the page while dirty shows the browser's "Leave site?" (`beforeunload`). A successful save turns the guard off; a failed save keeps it.
+      - In-app links aren't blocked: the console uses `<BrowserRouter>`, not a data router, so `useBlocker` isn't available.
+      - **Plan card dialog** (new, edit, duplicate): closing while dirty (Cancel, Escape, overlay, X) shows "Discard unsaved changes?" with Keep editing / Discard. No prompt after a successful save.
+      - 8 new tests (851 pass); the mutation check (dirty check always false) was caught by 5 tests; lint and build clean.
     - the live check below, once P1b, P2 and P3 are merged.
 
 ### Live check (P4)
@@ -329,4 +349,9 @@ Then tick F32 and F33 in the tracker.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: invoice history paid entry (live run 2026-11-26)
+**Issue:** the invoice detail's status history showed a paid invoice as "Paid 11/25/2026, 5:30:00 AM" and "Reason: NEFT 8842".
+
+**Root cause:** `paid_at` is a calendar date; the API sends it at UTC midnight, and the page formatted it with the viewer's zone (IST adds 5:30). The paid entry's note is the payment reference, not a reason.
+
+**Fix applied** (`provider-console/src/pages/InvoiceDetail.tsx`, `History`): paid entries are formatted with `dateStyle: 'medium', timeZone: 'UTC'` (date only) and their note is labelled "Reference". Test in `InvoiceDetail.test.tsx`, run in `TZ=Asia/Kolkata`; it fails on the old code. Commit `fa8c5280` on `feat/sprint26-p4-unsaved-guard`.
