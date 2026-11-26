@@ -789,8 +789,17 @@ func main() {
 	if billingProviderName == "" {
 		billingProviderName = "Zecurity"
 	}
-	invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay)}
-	invoiceAPI := &provider.InvoiceHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore, Generator: invoiceGen, ProviderName: billingProviderName}
+	// BILLING_TEST_NOW (ENV=development only) moves the billing clock for
+	// acceptance runs; refused otherwise.
+	billingClock, err := billing.TestClock(os.Getenv("BILLING_TEST_NOW"), os.Getenv("ENV") == "development", time.Now())
+	if err != nil {
+		log.Fatalf("billing: %v", err)
+	}
+	if billingClock != nil {
+		log.Printf("billing: TEST CLOCK active (dev only): billing time is %s", billingClock().Format(time.RFC3339))
+	}
+	invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay), Now: billingClock}
+	invoiceAPI := &provider.InvoiceHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore, Generator: invoiceGen, ProviderName: billingProviderName, Now: billingClock}
 	mux.Handle("GET /provider/invoices", requireProvider(http.HandlerFunc(invoiceAPI.List)))
 	mux.Handle("GET /provider/invoices/{id}", requireProvider(http.HandlerFunc(invoiceAPI.Get)))
 	mux.Handle("POST /provider/invoices/regenerate", requireProvider(http.HandlerFunc(invoiceAPI.Regenerate)))
