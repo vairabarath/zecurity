@@ -102,4 +102,49 @@ describe('BillingSettingsForm', () => {
     await userEvent.selectOptions(screen.getByLabelText('Currency'), 'EUR')
     expect(screen.getByText(/New prices will be in EUR\. Issued invoices keep their currency\./)).toBeInTheDocument()
   })
+
+  describe('unsaved-changes guard', () => {
+    // True when leaving the page would ask "Leave site?".
+    const unloadPrompts = () => {
+      const e = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(e)
+      return e.defaultPrevented
+    }
+
+    it('a clean form doesn’t prompt; a reason alone doesn’t either', async () => {
+      setup()
+      expect(unloadPrompts()).toBe(false)
+      await userEvent.type(screen.getByLabelText('Reason'), REASON)
+      expect(unloadPrompts()).toBe(false)
+    })
+
+    it('a changed setting prompts on leaving, even while still invalid, and changing it back clears it', async () => {
+      setup()
+      const years = screen.getByLabelText('Keep invoices for (years)')
+      await userEvent.clear(years)
+      expect(unloadPrompts()).toBe(true) // empty: invalid, still unsaved
+      await userEvent.type(years, '8')
+      expect(unloadPrompts()).toBe(false)
+    })
+
+    it('after a successful save leaving no longer prompts', async () => {
+      const { onSave, save } = setup()
+      await userEvent.click(screen.getByRole('checkbox', { name: /Email invoices to tenants/ }))
+      expect(unloadPrompts()).toBe(true)
+      await userEvent.type(screen.getByLabelText('Reason'), REASON)
+      await userEvent.click(save)
+      expect(onSave).toHaveBeenCalledWith({ email_tenants: false }, REASON)
+      expect(unloadPrompts()).toBe(false)
+    })
+
+    it('a failed save keeps the guard on', async () => {
+      const { onSave, save } = setup()
+      onSave.mockRejectedValueOnce(new Error('boom'))
+      await userEvent.click(screen.getByRole('checkbox', { name: /Email invoices to tenants/ }))
+      await userEvent.type(screen.getByLabelText('Reason'), REASON)
+      await userEvent.click(save)
+      expect(await screen.findByRole('alert')).toBeInTheDocument()
+      expect(unloadPrompts()).toBe(true)
+    })
+  })
 })

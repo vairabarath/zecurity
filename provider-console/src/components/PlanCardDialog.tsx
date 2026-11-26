@@ -11,6 +11,7 @@ import { isByteMeter, METER_LABELS, unitOptions } from '@/lib/billing-money'
 import { limitInputs, parseLimitInputs, sameLimits, type LimitInputs } from '@/lib/plan-format'
 import { parsePriceInputs, priceInputs, pricePayload, type PriceErrors, type PriceInputs } from '@/lib/plan-price-form'
 import { reasonValid } from '@/lib/pool-format'
+import { changedFrom } from '@/lib/useUnsavedChanges'
 import { useWrite } from '@/lib/useWrite'
 import { cn } from '@/lib/utils'
 
@@ -38,6 +39,20 @@ export function PlanCardDialog(props: Props) {
   const [reason, setReason] = useState('')
   const { pending, error, run } = useWrite()
 
+  // Unsaved-changes guard: closing (Cancel, Escape, the overlay or the X)
+  // while any field differs from how the dialog opened asks first. The
+  // reason alone doesn't count.
+  const values = { name, description, limits, price }
+  const [initial] = useState(values)
+  const [saved, setSaved] = useState(false)
+  const dirty = !saved && changedFrom(initial, values)
+  const [asking, setAsking] = useState(false)
+  function requestClose() {
+    if (pending) return
+    if (dirty) setAsking(true)
+    else props.onCancel()
+  }
+
   const parsedLimits = parseLimitInputs(limits)
   const parsedPrice = parsePriceInputs(price, currency)
   const nameOk = name.trim().length > 0 && name.trim().length <= 64
@@ -64,16 +79,18 @@ export function PlanCardDialog(props: Props) {
     void run(async () => {
       if (props.mode === 'edit') {
         await props.onUpdate(change, r)
+        setSaved(true)
         props.onDone(`Plan card ${name.trim()} saved.`)
       } else {
         await props.onCreate({ name: name.trim(), description: description.trim(), limits: parsedLimits, price: parsedPrice.price }, r)
+        setSaved(true)
         props.onDone(`Plan card ${name.trim()} created. Assign it to tenants from their tenant page.`)
       }
     })
   }
 
   return (
-    <Dialog open onOpenChange={(o) => !o && !pending && props.onCancel()}>
+    <Dialog open onOpenChange={(o) => !o && requestClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto overscroll-contain sm:max-w-2xl">
         <form onSubmit={submit} className="grid gap-5" noValidate>
           <DialogHeader>
@@ -97,8 +114,23 @@ export function PlanCardDialog(props: Props) {
           <LimitsFields value={limits} onChange={setLimits} />
           <PriceFields value={price} currency={currency} errors={parsedPrice.ok ? {} : parsedPrice.errors} onChange={setPrice} />
           <ReasonField id="plan-card-reason" value={reason} onChange={setReason} />
+          {asking && (
+            <Alert role="alertdialog" aria-labelledby="plan-card-discard">
+              <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+                <span id="plan-card-discard">Discard unsaved changes?</span>
+                <span className="flex gap-2">
+                  <Button type="button" variant="outline" size="sm" autoFocus onClick={() => setAsking(false)}>
+                    Keep editing
+                  </Button>
+                  <Button type="button" variant="destructive" size="sm" onClick={props.onCancel}>
+                    Discard
+                  </Button>
+                </span>
+              </AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={props.onCancel} disabled={pending}>
+            <Button type="button" variant="ghost" onClick={requestClose} disabled={pending}>
               Cancel
             </Button>
             <Button type="submit" disabled={!valid || pending}>

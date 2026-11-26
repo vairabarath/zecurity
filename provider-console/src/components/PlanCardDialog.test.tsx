@@ -144,3 +144,56 @@ describe('PlanCardDialog: duplicate', () => {
     )
   })
 })
+
+describe('PlanCardDialog: unsaved-changes guard', () => {
+  const discard = () => screen.queryByText('Discard unsaved changes?')
+
+  it('closing a clean dialog doesn’t ask; a reason alone doesn’t count', async () => {
+    const onCancel = vi.fn()
+    render(<PlanCardDialog mode="edit" plan={planCard()} currency="INR" onUpdate={vi.fn()} onCancel={onCancel} onDone={vi.fn()} />)
+    await type('Reason', REASON)
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(discard()).not.toBeInTheDocument()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('Cancel while dirty asks; Keep editing keeps the dialog and the edits, Discard closes', async () => {
+    const onCancel = vi.fn()
+    render(<PlanCardDialog mode="create" currency="USD" onCreate={vi.fn()} onCancel={onCancel} onDone={vi.fn()} />)
+    await type('Name', 'Starter')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(discard()).toBeInTheDocument()
+    expect(onCancel).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    expect(discard()).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Name')).toHaveValue('Starter')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape and the close button ask too while dirty (duplicate)', async () => {
+    const onCancel = vi.fn()
+    render(<PlanCardDialog mode="duplicate" plan={planCard()} currency="INR" onCreate={vi.fn()} onCancel={onCancel} onDone={vi.fn()} />)
+    await userEvent.click(screen.getByLabelText('Bill tenants on this card'))
+    await userEvent.keyboard('{Escape}')
+    expect(discard()).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Keep editing' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(discard()).toBeInTheDocument()
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
+  it('after a successful save closing doesn’t ask', async () => {
+    const onCancel = vi.fn()
+    const onUpdate = vi.fn().mockResolvedValue(undefined)
+    render(<PlanCardDialog mode="edit" plan={planCard()} currency="INR" onUpdate={onUpdate} onCancel={onCancel} onDone={vi.fn()} />)
+    await type('Name', 'Team plus')
+    await type('Reason', REASON)
+    await userEvent.click(screen.getByRole('button', { name: 'Save card' }))
+    expect(onUpdate).toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(discard()).not.toBeInTheDocument()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+})

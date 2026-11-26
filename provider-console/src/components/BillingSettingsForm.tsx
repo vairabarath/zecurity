@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { parseTaxPercent, taxPercentInput } from '@/lib/billing-money'
 import type { BillingCountry } from '@/lib/billing-countries'
 import { reasonValid } from '@/lib/pool-format'
+import { changedFrom, useUnsavedChanges } from '@/lib/useUnsavedChanges'
 import { useWrite } from '@/lib/useWrite'
 
 // Billing settings (Sprint 26): country and currency (D-64), tax (D-69),
@@ -47,6 +48,13 @@ export function BillingSettingsForm({
   const [reason, setReason] = useState('')
   const { pending, error, run } = useWrite()
 
+  // Unsaved-changes guard: dirty when any setting differs from what was
+  // loaded or last saved. The reason alone doesn't count.
+  const values = { country, currency, taxOn, taxRate, taxLabel, retention, email }
+  const [saved, setSaved] = useState(values)
+  const dirty = changedFrom(saved, values)
+  useUnsavedChanges(dirty)
+
   const currencies = [...new Set([settings.currency, ...countries.map((c) => c.currency)])].sort()
   const bp = taxOn ? parseTaxPercent(taxRate) : 0
   const taxOk = !taxOn || (bp !== null && bp > 0 && taxLabel.trim().length > 0 && taxLabel.trim().length <= 32)
@@ -79,6 +87,7 @@ export function BillingSettingsForm({
     if (!valid || pending) return
     void run(async () => {
       await onSave(change, reason.trim())
+      setSaved(values)
       setReason('')
       setAck(false)
       onDone('Billing settings saved.')
