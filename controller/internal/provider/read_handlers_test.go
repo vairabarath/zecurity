@@ -722,9 +722,11 @@ func TestTenantDetail_OneRepeatableReadSnapshot(t *testing.T) {
 		t.Fatalf("begins=%d iso=%v, want one REPEATABLE READ transaction", e.db.begins, e.db.iso)
 	}
 	// tenant+counts, networks, connectors, shields, relay pool (D-38), plan (D-43),
-	// quotas (D-47, one statement), first-admin invitation (S2, D-44).
-	if e.db.txReads != 8 || e.db.poolReads != 0 {
-		t.Fatalf("reads: %d in the transaction, %d on the pool; want 8 and 0", e.db.txReads, e.db.poolReads)
+	// quotas (D-47, one statement), first-admin invitation (S2, D-44), and the
+	// billing plan (Sprint 26 P1b, D-65): PlanForMonth (month row, then the live
+	// plan) and its name.
+	if e.db.txReads != 11 || e.db.poolReads != 0 {
+		t.Fatalf("reads: %d in the transaction, %d on the pool; want 11 and 0", e.db.txReads, e.db.poolReads)
 	}
 }
 

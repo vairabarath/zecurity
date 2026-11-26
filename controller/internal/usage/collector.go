@@ -178,18 +178,20 @@ ON CONFLICT DO NOTHING`, now, month); err != nil {
 
 // upsertTenantSnapshots keeps usage_tenants current for every counted tenant
 // (rewritten only when the name, slug or plan changed; never after purge).
+// plan_id is the plan snapshot billing reads for a purged tenant (D-65).
 func upsertTenantSnapshots(ctx context.Context, tx pgx.Tx, now time.Time) error {
 	if _, err := tx.Exec(ctx, `
-INSERT INTO usage_tenants (tenant_id, name, slug, plan_name, updated_at)
-SELECT w.id, w.name, w.slug, p.name, $1
+INSERT INTO usage_tenants (tenant_id, name, slug, plan_name, plan_id, updated_at)
+SELECT w.id, w.name, w.slug, p.name, w.plan_id, $1
   FROM workspaces w
   LEFT JOIN plans p ON p.id = w.plan_id
  WHERE `+providerquery.CountedTenantSQL+`
 ON CONFLICT (tenant_id) DO UPDATE
-   SET name = EXCLUDED.name, slug = EXCLUDED.slug, plan_name = EXCLUDED.plan_name, updated_at = EXCLUDED.updated_at
+   SET name = EXCLUDED.name, slug = EXCLUDED.slug, plan_name = EXCLUDED.plan_name, plan_id = EXCLUDED.plan_id,
+       updated_at = EXCLUDED.updated_at
  WHERE usage_tenants.purged_at IS NULL
-   AND (usage_tenants.name, usage_tenants.slug, usage_tenants.plan_name)
-       IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.slug, EXCLUDED.plan_name)`, now); err != nil {
+   AND (usage_tenants.name, usage_tenants.slug, usage_tenants.plan_name, usage_tenants.plan_id)
+       IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.slug, EXCLUDED.plan_name, EXCLUDED.plan_id)`, now); err != nil {
 		return fmt.Errorf("tenant snapshots: %w", err)
 	}
 	return nil
@@ -368,12 +370,12 @@ func FreezeTenant(ctx context.Context, tx pgx.Tx, tenantID string) error {
 		return fmt.Errorf("usage freeze: lock: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-INSERT INTO usage_tenants (tenant_id, name, slug, plan_name, updated_at, purged_at)
-SELECT w.id, w.name, w.slug, p.name, now(), now()
+INSERT INTO usage_tenants (tenant_id, name, slug, plan_name, plan_id, updated_at, purged_at)
+SELECT w.id, w.name, w.slug, p.name, w.plan_id, now(), now()
   FROM workspaces w LEFT JOIN plans p ON p.id = w.plan_id
  WHERE w.id = $1
 ON CONFLICT (tenant_id) DO UPDATE
-   SET name = EXCLUDED.name, slug = EXCLUDED.slug, plan_name = EXCLUDED.plan_name,
+   SET name = EXCLUDED.name, slug = EXCLUDED.slug, plan_name = EXCLUDED.plan_name, plan_id = EXCLUDED.plan_id,
        updated_at = EXCLUDED.updated_at, purged_at = EXCLUDED.purged_at
  WHERE usage_tenants.purged_at IS NULL`, tenantID); err != nil {
 		return fmt.Errorf("usage freeze: snapshot: %w", err)

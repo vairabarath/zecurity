@@ -4004,3 +4004,20 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Sprint 24 acceptance run (both, reset lab DB, current `main`); findings → X2; tick F23, F26, F27.
 - Barath: U1a `071_usage` → U1b collector. Sathiya: X2 → U2 (after U1a) → U3 → U4 (`072_usage_alert_kind`).
+
+## 2026-11-23 — Claude Code (Sathiya, Sprint 26 planning)
+
+**What was done:**
+- Sprint 26 theme chosen: **F34 billing plans and invoicing**. Wrote the scope draft, `Sprint26/path.md`, both phase files, the Decision Record amendment 2026-11-23 (billing, D-62 … D-70) and switched `CLAUDE.md` to Sprint 26 (PR #249, stacked on #244).
+- Tracker refreshed: F23, F26, F27 merged (Sprint 24 acceptance pending); F32, F33 in review (#245 … #248); F34 is the Sprint 26 theme.
+
+**Key decisions (answered by Sathiya, 2026-11-23):**
+- Q1: billing uses **editable plan cards** (limits, monthly fee, and per meter an included quantity and a unit price above it), created and edited any time, with a revision history.
+- Q2: the currency is editable, default USD (e.g. INR for India). Changing the country or currency switches every card; amounts aren't converted.
+- Q3: a mid-month plan change bills **from the next month**; the month-start plan is preserved (`tenant_billing_plans`). Limits still change immediately.
+- Q4: invoice retention is editable, default 8 years. Q5: issued invoices are emailed to the tenant's admins (editable, default on). Q6: no tax by default; an editable single rate and label.
+- **Sign-off:** Sathiya instructed that their sign-off override the product-owner sign-off step. Recorded as such everywhere; Barath reviews in PR #249.
+
+**What's next:**
+- Merge the Sprint 25 stack (#244 → #248), run the Sprint 24 and Sprint 25 acceptance runs (findings → X2 / X3).
+- Barath: P1a (`073_plan_cards`, `074_invoices`) → P1b and P2. Sathiya: X3 → P3 (after P1a) → P4.

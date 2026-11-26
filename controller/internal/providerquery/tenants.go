@@ -161,6 +161,16 @@ type TenantDetail struct {
 	// and for self-signup tenants. Status and expiry only: no email (users
 	// appear only as counts, OQ-2) and never the token.
 	FirstAdminInvitation *TenantFirstAdminInvitation `json:"first_admin_invitation"`
+	// BillingPlan is the plan this UTC month is billed at (Sprint 26 P1b,
+	// D-65): billing.PlanForMonth, filled by the read handler (this package
+	// doesn't derive it). It differs from Plan after a mid-month change.
+	BillingPlan *TenantBillingPlan `json:"billing_plan,omitempty"`
+}
+
+// TenantBillingPlan names the plan a month is billed at.
+type TenantBillingPlan struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // TenantQuota is one quota key of tenant detail: the effective limit (null =

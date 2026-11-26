@@ -233,4 +233,12 @@ A small `relay_bytes_to_clients` threshold: the tenant that crosses it gets one 
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: A — months before metering read "Incomplete 0 B" (U3, live run 2026-11-24)
+**Issue:** the tenant Usage table showed months before metering started as "Incomplete" with 0 B, which reads as if usage was measured and was zero.
+
+**Fix Applied:** `provider-console/src/components/TenantUsage.tsx` — a month with `collected_minutes === 0` shows a "Not metered" badge and "—" in every meter cell (`aria-label="Not metered"`); a metered month keeps its figures and its "Incomplete" mark. Test: `TenantUsage.test.tsx` "a month with no counted minute reads "Not metered"".
+
+### Fix: B — "0% of the month counted" when less than 1% was counted (U3, live run 2026-11-24)
+**Issue:** the fleet Usage page rounded the counted share to whole percents, so early in a month it read "0%".
+
+**Fix Applied:** `formatCountedShare(collected, total)` in `provider-console/src/lib/usage-format.ts`, used by `pages/Usage.tsx`: one decimal under 10%, "<0.1%" for a sliver, ">99.9%" just short of the whole, never "0%" or "100%" for a partly counted month (rounds down). Tests in `usage-format.test.ts`.

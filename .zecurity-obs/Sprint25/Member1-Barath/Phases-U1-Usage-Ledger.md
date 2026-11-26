@@ -155,4 +155,19 @@ Built by Sathiya (with Claude Code) while Barath ran the Sprint 24 acceptance ru
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: F32-1 — relay restart lost up to 5 minutes of bytes (live run 2026-11-24)
+**Issue:** a relay restart lost every byte since the last *DB-written* heartbeat (≈155 MB in the live run), not since the last heartbeat (D-59).
+
+**Root Cause:** `controller/internal/relay/heartbeat.go` returns early on throttled heartbeats (the B2 DB-write cadence, every 5 minutes), and the usage collector was only called from `recordWorkspaceTraffic`, after the DB write.
+
+**Fix Applied:** the throttled path now passes the counters to the usage collector too; R1's rate tracker keeps the DB-write cadence (its window is unchanged).
+```go
+// heartbeat.go, throttled path
+if !shouldWriteDB {
+	// F32-1: usage counts every heartbeat, not only the DB-write cadence.
+	s.recordWorkspaceUsage(ctx, relayID, receivedAt, req)
+	...
+```
+`workspace_traffic.go`: the trust-domain lookup moved into `workspaceSamples`; `recordWorkspaceTraffic` (DB-write heartbeats: tracker + usage) and `recordWorkspaceUsage` (throttled heartbeats: usage only) share it. A failed lookup records nothing; the next heartbeat counts the span (cumulative counters).
+
+**Tests:** `internal/relay/usage_every_heartbeat_test.go` — 3 heartbeats in one DB-write interval reach usage, the tracker sees one (mutation checks: removing the throttled call, and recording the tracker on throttled heartbeats, each fail it); a failed lookup on a throttled heartbeat records nothing. Live recheck: loss = the bytes since the last heartbeat (< 30 s).
