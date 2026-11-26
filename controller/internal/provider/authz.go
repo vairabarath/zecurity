@@ -157,6 +157,17 @@ const (
 	ActionUsageFleetRead  = "usage.fleet.read"
 )
 
+// Billing (Sprint 26 F34, D-70): billing is tenant data, so every billing
+// action is super-admin only by decide()'s rule (relay-ops 403; none of them
+// is in relayOpsAlsoAllowed). Card writes reuse the plan.* actions; reading
+// the billing settings is plan.read (the Plans page needs the currency).
+const (
+	ActionBillingSettingsWrite  = "billing.settings.write"
+	ActionBillingSettingsUpdate = "billing.settings.update" // audit action of a settings write
+	ActionInvoiceRead           = "invoice.read"
+	ActionInvoiceWrite          = "invoice.write"
+)
+
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
 // perform.
 var relayOpsAlsoAllowed = map[string]bool{
@@ -302,6 +313,18 @@ func (a *Authz) CanReadPlans(actor Actor) error {
 // or ActionTenantPlanAssign).
 func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error {
 	return decide(actor, action, target)
+}
+
+// CanReadBillingSettings gates GET /provider/billing/settings (plan.read:
+// super-admin only).
+func (a *Authz) CanReadBillingSettings(actor Actor) error {
+	return decide(actor, ActionPlanRead, Target{Type: "billing_settings"})
+}
+
+// CanWriteBillingSettings gates PATCH /provider/billing/settings
+// (billing.settings.write: super-admin only, D-70).
+func (a *Authz) CanWriteBillingSettings(actor Actor) error {
+	return decide(actor, ActionBillingSettingsWrite, Target{Type: "billing_settings"})
 }
 
 // CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}

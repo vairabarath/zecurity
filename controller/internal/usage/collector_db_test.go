@@ -221,6 +221,20 @@ func TestMinutes_CountedOncePerMinute(t *testing.T) {
 	if name := scalar[string](t, db, `SELECT name || '/' || slug || '/' || COALESCE(plan_name, '-') FROM usage_tenants WHERE tenant_id = $1`, ws); name != "u1-a Inc/u1-a/Free" {
 		t.Fatalf("snapshot %q", name)
 	}
+	// Sprint 26 P1b (D-65): the snapshot also keeps the plan id, kept current.
+	const free, legacy = "00000000-0000-0000-0001-000000000001", "00000000-0000-0000-0001-000000000002"
+	if id := scalar[string](t, db, `SELECT COALESCE(plan_id::text, '-') FROM usage_tenants WHERE tenant_id = $1`, ws); id != free {
+		t.Fatalf("snapshot plan_id %q, want Free", id)
+	}
+	if _, err := db.Exec(ctx, `UPDATE workspaces SET plan_id = $2 WHERE id = $1`, ws, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CollectMinute(ctx, now.Add(3*time.Minute)); err != nil { // 10:08, not yet collected
+		t.Fatal(err)
+	}
+	if id := scalar[string](t, db, `SELECT plan_id::text FROM usage_tenants WHERE tenant_id = $1`, ws); id != legacy {
+		t.Fatalf("snapshot plan_id %q after a plan change, want Legacy", id)
+	}
 }
 
 func TestActiveUsers_DistinctPerUTCMonth(t *testing.T) {
@@ -284,7 +298,7 @@ func TestFreezeTenant_KeepsNameDropsUserIDs(t *testing.T) {
 		t.Fatalf("snapshot %q", v)
 	}
 	// A rename after the freeze (the row is gone in reality) never changes it.
-	if _, err := db.Exec(ctx, `UPDATE workspaces SET name = 'renamed' WHERE id = $1`, ws); err != nil {
+	if _, err := db.Exec(ctx, `UPDATE workspaces SET name = 'renamed', plan_id = '00000000-0000-0000-0001-000000000002' WHERE id = $1`, ws); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.CollectMinute(ctx, now.Add(time.Minute)); err != nil {
@@ -292,6 +306,9 @@ func TestFreezeTenant_KeepsNameDropsUserIDs(t *testing.T) {
 	}
 	if v := scalar[string](t, db, `SELECT name FROM usage_tenants WHERE tenant_id = $1`, ws); v != "u1-p Inc" {
 		t.Fatalf("frozen name changed to %q", v)
+	}
+	if v := scalar[string](t, db, `SELECT plan_id::text FROM usage_tenants WHERE tenant_id = $1`, ws); v != "00000000-0000-0000-0001-000000000001" {
+		t.Fatalf("frozen plan_id changed to %q", v)
 	}
 	// Usage itself stays; the other tenant is untouched.
 	if n := total(t, db, ws, MeterSessionMinutes); n == 0 {

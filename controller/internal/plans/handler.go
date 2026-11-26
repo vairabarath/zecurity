@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
 
@@ -21,14 +22,19 @@ import (
 // F17). Writes that change what tenants may create (update, delete, set
 // default, assign) need a reason. Errors are {"error":"<code>"}.
 //
-//	POST   /provider/plans                {name, description?, limits}         → 201 plan
-//	PATCH  /provider/plans/{id}           {name?, description?, limits?, reason} → 204
+//	POST   /provider/plans                {name, description?, limits, price?, reason?} → 201 plan
+//	PATCH  /provider/plans/{id}           {name?, description?, limits?, price?, reason} → 204
 //	DELETE /provider/plans/{id}           {reason}                              → 204
 //	POST   /provider/plans/{id}/default   {reason}                              → 204
 //	PUT    /provider/tenants/{id}/plan    {plan_id, reason}                     → 204
 //
-// Reads (GET /provider/plans[/{id}]) are in internal/provider/read_handlers.go
-// over internal/providerquery (D-04).
+// Reads (GET /provider/plans[/{id}], /provider/plans/{id}/revisions) are in
+// internal/provider/read_handlers.go over internal/providerquery (D-04).
+//
+// Sprint 26 P1b (D-63, D-64): price is the card's price part (null = not
+// billable; on PATCH an absent price is unchanged and null removes it). It
+// must be in the billing currency. Every create and edit writes one card
+// revision and one audit row in one transaction.
 
 const maxReasonRunes = 500
 
@@ -41,18 +47,48 @@ type Handler struct {
 
 // PlanJSON is a plan in API responses.
 type PlanJSON struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Limits      Limits    `json:"limits"`
-	IsDefault   bool      `json:"is_default"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Limits      Limits         `json:"limits"`
+	IsDefault   bool           `json:"is_default"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	Price       *billing.Price `json:"price"`
+	Revision    int            `json:"revision"`
+	Tenants     int64          `json:"tenants"`
 }
 
 func planJSON(p Plan) PlanJSON {
 	return PlanJSON{ID: p.ID, Name: p.Name, Description: p.Description, Limits: p.Limits,
-		IsDefault: p.IsDefault, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt}
+		IsDefault: p.IsDefault, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Price: p.Price, Revision: p.Revision}
+}
+
+// decodePriceField reads an optional price field: absent → unchanged
+// (Set=false), null → remove, an object → that price.
+func decodePriceField(raw json.RawMessage) (billing.PriceChange, error) {
+	t := bytes.TrimSpace(raw)
+	if len(t) == 0 {
+		return billing.PriceChange{}, nil
+	}
+	if bytes.Equal(t, []byte("null")) {
+		return billing.PriceChange{Set: true}, nil
+	}
+	p, err := billing.DecodePrice(t)
+	if err != nil {
+		return billing.PriceChange{}, err
+	}
+	return billing.PriceChange{Set: true, Price: p}, nil
+}
+
+// optionalReason trims an optional reason; too long is refused.
+func optionalReason(w http.ResponseWriter, raw string) (string, bool) {
+	reason := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(reason) > maxReasonRunes {
+		provider.WriteError(w, http.StatusBadRequest, "reason_too_long")
+		return "", false
+	}
+	return reason, true
 }
 
 func (h *Handler) actor(w http.ResponseWriter, r *http.Request) (provider.Actor, bool) {
@@ -127,6 +163,12 @@ func writeError(w http.ResponseWriter, what string, err error) {
 		provider.WriteError(w, http.StatusBadRequest, "invalid_description")
 	case errors.Is(err, ErrInvalidLimits):
 		provider.WriteError(w, http.StatusBadRequest, "invalid_limits")
+	case errors.Is(err, billing.ErrInvalidPrice):
+		provider.WriteError(w, http.StatusBadRequest, "invalid_price")
+	case errors.Is(err, billing.ErrCurrencyMismatch):
+		provider.WriteError(w, http.StatusBadRequest, "currency_mismatch")
+	case errors.Is(err, billing.ErrPriceOverflow):
+		provider.WriteError(w, http.StatusBadRequest, "price_overflow")
 	default:
 		log.Printf("plans: %s: %v", what, err)
 		provider.WriteError(w, http.StatusInternalServerError, "server_error")
@@ -151,6 +193,8 @@ type createRequest struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Limits      json.RawMessage `json:"limits"`
+	Price       json.RawMessage `json:"price"`
+	Reason      string          `json:"reason"`
 }
 
 // Create: POST /provider/plans. A new plan is never the default.
@@ -169,12 +213,26 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "create", err)
 		return
 	}
+	price, err := decodePriceField(req.Price)
+	if err != nil {
+		writeError(w, "create", err)
+		return
+	}
+	reason, ok := optionalReason(w, req.Reason)
+	if !ok {
+		return
+	}
+	var details map[string]any
+	if reason != "" {
+		details = map[string]any{"reason": reason}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	p, err := h.Store.Create(ctx, req.Name, req.Description, limits, func(ctx context.Context, tx pgx.Tx, p Plan) error {
-		return h.audit(r, actor, provider.ActionPlanCreate, "plan", p.ID,
-			provider.WithChange(nil, nil, p.AuditView()))(ctx, tx)
-	})
+	p, err := h.Store.Create(ctx, req.Name, req.Description, limits, price.Price, CardMeta{Actor: actor.Email, Reason: reason},
+		func(ctx context.Context, tx pgx.Tx, p Plan) error {
+			return h.audit(r, actor, provider.ActionPlanCreate, "plan", p.ID,
+				provider.WithChange(details, nil, p.AuditView()))(ctx, tx)
+		})
 	if err != nil {
 		writeError(w, "create", err)
 		return
@@ -186,6 +244,7 @@ type updateRequest struct {
 	Name        *string         `json:"name"`
 	Description *string         `json:"description"`
 	Limits      json.RawMessage `json:"limits"`
+	Price       json.RawMessage `json:"price"`
 	Reason      string          `json:"reason"`
 }
 
@@ -218,9 +277,15 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		change.Limits = l
 	}
+	price, err := decodePriceField(req.Price)
+	if err != nil {
+		writeError(w, "update", err)
+		return
+	}
+	change.Price = price
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	_, err := h.Store.Update(ctx, id, change, func(ctx context.Context, tx pgx.Tx, before, after Plan) error {
+	_, err = h.Store.Update(ctx, id, change, CardMeta{Actor: actor.Email, Reason: reason}, func(ctx context.Context, tx pgx.Tx, before, after Plan) error {
 		return h.audit(r, actor, provider.ActionPlanUpdate, "plan", id,
 			provider.WithChange(map[string]any{"reason": reason}, before.AuditView(), after.AuditView()))(ctx, tx)
 	})

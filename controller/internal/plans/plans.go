@@ -6,8 +6,14 @@
 // unlimited); a plan always defines all six keys, so a missing key is an
 // error and never means unlimited. Exactly one plan is the default; a new
 // workspace gets the current default from a database trigger (migration 062)
-// unless its insert names a plan. Plans carry no prices or feature
-// entitlements (F34 and a later decision).
+// unless its insert names a plan. No feature entitlements (a later
+// decision).
+//
+// Sprint 26 P1b (F34, D-63, D-65): a plan is a priced card. Create and
+// Update call billing.CreateCard / billing.SaveCard in their transaction
+// (one edit = one revision, one audit row), and Assign records the
+// month-start plan (billing.RecordMonthStartPlan) before the change, so a
+// mid-month change bills from the next month. Limits behave as before.
 //
 // The store has no net/http dependency; the HTTP handlers live in
 // handler.go. EffectiveLimits is the one definition of a workspace's limits:
@@ -27,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/quota"
 )
 
@@ -69,6 +76,20 @@ var (
 	// prevents it; EffectiveLimits fails closed if it ever happens.
 	ErrIncompleteLimits = errors.New("plan limits incomplete")
 )
+
+// CardMeta is who changes a card and why: the revision history row (D-63).
+// An empty reason on create is stored as "Card created".
+type CardMeta struct {
+	Actor  string
+	Reason string
+}
+
+func (m CardMeta) actor() string {
+	if m.Actor == "" {
+		return "system"
+	}
+	return m.Actor
+}
 
 // Limits maps every quota key to its limit; nil is unlimited.
 type Limits map[string]*int64
@@ -121,6 +142,10 @@ type Plan struct {
 	IsDefault   bool
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// Revision is the card revision (D-63); Price its price part (nil = not
+	// billable). Price is filled by the card writes (Create, Update).
+	Revision int
+	Price    *billing.Price
 }
 
 // AuditView is the plan as written into audit details (before/after).
@@ -130,6 +155,8 @@ func (p Plan) AuditView() map[string]any {
 		"description": p.Description,
 		"limits":      p.Limits,
 		"is_default":  p.IsDefault,
+		"price":       p.Price,
+		"revision":    p.Revision,
 	}
 }
 
@@ -140,16 +167,27 @@ type Querier interface {
 }
 
 // Store reads and writes plans.
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool *pgxpool.Pool
+	// Now is the clock for the month-start plan (nil = time.Now); tests set it.
+	Now func() time.Time
+}
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
-const planColumns = `id::text, name, description, limits, is_default, created_at, updated_at`
+func (s *Store) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+const planColumns = `id::text, name, description, limits, is_default, created_at, updated_at, revision`
 
 func scanPlan(row pgx.Row) (Plan, error) {
 	var p Plan
 	var raw []byte
-	if err := row.Scan(&p.ID, &p.Name, &p.Description, &raw, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.Description, &raw, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt, &p.Revision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Plan{}, ErrNotFound
 		}
@@ -208,9 +246,10 @@ func (s *Store) inTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	return tx.Commit(ctx)
 }
 
-// Create inserts a plan (never the default; use SetDefault). audit runs in
+// Create inserts a plan card (never the default; use SetDefault) with an
+// optional price (nil = not billable) and its first revision. audit runs in
 // the same transaction.
-func (s *Store) Create(ctx context.Context, name, description string, limits Limits,
+func (s *Store) Create(ctx context.Context, name, description string, limits Limits, price *billing.Price, meta CardMeta,
 	audit func(ctx context.Context, tx pgx.Tx, p Plan) error) (Plan, error) {
 	name, err := normalizeName(name)
 	if err != nil {
@@ -236,6 +275,18 @@ func (s *Store) Create(ctx context.Context, name, description string, limits Lim
 			}
 			return fmt.Errorf("insert plan: %w", err)
 		}
+		if err := checkPriceCurrency(ctx, tx, price); err != nil {
+			return err
+		}
+		reason := meta.Reason
+		if reason == "" {
+			reason = "Card created"
+		}
+		card, err := billing.CreateCard(ctx, tx, p.ID, price, meta.actor(), reason)
+		if err != nil {
+			return err
+		}
+		p.Price = card.Price
 		if audit != nil {
 			return audit(ctx, tx, p)
 		}
@@ -244,17 +295,32 @@ func (s *Store) Create(ctx context.Context, name, description string, limits Lim
 	return p, err
 }
 
+// checkPriceCurrency validates a price against the billing currency (D-64).
+// The settings row is read FOR SHARE, so a concurrent currency switch (which
+// locks it FOR UPDATE) waits for this card write, or this write waits for it
+// and then sees the new currency.
+func checkPriceCurrency(ctx context.Context, tx pgx.Tx, price *billing.Price) error {
+	var currency string
+	if err := tx.QueryRow(ctx, `SELECT currency FROM billing_settings FOR SHARE`).Scan(&currency); err != nil {
+		return fmt.Errorf("read billing currency: %w", err)
+	}
+	return billing.ValidatePrice(price, currency)
+}
+
 // Change is a partial update; nil fields are unchanged. Limits, when set,
-// replaces all six values.
+// replaces all six values. Price.Set=false leaves the price unchanged;
+// Price.Set with a nil Price removes it.
 type Change struct {
 	Name        *string
 	Description *string
 	Limits      Limits
+	Price       billing.PriceChange
 }
 
-// Update applies a change under the plan's row lock. changed=false (no
-// audit) when nothing differs. audit gets the plan before and after.
-func (s *Store) Update(ctx context.Context, id string, c Change,
+// Update applies a change under the plan's row lock: plan fields, price, one
+// new card revision (D-63). changed=false (no revision, no audit) when
+// nothing differs. audit gets the plan before and after.
+func (s *Store) Update(ctx context.Context, id string, c Change, meta CardMeta,
 	audit func(ctx context.Context, tx pgx.Tx, before, after Plan) error) (changed bool, err error) {
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
 		before, err := scanPlan(tx.QueryRow(ctx, `SELECT `+planColumns+` FROM plans WHERE id = $1 FOR UPDATE`, id))
@@ -279,7 +345,18 @@ func (s *Store) Update(ctx context.Context, id string, c Change,
 			}
 			after.Limits = c.Limits.Clone()
 		}
-		if after.Name == before.Name && after.Description == before.Description && sameLimits(after.Limits, before.Limits) {
+		if before.Price, err = billing.CardPrice(ctx, tx, id); err != nil {
+			return err
+		}
+		after.Price = before.Price
+		if c.Price.Set {
+			if err := checkPriceCurrency(ctx, tx, c.Price.Price); err != nil {
+				return err
+			}
+			after.Price = c.Price.Price
+		}
+		priceChanged := !billing.SamePrice(before.Price, after.Price)
+		if after.Name == before.Name && after.Description == before.Description && sameLimits(after.Limits, before.Limits) && !priceChanged {
 			return nil
 		}
 		raw, err := limitsJSON(after.Limits)
@@ -295,6 +372,11 @@ func (s *Store) Update(ctx context.Context, id string, c Change,
 			}
 			return fmt.Errorf("update plan: %w", err)
 		}
+		card, rev, err := billing.SaveCard(ctx, tx, id, billing.PriceChange{Set: priceChanged, Price: c.Price.Price}, meta.actor(), meta.Reason)
+		if err != nil {
+			return err
+		}
+		after.Price, after.Revision = card.Price, rev
 		changed = true
 		if audit != nil {
 			return audit(ctx, tx, before, after)
@@ -419,6 +501,11 @@ func (s *Store) Assign(ctx context.Context, workspaceID, planID string,
 		before, err := scanPlan(tx.QueryRow(ctx, `SELECT `+planColumns+` FROM plans WHERE id = $1`, currentID))
 		if err != nil {
 			return fmt.Errorf("read current plan: %w", err)
+		}
+		// D-65: the plan being replaced is the month's start plan if this is
+		// the first change this month; recorded before the change.
+		if err := billing.RecordMonthStartPlan(ctx, tx, workspaceID, currentID, s.now()); err != nil {
+			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE workspaces SET plan_id = $2, updated_at = NOW() WHERE id = $1`, workspaceID, planID); err != nil {
 			return fmt.Errorf("assign plan: %w", err)
