@@ -323,6 +323,18 @@ func TestPurgeDB_CompletesAndResumesAfterCrashAtEachStep(t *testing.T) {
 	for i, crashAt := range []string{"", "exported", "revoked", "destroyed", "done"} {
 		t.Run("crash="+crashAt, func(t *testing.T) {
 			id := e.due(t, fmt.Sprintf("t%d", i))
+			// Sprint 26 (D-67, amends D-46): an issued invoice of the tenant
+			// survives the purge (no foreign key; the purge never touches it).
+			var invoiceID string
+			if err := e.pool.QueryRow(ctx, `INSERT INTO invoices (tenant_id, tenant_name, tenant_slug, month, currency, plan_id, plan_name,
+				plan_revision, subtotal_minor, tax_rate_bp, tax_minor, total_minor, collected_minutes, month_minutes, incomplete_hours)
+				VALUES ($1, 'x', 'x', '2026-10-01', 'USD', gen_random_uuid(), 'P', 1, 100, 0, 0, 100, 1, 44640, 0) RETURNING id::text`, id).Scan(&invoiceID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.pool.Exec(ctx, `UPDATE invoices SET status = 'issued', number = $2, issued_at = now(), issued_by = 'a' WHERE id = $1`,
+				invoiceID, fmt.Sprintf("INV-2026-%06d", i+1)); err != nil {
+				t.Fatal(err)
+			}
 			var before int
 			e.scalar(t, &before, `SELECT count(*) FROM provider_audit_logs`)
 			dir := t.TempDir()
@@ -343,6 +355,16 @@ func TestPurgeDB_CompletesAndResumesAfterCrashAtEachStep(t *testing.T) {
 				t.Fatalf("resume: %v", err)
 			}
 			e.assertPurged(t, id, dir, before)
+			var status string
+			e.scalar(t, &status, `SELECT status FROM invoices WHERE id = $1`, invoiceID)
+			if status != "issued" {
+				t.Fatalf("invoice after purge: %q", status)
+			}
+			var frozenPlan *string
+			e.scalar(t, &frozenPlan, `SELECT plan_id::text FROM usage_tenants WHERE tenant_id = $1`, id)
+			if frozenPlan == nil {
+				t.Fatal("purged tenant's usage snapshot lost its plan id")
+			}
 			// A further pass changes nothing.
 			if err := p.RunOnce(ctx); err != nil {
 				t.Fatalf("second pass: %v", err)

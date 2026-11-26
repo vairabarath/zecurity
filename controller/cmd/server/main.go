@@ -44,6 +44,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auditexport"
 	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/certalert"
 	"github.com/yourorg/ztna/controller/internal/changehint"
@@ -1203,6 +1204,46 @@ func main() {
 	usageCollector := &usage.Collector{DB: db.Pool, Retention: mustDuration("USAGE_RETENTION", 0)}
 	relaySvc.WithUsageSink(usageCollector)
 	workers.Go("usage-collector", func() { usageCollector.Run(ctx) })
+
+	// Billing month close and invoice retention (Sprint 26 P2, F34, D-66,
+	// D-67): after each UTC month closes plus BILLING_SETTLE_DELAY (default
+	// 6 h), every tenant with a priced month-start card gets a draft invoice
+	// (quantities from U2's reader only). Once a day invoices past the
+	// retention setting are pruned through prune_invoices(), audited.
+	// BILLING_ENABLED=false turns both off. Billing never enforces anything.
+	if os.Getenv("BILLING_ENABLED") != "false" {
+		invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay)}
+		workers.Go("billing-month-close", func() { invoiceGen.Run(ctx) })
+		workers.Go("billing-invoice-prune", func() {
+			prune := func() {
+				n, err := billing.Prune(ctx, db.Pool, time.Now(), func(ctx context.Context, tx pgx.Tx, cutoff time.Time, n int64) error {
+					return providerStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+						ProviderEmail: "system",
+						Action:        provider.ActionInvoicePrune,
+						TargetType:    "invoice",
+						TargetID:      "retention",
+						Details:       map[string]any{"pruned": n, "cutoff": cutoff.Format("2006-01-02")},
+					})
+				})
+				if err != nil {
+					log.Printf("billing: invoice prune: %v", err)
+				} else if n > 0 {
+					log.Printf("billing: invoice prune: %d invoice(s) past retention", n)
+				}
+			}
+			prune()
+			t := time.NewTicker(24 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					prune()
+				}
+			}
+		})
+	}
 
 	workers.Go("hourly-ticker", func() {
 

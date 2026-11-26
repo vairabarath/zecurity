@@ -166,6 +166,7 @@ const (
 	ActionBillingSettingsUpdate = "billing.settings.update" // audit action of a settings write
 	ActionInvoiceRead           = "invoice.read"
 	ActionInvoiceWrite          = "invoice.write"
+	ActionInvoicePrune          = "invoice.prune" // audit action of the retention prune (D-67)
 )
 
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
