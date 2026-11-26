@@ -115,6 +115,21 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
 
 ---
 
+### Implementation record (P1a)
+- **Built by Sathiya on 2026-11-26** (Sathiya took over P1a, P1b and P2 on Sathiya's instruction, because P1a blocked every other phase; Barath reviews). Branch `feat/sprint26-p1a-billing-schema`, commit `349ea314`, local only.
+- **As specified,** plus:
+  - `invoice_lines` re-checks the arithmetic: a meter line's `billable_units` must be the rounded-up units above the included quantity, and `amount = units × unit price` (a bigint overflow raises). A base line has no meter fields.
+  - `invoice_emails` CHECKs: `seq = 1` unless `resend`; `sent_at` is set exactly when `sent`.
+  - `prune_invoices(cutoff)` also **refuses a cutoff inside the retention** of `billing_settings`, so a wrong caller can't shorten it. The delete trigger accepts the prune only when its flag is set **and** the statement runs as the function's owner: the app role can set the flag itself but can't become the owner.
+  - **Security fix before commit:** every function lists `pg_temp` last in its `search_path` and qualifies its tables. Otherwise `pg_temp` is searched first, and a temporary `invoices` or `billing_settings` table could fool a guard. Found by the automated security review.
+  - The seeded plans get revision-1 history rows.
+- **Tests** (`internal/billing/schema_db_test.go`):
+  - defaults, every CHECK, append-only tables, the lifecycle transitions, the email queue and grants;
+  - prune, including the app role faking the flag;
+  - temp-table shadowing.
+- **Mutation checks**, each caught: no unique index; paid changing other fields; the flag without the owner check; the prune ignoring retention; round-down units; lines of an issued invoice changeable; shadowing (qualification and `pg_temp` removed).
+- **Gate:** `go build`, `go vet`, the full `go test ./...` with the DB and Valkey env: 50 packages ok, only the 2 known hard-coded skips.
+
 ## P1b — Plan card and billing settings API
 
 ### What exists
@@ -175,6 +190,30 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
 - Settings default, then switch to India / INR: every card switched. Tax 18 % GST.
 - Create two cards and a custom card, then edit a card; the history shows each change.
 - Move a tenant to another card mid-month: the `tenant_billing_plans` row holds the month-start card, and the limits changed immediately.
+
+### Implementation record (P1b)
+- **Built by Sathiya on 2026-11-26** (takeover, as P1a). Branch `feat/sprint26-p1b-cards-settings` on P1a, commit `a7625489`, local only.
+- **`internal/billing`:**
+  - `settings.go`: `GetSettings`, and `UpdateSettings` in one transaction; a currency change switches every priced card (plan rows locked in id order).
+  - `cards.go`: `DecodePrice` (strict integers, 18-digit cap → `price_overflow`), `ValidatePrice`, `CreateCard` / `SaveCard` (one edit = one revision), `CardFor`, `CardForMonth`.
+  - `planmonth.go`: `RecordMonthStartPlan`, `PlanForMonth`, `PlanName`.
+  - `currency.go`: ISO 4217 codes and a 54-country table, served as `countries`.
+- **B1:**
+  - create and update take `price` (absent = unchanged, `null` = remove). It is checked against the settings currency, read `FOR SHARE`, so a card write and a currency switch serialise.
+  - create takes an optional `reason` (stored as "Card created" when empty).
+  - assign records the month-start plan before the change.
+- **API:**
+  - `GET` / `PATCH /provider/billing/settings`;
+  - `GET /provider/plans/{id}/revisions`;
+  - plan reads return `price` and `revision`;
+  - tenant detail returns `billing_plan`;
+  - the U1 snapshot keeps `plan_id`.
+- **Choices to review:**
+  1. **`PlanForMonth` has one extra step:** the month's row, else the **earliest later month's row**, else the live plan, else the frozen plan. With no change in between, the start plan of that later month is the plan the tenant kept. Without this step, regenerating October after a November change would bill October at the November plan, which D-65 forbids. Test `TestMonthStartPlan` covers it; the mutation back to the plain rule is caught.
+  2. **Reading** the settings uses `plan.read` (the Plans page needs the currency). D-70 names only the write action. It is super-admin only either way.
+- **Tests:** `internal/plans/cards_db_test.go` (cards, settings, currency switch, atomic failure, month-start plan, card for month), plus the snapshot `plan_id` in `internal/usage`.
+- **Mutation checks**, each caught: the switch missing a card; recording after the change; `ON CONFLICT DO UPDATE`; revision not raised; relay-ops allowed; no later-change rule; the card as it reads now; the currency check skipped; the snapshot `plan_id` not frozen.
+- **Gate:** the full suite passed, 50 packages ok, 2 known skips.
 
 ---
 
@@ -254,7 +293,30 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
 - Purge a tenant → its final invoice exists and its invoices survive.
 
 ### Implementation record
-_Fill in when built (branch, choices, tests, gates, mutation checks)._
+- **Built by Sathiya on 2026-11-26** (takeover). Branch `feat/sprint26-p2-invoices` on P1b, commit `261219e7`, local only.
+- **Files:**
+  - `compute.go`: `Compute`, `BillableUnits` and `Tax`, overflow-checked;
+  - `monthclose.go`: `Generator` (`CloseDueMonths`, `Regenerate`, `DueMonths`);
+  - `lifecycle.go`: `Issue`, `MarkPaid`, `Void`, `Resend` (here so there is one implementation; P3 calls it), `Prune`;
+  - `invoice.go`: rows, draft insert and rewrite.
+- `providerquery.MonthUsage.IncompleteHours` is new (`json:"-"`: the usage API output is unchanged).
+- `main.go`: the month close, a daily audited prune (`invoice.prune`), and `BILLING_ENABLED` / `BILLING_SETTLE_DELAY`.
+- **Choices to review:**
+  1. **Currency after a mid-month switch.** A draft takes the currency of the card revision in force on the 1st (D-63, changed 2026-11-24). So a past month regenerated after a currency switch keeps the old currency and amounts. D-64's line "drafts take the new currency when regenerated" reads the other way; I followed the later D-63 change and P1b's test line "a currency change mid-month applies from the next month too".
+  2. A tenant purged during the month gets a final invoice even with no usage (from `usage_tenants.purged_at`). A tenant soft-deleted and not yet purged, with no usage, gets none.
+  3. **Regenerate** refuses the open month (`month_open`). **Void** refuses drafts and paid invoices (`invoice_not_issued`); there is no draft-delete route.
+  4. **Resend** queues an email even when `email_tenants` is off (the operator asked for it).
+  5. **Paid date:** not in the future and not before the invoice's month.
+- **Tests:** `internal/billing/invoices_db_test.go`:
+  - `Compute`;
+  - the month close (amounts, a 5-minute stop shown as 1 incomplete hour, settle delay, unpriced card, late tenant, base fee only, two runs → one invoice), the catch-up window, missed months;
+  - the month-start plan and card; reads only through U2;
+  - regenerate after tax, card and currency changes; the lifecycle and its refusals; email off;
+  - 20 concurrent issues get gap-free numbers, and a rolled-back issue leaves no gap;
+  - a purged tenant's final invoice; prune;
+  - plus "invoices survive the purge" in `tenantlifecycle` and a no-floating-point guard.
+- **Mutation checks**, each caught: floor; tax truncated; no overflow check; the current plan; the card as it reads now; own SQL for quantities; an unpriced card invoiced; regenerate on an issued invoice; email ignoring the setting; the open month issuable; the prune ignoring the setting; incomplete hours dropped; float rounding.
+- **Gate:** the full suite passed, 50 packages ok, 2 known skips.
 
 ---
 

@@ -58,6 +58,9 @@ All six review questions were answered on 2026-11-23 (marked ✔). The full text
 ## Team assignments
 
 **Person 1, Barath (M2):** P1a → P1b → P2. Phase file: `Member1-Barath/Phases-P1-P2-Prices-Invoices.md`.
+- **Takeover 2026-11-26:** P1a was the blocker for every other phase, so Sathiya built P1a, P1b and P2 on Sathiya's instruction. Barath reviews the PRs.
+- The code is in local stacked branches: `feat/sprint26-p1a-billing-schema` → `-p1b-cards-settings` → `-p2-invoices` → P3 (`feat/sprint26-p3-invoice-email`).
+- Each implementation record lists the choices to review.
 **Person 2, Sathiya (M1):** X3 → P3 → P4. Phase file: `Member2-Sathiya/Phases-X3-P3-P4-Billing-Console.md`.
 
 **Both:**
