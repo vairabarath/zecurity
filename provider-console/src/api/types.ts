@@ -539,6 +539,12 @@ export interface TenantDetail extends TenantSummary {
   relay_pool: TenantRelayPool
   /** The tenant's plan (Sprint 23 B1, D-43). */
   plan: TenantPlan
+  /**
+   * The plan this month is billed at (Sprint 26 P1b, D-65: the month-start
+   * plan, from `PlanForMonth`). Absent from controllers before P1b; the
+   * console then names the current plan.
+   */
+  billing_plan?: { id: string; name: string }
   /** Limit and usage per quota key (Sprint 23 S3, D-47), in display order. */
   quotas: TenantQuota[]
   /**
@@ -738,9 +744,9 @@ export interface HealthResult {
 
 
 // ---- Sprint 26 billing (F34, D-62 … D-70) ----
-// Shapes from the Sprint 26 phase files. The endpoints arrive with P1b
-// (plan cards, billing settings) and P3 (invoices); until then nothing in
-// src/api calls them (api-surface.test.ts lists calls only when they exist).
+// Shapes from the Sprint 26 phase files (P1b plan cards and billing
+// settings, P3 invoices). src/api/billing.ts calls them; this branch merges
+// only after P1b and P3, whose endpoints answer them.
 
 /** The D-57 meters a plan card can price, in display order. */
 export const BILLING_METERS = [
@@ -838,3 +844,78 @@ export interface PlanCardSummary extends PlanSummary {
   price: PlanPrice | null
   revision: number
 }
+
+/** A new plan card (POST /provider/plans with a price, D-63). */
+export interface NewPlanCard {
+  name: string
+  description: string
+  limits: PlanLimits
+  price: PlanPrice | null
+}
+
+/** Only the changed fields; `price: null` removes the price, a missing `price` leaves it. */
+export interface PlanCardChange {
+  name?: string
+  description?: string
+  limits?: PlanLimits
+  price?: PlanPrice | null
+}
+
+/** One entry of a card's append-only history (GET /provider/plans/{id}/revisions). */
+export interface PlanRevision {
+  revision: number
+  changed_at: string
+  /** The operator's email, or "system" for a currency switch. */
+  changed_by: string
+  reason: string
+  /** The whole card after this change. */
+  card: { name: string; description: string; limits: PlanLimits; price: PlanPrice | null }
+}
+
+/** GET /provider/billing/settings: the settings and the countries the controller knows (P1b). */
+export interface BillingSettingsResponse extends BillingSettings {
+  countries?: { code: string; name: string; currency: string }[]
+}
+
+/** The last email delivery of an invoice, as the list shows it (P3). */
+export type InvoiceEmailStatus = InvoiceEmailDelivery['status'] | null
+
+/** One row of GET /provider/invoices. */
+export interface InvoiceListItem extends Invoice {
+  last_email_status: InvoiceEmailStatus
+}
+
+export interface InvoiceStatusTotal {
+  count: number
+  subtotal_minor: number
+  tax_minor: number
+  total_minor: number
+}
+
+/** GET /provider/invoices: a keyset page plus the month's totals per status. */
+export interface InvoicePage {
+  items: InvoiceListItem[]
+  totals: Partial<Record<InvoiceStatus, InvoiceStatusTotal>>
+  /** The settings currency the totals are in. */
+  currency: string
+  next_cursor: string | null
+}
+
+/** One status change of an invoice. */
+export interface InvoiceStatusEvent {
+  status: InvoiceStatus
+  at: string
+  actor: string
+  reason: string | null
+}
+
+/** GET /provider/invoices/{id}: the invoice with its lines, history and email deliveries (never addresses). */
+export interface InvoiceDetail extends Invoice {
+  lines: InvoiceLine[]
+  emails: InvoiceEmailDelivery[]
+  history: InvoiceStatusEvent[]
+  /** Whether issuing emails the tenant's admins (the D-68 setting at read time). */
+  email_tenants: boolean
+  provider_name: string
+}
+

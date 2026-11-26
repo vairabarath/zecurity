@@ -13,6 +13,12 @@ export interface PlanCardActions {
   onEdit?: () => void
   onDuplicate?: () => void
   onHistory?: () => void
+  /** Shown on a priced card only. */
+  onRemovePrice?: () => void
+  /** Shown on a card that isn't the default. */
+  onMakeDefault?: () => void
+  /** Shown on a card that isn't the default; disabled while tenants use it. */
+  onDelete?: () => void
 }
 
 const plural = (n: number, one: string) => `${n.toLocaleString()} ${one}${n === 1 ? '' : 's'}`
@@ -76,6 +82,33 @@ export function PlanCard({ plan, ...actions }: { plan: PlanCardSummary } & PlanC
           </div>
         ))}
       </dl>
+
+      {(actions.onRemovePrice || actions.onMakeDefault || actions.onDelete) && (
+        <div className="mt-4 flex flex-wrap gap-2 px-5">
+          {actions.onMakeDefault && !plan.is_default && (
+            <Button variant="ghost" size="sm" onClick={actions.onMakeDefault} aria-label={`Make ${plan.name} the default`}>
+              Make default
+            </Button>
+          )}
+          {actions.onRemovePrice && price && (
+            <Button variant="ghost" size="sm" onClick={actions.onRemovePrice} aria-label={`Remove the price of ${plan.name}`}>
+              Remove price
+            </Button>
+          )}
+          {actions.onDelete && !plan.is_default && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={actions.onDelete}
+              aria-label={`Delete ${plan.name}`}
+              disabled={plan.tenants > 0}
+              title={plan.tenants > 0 ? 'Move its tenants to another plan first' : undefined}
+            >
+              Delete
+            </Button>
+          )}
+        </div>
+      )}
 
       <div className="mt-auto flex flex-wrap items-center justify-between gap-3 px-5 py-4">
         <span className="text-[13px] text-muted-foreground">

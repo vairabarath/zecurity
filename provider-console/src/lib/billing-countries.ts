@@ -1,6 +1,6 @@
 // Billing countries and their default currency (Sprint 26, D-64).
-// PLACEHOLDER: the controller's P1b settings API owns this table; when it
-// serves the list, the settings form takes it from there and this file goes.
+// Fallback only: the Billing settings page uses the countries the P1b
+// settings API serves (`countries`) and falls back to this list when it serves none.
 
 export interface BillingCountry {
   code: string // ISO 3166-1 alpha-2

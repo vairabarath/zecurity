@@ -101,7 +101,10 @@ function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: TenantDetail; 
     setError(null)
     try {
       await assignTenantPlan(tenant.id, planId, reason.trim())
-      onDone({ tone: 'success', text: `${tenant.name} is now on the ${chosen.name} plan. Its new limits apply at once.` })
+      onDone({
+        tone: 'success',
+        text: `${tenant.name} is now on the ${chosen.name} plan. Its new limits apply at once; billing changes from next month.`,
+      })
     } catch (err) {
       setError(planErrorMessage(err))
     } finally {
@@ -116,8 +119,12 @@ function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: TenantDetail; 
           <DialogHeader>
             <DialogTitle>Change plan</DialogTitle>
             <DialogDescription>
-              The new plan’s limits apply to <strong className="text-foreground">{tenant.name}</strong> at once. Nothing is
-              deleted if the new limits are lower; the tenant can’t create more until it’s below them.
+              Limits change now: the new plan’s limits apply to <strong className="text-foreground">{tenant.name}</strong> at once. Nothing is
+              deleted if the new limits are lower; the tenant can’t create more until it’s below them.{' '}
+              <span data-testid="billing-from-next-month">
+                Billing changes from next month; this month is billed at the{' '}
+                <strong className="text-foreground">{(tenant.billing_plan ?? tenant.plan).name}</strong> card as it was on the 1st.
+              </span>
             </DialogDescription>
           </DialogHeader>
           {error && (
