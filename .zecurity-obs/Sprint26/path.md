@@ -189,20 +189,28 @@ Tracker: F34 ticked only after its live check.
 
 ## Checklist
 
-- [ ] Sprint 25 stack merged (#244 → #248); Sprint 25 acceptance run (both) done; follow-ups recorded as X3; tracker F32, F33 ticked
+- [x] Sprint 25 stack merged (#244 → #248); Sprint 25 acceptance run (both) done; follow-ups recorded as X3; tracker F32, F33 ticked
 - [x] Phase 0: Q1–Q6 answered 2026-11-23; D-62 … D-70 written into the Decision Record (amendment 2026-11-23, billing)
 - [x] Documents signed off 2026-11-23 (by Sathiya, who instructed that this override the product-owner sign-off step; Barath reviews in PR #249)
-- [ ] X3: Sprint 25 follow-ups (Sathiya)
-- [ ] P1a: Billing schema `073_plan_cards`, `074_invoices` (Barath)
-- [ ] P1b: Plan card + billing settings API (Barath)
-- [ ] P2: Invoice generator and lifecycle (Barath)
-- [ ] P3: Invoice API + tenant email (Sathiya)
-- [ ] P4: Billing console (Sathiya)
-- [ ] Sprint acceptance run (both); tracker F34
+- [x] X3: Sprint 25 follow-ups (Sathiya) — #253
+- [x] P1a: Billing schema `073_plan_cards`, `074_invoices` (built by Sathiya, takeover) — #257
+- [x] P1b: Plan card + billing settings API (built by Sathiya, takeover) — #258
+- [x] P2: Invoice generator and lifecycle (built by Sathiya, takeover) — #259
+- [x] P3: Invoice API + tenant email (Sathiya) — #250
+- [x] P4: Billing console (Sathiya) — #251, #254
+- [x] Sprint acceptance run (Sathiya, 2026-11-26, live on `main` + test clock; PASS with one fix); tracker F34 ticked
 
 ## Post-Sprint Fixes
 
-_None yet._
+### Fix: a purged tenant's final invoice (acceptance 2026-11-26)
+**Issue:** a tenant purged during November with no usage left got no final invoice (D-67).
+
+**Root cause:** the U1 collector's `Prune` deleted a purged tenant's `usage_tenants` snapshot as soon as it had no usage rows left. The month close names a purged tenant's final invoice from that snapshot, and only runs after the month closes, so the snapshot was gone by then.
+
+**Fix:** `Prune` keeps a purged snapshot at least `SnapshotBillingHoldMonths` (4) after `purged_at` (the month close looks back 3 closed months). Details in `Member1-Barath/…` P2 Post-Phase Fixes. Found and rechecked live in the acceptance run.
+
+### Addition: dev-only billing test clock
+`BILLING_TEST_NOW` (RFC 3339; refused unless `ENV=development`) moves the billing clock so the acceptance can close the current month with real traffic (path.md: "use a test clock"). The email queue and the retention prune keep real time.
 
 ## Out of scope
 

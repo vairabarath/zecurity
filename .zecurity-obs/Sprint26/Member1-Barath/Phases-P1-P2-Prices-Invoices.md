@@ -322,4 +322,17 @@ Check `ls controller/migrations | tail -3` first; latest expected is `072_usage_
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: purged tenant's snapshot pruned before its final invoice (acceptance 2026-11-26)
+**Issue:** tenant `s26-charlie` (Card C on Nov 1, moved to a custom card, then suspended, deleted and purged on Nov 26, no usage) got no November invoice at the month close.
+
+**Root cause:** `usage.Collector.Prune` (U1, `controller/internal/usage/collector.go`) deleted every purged `usage_tenants` snapshot without usage rows. P2's `billedTenants` finds a tenant purged during the month through that snapshot (`purged_at` in the month), and `PlanForMonth` falls back to its frozen `plan_id`; both ran after the month closed, when the row was already gone.
+
+**Fix applied:**
+```go
+// BEFORE:
+DELETE FROM usage_tenants t WHERE t.purged_at IS NOT NULL AND NOT EXISTS (usage_hourly …) AND NOT EXISTS (usage_active_user_counts …)
+// AFTER:
+DELETE FROM usage_tenants t WHERE t.purged_at IS NOT NULL AND t.purged_at < $1 -- now − SnapshotBillingHoldMonths (4)
+  AND NOT EXISTS (usage_hourly …) AND NOT EXISTS (usage_active_user_counts …)
+```
+Test: `TestPrune_RetentionOnly` now keeps a tenant purged a month ago with no usage and still prunes one purged 6 months ago; it fails with the hold removed. Live: after the fix (the lost row restored as the fixed code keeps it), regenerate created charlie's final invoice under its kept name, billed at Card C (the month-start plan): INR 99.00 + GST 17.82 = 116.82, email "not delivered".
