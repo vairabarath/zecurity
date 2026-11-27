@@ -68,12 +68,21 @@ func (h *Handler) forbidden(w http.ResponseWriter, err error) bool {
 	return false
 }
 
-// readFilter builds the filter for an alert read, restricted for relay-ops.
+// readFilter builds the filter for an alert read, restricted by the role's
+// alert view (relay-ops: platform relay and pool alerts; support: tenant
+// alerts without usage alerts). false: the request can match nothing.
 func readFilter(r *http.Request, actor provider.Actor) (ReadFilter, bool) {
 	q := r.URL.Query()
 	f := ReadFilter{Scope: q.Get("scope"), TenantID: q.Get("tenant_id"), Status: q.Get("status")}
-	if actor.Role != provider.RoleSuperAdmin {
-		// relay-ops: platform relay and pool alerts only.
+	switch viewFor(actor.Role) {
+	case viewAll:
+	case viewTenant:
+		if f.Scope == ScopePlatform {
+			return f, false
+		}
+		f.Scope = ScopeTenant
+		f.Kinds = SupportKinds()
+	default:
 		if f.Scope == ScopeTenant || f.TenantID != "" {
 			return f, false
 		}

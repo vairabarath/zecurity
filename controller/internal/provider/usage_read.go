@@ -21,7 +21,8 @@ import (
 //	GET /provider/usage/tenants?month=YYYY-MM&sort=<meter>&cursor=&limit=
 //	  every tenant's usage for a month, largest first; audited usage.fleet.read
 //
-// tenant.usage.read: super-admin only (relay-ops 403). Both reads are
+// tenant.usage.read: super-admin, auditor, billing (D-73; relay-ops and
+// support 403). Both reads are
 // audited and fail closed like tenant detail (OQ-1): read, serialize and
 // audit in one REPEATABLE READ transaction; the first response byte is
 // written only after COMMIT. A purged tenant's usage stays readable, named

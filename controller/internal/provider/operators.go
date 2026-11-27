@@ -51,9 +51,14 @@ const (
 
 const maxEmailLength = 254
 
-// ValidRole reports whether role is one of the two provider roles (D-05).
+// ValidRole reports whether role is one of the provider roles (D-05, D-73).
 func ValidRole(role string) bool {
-	return role == RoleSuperAdmin || role == RoleRelayOps
+	for _, r := range Roles {
+		if role == r {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeOperatorEmail applies the lightweight Phase U validation — trimmed,

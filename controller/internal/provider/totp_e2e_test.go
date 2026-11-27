@@ -641,3 +641,21 @@ func TestRecoverAdmin_Boundaries(t *testing.T) {
 		t.Fatalf("refused recoveries wrote %d audit rows", n)
 	}
 }
+
+// Sprint 27 O1 (D-74): auditor, billing and support must enrol TOTP before
+// any full session, and verify it at every later sign-in.
+func TestTOTP_NewRolesMustEnrol(t *testing.T) {
+	e := newTOTPEnv(t)
+	for _, role := range []string{provider.RoleAuditor, provider.RoleBilling, provider.RoleSupport} {
+		email := role + "@inkyank.com"
+		_, temp := e.createOperator(t, email, role)
+		// activateSuperAdmin asserts: password change → mfa=enroll (no full
+		// session) → enrol → full session.
+		full := e.activateSuperAdmin(t, email, temp, role+"-final-pass-1")
+		if code, body := call(t, e.srv, http.MethodGet, "/provider/me", full, nil); code != http.StatusOK || !strings.Contains(body, `"role":"`+role+`"`) {
+			t.Fatalf("%s /provider/me: %d %s", role, code, body)
+		}
+		e.tick()
+		e.signIn(t, email, role+"-final-pass-1") // asserts mfa=verify first
+	}
+}
