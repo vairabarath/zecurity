@@ -400,3 +400,32 @@ func TestHeartbeat_UnmatchedDomainSurvivesASkippedReading(t *testing.T) {
 		t.Fatal("ws-a still rates")
 	}
 }
+
+// Rule 5 (agreed 2026-11-24): a gap longer than the tracker's MaxGap (main.go:
+// TrafficMaxAge, two DB-write windows plus a minute) gives no rate: a long
+// silence averaged into one minute would misstate it. The rejected reading
+// is still the baseline for the next one.
+func TestWorkspaceTraffic_GapLongerThanMaxGapHasNoRate(t *testing.T) {
+	tr := NewWorkspaceTrafficTracker().WithMaxGap(11 * time.Minute)
+	tr.Record("r1", t0, 1000, map[string]WorkspaceTrafficSample{wsA: {ToClient: 0}}, nil)
+	tr.Record("r1", t0.Add(20*time.Minute), 2200, map[string]WorkspaceTrafficSample{wsA: {ToClient: 120_000}}, nil)
+	v := onlyRelay(t, tr)
+	if v.WindowSeconds != 0 || v.Workspaces[wsA].ToClientBytesPerSec != nil {
+		t.Fatalf("20 min gap > 11 min: no rate, got %+v", v)
+	}
+	tr.Record("r1", t0.Add(21*time.Minute), 2260, map[string]WorkspaceTrafficSample{wsA: {ToClient: 120_600}}, nil)
+	wantRate(t, "next reading (baseline = rejected one)", onlyRelay(t, tr).Workspaces[wsA].ToClientBytesPerSec, 10)
+}
+
+// A reading skipped (lookup failure) inside MaxGap: the next one rates over
+// the longer window.
+func TestWorkspaceTraffic_SkippedReadingWithinMaxGapRatesOverLongerWindow(t *testing.T) {
+	tr := NewWorkspaceTrafficTracker().WithMaxGap(11 * time.Minute)
+	tr.Record("r1", t0, 1000, map[string]WorkspaceTrafficSample{wsA: {ToClient: 0}}, nil)
+	tr.Record("r1", t0.Add(10*time.Minute), 1600, map[string]WorkspaceTrafficSample{wsA: {ToClient: 6000}}, nil)
+	v := onlyRelay(t, tr)
+	if v.WindowSeconds != 600 {
+		t.Fatalf("window %v", v.WindowSeconds)
+	}
+	wantRate(t, "over 10 min", v.Workspaces[wsA].ToClientBytesPerSec, 10)
+}

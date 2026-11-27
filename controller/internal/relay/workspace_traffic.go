@@ -62,6 +62,9 @@ type RelayWorkspaceTraffic struct {
 type WorkspaceTrafficTracker struct {
 	mu     sync.Mutex
 	relays map[string]*relayTraffic
+	// maxGap: a longer window between two readings has no rate (rule 5).
+	// Zero means no limit.
+	maxGap time.Duration
 }
 
 type relayTraffic struct {
@@ -77,6 +80,16 @@ type relayTraffic struct {
 
 func NewWorkspaceTrafficTracker() *WorkspaceTrafficTracker {
 	return &WorkspaceTrafficTracker{relays: map[string]*relayTraffic{}}
+}
+
+// WithMaxGap sets rule 5's limit: a window longer than d has no rate. main.go
+// passes the sampler's TrafficMaxAge, so a gap is rejected exactly when the
+// previous reading would already count as not reported.
+func (t *WorkspaceTrafficTracker) WithMaxGap(d time.Duration) *WorkspaceTrafficTracker {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maxGap = d
+	return t
 }
 
 // restartSlackSeconds tolerates heartbeat delivery jitter and the relay's
@@ -97,6 +110,8 @@ const restartSlackSeconds = 5
 //  3. A counter that went down (reset or re-created entry) has no rate.
 //  4. A workspace whose trust domain was unmatched in the previous reading
 //     gets no zero baseline: that counter may be long-lived.
+//  5. A window longer than maxGap has no rate. Every reading, rated or not,
+//     is the baseline for the next one.
 func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample, domains map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -109,7 +124,8 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 	continuous := false
 	if prev != nil {
 		gap = at.Sub(prev.at).Seconds()
-		continuous = gap > 0 && !restarted(prev.uptime, uptimeSeconds, gap)
+		continuous = gap > 0 && !restarted(prev.uptime, uptimeSeconds, gap) &&
+			(t.maxGap <= 0 || at.Sub(prev.at) <= t.maxGap)
 	}
 	if continuous {
 		view.WindowSeconds = gap
