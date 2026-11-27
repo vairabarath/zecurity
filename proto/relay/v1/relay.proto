@@ -95,8 +95,12 @@ message HeartbeatRequest {
 // Sprint 24 R1 (D-54): one workspace's share of the relay's traffic.
 message WorkspaceTraffic {
   string trust_domain = 1;
-  uint64 bytes_client_to_connector = 2; // cumulative since relay start
-  uint64 bytes_connector_to_client = 3; // cumulative since relay start
+  // Cumulative since this entry was created: the workspace's first stream
+  // through this relay process, or its first stream after the relay pruned
+  // the idle entry (workspace no longer allowed). Never decremented. An entry
+  // that ever carried bytes is reported in every heartbeat (F23 R1-1).
+  uint64 bytes_client_to_connector = 2;
+  uint64 bytes_connector_to_client = 3;
   uint32 active_streams = 4;            // open bridged streams now
 }
 
