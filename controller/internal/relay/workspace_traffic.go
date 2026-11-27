@@ -72,7 +72,8 @@ type relayTraffic struct {
 	uptime uint64
 	totals map[string]WorkspaceTrafficSample
 	// domains is this reading's trust domain → workspace id, "" for a trust
-	// domain that matched no active workspace (F23 R1-1 rule 4). Replaced at
+	// domain that matched no active workspace (F23 R1-1 rule 4). In memory
+	// only, for one reading; never stored. Replaced at
 	// every reading, so it never holds more than one heartbeat's entries.
 	domains map[string]string
 	view    RelayWorkspaceTraffic
@@ -108,8 +109,9 @@ const restartSlackSeconds = 5
 //  2. A window that isn't continuous (first reading, relay restart) has no
 //     rate for any workspace on the relay. Restart: U_now < U_prev + gap − 5 s.
 //  3. A counter that went down (reset or re-created entry) has no rate.
-//  4. A workspace whose trust domain was unmatched in the previous reading
-//     gets no zero baseline: that counter may be long-lived.
+//  4. A workspace whose trust domain was unmatched, or another workspace's,
+//     in the previous reading gets no zero baseline: that counter may be
+//     long-lived (a purged tenant's slug can be reused).
 //  5. A window longer than maxGap has no rate. Every reading, rated or not,
 //     is the baseline for the next one.
 func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample, domains map[string]string) {
@@ -161,13 +163,14 @@ func restarted(prevUptime, uptime uint64, gapSeconds float64) bool {
 
 // zeroBaselineAllowed reports whether ws, absent from this (previous)
 // reading, may rate from zero: none of its trust domains in the current
-// reading was unmatched here (rule 4).
+// reading was reported here as unmatched or as another workspace's (rule 4).
+// Either way the relay entry existed and its counter may be long-lived.
 func (r *relayTraffic) zeroBaselineAllowed(ws string, current map[string]string) bool {
 	for td, id := range current {
 		if id != ws {
 			continue
 		}
-		if was, seen := r.domains[td]; seen && was == "" {
+		if was, seen := r.domains[td]; seen && was != ws {
 			return false
 		}
 	}

@@ -443,3 +443,20 @@ func TestHeartbeat_TrafficTimeKeepsTheMonotonicClock(t *testing.T) {
 		t.Fatalf("MeasuredAt has no monotonic reading: %s", at)
 	}
 }
+
+// Rule 4 extension (agreed 2026-11-24): a trust domain that belonged to a
+// different workspace in the previous reading gives no zero baseline. A
+// purged tenant's slug can be reused, so the relay entry (keyed by trust
+// domain) may still hold the old tenant's lifetime counter.
+func TestWorkspaceTraffic_DomainThatChangedWorkspaceGetsNoZeroBaseline(t *testing.T) {
+	tr := NewWorkspaceTrafficTracker()
+	tr.Record("r1", t0, 1000, map[string]WorkspaceTrafficSample{wsA: {ToClient: 1 << 30}},
+		map[string]string{"ws-acme.zecurity.in": wsA})
+	// Old tenant purged, a new tenant created with the same slug, all within
+	// one window: same trust domain, new workspace id, old counter.
+	tr.Record("r1", t0.Add(60*time.Second), 1060, map[string]WorkspaceTrafficSample{wsB: {ToClient: 1<<30 + 600, ActiveStreams: 1}},
+		map[string]string{"ws-acme.zecurity.in": wsB})
+	if r := onlyRelay(t, tr).Workspaces[wsB]; r.ToClientBytesPerSec != nil || r.ActiveStreams != 1 {
+		t.Fatalf("domain changed workspace: streams known, no zero baseline; got %+v", r)
+	}
+}
