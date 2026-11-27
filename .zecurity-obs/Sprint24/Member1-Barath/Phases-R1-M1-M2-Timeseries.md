@@ -191,4 +191,132 @@ Record in `.zecurity-obs/Planning/Pending-Live-Tests.md`:
 
 ## Post-Phase Fixes
 
-_None yet._
+F23 live run 2026-11-23 (`main` `2ae68355`) found R1-1, R1-2, R1-3 and M1-1 (`Planning/Pending-Live-Tests.md`, "F23 findings"). Branch `fix/sprint24-f23-findings`. The design was agreed with Barath on 2026-11-23/24 (option D: no proto field change, no controller-side counter cache).
+
+### Fix: R1-1 — a tenant's first window had no rate
+**Issue:** a workspace absent from a relay's previous reading got no rate, so its first minute of traffic was missing.
+
+**Root cause:** `Record` only rated a workspace that had a previous counter.
+
+**Fix applied** (`internal/relay/workspace_traffic.go`, `Record`):
+1. In a continuous window, a workspace absent from the previous reading rates **from zero**. This is safe because the relay reports every entry that ever carried bytes (`relay/src/traffic.rs` snapshot tests the cumulative counters), so an absent entry is a zero counter.
+2. A window that isn't continuous gives no rate for **any** workspace on that relay (first reading, controller restart, relay restart).
+3. A counter that went down gives no rate (a reset or a re-created entry).
+4. No zero baseline if one of the workspace's trust domains was, in the previous reading, **unmatched or another workspace's**. Such a domain's counter may be long-lived, for example when a purged tenant's slug is reused. Details:
+   - the per-domain map (trust domain → workspace id, `""` when unmatched) is kept in memory for one reading and never stored;
+   - a skipped reading (lookup failure) keeps the previous map.
+5. A window longer than `maxGap` (= `TrafficMaxAge`) has no rate. Every reading, rated or not, is the baseline for the next one.
+
+**Known limitation (tested, documented):** an entry pruned and re-created within one window, whose new counter is above the old one, is undercounted (`TestWorkspaceTraffic_RecreatedEntryLargerThanBefore_KnownUndercount`). The exact fix is an entry epoch in `WorkspaceTraffic` (additive field), deferred.
+
+### Fix: combined relay restart check
+**Issue:** the old check `uptime + 5 ≥ gap` missed a relay that restarted within 5 s after a reading. A young relay (previous uptime below the gap) could slip past too.
+
+**Fix applied:** restart if `U_now < U_prev + gap − 5 s` (`restarted()`).
+- The uptime is the relay's `Instant` (monotonic), in whole seconds.
+- 5 s covers delivery-delay differences and the rounding.
+- A false positive costs one blank window, never a wrong number.
+
+### Fix: the window uses the monotonic clock
+**Issue:** `receivedAt := time.Now().UTC()` strips Go's monotonic reading. A backward wall-clock step on the controller shortened the gap and inflated rates (a 30 s step in a 60 s window doubled them).
+
+**Fix applied** (`internal/relay/heartbeat.go`): the tracker gets `arrived := time.Now()`; the database still gets `arrived.UTC()`. The B2 relay totals still use database timestamps, which can't carry a monotonic reading (known; out of scope).
+
+### Fix: R1-2 — partial tenant sums after a relay restart
+**Issue:** a fresh view without a window (restart) dropped only the tenants it listed with an unknown rate. Others summed over the remaining relays, a partial total shown as real.
+
+**Fix applied** (`internal/metricstore/sampler.go`, `tenantRelaySamples`):
+- any used view with `WindowSeconds == 0` → no byte samples for **any** tenant that minute;
+- stream counts are still written;
+- the next continuous window recovers.
+
+### Fix: R1-3 B — a silent relay's last rate repeated
+**Issue:** rates are averages over the DB-write window. When a relay stopped, its last rate was written every minute until eviction (up to 150 s).
+
+**Fix applied:**
+- the relay byte series, fleet byte totals and the relay's tenant shares are used only while the relay is **live**: last heartbeat within `RelayLiveMaxAge` = 75 s;
+- the heartbeat time is the Valkey liveness key, else the persisted heartbeat (`providerquery.EffectiveHeartbeat`, the console's definition);
+- connections still follow the relay status.
+
+R1-3 C (the console label) is in PR B.
+
+### Fix: rule 6 — relays left out of the tenant sum
+**Issue:** a relay left out of the sum (evicted, silent, or without a fresh reading) counted as 0 for its tenants. That is an undercount whenever traffic still flows, for example:
+- connector streams draining (≤ 120 s) after the relay was evicted;
+- a partition: relay alive but cut off from the controller, connectors still attached, which the F10-1 migration retry allows when no other relay exists.
+
+**Fix applied (`tenantRelaySamples`):**
+- **6a:** the tenant's bytes are a gap when either:
+  - (i) it was carrying traffic (streams, bytes or an unknown rate) in the left-out relay's reading of the last `max(TrafficMaxAge, ResidualWindow)`;
+  - or (ii) one of its unrevoked connectors confirmed a placement on that relay within `PlacementMaxAge` (60 s; `connector_relay_placement.last_confirmed`, refreshed by every 15 s health report). A connector that stops confirming has lost the controller and fails closed 15 s after its last authorization acknowledgement, so it can't be carrying traffic.
+- **6b:** an active, **live** relay without a fresh view can't say which tenants it carries → no tenant relay sample at all that minute.
+- A failed placement read → no tenant bytes that minute.
+
+### Fix: M1-1 — a restart re-roll thinned an hour's roll-up
+**Issue:** on start the sampler re-rolls the previous two hours. After a short retention had pruned part of that hour, the re-run overwrote the full roll-up (live run: count 54 → 2).
+
+**Fix applied** (`Rollup`):
+- `ON CONFLICT … DO UPDATE … WHERE EXCLUDED.count >= metric_rollups.count`;
+- a re-run that covers fewer minutes keeps the fuller row;
+- the `Tick` comment ("re-running is harmless") is corrected.
+
+### R1 freshness thresholds (one table)
+`W` = `RELAY_HEARTBEAT_DB_WRITE_INTERVAL` (default 5 min, lab 1 min). `TrafficMaxAge` = `2W + 1 min`, one value in `main.go` for both the tracker and the sampler.
+
+| Threshold | Default (lab) | Where | Blanks |
+|---|---|---|---|
+| Relay heartbeat | 30 s | relay | — |
+| Reading cadence | `W` = 5 min (1 min) | heartbeat DB write | — |
+| Restart tolerance | 5 s | tracker `restartSlackSeconds` | that reading's rates, every tenant on the relay |
+| Rule 5 max gap | `TrafficMaxAge` = 11 min (3 min) | tracker `maxGap` | that reading's rates, every tenant on the relay (still the next baseline) |
+| Fresh view | `TrafficMaxAge` | sampler | the view isn't used (→ 6a / 6b) |
+| R1-3 B live | 75 s | sampler `RelayLiveMaxAge` | relay byte series and fleet byte totals; the relay is left out of tenant sums (→ 6a) |
+| Eviction | 90 s expiry, 60 s sweep (inactive after 90–150 s) | `relay/expiry.go` | relay `inactive`: no connections sample; dropped from connectors' relay lists |
+| 6a reading cutoff | `max(TrafficMaxAge, 330 s)` = 11 min (5.5 min) | sampler `ResidualWindow` | bytes of tenants carrying traffic in a left-out relay's last reading |
+| 6a placement | 60 s | sampler `PlacementMaxAge` | bytes of tenants with a connector confirming a placement on a left-out relay |
+| 6b | live relay, view missing or older than `TrafficMaxAge` | sampler | every tenant relay sample that minute (bytes and streams) |
+| Connector drain | 120 s | connector | input to `ResidualWindow` |
+| Connector fail-closed | 15 s after the last ack; health every 15 s | connector | input to `PlacementMaxAge` |
+
+**No conflicts (checked):**
+- **Live (75 s) < eviction (90 s):** a silent relay stops contributing rates before it is evicted. Between 75 s and eviction it is active but not live, so 6a applies, not 6b (6b needs a live relay).
+- **Rule 5 and freshness share `TrafficMaxAge`:** a gap is rejected exactly when the previous reading would no longer be fresh. Normal gaps are `W` + ≤ 30 s (30 s with Valkey down), always below `2W + 1 min`.
+- **6a cutoff ≥ eviction worst case (150 s) + drain (120 s) + 60 s, for any `W`:** with lab `W` = 1 min, `TrafficMaxAge` (3 min) alone would end too early. That's why the cutoff is `max(TrafficMaxAge, 330 s)`.
+- **Placement 60 s = four health reports**, well above the 15 s fail-closed bound.
+- **A live relay with a stale view** marks 6a residuals and also hits 6b; 6b (nothing written) wins.
+
+### Tests
+- **Tracker:**
+  - `TestWorkspaceTraffic_NewWorkspaceInContinuousWindowRatesFromZero`
+  - `…_RelayRestartBlanksAllWorkspaces`
+  - `…_ControllerFirstSampleHasNoRate`
+  - `…_UnmappedDomainOnlyBlocksItsOwnWorkspace`
+  - `…_UnmatchedForSeveralReadingsThenMatched`
+  - `…_DisappearAndReappear`
+  - `…_RecreatedEntryLargerThanBefore_KnownUndercount`
+  - `…_IndependentRelays`
+  - `…_JitterWithinToleranceStillRates` (replaces `UptimeWithinSlackStillRates`, whose case is now a restart)
+  - `…_RestartJustAfterAReadingIsDetected`
+  - `…_GapLongerThanMaxGapHasNoRate`
+  - `…_SkippedReadingWithinMaxGapRatesOverLongerWindow`
+  - `…_DomainThatChangedWorkspaceGetsNoZeroBaseline`
+- **Heartbeat:**
+  - `TestHeartbeat_UnmatchedDomainSurvivesASkippedReading`
+  - `TestHeartbeat_TrafficTimeKeepsTheMonotonicClock`
+- **Sampler:**
+  - `TestTenantRelaySamples_NonContinuousViewWritesNoBytes`
+  - `…_LeftOutRelayWithRecentReadingBlanksItsTenants`
+  - `…_ResidualReadingPastCutoffCountsZero`
+  - `…_PlacementOnLeftOutRelayBlanksTenant`
+  - `…_LiveRelayWithoutFreshReadingWritesNothing`
+  - `…_PlacementsUnknownWritesNoBytes`
+  - `TestRelaySamples_SilentRelayHasNoByteSamples`
+  - `TestRelayLive_ValkeyThenPersistedHeartbeat`
+  - **Changed:** `TestTenantRelaySamples_SumOverFreshActiveRelays`'s offline relay is now 20 min old. A recent one blanks the tenant (6a).
+- **Database:**
+  - `TestRecentPlacements_ConfirmedAndUnrevokedOnly`
+  - `TestRollup_RerunAfterPruneKeepsTheFullerRollup`
+- **Relay:**
+  - `idle_entry_with_bytes_is_still_reported`, the invariant R1-1 relies on;
+  - `prune_then_reopen_restarts_at_zero`.
+- **Proto:** the comment on `WorkspaceTraffic` fields 2–3 is corrected (cumulative since the entry was created, not since relay start). There is no field change.
