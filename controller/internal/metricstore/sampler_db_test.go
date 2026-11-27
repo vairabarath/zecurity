@@ -375,3 +375,37 @@ func TestRecentPlacements_ConfirmedAndUnrevokedOnly(t *testing.T) {
 		t.Fatalf("only an old placement: %v %v", got, err)
 	}
 }
+
+// F23 M1-1 (live run 2026-11-23): a restart re-rolls the previous two hours.
+// If samples of that hour were pruned meanwhile (a short retention), the
+// re-run covers fewer minutes and must not overwrite the fuller roll-up.
+func TestRollup_RerunAfterPruneKeepsTheFullerRollup(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := &Sampler{DB: db}
+	hour := time.Date(2026, 11, 23, 8, 0, 0, 0, time.UTC)
+	for minute, v := range []float64{2, 4, 6, 8} {
+		if err := s.Write(ctx, hour.Add(time.Duration(minute*10)*time.Minute), []Sample{{providerquery.SeriesTenantActiveSessions, providerquery.MetricSubjectTenant, tenantA, v}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Rollup(ctx, hour); err != nil {
+		t.Fatal(err)
+	}
+	// Retention removed the first three minutes; the controller restarts.
+	if _, err := db.Exec(ctx, `DELETE FROM metric_samples WHERE ts < $1`, hour.Add(25*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rollup(ctx, hour); err != nil {
+		t.Fatal(err)
+	}
+	var mn, mx, avg float64
+	var n int
+	if err := db.QueryRow(ctx, `SELECT min, max, avg, count FROM metric_rollups WHERE series = $1 AND ts = $2`,
+		providerquery.SeriesTenantActiveSessions, hour).Scan(&mn, &mx, &avg, &n); err != nil {
+		t.Fatal(err)
+	}
+	if mn != 2 || mx != 8 || avg != 5 || n != 4 {
+		t.Fatalf("roll-up after a thinner re-run: min %v max %v avg %v count %v, want 2 8 5 4", mn, mx, avg, n)
+	}
+}

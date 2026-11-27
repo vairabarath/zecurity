@@ -132,7 +132,8 @@ func (s *Sampler) Tick(ctx context.Context) {
 	hour := now.Truncate(time.Hour)
 	if !s.lastRolledHour.Equal(hour) {
 		// The previous two hours, so a restart near an hour boundary still
-		// rolls up the hour it missed. Upserts: re-running is harmless.
+		// rolls up the hour it missed. Re-running never thins a roll-up: a
+		// re-run over pruned samples keeps the fuller row (F23 M1-1).
 		ok := true
 		for _, h := range []time.Time{hour.Add(-2 * time.Hour), hour.Add(-time.Hour)} {
 			if err := s.Rollup(ctx, h); err != nil {
@@ -473,7 +474,9 @@ ON CONFLICT (series, subject_id, ts) DO NOTHING`, series, types, subjects, ts, v
 
 // Rollup aggregates the hour starting at hourStart into metric_rollups
 // (min, max, mean clamped into [min, max], number of minutes). Re-running an
-// hour replaces its rows.
+// hour replaces its rows only when it covers at least as many minutes (F23
+// M1-1): after retention pruned part of the hour, a re-run is thinner and
+// the fuller roll-up is kept.
 func (s *Sampler) Rollup(ctx context.Context, hourStart time.Time) error {
 	start := hourStart.UTC().Truncate(time.Hour)
 	_, err := s.DB.Exec(ctx, `
@@ -484,7 +487,8 @@ SELECT series, subject_type, subject_id, $1,
  WHERE ts >= $1 AND ts < $2
  GROUP BY series, subject_type, subject_id
 ON CONFLICT (series, subject_id, ts) DO UPDATE
-   SET min = EXCLUDED.min, max = EXCLUDED.max, avg = EXCLUDED.avg, count = EXCLUDED.count`,
+   SET min = EXCLUDED.min, max = EXCLUDED.max, avg = EXCLUDED.avg, count = EXCLUDED.count
+ WHERE EXCLUDED.count >= metric_rollups.count`,
 		start, start.Add(time.Hour))
 	if err != nil {
 		return fmt.Errorf("roll up: %w", err)
