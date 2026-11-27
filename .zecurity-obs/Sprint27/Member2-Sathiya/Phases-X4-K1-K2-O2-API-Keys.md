@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); planned — starts after Sprint 26 is merged and live-checked
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 waits for O1
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role
@@ -23,13 +23,12 @@ Order: **X4 → K1 (after O1 merges) → K2 → O2**. K1's expiry-alert part wai
 
 ## X4 — Sprint 26 follow-ups
 
-Filled in after the Sprint 26 acceptance run. Each finding gets:
-- a separate small change;
-- its decision, if one is needed;
-- a test;
-- a live recheck.
+**Done (2026-11-27).** The Sprint 26 acceptance run (live, 2026-11-26, on `main` + the dev test clock `BILLING_TEST_NOW`) passed with one finding, fixed and merged in **#260** (`7ee717bc`). F34 is ticked.
 
-Then tick F34.
+- **Finding: a purged tenant's final invoice was missing.** The U1 usage prune deleted a purged tenant's `usage_tenants` snapshot (name, plan) as soon as it had no usage, but the month close needs it to draft the tenant's final invoice (D-67). **Fix:** the prune keeps the snapshot for 4 months after a purge; a DB test covers it. **Live recheck:** charlie (suspended, deleted and purged mid-month) got its final November invoice. Recorded in `Sprint26/path.md` → Post-Sprint Fixes and `Pending-Live-Tests.md`.
+- **Also in #260:** the dev-only billing test clock (`BILLING_TEST_NOW`, refused outside `ENV=development`).
+- **Not checked live** (unit tests cover them): CSV/JSON invoice export, the print view, the retention prune (nothing old enough).
+- **Open for Barath's review** (recorded in the Sprint 26 phase files, not findings): `PlanForMonth` later-month step; regenerate keeps the month-start currency (D-63 vs D-64); prune refuses a cutoff inside retention; settings GET = `plan.read`; resend ignores `email_tenants`.
 
 ---
 

@@ -194,10 +194,49 @@ func (s *Service) WithWorkspaceTraffic(tracker *WorkspaceTrafficTracker, lookup 
 // records it. Unknown trust domains are logged and dropped, never stored. A
 // lookup failure records nothing for this window, so the previous view ages
 // (a reader sees it as not reported) instead of being replaced by a guess.
+// It runs on the heartbeats that are written to the DB (the B2 cadence), so
+// R1's rates keep their window.
 func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at time.Time, req *relaypb.HeartbeatRequest) {
 	if s.workspaceTraffic == nil || s.workspaceLookup == nil {
 		return
 	}
+	samples, ok := s.workspaceSamples(ctx, relayID, req)
+	if !ok {
+		return
+	}
+	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples)
+	s.recordUsage(ctx, relayID, at, req, samples)
+}
+
+// recordWorkspaceUsage passes a throttled heartbeat's counters to the usage
+// collector only (Sprint 25 live finding F32-1): usage must see every
+// heartbeat, not only the B2 DB-write cadence, so a relay restart loses at
+// most the bytes since its last heartbeat (D-59). R1's rate tracker is not
+// touched: its window stays the B2 cadence.
+func (s *Service) recordWorkspaceUsage(ctx context.Context, relayID string, at time.Time, req *relaypb.HeartbeatRequest) {
+	if s.usageSink == nil || s.workspaceLookup == nil {
+		return
+	}
+	samples, ok := s.workspaceSamples(ctx, relayID, req)
+	if !ok {
+		return
+	}
+	s.recordUsage(ctx, relayID, at, req, samples)
+}
+
+// recordUsage hands the cumulative counters to the usage collector (Sprint 25
+// U1, F32, D-59): exact bytes from the cumulative counters. A failed lookup
+// skips this heartbeat; the counters are cumulative, so the next one counts
+// the whole span once.
+func (s *Service) recordUsage(ctx context.Context, relayID string, at time.Time, req *relaypb.HeartbeatRequest, samples map[string]WorkspaceTrafficSample) {
+	if s.usageSink != nil {
+		s.usageSink.RecordRelayCounters(ctx, relayID, at, req.GetUptimeSeconds(), samples)
+	}
+}
+
+// workspaceSamples resolves a heartbeat's field 13 to workspace ids. ok is
+// false when the lookup failed (nothing may be recorded for this heartbeat).
+func (s *Service) workspaceSamples(ctx context.Context, relayID string, req *relaypb.HeartbeatRequest) (map[string]WorkspaceTrafficSample, bool) {
 	entries := req.GetWorkspaceTraffic()
 	domains := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -206,7 +245,7 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 	byDomain, err := s.workspaceLookup.ActiveWorkspacesByTrustDomain(ctx, domains)
 	if err != nil {
 		log.Printf("relay heartbeat: workspace traffic %s: %v — not recorded this window", relayID, err)
-		return
+		return nil, false
 	}
 	samples := make(map[string]WorkspaceTrafficSample, len(entries))
 	for _, e := range entries {
@@ -221,5 +260,18 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 		cur.ActiveStreams += e.GetActiveStreams()
 		samples[ws] = cur
 	}
-	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples)
+	return samples, true
+}
+
+// WorkspaceUsageSink receives every heartbeat's per-workspace cumulative
+// counters (Sprint 25 U1, F32). Implemented by the usage collector; an
+// interface so this package doesn't depend on it.
+type WorkspaceUsageSink interface {
+	RecordRelayCounters(ctx context.Context, relayID string, at time.Time, uptimeSeconds uint64, counters map[string]WorkspaceTrafficSample)
+}
+
+// WithUsageSink sets the usage collector (Sprint 25 U1).
+func (s *Service) WithUsageSink(sink WorkspaceUsageSink) *Service {
+	s.usageSink = sink
+	return s
 }

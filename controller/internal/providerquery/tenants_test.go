@@ -556,7 +556,7 @@ func TestTenantDTOSurface(t *testing.T) {
 		"TenantPlan":                 {TenantPlan{}, []string{"id", "is_default", "limits", "name"}},
 		"TenantDeletion":             {TenantDeletion{}, []string{"by", "delete_after", "legal_hold", "legal_hold_reason", "purge_step", "reason", "scheduled_at"}},
 		"TenantFirstAdminInvitation": {TenantFirstAdminInvitation{}, []string{"expires_at", "status"}},
-		"PlanSummary":                {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "tenants", "updated_at"}},
+		"PlanSummary":                {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "price", "revision", "tenants", "updated_at"}},
 		"TenantRelayPoolPrevious":    {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
 		"TenantConnector": {TenantConnector{}, []string{"cert_not_after", "id", "last_heartbeat_at", "name",
 			"remote_network_id", "revoked_at", "status", "version"}},

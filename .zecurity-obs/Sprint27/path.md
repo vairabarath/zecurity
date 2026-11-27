@@ -2,12 +2,12 @@
 type: sprint
 sprint: 27
 title: Provider Dashboard — provider access and API (F19, F20, F35)
-status: decided and signed off 2026-11-23 (sign-off given by Sathiya, as for Sprint 26; Barath reviews in PR #252); PLANNED: starts after Sprint 26 is merged and live-checked (X4 first, then O1)
+status: ACTIVE since 2026-11-27 — decided and signed off 2026-11-23 (sign-off given by Sathiya, as for Sprint 26; Barath reviews in PR #252); X4 done (#260); next O1 (Barath)
 created: 2026-11-23
 team:
   - Person 1 = Barath (M2): F19 — O1 role matrix and new roles; F20 — G1 loud break-glass
   - Person 2 = Sathiya (M1): X4 Sprint 26 follow-ups; F35 — K1 API keys, K2 keys console; F19 — O2 console per role
-baseline: Sprint 26 docs (#249); Sprint 25 stack #244 … #248, Sprint 26 code (#250, #251, P1a/P1b/P2) not merged yet
+baseline: main 7ee717bc (Sprint 26 merged and live-checked: #257, #258, #259, #250, #251, #254, acceptance #260; latest migration 074_invoices)
 ---
 
 # Sprint 27 — Provider access and API
@@ -31,10 +31,10 @@ The provider console has two roles today (`super-admin`, `relay-ops`; D-05, D-31
 Tracker: `.zecurity-obs/Planning/Provider-Dashboard-Features.md`. **Binding decisions:** `docs/provider-dashboard-architecture-decisions.md`, amendment **2026-11-23, provider access (D-71 … D-76)**, on top of D-01 … D-70. Scope discussion: `Sprint27/Scope-Draft.md` (PR #252).
 
 **Prerequisites:**
-1. Sprint 26 (F34) merged and live-checked; its findings are **X4**. The `billing` role covers F34's endpoints.
-2. The Sprint 24 and Sprint 25 acceptance runs closed.
+1. ✅ Sprint 26 (F34) merged and live-checked (acceptance PASS 2026-11-26, #260); its one finding was fixed in #260, so **X4** is done. The `billing` role covers F34's endpoints.
+2. Sprint 25 acceptance closed (2026-11-24, #253). **Open:** the Sprint 24 acceptance run (F23 live R1-1/R1-2 failed on 2026-11-23; F26, F27 live-checked but not ticked). Sprint 27 started on 2026-11-27 with this still open; it doesn't block O1 or K1 (no shared code), and stays on the list to close.
 
-`CLAUDE.md` keeps Sprint 26 as the active sprint until it closes; Sprint 27 is listed there as planned.
+Sprint 27 became the active sprint in `CLAUDE.md` on 2026-11-27.
 
 ---
 
@@ -171,10 +171,10 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 
 ## Checklist
 
-- [ ] Sprint 26 merged and live-checked; follow-ups recorded as X4; tracker F34 ticked
+- [x] Sprint 26 merged and live-checked (#257 … #254, acceptance #260 `7ee717bc`, 2026-11-27); follow-up recorded as X4; tracker F34 ticked
 - [x] Phase 0: Q1–Q6 answered 2026-11-23; D-71 … D-76 written into the Decision Record (amendment 2026-11-23, provider access)
 - [x] Documents signed off 2026-11-23 (by Sathiya, as for Sprint 26; Barath reviews in PR #252)
-- [ ] X4: Sprint 26 follow-ups (Sathiya)
+- [x] X4: Sprint 26 follow-ups (Sathiya) — the one acceptance finding fixed in #260; no other follow-up
 - [ ] O1: Role matrix + roles `075_provider_roles` (Barath)
 - [ ] G1: Loud break-glass `077_provider_alert_kinds` (Barath)
 - [ ] K1: API keys `076_provider_api_keys` (Sathiya)

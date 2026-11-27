@@ -124,6 +124,62 @@ describe('Alerts: rules', () => {
   })
 })
 
+// Sprint 25 U4 (D-61): the usage rule's meter and threshold are edited in
+// display units (GB, hours, users) and sent in the meter's raw unit, both
+// together (the controller replaces params whole).
+describe('Alerts: usage rule', () => {
+  const USAGE_RULE: AlertRule = {
+    ...RULE, id: 'r10', kind: 'tenant.usage_over', scope: 'tenant', name: 'Tenant usage over threshold', enabled: false, severity: 'warning',
+    params: { meter: 'relay_bytes_to_clients', threshold: 500_000_000_000 }, for_seconds: 0, renotify_seconds: 0,
+  }
+
+  it('lists the meter and threshold; edits them in display units', async () => {
+    signedInAs(superAdminMe)
+    const { calls } = mockFetch({
+      'GET /provider/alert-rules': { status: 200, body: { items: [USAGE_RULE] } },
+      'PATCH /provider/alert-rules/r10': { status: 200, body: { ...USAGE_RULE, enabled: true } },
+    })
+    renderApp('/alerts?tab=rules')
+    expect(await screen.findByText(/Tenant usage over threshold · Relayed to clients from 500 GB a month/)).toBeInTheDocument()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Edit Tenant usage over threshold' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    const threshold = dialog.getByLabelText('Monthly threshold (GB)')
+    expect(threshold).toHaveValue('500')
+    await user.selectOptions(dialog.getByLabelText('Meter'), 'session_minutes')
+    expect(dialog.getByLabelText('Monthly threshold (hours)')).toBeInTheDocument()
+    await user.clear(threshold)
+    await user.type(threshold, '1.5')
+    await user.click(dialog.getByRole('checkbox', { name: 'Enabled' }))
+    await user.type(dialog.getByLabelText('Reason'), 'warn on heavy tenants')
+    await user.click(dialog.getByRole('button', { name: 'Save rule' }))
+    await waitFor(() => expect(writes(calls)).toHaveLength(1))
+    expect(writes(calls)[0].body).toEqual({ enabled: true, params: { meter: 'session_minutes', threshold: 90 }, reason: 'warn on heavy tenants' })
+  })
+
+  it('a fractional user count or a zero threshold keeps Save disabled', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({ 'GET /provider/alert-rules': { status: 200, body: { items: [USAGE_RULE] } } })
+    renderApp('/alerts?tab=rules')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit Tenant usage over threshold' }))
+    const dialog = within(await screen.findByRole('dialog'))
+    await user.selectOptions(dialog.getByLabelText('Meter'), 'active_users')
+    const threshold = dialog.getByLabelText('Monthly threshold (users)')
+    // Another change is made too, so only the threshold can keep Save disabled.
+    await user.click(dialog.getByRole('checkbox', { name: 'Enabled' }))
+    await user.type(dialog.getByLabelText('Reason'), 'warn on heavy tenants')
+    for (const bad of ['2.5', '0', 'lots']) {
+      await user.clear(threshold)
+      await user.type(threshold, bad)
+      expect(dialog.getByRole('button', { name: 'Save rule' })).toBeDisabled()
+    }
+    await user.clear(threshold)
+    await user.type(threshold, '50')
+    expect(dialog.getByRole('button', { name: 'Save rule' })).toBeEnabled()
+  })
+})
+
 describe('Alerts: channels', () => {
   it('adds a webhook: the secret is shown once, cleared on close and never stored', async () => {
     signedInAs(superAdminMe)

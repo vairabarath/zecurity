@@ -287,6 +287,23 @@ func (e *env) assertPurged(t *testing.T, id, dir string, providerRowsBefore int)
 	if !strings.Contains(arc["audit_log.jsonl"], `"resource.create"`) || !strings.Contains(arc["connector_certificates.jsonl"], `"serial-`) {
 		t.Fatalf("archive misses the tenant's audit or certificate rows: %v", m.Files)
 	}
+	// Usage (Sprint 25 U1, D-58 amends D-46): the tenant's usage snapshot is
+	// kept with its name and slug and frozen; no user ids are kept.
+	var uslug, uname string
+	var purgedAt *time.Time
+	if err := e.pool.QueryRow(context.Background(), `SELECT slug, name, purged_at FROM usage_tenants WHERE tenant_id = $1`, id).
+		Scan(&uslug, &uname, &purgedAt); err != nil {
+		t.Fatalf("usage snapshot: %v", err)
+	}
+	var tslug string
+	e.scalar(t, &tslug, `SELECT slug FROM workspace_tombstones WHERE workspace_id = $1`, id)
+	if uslug != tslug || uname == "" || purgedAt == nil {
+		t.Fatalf("usage snapshot slug=%q name=%q purged_at=%v, want slug %q, a name, frozen", uslug, uname, purgedAt, tslug)
+	}
+	e.scalar(t, &n, `SELECT count(*) FROM usage_active_users WHERE tenant_id = $1`, id)
+	if n != 0 {
+		t.Fatalf("%d active-user rows kept for a purged tenant", n)
+	}
 	// provider_audit_logs is untouched: earlier rows stay, one tenant.purged row added.
 	var after int
 	e.scalar(t, &after, `SELECT count(*) FROM provider_audit_logs`)
@@ -306,6 +323,18 @@ func TestPurgeDB_CompletesAndResumesAfterCrashAtEachStep(t *testing.T) {
 	for i, crashAt := range []string{"", "exported", "revoked", "destroyed", "done"} {
 		t.Run("crash="+crashAt, func(t *testing.T) {
 			id := e.due(t, fmt.Sprintf("t%d", i))
+			// Sprint 26 (D-67, amends D-46): an issued invoice of the tenant
+			// survives the purge (no foreign key; the purge never touches it).
+			var invoiceID string
+			if err := e.pool.QueryRow(ctx, `INSERT INTO invoices (tenant_id, tenant_name, tenant_slug, month, currency, plan_id, plan_name,
+				plan_revision, subtotal_minor, tax_rate_bp, tax_minor, total_minor, collected_minutes, month_minutes, incomplete_hours)
+				VALUES ($1, 'x', 'x', '2026-10-01', 'USD', gen_random_uuid(), 'P', 1, 100, 0, 0, 100, 1, 44640, 0) RETURNING id::text`, id).Scan(&invoiceID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.pool.Exec(ctx, `UPDATE invoices SET status = 'issued', number = $2, issued_at = now(), issued_by = 'a' WHERE id = $1`,
+				invoiceID, fmt.Sprintf("INV-2026-%06d", i+1)); err != nil {
+				t.Fatal(err)
+			}
 			var before int
 			e.scalar(t, &before, `SELECT count(*) FROM provider_audit_logs`)
 			dir := t.TempDir()
@@ -326,6 +355,16 @@ func TestPurgeDB_CompletesAndResumesAfterCrashAtEachStep(t *testing.T) {
 				t.Fatalf("resume: %v", err)
 			}
 			e.assertPurged(t, id, dir, before)
+			var status string
+			e.scalar(t, &status, `SELECT status FROM invoices WHERE id = $1`, invoiceID)
+			if status != "issued" {
+				t.Fatalf("invoice after purge: %q", status)
+			}
+			var frozenPlan *string
+			e.scalar(t, &frozenPlan, `SELECT plan_id::text FROM usage_tenants WHERE tenant_id = $1`, id)
+			if frozenPlan == nil {
+				t.Fatal("purged tenant's usage snapshot lost its plan id")
+			}
 			// A further pass changes nothing.
 			if err := p.RunOnce(ctx); err != nil {
 				t.Fatalf("second pass: %v", err)

@@ -111,6 +111,10 @@ Run the Sprint 25 acceptance (both, reset lab DB, current `main`) before P1 star
 5. **Q5 delivery:** also **email invoices to the tenant's admins** on issue (and a void notice). This is an editable setting, default on → D-68.
 6. **Q6 tax:** **no tax by default** ("Tax not included"). **Editable:** one tax rate and label (e.g. GST 18 %) → D-69.
 
+**Changed after sign-off (2026-11-24, Sathiya):**
+- **Card edits apply from the next month (D-63).** The month is billed with the card **as it was at the start of the month**, not as it reads at month close. Example: Starter ₹499 / 50 GB included / ₹2 per extra GB, edited on the 15th to ₹599 / 100 GB / ₹1 → that month is billed ₹499 / 50 GB / ₹2; the new terms bill from the next month.
+- **Minutes meters are an editable choice per card**; **session minutes are not billed by default** (a new card starts with no meter billed). Q-1 from the Sprint 25 run: a session counts while valid, also while the device sleeps, so billing it is the provider's choice.
+
 ## Suggested split (two members, as in Sprint 25)
 
 | Member | Phases | Order |

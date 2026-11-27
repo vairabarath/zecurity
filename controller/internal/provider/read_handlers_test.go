@@ -257,6 +257,8 @@ func newReadEnv(t *testing.T) *readEnv {
 	mux.Handle("GET /provider/pki", rp(http.HandlerFunc(h.PKI)))
 	mux.Handle("GET /provider/health", rp(http.HandlerFunc(h.Health)))
 	mux.Handle("GET /provider/metrics/{series}", rp(http.HandlerFunc(h.GetMetricSeries)))
+	mux.Handle("GET /provider/usage", rp(http.HandlerFunc(h.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", rp(http.HandlerFunc(h.ListFleetUsage)))
 	env.health = &fakeHealth{report: leakyReport(now), critical: map[string]bool{"database": true, "valkey": true, "pki": true, "outbox": false}}
 	h.SetHealth(env.health)
 	noop := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
@@ -720,9 +722,11 @@ func TestTenantDetail_OneRepeatableReadSnapshot(t *testing.T) {
 		t.Fatalf("begins=%d iso=%v, want one REPEATABLE READ transaction", e.db.begins, e.db.iso)
 	}
 	// tenant+counts, networks, connectors, shields, relay pool (D-38), plan (D-43),
-	// quotas (D-47, one statement), first-admin invitation (S2, D-44).
-	if e.db.txReads != 8 || e.db.poolReads != 0 {
-		t.Fatalf("reads: %d in the transaction, %d on the pool; want 8 and 0", e.db.txReads, e.db.poolReads)
+	// quotas (D-47, one statement), first-admin invitation (S2, D-44), and the
+	// billing plan (Sprint 26 P1b, D-65): PlanForMonth (month row, then the live
+	// plan) and its name.
+	if e.db.txReads != 11 || e.db.poolReads != 0 {
+		t.Fatalf("reads: %d in the transaction, %d on the pool; want 11 and 0", e.db.txReads, e.db.poolReads)
 	}
 }
 

@@ -44,6 +44,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auditexport"
 	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/certalert"
 	"github.com/yourorg/ztna/controller/internal/changehint"
@@ -82,6 +83,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/tenantexport"
 	"github.com/yourorg/ztna/controller/internal/tenantlifecycle"
 	"github.com/yourorg/ztna/controller/internal/transport"
+	"github.com/yourorg/ztna/controller/internal/usage"
 	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
@@ -778,6 +780,35 @@ func main() {
 	mux.Handle("PATCH /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Update)))
 	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
 	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
+	// Sprint 26 P1b (F34, D-64, D-69, D-70): billing settings, super-admin only.
+	billingSettings := &provider.BillingSettingsHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore}
+	// Sprint 26 P2/P3 (F34, D-66, D-68, D-70): the invoice generator (month
+	// close, regenerate) and the invoice API, super-admin only.
+	billingEnabled := os.Getenv("BILLING_ENABLED") != "false"
+	billingProviderName := os.Getenv("BILLING_PROVIDER_NAME")
+	if billingProviderName == "" {
+		billingProviderName = "Zecurity"
+	}
+	// BILLING_TEST_NOW (ENV=development only) moves the billing clock for
+	// acceptance runs; refused otherwise.
+	billingClock, err := billing.TestClock(os.Getenv("BILLING_TEST_NOW"), os.Getenv("ENV") == "development", time.Now())
+	if err != nil {
+		log.Fatalf("billing: %v", err)
+	}
+	if billingClock != nil {
+		log.Printf("billing: TEST CLOCK active (dev only): billing time is %s", billingClock().Format(time.RFC3339))
+	}
+	invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay), Now: billingClock}
+	invoiceAPI := &provider.InvoiceHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore, Generator: invoiceGen, ProviderName: billingProviderName, Now: billingClock}
+	mux.Handle("GET /provider/invoices", requireProvider(http.HandlerFunc(invoiceAPI.List)))
+	mux.Handle("GET /provider/invoices/{id}", requireProvider(http.HandlerFunc(invoiceAPI.Get)))
+	mux.Handle("POST /provider/invoices/regenerate", requireProvider(http.HandlerFunc(invoiceAPI.Regenerate)))
+	mux.Handle("POST /provider/invoices/{id}/issue", requireProvider(http.HandlerFunc(invoiceAPI.Issue)))
+	mux.Handle("POST /provider/invoices/{id}/mark-paid", requireProvider(http.HandlerFunc(invoiceAPI.MarkPaid)))
+	mux.Handle("POST /provider/invoices/{id}/void", requireProvider(http.HandlerFunc(invoiceAPI.Void)))
+	mux.Handle("POST /provider/invoices/{id}/resend", requireProvider(http.HandlerFunc(invoiceAPI.Resend)))
+	mux.Handle("GET /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Get)))
+	mux.Handle("PATCH /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Update)))
 	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
 	// Per-tenant quota overrides (Sprint 23 S3, D-47): super-admin only,
 	// reason required, audited with before/after.
@@ -883,7 +914,11 @@ func main() {
 	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
 	// Sprint 24 M1 (F23): stored metric series (relay/fleet relay: relay-ops too; tenant: super-admin).
 	mux.Handle("GET /provider/metrics/{series}", requireProvider(http.HandlerFunc(providerReads.GetMetricSeries)))
+	// Usage (Sprint 25 U2, F33, D-60): super-admin only, audited.
+	mux.Handle("GET /provider/usage", requireProvider(http.HandlerFunc(providerReads.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", requireProvider(http.HandlerFunc(providerReads.ListFleetUsage)))
 	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
+	mux.Handle("GET /provider/plans/{id}/revisions", requireProvider(http.HandlerFunc(providerReads.ListPlanRevisions)))
 	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
 	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
 	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
@@ -1185,6 +1220,60 @@ func main() {
 		RollupRetention: mustDuration("METRIC_ROLLUP_RETENTION", providerquery.RollupRetention),
 	}
 	workers.Go("metric-sampler", func() { metricSampler.Run(ctx) })
+
+	// Usage collector (Sprint 25 U1, F32, D-57 … D-59): every minute it counts
+	// session, connector and shield minutes and monthly active users; each
+	// relay heartbeat adds the exact bytes from R1's cumulative counters.
+	// Counted, never estimated; kept 25 months (USAGE_RETENTION shortens it
+	// for tests).
+	usageCollector := &usage.Collector{DB: db.Pool, Retention: mustDuration("USAGE_RETENTION", 0)}
+	relaySvc.WithUsageSink(usageCollector)
+	workers.Go("usage-collector", func() { usageCollector.Run(ctx) })
+
+	// Billing month close and invoice retention (Sprint 26 P2, F34, D-66,
+	// D-67): after each UTC month closes plus BILLING_SETTLE_DELAY (default
+	// 6 h), every tenant with a priced month-start card gets a draft invoice
+	// (quantities from U2's reader only). Once a day invoices past the
+	// retention setting are pruned through prune_invoices(), audited, and the
+	// tenant invoice emails are delivered. BILLING_ENABLED=false turns these
+	// jobs off (the API still answers). Billing never enforces anything.
+	if billingEnabled {
+		workers.Go("billing-month-close", func() { invoiceGen.Run(ctx) })
+		workers.Go("billing-invoice-prune", func() {
+			prune := func() {
+				n, err := billing.Prune(ctx, db.Pool, time.Now(), func(ctx context.Context, tx pgx.Tx, cutoff time.Time, n int64) error {
+					return providerStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+						ProviderEmail: "system",
+						Action:        provider.ActionInvoicePrune,
+						TargetType:    "invoice",
+						TargetID:      "retention",
+						Details:       map[string]any{"pruned": n, "cutoff": cutoff.Format("2006-01-02")},
+					})
+				})
+				if err != nil {
+					log.Printf("billing: invoice prune: %v", err)
+				} else if n > 0 {
+					log.Printf("billing: invoice prune: %d invoice(s) past retention", n)
+				}
+			}
+			prune()
+			t := time.NewTicker(24 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					prune()
+				}
+			}
+		})
+		// Tenant invoice email (Sprint 26 P3, D-68): issued invoices and void
+		// notices to the tenant's active admins, through the F14 SMTP sender;
+		// at most once per (invoice, kind) unless a super-admin resends.
+		emailWorker := &billing.EmailWorker{Store: &billing.SQLEmailStore{DB: db.Pool}, Mail: inviteEmailer, ProviderName: billingProviderName}
+		workers.Go("billing-invoice-email", func() { emailWorker.Run(ctx, mustDuration("BILLING_EMAIL_INTERVAL", 30*time.Second)) })
+	}
 
 	workers.Go("hourly-ticker", func() {
 

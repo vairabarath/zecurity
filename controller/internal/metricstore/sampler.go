@@ -211,15 +211,16 @@ type tenantCount struct {
 // tenantCounts reads every active tenant (status 'active'; a suspended one
 // keeps that status, D-45) with its live sessions and online agents.
 func (s *Sampler) tenantCounts(ctx context.Context, now time.Time) ([]tenantCount, error) {
+	// The definitions are shared with the usage collector (providerquery
+	// activity.go), so F23 charts and F32 usage count the same things.
 	rows, err := s.DB.Query(ctx, `
 SELECT w.id::text,
        (SELECT count(*) FROM client_devices d
-         WHERE d.workspace_id = w.id AND d.revoked_at IS NULL
-           AND d.session_idle_until > $1 AND d.session_max_until > $1),
-       (SELECT count(*) FROM connectors c WHERE c.tenant_id = w.id AND c.status = 'active'),
-       (SELECT count(*) FROM shields sh WHERE sh.tenant_id = w.id AND sh.status = 'active')
+         WHERE d.workspace_id = w.id AND `+providerquery.LiveClientSessionSQL+`),
+       (SELECT count(*) FROM connectors c WHERE c.tenant_id = w.id AND `+providerquery.ActiveConnectorSQL+`),
+       (SELECT count(*) FROM shields sh WHERE sh.tenant_id = w.id AND `+providerquery.ActiveShieldSQL+`)
   FROM workspaces w
- WHERE w.status = 'active'
+ WHERE `+providerquery.CountedTenantSQL+`
  ORDER BY w.id`, now)
 	if err != nil {
 		return nil, fmt.Errorf("tenant counts: %w", err)

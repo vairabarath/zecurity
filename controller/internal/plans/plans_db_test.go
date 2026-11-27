@@ -181,7 +181,7 @@ func TestPlansDB_SeedsAndCurrentDefault(t *testing.T) {
 		t.Fatalf("new workspace plan %s, want Free", got)
 	}
 	// The trigger follows a changed default (a column default couldn't).
-	pro, err := e.store.Create(ctx, "Pro", "", limits(n(50), n(500), n(20), n(40), n(40), n(250)), nil)
+	pro, err := e.store.Create(ctx, "Pro", "", limits(n(50), n(500), n(20), n(40), n(40), n(250)), nil, CardMeta{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestPlansDB_LimitsValidation(t *testing.T) {
 	negative := full.Clone()
 	negative[KeyUsers] = n(-1)
 	for name, l := range map[string]Limits{"missing key": missing, "extra key": extra, "negative": negative, "nil map": nil} {
-		if _, err := e.store.Create(ctx, "p-"+strings.ReplaceAll(name, " ", "-"), "", l, nil); err != ErrInvalidLimits {
+		if _, err := e.store.Create(ctx, "p-"+strings.ReplaceAll(name, " ", "-"), "", l, nil, CardMeta{}, nil); err != ErrInvalidLimits {
 			t.Errorf("%s: err %v, want ErrInvalidLimits", name, err)
 		}
 	}
@@ -226,10 +226,10 @@ func TestPlansDB_LimitsValidation(t *testing.T) {
 		'{"users": 1.5, "resources": 1, "remote_networks": 1, "connectors": 1, "shields": 1, "client_devices": 1}')`); err == nil {
 		t.Fatal("the plans CHECK must refuse a fractional limit")
 	}
-	if _, err := e.store.Create(ctx, "ok", "", full, nil); err != nil {
+	if _, err := e.store.Create(ctx, "ok", "", full, nil, CardMeta{}, nil); err != nil {
 		t.Fatalf("a full plan with an explicit null: %v", err)
 	}
-	if _, err := e.store.Create(ctx, "ok", "", full, nil); err != ErrNameTaken {
+	if _, err := e.store.Create(ctx, "ok", "", full, nil, CardMeta{}, nil); err != ErrNameTaken {
 		t.Fatalf("duplicate name: %v, want ErrNameTaken", err)
 	}
 }
@@ -238,8 +238,8 @@ func TestPlansDB_LimitsValidation(t *testing.T) {
 func TestPlansDB_SetDefault(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	a, _ := e.store.Create(ctx, "A", "", limits(n(1), n(1), n(1), n(1), n(1), n(1)), nil)
-	b, _ := e.store.Create(ctx, "B", "", limits(n(1), n(1), n(1), n(1), n(1), n(1)), nil)
+	a, _ := e.store.Create(ctx, "A", "", limits(n(1), n(1), n(1), n(1), n(1), n(1)), nil, CardMeta{}, nil)
+	b, _ := e.store.Create(ctx, "B", "", limits(n(1), n(1), n(1), n(1), n(1), n(1)), nil, CardMeta{}, nil)
 	var prev, next Plan
 	changed, err := e.store.SetDefault(ctx, a.ID, func(_ context.Context, _ pgx.Tx, p, nx Plan) error {
 		prev, next = p, nx
@@ -288,7 +288,7 @@ func TestPlansDB_DeleteGuards(t *testing.T) {
 	if err := e.store.Delete(ctx, LegacyPlanID, nil); err != ErrInUse {
 		t.Fatalf("delete assigned: %v, want ErrInUse", err)
 	}
-	spare, _ := e.store.Create(ctx, "Spare", "", limits(nil, nil, nil, nil, nil, nil), nil)
+	spare, _ := e.store.Create(ctx, "Spare", "", limits(nil, nil, nil, nil, nil, nil), nil, CardMeta{}, nil)
 	audited := false
 	if err := e.store.Delete(ctx, spare.ID, func(context.Context, pgx.Tx, Plan) error { audited = true; return nil }); err != nil || !audited {
 		t.Fatalf("delete unused plan: err=%v audited=%v", err, audited)
@@ -326,7 +326,7 @@ func TestPlansDB_AssignAndEffectiveLimits(t *testing.T) {
 	if _, err := e.store.Assign(ctx, ws, FreePlanID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.store.Update(ctx, FreePlanID, Change{Limits: limits(n(7), n(50), n(3), n(10), n(10), n(25))}, nil); err != nil {
+	if _, err := e.store.Update(ctx, FreePlanID, Change{Limits: limits(n(7), n(50), n(3), n(10), n(10), n(25))}, CardMeta{Reason: "test"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if l, _ := EffectiveLimits(ctx, e.pool, ws); value(l, KeyUsers) != "7" {

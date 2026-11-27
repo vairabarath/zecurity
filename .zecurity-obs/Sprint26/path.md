@@ -42,7 +42,7 @@ All six review questions were answered on 2026-11-23 (marked ✔). The full text
 | ID | Decision | Phase |
 |---|---|---|
 | **D-62** | **Scope:** F34 plan cards, billing settings and invoices, emailed to tenants (+ X3). **Not in scope:** collecting payment (no payment processor, no card data), enforcing anything on non-payment, tenant-facing billing pages in the admin UI. No agent change. A plan card without a price is **not billable**: its tenants get no invoice. | all |
-| **D-63** | ✔ Q1 **Plan cards.** A plan is a **card** the provider creates and edits whenever it wants. It has the B1 part (name, description, the six limits of D-43/D-47) and an optional **price**: a **monthly base fee**, and for each meter it prices an **included quantity**, a **unit size** and a **unit price** for usage above the included quantity. Billable meters are the D-57 meters. Every edit raises the card's **revision** and is kept in an append-only history. A custom deal is a new card assigned to that tenant. The card **as it reads at month close** prices the month; issued invoices never change. | P1, P2, P4 |
+| **D-63** | ✔ Q1 **Plan cards.** A plan is a **card** the provider creates and edits whenever it wants. It has the B1 part (name, description, the six limits of D-43/D-47) and an optional **price**: a **monthly base fee**, and for each meter it prices an **included quantity**, a **unit size** and a **unit price** for usage above the included quantity. Billable meters are the D-57 meters, each optional per card (minutes meters too); **session minutes are off unless a card turns them on**. Every edit raises the card's **revision** and is kept in an append-only history. A custom deal is a new card assigned to that tenant. The card **revision in force at the start of the month** prices the month: an edit during the month applies from the next month (changed 2026-11-24, Sathiya; was "at month close"). Issued invoices never change. | P1, P2, P4 |
 | **D-64** | ✔ Q2 **Country and currency.** A provider-wide **billing country and currency**, **editable**, default **United States / USD** (for example India / INR). Choosing a country fills in its currency, and the currency can still be set on its own. **Changing the currency switches every plan card to it** in one transaction (each card gets a revision). Amounts are **not converted**: the console warns and the provider reviews each card's prices. Drafts take the new currency when regenerated; issued invoices keep theirs. Money is whole **minor units** (`BIGINT`), using the currency's exponent, with no floating point. Usage above the included quantity is rounded **up to whole units**. Overflow refuses; it never wraps. | P1, P2, P4 |
 | **D-65** | ✔ Q3 **Plan change in the month.** A tenant is billed for the **whole month at the plan it had at the start of the month**. A plan changed mid-month is billed **from the next month**. The month-start plan is **preserved**: the first plan change in a month records the plan it replaces in `tenant_billing_plans (tenant, month, plan)`, in the same transaction as the change. A tenant created mid-month starts on its creation plan. Limits (D-43/D-47) still change **immediately**; only billing waits for the next month. There is no proration. | P1, P2 |
 | **D-66** | **Invoice lifecycle.** **Draft** (can be regenerated) → **issued** → **paid** or **void**. An issued invoice can't be changed and gets a number from a **gap-free counter**, `INV-<year>-<6 digits>`. Void needs a reason. A paid invoice is final. A correction is a void plus a new invoice. Drafts are generated after the UTC month closes **plus a 6-hour settling delay**. Quantities are **counts only (D-59)**: hours the collector missed are billed as counted, and the invoice states how many there were. | P2, P3 |
@@ -58,6 +58,9 @@ All six review questions were answered on 2026-11-23 (marked ✔). The full text
 ## Team assignments
 
 **Person 1, Barath (M2):** P1a → P1b → P2. Phase file: `Member1-Barath/Phases-P1-P2-Prices-Invoices.md`.
+- **Takeover 2026-11-26:** P1a was the blocker for every other phase, so Sathiya built P1a, P1b and P2 on Sathiya's instruction. Barath reviews the PRs.
+- The code is in local stacked branches: `feat/sprint26-p1a-billing-schema` → `-p1b-cards-settings` → `-p2-invoices` → P3 (`feat/sprint26-p3-invoice-email`).
+- Each implementation record lists the choices to review.
 **Person 2, Sathiya (M1):** X3 → P3 → P4. Phase file: `Member2-Sathiya/Phases-X3-P3-P4-Billing-Console.md`.
 
 **Both:**
@@ -186,20 +189,28 @@ Tracker: F34 ticked only after its live check.
 
 ## Checklist
 
-- [ ] Sprint 25 stack merged (#244 → #248); Sprint 25 acceptance run (both) done; follow-ups recorded as X3; tracker F32, F33 ticked
+- [x] Sprint 25 stack merged (#244 → #248); Sprint 25 acceptance run (both) done; follow-ups recorded as X3; tracker F32, F33 ticked
 - [x] Phase 0: Q1–Q6 answered 2026-11-23; D-62 … D-70 written into the Decision Record (amendment 2026-11-23, billing)
 - [x] Documents signed off 2026-11-23 (by Sathiya, who instructed that this override the product-owner sign-off step; Barath reviews in PR #249)
-- [ ] X3: Sprint 25 follow-ups (Sathiya)
-- [ ] P1a: Billing schema `073_plan_cards`, `074_invoices` (Barath)
-- [ ] P1b: Plan card + billing settings API (Barath)
-- [ ] P2: Invoice generator and lifecycle (Barath)
-- [ ] P3: Invoice API + tenant email (Sathiya)
-- [ ] P4: Billing console (Sathiya)
-- [ ] Sprint acceptance run (both); tracker F34
+- [x] X3: Sprint 25 follow-ups (Sathiya) — #253
+- [x] P1a: Billing schema `073_plan_cards`, `074_invoices` (built by Sathiya, takeover) — #257
+- [x] P1b: Plan card + billing settings API (built by Sathiya, takeover) — #258
+- [x] P2: Invoice generator and lifecycle (built by Sathiya, takeover) — #259
+- [x] P3: Invoice API + tenant email (Sathiya) — #250
+- [x] P4: Billing console (Sathiya) — #251, #254
+- [x] Sprint acceptance run (Sathiya, 2026-11-26, live on `main` + test clock; PASS with one fix); tracker F34 ticked
 
 ## Post-Sprint Fixes
 
-_None yet._
+### Fix: a purged tenant's final invoice (acceptance 2026-11-26)
+**Issue:** a tenant purged during November with no usage left got no final invoice (D-67).
+
+**Root cause:** the U1 collector's `Prune` deleted a purged tenant's `usage_tenants` snapshot as soon as it had no usage rows left. The month close names a purged tenant's final invoice from that snapshot, and only runs after the month closes, so the snapshot was gone by then.
+
+**Fix:** `Prune` keeps a purged snapshot at least `SnapshotBillingHoldMonths` (4) after `purged_at` (the month close looks back 3 closed months). Details in `Member1-Barath/…` P2 Post-Phase Fixes. Found and rechecked live in the acceptance run.
+
+### Addition: dev-only billing test clock
+`BILLING_TEST_NOW` (RFC 3339; refused unless `ENV=development`) moves the billing clock so the acceptance can close the current month with real traffic (path.md: "use a test clock"). The email queue and the retention prune keep real time.
 
 ## Out of scope
 

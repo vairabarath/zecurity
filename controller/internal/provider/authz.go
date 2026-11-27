@@ -147,6 +147,37 @@ const (
 	ActionTenantMetricsRead = "tenant.metrics.read"
 )
 
+// Usage (Sprint 25 U2, F33, D-60): usage is tenant data, so every usage read
+// is tenant.usage.read (super-admin only by decide()'s rule; relay-ops 403).
+// A read of one tenant's usage is audited as tenant.usage.read (as a tenant
+// detail view, OQ-1); the fleet list as one usage.fleet.read row per request.
+// Both end in ".read", so the incident timeline leaves them out (T1).
+const (
+	ActionTenantUsageRead = "tenant.usage.read"
+	ActionUsageFleetRead  = "usage.fleet.read"
+)
+
+// Billing (Sprint 26 F34, D-70): billing is tenant data, so every billing
+// action is super-admin only by decide()'s rule (relay-ops 403; none of them
+// is in relayOpsAlsoAllowed). Card writes reuse the plan.* actions; reading
+// the billing settings is plan.read (the Plans page needs the currency).
+const (
+	ActionBillingSettingsWrite  = "billing.settings.write"
+	ActionBillingSettingsUpdate = "billing.settings.update" // audit action of a settings write
+	ActionInvoiceRead           = "invoice.read"
+	ActionInvoiceWrite          = "invoice.write"
+	ActionInvoicePrune          = "invoice.prune" // audit action of the retention prune (D-67)
+	// Audit actions of the invoice API (P3): reads, one row per request.
+	ActionInvoiceFleetRead = "invoice.fleet.read"
+	// Audit actions of the invoice writes (invoice.write), reason and
+	// before/after each.
+	ActionInvoiceIssue      = "invoice.issue"
+	ActionInvoiceMarkPaid   = "invoice.mark_paid"
+	ActionInvoiceVoid       = "invoice.void"
+	ActionInvoiceRegenerate = "invoice.regenerate"
+	ActionInvoiceResend     = "invoice.resend"
+)
+
 // relayOpsAlsoAllowed are the actions outside relay.* that relay-ops may
 // perform.
 var relayOpsAlsoAllowed = map[string]bool{
@@ -294,6 +325,30 @@ func (a *Authz) CanManagePlans(actor Actor, action string, target Target) error 
 	return decide(actor, action, target)
 }
 
+// CanReadBillingSettings gates GET /provider/billing/settings (plan.read:
+// super-admin only).
+func (a *Authz) CanReadBillingSettings(actor Actor) error {
+	return decide(actor, ActionPlanRead, Target{Type: "billing_settings"})
+}
+
+// CanWriteBillingSettings gates PATCH /provider/billing/settings
+// (billing.settings.write: super-admin only, D-70).
+func (a *Authz) CanWriteBillingSettings(actor Actor) error {
+	return decide(actor, ActionBillingSettingsWrite, Target{Type: "billing_settings"})
+}
+
+// CanReadInvoices gates the invoice reads (invoice.read: super-admin only,
+// D-70).
+func (a *Authz) CanReadInvoices(actor Actor) error {
+	return decide(actor, ActionInvoiceRead, Target{Type: "invoice"})
+}
+
+// CanWriteInvoices gates issue, mark paid, void, regenerate and resend
+// (invoice.write: super-admin only, D-70).
+func (a *Authz) CanWriteInvoices(actor Actor, target Target) error {
+	return decide(actor, ActionInvoiceWrite, target)
+}
+
 // CanSetTenantQuota gates PUT /provider/tenants/{id}/quotas/{key}
 // (super-admin only: tenant.*, D-06, D-47).
 func (a *Authz) CanSetTenantQuota(actor Actor, target Target) error {
@@ -330,6 +385,12 @@ func (a *Authz) CanReadMetricSeries(actor Actor, series string, tenantData bool)
 		return decide(actor, ActionTenantMetricsRead, Target{Type: "metric", ID: series})
 	}
 	return decide(actor, ActionRelayMetricsRead, Target{Type: "metric", ID: series})
+}
+
+// CanReadUsage gates GET /provider/usage and /provider/usage/tenants
+// (tenant.usage.read: super-admin only; D-60).
+func (a *Authz) CanReadUsage(actor Actor) error {
+	return decide(actor, ActionTenantUsageRead, Target{Type: "usage"})
 }
 
 func (a *Authz) CanReadAlerts(actor Actor) error {

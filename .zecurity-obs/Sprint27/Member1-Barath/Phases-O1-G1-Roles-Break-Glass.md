@@ -5,7 +5,7 @@ owner: Barath (Person 1, M2)
 features: [F19 provider admin roles, F20 break-glass]
 phases: [O1, G1]
 decisions: [D-71, D-72, D-73, D-74, D-75, D-05, D-06, D-26, D-28, D-31, D-50]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); planned — starts after Sprint 26 is merged and live-checked
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 next (migration 075_; latest on main is 074_invoices)
 ---
 
 # Sprint 27 — Barath: O1 role matrix and roles (F19), G1 loud break-glass (F20)
