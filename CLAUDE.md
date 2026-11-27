@@ -8,26 +8,18 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 26 is the active sprint: Provider Dashboard, billing plans and invoicing (F34).** Decisions **D-62 … D-70** are made (Decision Record amendment **2026-11-23, billing**). The Sprint 26 documents were **signed off on 2026-11-23 by Sathiya, who instructed that this override the product-owner sign-off step; Barath reviews them in PR #249**. Sprint 25 (F32, F33, usage alerts) is **merged** (2026-11-25, #244 → #248 plus the live-run fixes #253; `main` `1bf7e225`) and live-checked; F32 and F33 are ticked (#255). Sprint 26 **prices, invoices and emails invoices**: no payment collection, no enforcement, no agent change.
-- **P1a — billing schema (F34)**, Barath, merged first (the contract with P3/P4):
-  - `073_plan_cards`: `billing_settings` (country, currency, tax, retention, email), `plan_prices`, `plans.revision`, `plan_card_revisions`, `tenant_billing_plans`, `usage_tenants.plan_id`;
-  - `074_invoices`: `invoices`, `invoice_lines`, `invoice_number_counters`, `invoice_emails`, immutability triggers, `prune_invoices()`.
-- **P1b — plan cards + billing settings API (D-63, D-64, D-65, D-69)**, Barath:
-  - cards are created and edited any time (price, included quantities, limits; revision history);
-  - the currency is editable, default USD (e.g. INR); a change switches every card;
-  - plan assignment records the month-start plan; `PlanForMonth` is the only billing-plan rule.
-- **P2 — invoice generator + lifecycle (D-66, D-67)**, Barath:
-  - month close plus a 6 h settling delay; drafts from U2's reader (counts only);
-  - regenerate, issue (gap-free `INV-<year>-<n>`), mark paid, void;
-  - editable retention (default 8 years); invoices survive the purge (amends D-46).
-- **X3 — Sprint 25 follow-ups**, Sathiya: **done** — the acceptance run's findings were fixed in #253 (F32-1 relay usage on every heartbeat, "Not metered" months, counted share); F32, F33 ticked.
-- **P3 — invoice API + tenant email (D-68, D-70)**, Sathiya, after P1a (writes after P2):
-  - `GET/POST /provider/invoices…`; `invoice.read` / `invoice.write` (super-admin only; relay-ops 403);
-  - issued invoices are emailed to the tenant's active admins (editable, default on), with a void notice and resend.
-- **P4 — billing console**, Sathiya, after P1b and P3: Billing settings, Plans as cards (create, edit, duplicate, history), Invoices page and detail, tenant Invoices, export, print view.
-- **Not in Sprint 26:** payment collection, any enforcement, tenant-facing billing pages, tax IDs or per-country tax rules, multi-currency at once or amount conversion, proration, discounts or credits, direct-path metering, F19 (billing role), F20, F22, F28/F29, F31, F35, F37, F39, F40.
+**Sprint 27 is the active sprint: provider access and API (F19, F20, F35).** Started 2026-11-27. Decisions **D-71 … D-76** are made (Decision Record amendment **2026-11-23, provider access**). The documents were signed off on 2026-11-23 by Sathiya (as for Sprint 26); Barath reviews them in PR #252. Sprint 26 (F34) is **merged and live-checked** (acceptance PASS 2026-11-26, #260 `7ee717bc`); F34 is ticked. Sprint 27 adds roles, loud break-glass and read-only API keys: **no agent change, no external IdP, no impersonation, no keys that write.**
+- **X4 — Sprint 26 follow-ups**, Sathiya: **done** — the acceptance run's one finding (a purged tenant's final invoice) was fixed in #260.
+- **O1 — role matrix + roles (D-72, D-73, D-74)**, Barath, merged first (the contract with K1 and O2):
+  - `decide()` becomes an explicit role → actions table; existing roles keep exactly today's permissions; an action with no entry is denied to every role except super-admin;
+  - new roles `auditor` (all reads), `billing` (cards, billing settings, invoices, usage, tenant list, plan assignment), `support` (tenant reads, the tenant's alerts and timeline, health); TOTP mandatory for all three; `075_provider_roles`.
+- **G1 — loud break-glass (D-75)**, Barath, after O1: `recover-admin --reason` on the controller host is the only path; each use raises a critical `provider.break_glass_used` alert, emails every super-admin and shows a console banner until acknowledged; `077_provider_alert_kinds` (also holds K1's `api_key.expiring`).
+- **K1 — provider API keys (D-76)**, Sathiya, after O1 (expiry alert after `077_`): `zpk_<id>_<secret>`, SHA-256 at rest, shown once; one role per key (never super-admin); read-only; expires ≤ 365 days; optional CIDR allowlist and rate limit; never a session; `076_provider_api_keys`.
+- **K2 — keys console**, Sathiya, after K1: create (show once), list (prefix only), revoke with a reason.
+- **O2 — console per role**, Sathiya, after O1: navigation and write buttons follow the matrix (UX only; the server decides).
+- **Not in Sprint 27:** agent changes, external IdPs (D-29), impersonation or support grants (F31), partner scoping (F37), several roles per operator, step-up beyond today's TOTP, keys that write, OAuth/mTLS for the API, F22, F28, F29, F36, F38, F39, F40.
 
-Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)** , **2026-11-21 (D-55: relay-ops see relay and pool operation audit rows in the incident timeline; extends D-40)** , **2026-11-21, usage (D-56 … D-61; extends D-40 and D-50, amends D-46)** and **2026-11-23, billing (D-62 … D-70; extends D-43, D-40/D-60, amends D-30, D-46)**. The plan is `.zecurity-obs/Sprint26/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
+Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → decision record 2026-09-23 (D-01 … D-23) and amendments 2026-09-26 (D-24 … D-29), 2026-10-26 (D-30 … D-34), 2026-11-11 (D-35, D-36), 2026-11-12 (D-37 … D-41), 2026-11-17 (D-42 … D-47; amends D-07, D-11, D-17, D-30, D-31; preserves D-08) **2026-11-20 (D-48 … D-54; amends D-30, extends D-40)** , **2026-11-21 (D-55: relay-ops see relay and pool operation audit rows in the incident timeline; extends D-40)** , **2026-11-21, usage (D-56 … D-61; extends D-40 and D-50, amends D-46)** **2026-11-23, billing (D-62 … D-70; extends D-43, D-40/D-60, amends D-30, D-46)** and **2026-11-23, provider access (D-71 … D-76; extends D-26, D-28, D-50; amends D-05, D-06, D-30, D-31, D-68/D-70)**. The plan is `.zecurity-obs/Sprint27/path.md` (decisions summary, order, conflict zones, rules, test gates, acceptance).
 
 **Database (pre-production rule):**
 - Schema changes are new numbered SQL files in `controller/migrations/`, run by Postgres only when its volume is first created.
@@ -35,7 +27,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → d
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only, both developing in Sprint 26.** **M1 = Sathiya** (Person 2): X3 follow-ups, P3 invoice API + tenant email, P4 billing console — `Sprint26/Member2-Sathiya/Phases-X3-P3-P4-Billing-Console.md`. **M2 = Barath** (Person 1, product owner): P1a billing schema, P1b plan cards + settings API, P2 invoice generator — `Sprint26/Member1-Barath/Phases-P1-P2-Prices-Invoices.md`. Both review each other's PRs and run the sprint acceptance on the lab.
+**Team: two members only, both developing in Sprint 27.** **M1 = Sathiya** (Person 2): X4 follow-ups (done), K1 API keys, K2 keys console, O2 console per role — `Sprint27/Member2-Sathiya/Phases-X4-K1-K2-O2-API-Keys.md`. **M2 = Barath** (Person 1, product owner): O1 role matrix + roles, G1 loud break-glass — `Sprint27/Member1-Barath/Phases-O1-G1-Roles-Break-Glass.md`. Both review each other's PRs and run the sprint acceptance on the lab.
 
 ---
 
@@ -72,8 +64,8 @@ When a team member starts a session, they will tell you who they are (Sathiya / 
 
 0. **Sync with `origin/main`** (section above): fetch, say what moved, fast-forward `main`, update the working branch.
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint26/path.md` — decisions (D-62 … D-70), order, conflict zones, rules, test gates and acceptance
-3. Read their phase file and pick the **first unchecked phase** whose dependencies are merged (Barath: P1a → P1b and P2; Sathiya: X3 → P3 (after P1a; writes after P2) → P4). If the documents aren't signed off yet (`path.md` checklist), don't start implementation
+2. Read `.zecurity-obs/Sprint27/path.md` — decisions (D-71 … D-76), order, conflict zones, rules, test gates and acceptance
+3. Read their phase file and pick the **first unchecked phase** whose dependencies are merged (Barath: O1 → G1; Sathiya: X4 → K1 (after O1; expiry alert after G1's `077_`) → K2 → O2 (after O1)). If the documents aren't signed off yet (`path.md` checklist), don't start implementation
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 
@@ -86,11 +78,12 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint26/path.md` | Active sprint: decisions summary, phases and order, conflict zones, rules, test gates, acceptance, checklist |
-| `.zecurity-obs/Sprint26/Member1-Barath/Phases-P1-P2-Prices-Invoices.md` | Barath's phases P1a, P1b, P2 (F34) |
-| `.zecurity-obs/Sprint26/Member2-Sathiya/Phases-X3-P3-P4-Billing-Console.md` | Sathiya's phases X3, P3, P4 (F34) |
-| `.zecurity-obs/Sprint26/Scope-Draft.md` | Sprint 26 scope discussion (signed off 2026-11-23) |
-| `.zecurity-obs/Sprint25/path.md` | Previous sprint record (usage ledger F32, usage report F33, usage alerts; stack #244 → #248, acceptance run pending) |
+| `.zecurity-obs/Sprint27/path.md` | Active sprint: decisions summary, phases and order, conflict zones, rules, test gates, acceptance, checklist |
+| `.zecurity-obs/Sprint27/Member1-Barath/Phases-O1-G1-Roles-Break-Glass.md` | Barath's phases O1, G1 (F19, F20) |
+| `.zecurity-obs/Sprint27/Member2-Sathiya/Phases-X4-K1-K2-O2-API-Keys.md` | Sathiya's phases X4, K1, K2, O2 (F35, F19) |
+| `.zecurity-obs/Sprint27/Scope-Draft.md` | Sprint 27 scope discussion (signed off 2026-11-23) |
+| `.zecurity-obs/Sprint26/path.md` | Previous sprint record (billing plans and invoicing F34; acceptance PASS 2026-11-26) |
+| `.zecurity-obs/Sprint25/path.md` | Previous sprint record (usage ledger F32, usage report F33, usage alerts; acceptance PASS 2026-11-24) |
 | `.zecurity-obs/Sprint24/path.md` | Previous sprint record (metrics F23, alerts F26, incident timeline F27; acceptance run pending) |
 | `.zecurity-obs/Sprint23/path.md` | Previous sprint record (plans, headroom, tenant lifecycle, quotas; Post-Sprint Fixes) |
 | `.zecurity-obs/Planning/Provider-Dashboard-Features.md` | Feature tracker (tick only when merged **and** live-checked) |
@@ -169,15 +162,24 @@ cd controller && docker compose down -v && docker compose up -d   # Recreate loc
 
 ## Rules (non-negotiable)
 
-Sprint 26 specific:
+Sprint 27 specific:
 - Build gate passes before proceeding to the next phase (DB-backed tests must run, not skip; a skipped DB test is a failed case).
-- The Decision Record (all amendments through **2026-11-23, billing**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
-- No phase before its dependencies are merged (Sprint 25 is merged; P1a before P1b, P2 and P3; P2 before P3's writes; P1b and P3 before P4).
+- The Decision Record (all amendments through **2026-11-23, provider access**) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
+- No phase before its dependencies are merged (O1 before G1, K1 and O2; `077_` before K1's expiry alert; K1 before K2).
 - **No commit, push, PR or merge without the product owner's explicit go** for that step.
+- **Deny by default (D-72):** an action with no matrix entry is denied to every role except super-admin; a test fails when an action constant has no entry. Existing roles keep exactly today's permissions (full action × role table test, incl. D-31, D-41, D-55).
+- **New roles (D-73):** `auditor` reads only; `billing` never gets relay, pool, tenant lifecycle, quota, alert or operator actions; `support` never sees invoices, usage or the provider audit log, and never writes. Tenant reads by any role are audited. `relay-ops` still never sees tenant data (D-40).
+- **TOTP (D-74)** is mandatory for `super-admin`, `auditor`, `billing`, `support`; never mint a session without `otp` in `amr` for them.
+- **API keys (D-76):** read-only (`decide()` refuses every write for an `api_key` actor, not handlers); never `super-admin`; expire ≤ 365 days; never go through `IssueSession` or yield a session; refused (403) on auth, TOTP, operator and key routes; the secret is shown once (`no-store`) and never logged, audited or returned again; rate limit and CIDR checks fail closed; a generic 401 on any failure.
+- **Break-glass (D-75):** only `recover-admin --reason` on the controller host; no standing account, no console or API route; every use alerts, emails super-admins and shows a banner; the temporary password stays stdout-only; no secrets in the alert.
+- Migrations reserved: `075_provider_roles` (O1), `076_provider_api_keys` (K1), `077_provider_alert_kinds` (G1, both new platform kinds; never edit `069_` or `072_`).
+- Respect the `Sprint27/path.md` conflict zones (`authz.go`, `RequireProvider` / `identity.go`, `totp.go`, operator handlers, `recover_admin.go`, `internal/alerting` kinds, `main.go`, `roles.ts`, `Layout.tsx`, `api-surface.test.ts`, `static-guards.test.ts`).
+
+Sprint 26 (still in force):
 - **Money is integers (D-64):** minor units only; no floats. Overage is rounded up to whole units, and tax half up. Overflow refuses.
 - **Billing reads, never estimates:** quantities come only through U2's `ReadMonthUsage` (D-59); the billing plan only through `PlanForMonth` (month-start plan, D-65).
 - **Issued invoices are immutable (D-66):** DB triggers. Numbers come from a gap-free counter (no `SEQUENCE`). One non-void invoice per tenant per month. Only `prune_invoices()` deletes issued invoices (editable retention, default 8 years, D-67); the S4 purge never does.
-- **Billing is tenant data (D-70):** super-admin only (`billing.settings.write`, `invoice.read`, `invoice.write`; cards use the plan actions); relay-ops 403. Invoice email goes only to the tenant's own active admins; addresses are never audited or logged (D-68).
+- **Billing is tenant data (D-70, opened to the `billing` role by D-73):** super-admin only (`billing.settings.write`, `invoice.read`, `invoice.write`; cards use the plan actions); relay-ops 403. Invoice email goes only to the tenant's own active admins; addresses are never audited or logged (D-68).
 - **No enforcement (D-62):** no code path uses invoices, prices or tax to refuse, slow, suspend or limit anything. No payment data.
 
 Sprint 25 (still in force):
@@ -191,9 +193,9 @@ Sprint 24 (still in force):
 - **Webhooks (D-52):** one generic versioned JSON payload, no vendor SDKs; HMAC over timestamp + body; secret sealed, shown once, never logged/audited/returned; HTTPS outside dev; SSRF guard checked at connect time; no secrets or tenant content in the payload.
 - **Rules and channels (D-53):** super-admin only, reason + before/after audit; built-in rule kinds, no query language.
 - **Metrics (D-49):** Postgres, 1-min 7 days, hourly 400 days; an unknown value is a gap, never 0. Evaluator read errors never resolve an alert.
-- **No migration framework.** Reserved: `073_plan_cards`, `074_invoices` (P1a). Earlier: `071_`, `072_` (Sprint 25), `068_` … `070_` (Sprint 24), `062_` … `067_` (Sprint 23); check the latest with `ls controller/migrations | tail -3` before adding one. Never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
-- **Console writes (D-30, amended by D-42 … D-47 and D-53):** auth calls (incl. TOTP), operator management, relay create / revoke / delete / drain / resume / move / pools, tenant pool assignment, plans and plan assignment, relay link capacity, tenant create / suspend / resume / delete / cancel delete / legal hold, quota overrides, **alert rules and alert channels (create, update, enable/disable, delete, test, rotate secret)**, **plan card prices, billing settings, and invoice issue / mark paid / void / regenerate / resend (D-70)**. Every new write goes into `api-surface.test.ts` on purpose. `admin/` may change only where a phase file says so.
-- **Tenant actions are super-admin only (D-06)**, plans too; relay link capacity is relay-ops or super-admin (D-31 amended). Enforced server-side in `decide()`; console visibility is never the authorization control.
+- **No migration framework.** Reserved: `075_` … `077_` (Sprint 27). Earlier: `073_`, `074_` (Sprint 26), `071_`, `072_` (Sprint 25), `068_` … `070_` (Sprint 24), `062_` … `067_` (Sprint 23); check the latest with `ls controller/migrations | tail -3` before adding one. Never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
+- **Console writes (D-30, amended by D-42 … D-47 and D-53):** auth calls (incl. TOTP), operator management, relay create / revoke / delete / drain / resume / move / pools, tenant pool assignment, plans and plan assignment, relay link capacity, tenant create / suspend / resume / delete / cancel delete / legal hold, quota overrides, **alert rules and alert channels (create, update, enable/disable, delete, test, rotate secret)**, **plan card prices, billing settings, and invoice issue / mark paid / void / regenerate / resend (D-70)**, **API key create / revoke (D-76) and the break-glass banner acknowledge (D-75)**. Every new write goes into `api-surface.test.ts` on purpose. `admin/` may change only where a phase file says so.
+- **Tenant actions are super-admin only (D-06, amended by D-73:** `auditor` and `support` read tenants, `billing` reads the tenant list and assigns plans**)**, plans too; relay link capacity is relay-ops or super-admin (D-31 amended). Enforced server-side in `decide()`; console visibility is never the authorization control.
 - **D-17 (extended):** relay revoke/delete and **tenant suspend/delete** need a mandatory reason (in the body, never the URL; stored in the audit) and a typed name/slug confirmation, checked by the server. Tenant-affecting writes (plan assignment, resume, cancel, quota override, legal hold) need a reason. Audit with before/after (F17).
 - **D-08 holds:** suspension never refuses or invalidates an existing connector's or shield's authentication; suspended agents get a deny-all ACL and resume without re-enrollment.
 - **Quota checks (D-47)** are server-side on every creation path and atomic with the creation (same transaction, serialised per workspace); lookup errors fail closed. Lowered limits never delete resources.
@@ -206,7 +208,6 @@ Sprint 24 (still in force):
 - Never log, audit or return passwords (incl. temporary ones), `password_hash`, TOTP secrets or codes, invitation tokens or key material. Provider login and TOTP verification stay rate-limited (fail closed) and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04). A provisioning token is returned once (`Cache-Control: no-store`) and never stored in the console.
 - Proto changes are additive only; never renumber fields (Sprint 24: R1 field 13 only).
-- Respect the `Sprint26/path.md` conflict zones (U2 usage reader, U1 `usage_tenants` snapshot, B1 plan create/update/assign, S4 purge, SMTP sender, `main.go`, `authz.go`, `api-surface.test.ts`, `TenantDetail.tsx`, Plans page, navigation).
 
 Sprint 20 (invariants still in force):
 - Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.
