@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 part 1 (keys) built stacked on O1 #262, live PASS; K1 expiry alert waits for G1's 077_
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 built (draft PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 next
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role
@@ -185,7 +185,29 @@ Branch `feat/sprint27-k1-api-keys`, **stacked on G1** (PR #263, itself on O1 #26
 - The first run's driver mis-compared tuple results ("FAIL" where the printed value equals the wanted one, 12 lines); the helper was fixed and every value checked: 52 as expected, 0 real failures.
 - Not run yet: the expiry alert (after `077_`), the console (K2).
 
-**Part 2 (after G1's `077_` merges):** `api_key.expiring` evaluator signal (fires once 14 days before expiry, resolves on revoke, expiry or leaving the window; no secret), tests and live check.
+### Implementation record (part 2: expiry alert; 2026-11-27)
+
+Same branch, on top of G1's `077_` (which seeds the rule: warning, enabled, `{"days_before": 14}`, fire 0 s, renotify 0, id `…0012`).
+
+- **Signal** `alerting.Sources.apiKeyExpiring` replaces G1's "not evaluated" placeholder.
+  - One observation per key that is not revoked, not yet expired and expires within `days_before` days of the evaluator's clock (14 by default).
+  - Target `api_key` / key id / key name.
+  - Summary: `Provider API key <name> (<prefix>, role <role>) expires at <RFC3339>`. Never the key or its hash.
+- **Fires once per key** (renotify 0). **Resolves** when the key is revoked, expires, or leaves the window (a replaced key is revoked).
+- **Tests:**
+  - `internal/alerting/apikey_alert_db_test.go` (test clock): the seed is as agreed; keys 10 days and exactly 14 days out fire, 20 days out doesn't, a revoked key and an expired key never fire; the payload has key, prefix and role but no hash; no re-fire on later ticks.
+  - Resolves on revoke; the 20-day key fires once it enters the window; resolves on expiry; resolves when `days_before` is lowered.
+  - `TestNewProviderKinds` no longer expects "not evaluated".
+- **Mutation checks (5, each caught):** fires for a revoked key; fires for an expired key; window ignored; hash in the payload; signal not wired.
+- **Gate (2026-11-27, combined O1 + G1 + K1):** `go build`, `go vet`, full `go test -count=1 ./...` with every DB variable: 51 packages ok, 0 failures, the 2 known skips; `TestAPIKeyExpiringDB`, the three key e2e tests and the break-glass tests ran.
+- **Live check (2026-11-27): PASS.**
+  - **Setup:** controller from the branch (sha256 `b43fa0f0…`, eval 10 s) on ports 18080/19090, because another controller started from the Orca app held 8080/9090 on the same local DB. Fresh DB through `077_`; local webhook receiver; mail capture.
+  - **Channels:** a webhook channel, and an email channel to `ops@lab.test` only (so a delivery claimed by the other controller could not reach a real inbox).
+  - **Keys:** two auditor keys, expiring in 10 and 30 days.
+  - **Fired:** within one tick the webhook got one `api_key.expiring` (firing, warning, platform) for the 10-day key only, delivered 204, and one email reached `ops@lab.test`. Both name the key and prefix, never the key. No re-fire after 25 s more.
+  - **Resolved:** revoking the key delivered `resolved` by webhook and email. Both deliveries went through this controller (both emails are in the local capture).
+  - The controller log has no key.
+
 
 ---
 

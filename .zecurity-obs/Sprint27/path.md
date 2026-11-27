@@ -177,7 +177,7 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] X4: Sprint 26 follow-ups (Sathiya) — the one acceptance finding fixed in #260; no other follow-up
 - [ ] O1: Role matrix + roles `075_provider_roles` (built by Sathiya, takeover 2026-11-27; live PASS 2026-11-27; PR #262 open)
 - [ ] G1: Loud break-glass `077_provider_alert_kinds` (built by Sathiya, takeover 2026-11-27; live PASS 2026-11-27; PR #263, stacked on #262)
-- [ ] K1: API keys `076_provider_api_keys` (Sathiya) — part 1 (keys, auth, read-only, routes) built on `feat/sprint27-k1-api-keys` stacked on G1 (#263), live PASS 2026-11-27; part 2 (`api_key.expiring` alert) waits for G1's `077_`
+- [ ] K1: API keys `076_provider_api_keys` (Sathiya) — parts 1 (keys, auth, read-only, routes) and 2 (`api_key.expiring` alert) built, live PASS 2026-11-27; draft PR #264 stacked on G1 #263 → O1 #262
 - [ ] K2: Keys console (Sathiya)
 - [ ] O2: Console per role (Sathiya)
 - [ ] Sprint acceptance run (both); tracker F19, F20, F35

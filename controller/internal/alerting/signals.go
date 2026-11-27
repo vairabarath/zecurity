@@ -80,9 +80,7 @@ func (s Sources) Observe(ctx context.Context, kind string, p Params, now time.Ti
 	case KindBreakGlassUsed:
 		obs, err = s.breakGlassUsed(ctx)
 	case KindAPIKeyExpiring:
-		// The signal reads provider_api_keys (K1, 076_); until K1 wires it
-		// the rule is "not evaluated" and its states stay unchanged.
-		err = errNoSource
+		obs, err = s.apiKeyExpiring(ctx, p, now)
 	default:
 		return nil, fmt.Errorf("alerting: unknown kind %q", kind)
 	}
@@ -581,6 +579,47 @@ func (s Sources) breakGlassUsed(ctx context.Context) ([]Observation, error) {
 			TargetName: email,
 			Summary: fmt.Sprintf("Break-glass recovery used for %s on %s at %s: %s",
 				email, host, at.UTC().Format(time.RFC3339), reason),
+		})
+	}
+	return out, rows.Err()
+}
+
+// apiKeyExpiring (K1, D-76 Q6): one observation per active provider API key
+// (not revoked, not yet expired) that expires within days_before days of now.
+// The alert fires once per key (renotify 0) and resolves when the key is
+// revoked, expires, or is no longer within the window (a replaced key is
+// revoked). Target = the key id; the summary names the key, its prefix, role
+// and expiry. Never the key or its hash.
+func (s Sources) apiKeyExpiring(ctx context.Context, p Params, now time.Time) ([]Observation, error) {
+	days := p.DaysBefore
+	if days == 0 {
+		days = DefaultAPIKeyDaysBefore
+	}
+	rows, err := s.DB.Query(ctx, `
+		SELECT id::text, name, prefix, role, expires_at
+		  FROM provider_api_keys
+		 WHERE revoked_at IS NULL
+		   AND expires_at > $1
+		   AND expires_at <= $1 + make_interval(days => $2)
+		 ORDER BY expires_at, id
+		 LIMIT $3`, now, days, maxObservations+1)
+	if err != nil {
+		return nil, fmt.Errorf("expiring api keys: %w", err)
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var id, name, prefix, role string
+		var exp time.Time
+		if err := rows.Scan(&id, &name, &prefix, &role, &exp); err != nil {
+			return nil, fmt.Errorf("expiring api key: %w", err)
+		}
+		out = append(out, Observation{
+			TargetType: "api_key",
+			TargetID:   id,
+			TargetName: name,
+			Summary: fmt.Sprintf("Provider API key %s (%s, role %s) expires at %s",
+				name, prefix, role, exp.UTC().Format(time.RFC3339)),
 		})
 	}
 	return out, rows.Err()

@@ -56,7 +56,8 @@ const (
 	// resolved when a super-admin acknowledges it.
 	KindBreakGlassUsed = "provider.break_glass_used"
 	// KindAPIKeyExpiring (Sprint 27 K1, D-76 Q6): an active provider API key
-	// expires within days_before days. The signal lands with K1.
+	// expires within days_before days (default 14). Fires once per key;
+	// resolves on revoke, expiry or leaving the window.
 	KindAPIKeyExpiring = "api_key.expiring"
 )
 
