@@ -72,8 +72,11 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	}
 	// When the relay's connection count was measured: it reads its counter while
 	// building the request, so the receive time is off by one RPC's transit.
-	// Taken before any cache or DB work (Sprint 22 Phase D).
-	receivedAt := time.Now().UTC()
+	// Taken before any cache or DB work (Sprint 22 Phase D). arrived keeps
+	// Go's monotonic reading (UTC() strips it) for the R1 tracker's window, so
+	// a wall-clock step on the controller can't distort a rate (F23 fix).
+	arrived := time.Now()
+	receivedAt := arrived.UTC()
 	relayID, leaf, err := authenticatedRelay(ctx)
 	if err != nil {
 		return nil, err
@@ -146,7 +149,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	}
 	// Sprint 24 R1 (D-54): per-workspace traffic on the same cadence and
 	// window as the relay totals above (B2).
-	s.recordWorkspaceTraffic(ctx, relayID, receivedAt, req)
+	s.recordWorkspaceTraffic(ctx, relayID, arrived, req)
 
 	transition, evalErr := s.store.EvaluateCapacityLabel(ctx, relayID, s.labelHoldDown)
 	if evalErr != nil {

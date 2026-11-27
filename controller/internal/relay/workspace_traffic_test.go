@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -428,4 +429,17 @@ func TestWorkspaceTraffic_SkippedReadingWithinMaxGapRatesOverLongerWindow(t *tes
 		t.Fatalf("window %v", v.WindowSeconds)
 	}
 	wantRate(t, "over 10 min", v.Workspaces[wsA].ToClientBytesPerSec, 10)
+}
+
+// F23 fix (2026-11-24): the heartbeat hands the tracker a time that keeps
+// Go's monotonic clock reading, so the window between two readings can't be
+// stretched or shrunk by a wall-clock step on the controller (time.Now().UTC()
+// strips the monotonic reading; a 30 s backward step would double a rate).
+func TestHeartbeat_TrafficTimeKeepsTheMonotonicClock(t *testing.T) {
+	tr := NewWorkspaceTrafficTracker()
+	svc := NewService(nil, &fakeHeartbeatStore{}, time.Hour).WithWorkspaceTraffic(tr, &fakeWorkspaceLookup{})
+	heartbeatWithTraffic(t, svc, 100)
+	if at := onlyRelay(t, tr).MeasuredAt; !strings.Contains(at.String(), "m=") {
+		t.Fatalf("MeasuredAt has no monotonic reading: %s", at)
+	}
 }
