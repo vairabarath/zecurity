@@ -51,6 +51,13 @@ const (
 	// KindTenantUsageOver (Sprint 25 U4, D-61): a tenant's month-to-date
 	// usage of one meter at or above a threshold. Warns only.
 	KindTenantUsageOver = "tenant.usage_over"
+	// KindBreakGlassUsed (Sprint 27 G1, D-75): recover-admin was run on the
+	// controller host. One alert per unacknowledged break-glass event,
+	// resolved when a super-admin acknowledges it.
+	KindBreakGlassUsed = "provider.break_glass_used"
+	// KindAPIKeyExpiring (Sprint 27 K1, D-76 Q6): an active provider API key
+	// expires within days_before days. The signal lands with K1.
+	KindAPIKeyExpiring = "api_key.expiring"
 )
 
 var kindScope = map[string]string{
@@ -64,6 +71,8 @@ var kindScope = map[string]string{
 	KindTenantNoRelayPath:   ScopeTenant,
 	KindTenantOverQuota:     ScopeTenant,
 	KindTenantUsageOver:     ScopeTenant,
+	KindBreakGlassUsed:      ScopePlatform,
+	KindAPIKeyExpiring:      ScopePlatform,
 }
 
 // Kinds returns every kind, sorted.
@@ -115,6 +124,8 @@ type Params struct {
 	// threshold in the meter's unit (bytes, minutes or users). Both required.
 	Meter     string `json:"meter,omitempty"`
 	Threshold int64  `json:"threshold,omitempty"`
+	// api_key.expiring (D-76 Q6): fire this many days before a key expires.
+	DaysBefore int `json:"days_before,omitempty"`
 }
 
 // MaxUsageThreshold bounds tenant.usage_over's threshold (an exabyte).
@@ -124,6 +135,7 @@ const MaxUsageThreshold = int64(1_000_000_000_000_000_000)
 const (
 	DefaultThresholdPercent = 90
 	DefaultCertDays         = 30
+	DefaultAPIKeyDaysBefore = 14
 )
 
 // ParseParams validates raw parameters for kind and returns them with
@@ -150,6 +162,7 @@ func ParseParams(kind string, raw json.RawMessage) (Params, error) {
 			"keys":              p.Keys != nil,
 			"meter":             p.Meter != "",
 			"threshold":         p.Threshold != 0,
+			"days_before":       p.DaysBefore != 0,
 		}
 		ok := map[string]bool{}
 		for _, a := range allowed {
@@ -214,7 +227,18 @@ func ParseParams(kind string, raw json.RawMessage) (Params, error) {
 		if p.Threshold < 1 || p.Threshold > MaxUsageThreshold {
 			return Params{}, fmt.Errorf("%w: threshold must be 1..%d", ErrInvalidParams, MaxUsageThreshold)
 		}
-	case KindRelayOffline, KindPoolNoEligibleRelay, KindConnectorOffline, KindShieldOffline, KindTenantNoRelayPath:
+	case KindAPIKeyExpiring:
+		if err := only("days_before"); err != nil {
+			return Params{}, err
+		}
+		if p.DaysBefore == 0 {
+			p.DaysBefore = DefaultAPIKeyDaysBefore
+		}
+		if p.DaysBefore < 1 || p.DaysBefore > 90 {
+			return Params{}, fmt.Errorf("%w: days_before must be 1..90", ErrInvalidParams)
+		}
+	case KindRelayOffline, KindPoolNoEligibleRelay, KindConnectorOffline, KindShieldOffline, KindTenantNoRelayPath,
+		KindBreakGlassUsed:
 		if err := only(); err != nil {
 			return Params{}, err
 		}

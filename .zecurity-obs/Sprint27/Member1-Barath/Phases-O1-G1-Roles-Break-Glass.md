@@ -5,7 +5,7 @@ owner: Barath (Person 1, M2)
 features: [F19 provider admin roles, F20 break-glass]
 phases: [O1, G1]
 decisions: [D-71, D-72, D-73, D-74, D-75, D-05, D-06, D-26, D-28, D-31, D-50]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 built by Sathiya (takeover, 2026-11-27, branch feat/sprint27-o1-role-matrix), live PASS; G1 next
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 built by Sathiya (takeover, 2026-11-27, PR #262), live PASS; G1 built by Sathiya (takeover, branch feat/sprint27-g1-break-glass stacked on O1), live PASS, uncommitted
 ---
 
 # Sprint 27 — Barath: O1 role matrix and roles (F19), G1 loud break-glass (F20)
@@ -165,8 +165,58 @@ On the controller host:
 1. Run `recover-admin --email <test super-admin>`: refused (no reason).
 2. Run it with `--reason`: the webhook receiver gets `provider.break_glass_used` (critical, `scope: platform`, no password); each active super-admin gets the email; the console shows the banner; acknowledging it with a note clears it (audited).
 
-### Implementation record
-_Fill in when built (branch, choices, tests, gates, mutation checks)._
+### Implementation record (built by Sathiya, takeover 2026-11-27)
+
+Barath's phase, built by Sathiya at Sathiya's instruction (as O1). Branch `feat/sprint27-g1-break-glass`, **stacked on O1** (`feat/sprint27-o1-role-matrix`, PR #262). Not committed yet (awaiting the go).
+
+**Choices made inside the phase (for review):**
+1. **`077_provider_alert_kinds.sql` also holds the break-glass event table** `provider_break_glass_events`: the phase needs an event row and G1 has no other reserved migration. A trigger makes what happened immutable; notification and acknowledgement are each set once.
+2. **The alert comes from the A1 evaluator** (the option the phase lists): `alerting.Sources.breakGlassUsed` gives one observation per unacknowledged event, so the alert fires on the next tick (even if the controller was down when the CLI ran) and **resolves when a super-admin acknowledges** the event. A2 delivers it unchanged.
+3. **The email is sent by the controller**, not the CLI. `internal/breakglass.Job` runs every 30 s and emails every active super-admin through the F14 sender. It marks the event notified once at least one recipient took the email; if every send fails it retries. The audit row `break_glass.notified` holds the recipient count, never the addresses. So a CLI shell without SMTP settings can't lose the email.
+4. **The seed** (coordinated with K1, same owner): `provider.break_glass_used` is critical, enabled, `{}`, fire 0 s, renotify 0. `api_key.expiring` is warning, enabled, `{"days_before": 14}`, fire 0 s, renotify 0 (fixed ids `…0011`, `…0012`). The `days_before` parameter is new (1–90, default 14). Until K1 part 2 adds its signal, `api_key.expiring` is "not evaluated, alerts unchanged" (`errNoSource`): one log line per tick, never a false "nothing expiring".
+5. **The console banner** is left to O2 (console). G1 provides the API: `GET /provider/break-glass` and `POST /provider/break-glass/{id}/ack` (`{note}`, 1–500, required), super-admin only (`break_glass.read`, `break_glass.acknowledge`; no role row), session routes.
+
+**Changes:**
+- `recover-admin` (`cmd/server/recover_admin.go`): **`--reason` is required**; without it, or with a blank reason, it exits 2 and nothing changes. `provider.RecoverAdmin(ctx, store, email, reason, host)` refuses an empty reason, one over 500 characters or one with control characters (`ErrBreakGlassReason`) before anything changes. The host comes from `os.Hostname()`.
+- `provider.Store.RecoverAdmin`: in the same transaction as the reset, inserts the event row. The `provider_user.recover_admin` audit row now carries `reason`, `host` and `break_glass_event_id`. The temporary password stays stdout only; the event row has no password column.
+- `internal/alerting`: kinds `provider.break_glass_used` and `api_key.expiring` (platform; not visible to relay-ops); `Params.DaysBefore`; the break-glass signal (summary: operator, host, time, reason).
+- `internal/breakglass` (new): banner list and acknowledge (audited `break_glass.acknowledge` with the note, before/after); the email job.
+- `internal/provider/authz.go`: actions `break_glass.read` (read, super-admin only, so excluded from auditor's "every read" in the O1 boundary test), `break_glass.acknowledge` (write) and `break_glass.notified` (audit-row name); `CanManageBreakGlass`.
+- `cmd/server/main.go`: the two routes (session `requireProvider`) and the `break-glass-email` worker.
+- Tests updated for the new seed: `TestKindScopes` (7 platform kinds), `TestAlertsDB_SchemaScopes` (12 rules, 7 enabled platform), `TestAlertsDB_ReviewFixes` (11 listed with one bad); `recover-admin` callers pass a reason.
+
+**Tests:**
+- `internal/breakglass/breakglass_db_test.go`:
+  - `TestRecoverAdmin_ReasonRequired`: empty, blank, 501-character and control-character reasons are refused; password, events and audit unchanged.
+  - `TestBreakGlass_EndToEnd`:
+    - **event and audit:** one event, the audit has reason, host and event id, the event reason can't be edited;
+    - **alert:** the evaluator fires one critical platform alert for the event and doesn't re-fire; the A2 payload names the operator and reason, never the password;
+    - **email:** a failing sender marks nothing; then one email per active super-admin (not the disabled one, not relay-ops), never resent; the notified audit has the count and no address;
+    - **banner:** list and ack get 403 for relay-ops, auditor, billing, support and no role; ack without a note → 400, a long note → 400, with a note → 204, again → 409, unknown → 404; the list is empty after ack; the ack is audited with the note;
+    - **resolve:** after the ack the next tick resolves the alert.
+- `cmd/server/recover_admin_test.go`: `--reason` required (missing, empty, blank).
+- `internal/alerting/kinds_test.go` `TestNewProviderKinds`: scopes, parameters, and `api_key.expiring` = not evaluated until K1.
+- **Mutation checks (9, each caught; each restore verified byte for byte):**
+  - reason optional (library); reason optional (CLI);
+  - alert skipped; email skipped;
+  - the password in the alert and email;
+  - ack without a note; ack open to other roles;
+  - email resent on every check; marked notified when every send failed.
+  - A first attempt at these checks didn't restore the files between mutations (a zsh word-splitting slip); every mutation was reversed and checked by grep and the tests before the clean re-run above.
+
+**Gate (2026-11-27):** `go build ./... && go vet ./...` clean; full `go test -count=1 ./...` with every DB variable set: 51 packages ok (the new `breakglass` package), 0 failures, only the 2 known hard-coded skips; the new DB tests ran.
+
+**Live check (2026-11-27): PASS.**
+- **Setup:** local controller from the branch (sha256 `a43ec622…`, `ALERT_EVAL_INTERVAL=10s`, private webhooks allowed in dev) on a fresh DB through `077_`; mail capture on 127.0.0.1:2525; local webhook receiver; a second super-admin `bg@s27.test` (password + TOTP) as the one to recover; driver `~/.cache/zecurity-s27/g1live.py`.
+- **Without `--reason`:** `recover-admin --email bg@s27.test` → exit 2; password hash, sessions, events and audit unchanged.
+- **With `--reason`:** `--reason "G1 live check: lost authenticator phone"` → exit 0, the temporary password on stdout only (not in stderr). One event row (reason, host `inkyank-01-computer`); the audit has the reason and host, no password.
+- **Alert:** within one tick the webhook got `provider.break_glass_used` (status firing, critical, `scope: platform`, `tenant_id` null, target `break_glass_event` named `bg@s27.test`), delivered with HTTP 204. The payload names the operator and reason, without the password.
+- **Email:** one email to each active super-admin (2) with operator, host and reason, no password; audit `break_glass.notified` `{"recipients": 2, "failed": 0}`, no addresses.
+- **Banner:** the banner API lists the event (`notified_count` 2). Ack without a note → 400 `note_required`; with a note → 204; the list is empty; the ack is audited with the note. The next tick delivered the **resolved** event (HTTP 204). The controller log has no password.
+- **Driver slips (not G1 defects):**
+  - The CLI runs before the controller loads `.env`, so the first attempt failed cleanly ("DATABASE_URL not set", nothing changed); the driver now passes `DATABASE_URL`, as an operator's shell would.
+  - The driver read `kind`/`transition` instead of the D-52 payload's `event_type`/`status`. The webhook bodies were checked by hand (above) and the driver fixed.
+- Not run live: the console banner (O2).
 
 ---
 

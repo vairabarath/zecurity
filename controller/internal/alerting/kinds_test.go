@@ -1,8 +1,10 @@
 package alerting
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestParseParams(t *testing.T) {
@@ -72,8 +74,9 @@ func TestKindScopes(t *testing.T) {
 			t.Errorf("kind %s has no scope", k)
 		}
 	}
-	if platform != 5 || tenant != 5 {
-		t.Fatalf("platform=%d tenant=%d, want 5 and 5", platform, tenant)
+	// Sprint 27 G1 (077_): provider.break_glass_used and api_key.expiring.
+	if platform != 7 || tenant != 5 {
+		t.Fatalf("platform=%d tenant=%d, want 7 and 5", platform, tenant)
 	}
 	for _, k := range RelayOpsKinds() {
 		if ScopeOf(k) != ScopePlatform {
@@ -102,5 +105,39 @@ func TestRuleValidate(t *testing.T) {
 		if err := r.Validate(); !errors.Is(err, ErrInvalidRule) {
 			t.Errorf("%s: want ErrInvalidRule, got %v", name, err)
 		}
+	}
+}
+
+// Sprint 27 G1 / K1: the two new platform kinds and their parameters.
+func TestNewProviderKinds(t *testing.T) {
+	for _, k := range []string{KindBreakGlassUsed, KindAPIKeyExpiring} {
+		if ScopeOf(k) != ScopePlatform || relayOpsVisible(k) {
+			t.Errorf("%s: scope %q, relay-ops visible %v", k, ScopeOf(k), relayOpsVisible(k))
+		}
+	}
+	if p, err := ParseParams(KindBreakGlassUsed, []byte(`{}`)); err != nil || p.DaysBefore != 0 {
+		t.Fatalf("break-glass {}: %+v %v", p, err)
+	}
+	if _, err := ParseParams(KindBreakGlassUsed, []byte(`{"days_before": 3}`)); err == nil {
+		t.Fatal("break-glass took days_before")
+	}
+	if p, err := ParseParams(KindAPIKeyExpiring, []byte(`{}`)); err != nil || p.DaysBefore != DefaultAPIKeyDaysBefore {
+		t.Fatalf("api_key.expiring default: %+v %v", p, err)
+	}
+	if p, err := ParseParams(KindAPIKeyExpiring, []byte(`{"days_before": 30}`)); err != nil || p.DaysBefore != 30 {
+		t.Fatalf("api_key.expiring 30: %+v %v", p, err)
+	}
+	for _, raw := range []string{`{"days_before": 91}`, `{"days_before": -1}`, `{"days": 14}`, `{"threshold_percent": 5}`} {
+		if _, err := ParseParams(KindAPIKeyExpiring, []byte(raw)); err == nil {
+			t.Errorf("api_key.expiring accepted %s", raw)
+		}
+	}
+	if _, err := ParseParams(KindCertificateExpiring, []byte(`{"days_before": 14}`)); err == nil {
+		t.Error("certificate.expiring took days_before")
+	}
+	// Until K1 wires its signal, api_key.expiring is "not evaluated" (states
+	// unchanged), never "nothing expiring".
+	if _, err := (Sources{}).Observe(context.Background(), KindAPIKeyExpiring, Params{DaysBefore: 14}, time.Now()); !errors.Is(err, errNoSource) {
+		t.Fatalf("api_key.expiring without K1: %v", err)
 	}
 }

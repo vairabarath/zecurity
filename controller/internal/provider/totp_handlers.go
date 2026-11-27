@@ -353,20 +353,41 @@ func (h *OperatorHandlers) ResetTOTP(w http.ResponseWriter, r *http.Request) {
 
 // recoverStore is what RecoverAdmin needs from the provider store.
 type recoverStore interface {
-	RecoverAdmin(ctx context.Context, email, passwordHash string) (bool, error)
+	RecoverAdmin(ctx context.Context, email, passwordHash, reason, host string) (bool, error)
 }
 
+// MaxBreakGlassReason bounds the recover-admin reason (D-75).
+const MaxBreakGlassReason = 500
+
+// ErrBreakGlassReason: recover-admin needs a reason of 1..500 characters
+// (D-75); nothing changes without one.
+var ErrBreakGlassReason = errors.New("recover-admin needs a reason (1-500 characters)")
+
 // RecoverAdmin is the break-glass path behind `zecurity-controller provider
-// recover-admin --email` (ADR-029): it gives an active super-admin a new
-// temporary password (returned once, for the CLI to print) and clears their
-// TOTP, so they change the password and enrol again at next sign-in.
-func RecoverAdmin(ctx context.Context, store recoverStore, email string) (string, error) {
+// recover-admin --email --reason` (ADR-029, D-75): it gives an active
+// super-admin a new temporary password (returned once, for the CLI to print)
+// and clears their TOTP, so they change the password and enrol again at next
+// sign-in. The same transaction records a break-glass event (who, when, the
+// reason, the host) that the controller turns into a critical alert, an
+// email to every active super-admin and a console banner (G1). The reason is
+// required and checked before anything changes.
+func RecoverAdmin(ctx context.Context, store recoverStore, email, reason, host string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || utf8.RuneCountInString(reason) > MaxBreakGlassReason || strings.ContainsFunc(reason, isControlNotSpace) {
+		return "", ErrBreakGlassReason
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || len(host) > 255 {
+		host = "unknown"
+	}
 	password, hash, err := newTemporaryCredential(ctx)
 	if err != nil {
 		return "", err
 	}
-	if _, err := store.RecoverAdmin(ctx, email, hash); err != nil {
+	if _, err := store.RecoverAdmin(ctx, email, hash, reason, host); err != nil {
 		return "", err
 	}
 	return password, nil
 }
+
+func isControlNotSpace(r rune) bool { return r < 0x20 && r != ' ' || r == 0x7f }

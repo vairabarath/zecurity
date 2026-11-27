@@ -27,16 +27,19 @@ func TestIsRecoverAdminCommand(t *testing.T) {
 
 func TestParseRecoverAdminArgs(t *testing.T) {
 	var stderr bytes.Buffer
-	email, err := parseRecoverAdminArgs([]string{"--email", "Ops@InkYank.com"}, &stderr)
-	if err != nil || email != "Ops@InkYank.com" {
-		t.Fatalf("email=%q err=%v", email, err)
+	email, reason, err := parseRecoverAdminArgs([]string{"--email", "Ops@InkYank.com", "--reason", "lost phone"}, &stderr)
+	if err != nil || email != "Ops@InkYank.com" || reason != "lost phone" {
+		t.Fatalf("email=%q reason=%q err=%v", email, reason, err)
 	}
-	for _, args := range [][]string{nil, {"--email", ""}, {"--email", "   "}, {"--bogus"}, {"--email", "a@b.c", "extra"}} {
-		if _, err := parseRecoverAdminArgs(args, &stderr); err == nil {
+	// G1 (D-75): --reason is required; without it nothing runs.
+	for _, args := range [][]string{nil, {"--email", ""}, {"--email", "   "}, {"--bogus"}, {"--email", "a@b.c", "extra"},
+		{"--email", "a@b.c"}, {"--email", "a@b.c", "--reason", ""}, {"--email", "a@b.c", "--reason", "  "},
+		{"--reason", "why"}} {
+		if _, _, err := parseRecoverAdminArgs(args, &stderr); err == nil {
 			t.Errorf("%v: accepted", args)
 		}
 	}
-	if !strings.Contains(stderr.String(), "--email") {
-		t.Errorf("usage does not mention --email: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "--email") || !strings.Contains(stderr.String(), "--reason") {
+		t.Errorf("usage does not mention --email and --reason: %q", stderr.String())
 	}
 }

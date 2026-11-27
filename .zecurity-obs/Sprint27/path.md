@@ -175,8 +175,8 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] Phase 0: Q1–Q6 answered 2026-11-23; D-71 … D-76 written into the Decision Record (amendment 2026-11-23, provider access)
 - [x] Documents signed off 2026-11-23 (by Sathiya, as for Sprint 26; Barath reviews in PR #252)
 - [x] X4: Sprint 26 follow-ups (Sathiya) — the one acceptance finding fixed in #260; no other follow-up
-- [ ] O1: Role matrix + roles `075_provider_roles` (built by Sathiya, takeover 2026-11-27; branch `feat/sprint27-o1-role-matrix`, live PASS 2026-11-27; PR pending)
-- [ ] G1: Loud break-glass `077_provider_alert_kinds` (Barath)
+- [ ] O1: Role matrix + roles `075_provider_roles` (built by Sathiya, takeover 2026-11-27; live PASS 2026-11-27; PR #262 open)
+- [ ] G1: Loud break-glass `077_provider_alert_kinds` (built by Sathiya, takeover 2026-11-27; branch `feat/sprint27-g1-break-glass` stacked on O1, live PASS 2026-11-27; not committed yet)
 - [ ] K1: API keys `076_provider_api_keys` (Sathiya)
 - [ ] K2: Keys console (Sathiya)
 - [ ] O2: Console per role (Sathiya)

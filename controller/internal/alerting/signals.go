@@ -77,6 +77,12 @@ func (s Sources) Observe(ctx context.Context, kind string, p Params, now time.Ti
 		obs, err = s.tenantOverQuota(ctx, p)
 	case KindTenantUsageOver:
 		obs, err = s.tenantUsageOver(ctx, p, now)
+	case KindBreakGlassUsed:
+		obs, err = s.breakGlassUsed(ctx)
+	case KindAPIKeyExpiring:
+		// The signal reads provider_api_keys (K1, 076_); until K1 wires it
+		// the rule is "not evaluated" and its states stay unchanged.
+		err = errNoSource
 	default:
 		return nil, fmt.Errorf("alerting: unknown kind %q", kind)
 	}
@@ -544,4 +550,38 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// breakGlassUsed (G1, D-75): one observation per break-glass event not yet
+// acknowledged. It fires on the next tick after recover-admin ran (even if the
+// controller was down then) and resolves when a super-admin acknowledges the
+// event. The summary has the recovered operator, the time, the host and the
+// reason: never the temporary password (the event row never holds it).
+func (s Sources) breakGlassUsed(ctx context.Context) ([]Observation, error) {
+	rows, err := s.DB.Query(ctx, `
+		SELECT id::text, email, reason, host, created_at
+		  FROM provider_break_glass_events
+		 WHERE acknowledged_at IS NULL
+		 ORDER BY created_at, id
+		 LIMIT $1`, maxObservations+1)
+	if err != nil {
+		return nil, fmt.Errorf("break-glass events: %w", err)
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var id, email, reason, host string
+		var at time.Time
+		if err := rows.Scan(&id, &email, &reason, &host, &at); err != nil {
+			return nil, fmt.Errorf("break-glass event: %w", err)
+		}
+		out = append(out, Observation{
+			TargetType: "break_glass_event",
+			TargetID:   id,
+			TargetName: email,
+			Summary: fmt.Sprintf("Break-glass recovery used for %s on %s at %s: %s",
+				email, host, at.UTC().Format(time.RFC3339), reason),
+		})
+	}
+	return out, rows.Err()
 }
