@@ -135,6 +135,39 @@ func TestTenantRelaySamples_NotReportedWhenNoFreshRelay(t *testing.T) {
 	}
 }
 
+// F23 R1-2 (live run 2026-11-23): a fresh relay view without a window (the
+// relay restarted, or its first reading) can't tell which tenants it carried,
+// so no tenant gets byte samples that minute: a gap, never a partial sum.
+// Stream counts are still known. The next continuous window recovers.
+func TestTenantRelaySamples_NonContinuousViewWritesNoBytes(t *testing.T) {
+	tenants := []tenantCount{{id: "t1"}, {id: "t2"}}
+	active := map[string]bool{"r1": true, "r2": true}
+	restarted := view("r2", time.Minute, map[string]relay.WorkspaceRate{"t2": {ActiveStreams: 1}})
+	restarted.WindowSeconds = 0
+	views := []relay.RelayWorkspaceTraffic{
+		view("r1", time.Minute, map[string]relay.WorkspaceRate{
+			"t1": {ToClientBytesPerSec: f(100), ToConnectorBytesPerSec: f(1), ActiveStreams: 2},
+		}),
+		restarted,
+	}
+	m := index(tenantRelaySamples(tenants, active, views, now, 11*time.Minute))
+	for _, id := range []string{"t1", "t2"} {
+		if has(m, providerquery.SeriesTenantRelayBytesToClient, id) || has(m, providerquery.SeriesTenantRelayBytesToConn, id) {
+			t.Fatalf("%s got bytes while r2 has no window (t1 is on an unaffected relay; still a gap): %v", id, m)
+		}
+	}
+	if m[key{providerquery.SeriesTenantRelayStreams, "t1"}] != 2 || m[key{providerquery.SeriesTenantRelayStreams, "t2"}] != 1 {
+		t.Fatalf("streams are still known: %v", m)
+	}
+
+	// Next minute r2 has a continuous window again: bytes are back.
+	recovered := view("r2", time.Minute, map[string]relay.WorkspaceRate{"t2": {ToClientBytesPerSec: f(7), ToConnectorBytesPerSec: f(0), ActiveStreams: 1}})
+	m = index(tenantRelaySamples(tenants, active, []relay.RelayWorkspaceTraffic{views[0], recovered}, now, 11*time.Minute))
+	if m[key{providerquery.SeriesTenantRelayBytesToClient, "t1"}] != 100 || m[key{providerquery.SeriesTenantRelayBytesToClient, "t2"}] != 7 {
+		t.Fatalf("recovered window: %v", m)
+	}
+}
+
 func TestEverySampledSeriesIsRegisteredWithItsSubject(t *testing.T) {
 	var all []Sample
 	all = append(all, relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "active", Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(1), ToConnectorBytesPerSec: f(1)}}}, false, map[string]bool{})...)

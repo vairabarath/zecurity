@@ -264,13 +264,21 @@ func tenantSamples(tenants []tenantCount) []Sample {
 // relays whose R1 view is fresh (D-54 refined: a workspace missing from a
 // reporting relay's view had no traffic there). No fresh view at all → no
 // sample for any tenant (not reported). A tenant whose rate is unknown on a
-// reporting relay this window (restart) gets no byte samples; its stream
-// count is still known.
+// reporting relay this window gets no byte samples; its stream count is
+// still known. A fresh view without a window (a relay restart or first
+// reading) gives no byte samples for any tenant (F23 R1-2): it can't say
+// which tenants it carried, and a partial sum would read as the real total.
 func tenantRelaySamples(tenants []tenantCount, active map[string]bool, views []relay.RelayWorkspaceTraffic, now time.Time, maxAge time.Duration) []Sample {
 	var fresh []relay.RelayWorkspaceTraffic
+	bytesKnown := true
 	for _, v := range views {
 		if active[v.RelayID] && now.Sub(v.MeasuredAt) <= maxAge {
 			fresh = append(fresh, v)
+			// F23 R1-2: a view without a window (restart, first reading)
+			// can't say which tenants it carried: no tenant bytes this minute.
+			if v.WindowSeconds == 0 {
+				bytesKnown = false
+			}
 		}
 	}
 	if len(fresh) == 0 {
@@ -294,7 +302,7 @@ func tenantRelaySamples(tenants []tenantCount, active map[string]bool, views []r
 			toConnectors += *rate.ToConnectorBytesPerSec
 		}
 		out = append(out, Sample{providerquery.SeriesTenantRelayStreams, providerquery.MetricSubjectTenant, t.id, streams})
-		if known {
+		if known && bytesKnown {
 			out = append(out,
 				Sample{providerquery.SeriesTenantRelayBytesToClient, providerquery.MetricSubjectTenant, t.id, toClients},
 				Sample{providerquery.SeriesTenantRelayBytesToConn, providerquery.MetricSubjectTenant, t.id, toConnectors},
