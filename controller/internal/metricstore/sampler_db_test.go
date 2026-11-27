@@ -323,3 +323,55 @@ func TestCollect_FromRealRows(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// F23 rule 6a: placements count only when confirmed within PlacementMaxAge
+// and the connector isn't revoked.
+func TestRecentPlacements_ConfirmedAndUnrevokedOnly(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	var ws, network, relayID string
+	if err := db.QueryRow(ctx, `INSERT INTO workspaces (slug, name, status, trust_domain) VALUES ('p-a','p-a','active','p-a.zecurity.test') RETURNING id::text`).Scan(&ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'n','other') RETURNING id::text`, ws).Scan(&network); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO relays (name, dns_allowlist, ip_allowlist) VALUES ('p-r1','{}','{}') RETURNING id::text`).Scan(&relayID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name    string
+		age     time.Duration
+		revoked bool
+	}{{"recent", 20 * time.Second, false}, {"old", 5 * time.Minute, false}, {"revoked", 10 * time.Second, true}} {
+		var id string
+		if err := db.QueryRow(ctx, `INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,$3,'active') RETURNING id::text`, ws, network, c.name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(ctx, `INSERT INTO connector_relay_placement (connector_id, relay_id, last_confirmed, source) VALUES ($1,$2,$3,'heartbeat')`, id, relayID, now.Add(-c.age)); err != nil {
+			t.Fatal(err)
+		}
+		if c.revoked {
+			if _, err := db.Exec(ctx, `UPDATE connectors SET status='revoked', revoked_at=NOW() WHERE id=$1`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	s := &Sampler{DB: db}
+	got, err := s.recentPlacements(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[ws][relayID] || len(got[ws]) != 1 {
+		t.Fatalf("placements %v", got)
+	}
+
+	// Only the old placement left: nothing recent.
+	if _, err := db.Exec(ctx, `DELETE FROM connector_relay_placement WHERE last_confirmed > $1`, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.recentPlacements(ctx, now); err != nil || len(got) != 0 {
+		t.Fatalf("only an old placement: %v %v", got, err)
+	}
+}

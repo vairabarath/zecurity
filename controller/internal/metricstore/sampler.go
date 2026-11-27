@@ -164,23 +164,30 @@ func (s *Sampler) Collect(ctx context.Context, now time.Time) ([]Sample, error) 
 	relays, truncated, err := providerquery.RelayLoads(ctx, s.DB)
 	keep(err)
 	active := map[string]bool{}
-	live := map[string]bool{}
+	states := map[string]relayState{}
 	if err == nil {
 		for _, r := range relays {
-			if r.Status == "active" && relayLive(ctx, s.Heartbeats, r.ID, r.LastHeartbeatAt, now, s.liveMaxAge()) {
-				live[r.ID] = true
-			}
+			st := relayState{active: r.Status == "active"}
+			st.live = st.active && relayLive(ctx, s.Heartbeats, r.ID, r.LastHeartbeatAt, now, s.liveMaxAge())
+			states[r.ID] = st
 		}
-		out = append(out, relaySamples(relays, truncated, func(id string) bool { return live[id] }, active)...)
+		out = append(out, relaySamples(relays, truncated, func(id string) bool { return states[id].live }, active)...)
 	}
 
 	tenants, err := s.tenantCounts(ctx, now)
 	keep(err)
 	if err == nil {
 		out = append(out, tenantSamples(tenants)...)
-		// R1 series need the relay list too (only active, live relays count).
+		// R1 series need the relay list too (only active, live relays count),
+		// and the connector placements (F23 rule 6a). A failed placement read
+		// leaves placed nil: no tenant bytes this minute.
 		if s.Traffic != nil && relays != nil {
-			out = append(out, tenantRelaySamples(tenants, live, s.Traffic.Snapshot(), now, s.TrafficMaxAge)...)
+			placed, perr := s.recentPlacements(ctx, now)
+			keep(perr)
+			out = append(out, tenantRelaySamples(tenantRelayInput{
+				tenants: tenants, relays: states, views: s.Traffic.Snapshot(),
+				placed: placed, now: now, maxAge: s.TrafficMaxAge,
+			})...)
 		}
 	}
 	return out, firstErr
@@ -291,35 +298,96 @@ func tenantSamples(tenants []tenantCount) []Sample {
 	)
 }
 
-// tenantRelaySamples: each tenant's relay traffic summed over the active,
-// live relays (usable) whose R1 view is fresh (D-54 refined: a workspace missing from a
-// reporting relay's view had no traffic there). No fresh view at all → no
-// sample for any tenant (not reported). A tenant whose rate is unknown on a
-// reporting relay this window gets no byte samples; its stream count is
-// still known. A fresh view without a window (a relay restart or first
-// reading) gives no byte samples for any tenant (F23 R1-2): it can't say
-// which tenants it carried, and a partial sum would read as the real total.
-func tenantRelaySamples(tenants []tenantCount, usable map[string]bool, views []relay.RelayWorkspaceTraffic, now time.Time, maxAge time.Duration) []Sample {
-	var fresh []relay.RelayWorkspaceTraffic
-	bytesKnown := true
-	for _, v := range views {
-		if usable[v.RelayID] && now.Sub(v.MeasuredAt) <= maxAge {
-			fresh = append(fresh, v)
-			// F23 R1-2: a view without a window (restart, first reading)
-			// can't say which tenants it carried: no tenant bytes this minute.
+// relayState is what the sampler knows about one listed relay (not revoked
+// or deleted): its status is active, and it is live (F23 R1-3 B).
+type relayState struct{ active, live bool }
+
+// PlacementMaxAge: a connector placement confirmed this recently means the
+// connector may be carrying traffic through that relay. Connectors confirm
+// every 15 s and fail closed 15 s after their last authorization ack, so an
+// older placement is not serving (F23 rule 6a).
+const PlacementMaxAge = 60 * time.Second
+
+// ResidualWindow: how long after a left-out relay's last reading its tenants
+// may still carry traffic on it: eviction (≤150 s) + connector drain timeout
+// (120 s) + 60 s slack (F23 rule 6a). The cutoff is the larger of this and
+// TrafficMaxAge.
+const ResidualWindow = 330 * time.Second
+
+type tenantRelayInput struct {
+	tenants []tenantCount
+	// relays: every listed relay by id.
+	relays map[string]relayState
+	views  []relay.RelayWorkspaceTraffic
+	// placed: tenant id → relays its connectors confirmed a placement on
+	// within PlacementMaxAge. nil: not known (the read failed).
+	placed map[string]map[string]bool
+	now    time.Time
+	maxAge time.Duration
+}
+
+// tenantRelaySamples: each tenant's relay traffic summed over the used
+// relays: active, live (F23 R1-3 B), with a fresh R1 view (D-54 refined: a
+// workspace missing from a used relay's view had no traffic there). No used
+// relay → no sample for any tenant (not reported). Stream counts are summed
+// over the used relays. Byte samples are a gap, never a partial sum, when:
+//   - the tenant's rate is unknown on a used relay this window;
+//   - any used view has no window (relay restart or first reading, F23 R1-2):
+//     it can't say which tenants it carried;
+//   - rule 6a: a left-out relay may still carry the tenant's traffic: the
+//     tenant was carrying traffic in its reading of the last
+//     max(TrafficMaxAge, ResidualWindow), or one of the tenant's connectors
+//     still confirms a placement on it (a partition);
+//   - placements could not be read.
+//
+// Rule 6b: an active, live relay without a fresh view can't say which tenants
+// it carries → no tenant relay sample at all this minute.
+func tenantRelaySamples(in tenantRelayInput) []Sample {
+	cutoff := in.maxAge
+	if ResidualWindow > cutoff {
+		cutoff = ResidualWindow
+	}
+	var used []relay.RelayWorkspaceTraffic
+	usedIDs := map[string]bool{}
+	bytesKnown := in.placed != nil
+	residual := map[string]bool{}
+	for _, v := range in.views {
+		st := in.relays[v.RelayID]
+		age := in.now.Sub(v.MeasuredAt)
+		if st.active && st.live && age <= in.maxAge {
+			used = append(used, v)
+			usedIDs[v.RelayID] = true
 			if v.WindowSeconds == 0 {
-				bytesKnown = false
+				bytesKnown = false // R1-2
+			}
+			continue
+		}
+		if age <= cutoff {
+			for ws, r := range v.Workspaces {
+				if carrying(r) {
+					residual[ws] = true // 6a, from the relay's last reading
+				}
 			}
 		}
 	}
-	if len(fresh) == 0 {
+	for id, st := range in.relays {
+		if st.active && st.live && !usedIDs[id] {
+			return nil // 6b
+		}
+	}
+	if len(used) == 0 {
 		return nil
 	}
 	var out []Sample
-	for _, t := range tenants {
+	for _, t := range in.tenants {
 		var toClients, toConnectors, streams float64
-		known := true
-		for _, v := range fresh {
+		known := bytesKnown && !residual[t.id]
+		for rid := range in.placed[t.id] {
+			if !usedIDs[rid] {
+				known = false // 6a, a connector still attached to a left-out relay
+			}
+		}
+		for _, v := range used {
 			rate, ok := v.Workspaces[t.id]
 			if !ok {
 				continue
@@ -333,7 +401,7 @@ func tenantRelaySamples(tenants []tenantCount, usable map[string]bool, views []r
 			toConnectors += *rate.ToConnectorBytesPerSec
 		}
 		out = append(out, Sample{providerquery.SeriesTenantRelayStreams, providerquery.MetricSubjectTenant, t.id, streams})
-		if known && bytesKnown {
+		if known {
 			out = append(out,
 				Sample{providerquery.SeriesTenantRelayBytesToClient, providerquery.MetricSubjectTenant, t.id, toClients},
 				Sample{providerquery.SeriesTenantRelayBytesToConn, providerquery.MetricSubjectTenant, t.id, toConnectors},
@@ -341,6 +409,44 @@ func tenantRelaySamples(tenants []tenantCount, usable map[string]bool, views []r
 		}
 	}
 	return out
+}
+
+// carrying: the reading shows open streams, traffic, or an unknown rate.
+func carrying(r relay.WorkspaceRate) bool {
+	if r.ActiveStreams > 0 || r.ToClientBytesPerSec == nil || r.ToConnectorBytesPerSec == nil {
+		return true
+	}
+	return *r.ToClientBytesPerSec > 0 || *r.ToConnectorBytesPerSec > 0
+}
+
+// recentPlacements: tenant id → relays its unrevoked connectors confirmed a
+// placement on since now − PlacementMaxAge (connector_relay_placement, which
+// every 15 s health report refreshes).
+func (s *Sampler) recentPlacements(ctx context.Context, now time.Time) (map[string]map[string]bool, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT c.tenant_id::text, p.relay_id::text
+  FROM connector_relay_placement p
+  JOIN connectors c ON c.id = p.connector_id
+ WHERE p.last_confirmed >= $1 AND c.revoked_at IS NULL`, now.Add(-PlacementMaxAge))
+	if err != nil {
+		return nil, fmt.Errorf("connector placements: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]map[string]bool{}
+	for rows.Next() {
+		var tenant, relayID string
+		if err := rows.Scan(&tenant, &relayID); err != nil {
+			return nil, fmt.Errorf("connector placements: scan: %w", err)
+		}
+		if out[tenant] == nil {
+			out[tenant] = map[string]bool{}
+		}
+		out[tenant][relayID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("connector placements: %w", err)
+	}
+	return out, nil
 }
 
 // Write stores samples at now's minute. A sample already stored for that
