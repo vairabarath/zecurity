@@ -72,14 +72,13 @@ func (h *InvoiceHandler) actorOr500(w http.ResponseWriter, r *http.Request) (Act
 }
 
 func (h *InvoiceHandler) audit(ctx context.Context, tx pgx.Tx, r *http.Request, actor Actor, action, targetID string, details map[string]any) error {
-	userID := actor.UserID
 	return h.Store.InsertAuditTx(ctx, tx, AuditEntry{
-		ProviderUserID: &userID,
+		ProviderUserID: actor.AuditUserID(),
 		ProviderEmail:  actor.Email,
 		Action:         action,
 		TargetType:     "invoice",
 		TargetID:       targetID,
-		Details:        details,
+		Details:        actor.AuditDetails(details),
 		IPAddress:      clientIP(r),
 	})
 }

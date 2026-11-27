@@ -195,8 +195,9 @@ func TestDecide_UnknownActionDenied(t *testing.T) {
 // quotas, alerts or operators; support never reads billing, usage, plan
 // cards or the audit log.
 func TestRoleBoundaries(t *testing.T) {
-	// Reads that stay super-admin only: the break-glass banner (D-75).
-	superAdminOnlyReads := map[string]bool{ActionBreakGlassRead: true}
+	// Reads that stay super-admin only: the break-glass banner (D-75) and
+	// managing API keys (D-76).
+	superAdminOnlyReads := map[string]bool{ActionBreakGlassRead: true, ActionAPIKeyRead: true}
 	for a, c := range actionClasses {
 		if c == classRead && !roleActions[RoleAuditor][a] && !superAdminOnlyReads[a] {
 			t.Errorf("auditor lacks read %q", a)

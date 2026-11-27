@@ -201,6 +201,15 @@ const (
 	ActionBreakGlassNotified    = "break_glass.notified"
 )
 
+// Provider API keys (Sprint 27 K1, D-76): listing, creating and revoking
+// keys. Super-admin only (no role row lists them), and only from a session:
+// the key routes refuse a key in RequireProvider.
+const (
+	ActionAPIKeyRead   = "api_key.read"
+	ActionAPIKeyCreate = "api_key.create"
+	ActionAPIKeyRevoke = "api_key.revoke"
+)
+
 // actionClass says what an action constant is: a read, a write, or only the
 // name of an audit row (never passed to decide()). Every Action* constant has
 // exactly one entry (TestActionClass_EveryConstant); K1 uses it to refuse
@@ -286,6 +295,10 @@ var actionClasses = map[string]actionClass{
 	ActionBreakGlassRead:        classRead,
 	ActionBreakGlassAcknowledge: classWrite,
 	ActionBreakGlassNotified:    classAuditOnly,
+	// API keys (K1)
+	ActionAPIKeyRead:   classRead,
+	ActionAPIKeyCreate: classWrite,
+	ActionAPIKeyRevoke: classWrite,
 }
 
 // IsWriteAction reports whether action is anything but a classified read.
@@ -383,11 +396,52 @@ var roleActions = map[string]actionSet{
 // action. Handlers map this to HTTP 403; any other error maps to 500.
 var ErrForbidden = errors.New("provider action forbidden")
 
+// ActorKindAPIKey marks an Actor authenticated by a provider API key (K1,
+// D-76). The zero Kind is a person with a provider session.
+const ActorKindAPIKey = "api_key"
+
 // Actor is the verified provider identity, injected by RequireProvider.
+//
+// For a person: UserID, Email, Role from provider_users. For an API key:
+// Kind = ActorKindAPIKey, UserID empty, Email = "api_key:<name> (<prefix>)"
+// (the audit actor), Role = the key's role, and the Key* fields.
 type Actor struct {
 	UserID string
 	Email  string
 	Role   string
+
+	Kind      string
+	KeyID     string
+	KeyName   string
+	KeyPrefix string
+}
+
+// IsAPIKey reports whether the actor is an API key, not a person.
+func (a Actor) IsAPIKey() bool { return a.Kind == ActorKindAPIKey }
+
+// AuditUserID is the provider_user_id of the actor's audit rows: nil for an
+// API key (it is not a provider user).
+func (a Actor) AuditUserID() *string {
+	if a.IsAPIKey() || a.UserID == "" {
+		return nil
+	}
+	id := a.UserID
+	return &id
+}
+
+// AuditDetails returns details for one of the actor's audit rows: for an API
+// key a copy with key_id added (never the secret or its hash); otherwise d
+// unchanged.
+func (a Actor) AuditDetails(d map[string]any) map[string]any {
+	if !a.IsAPIKey() {
+		return d
+	}
+	out := make(map[string]any, len(d)+1)
+	for k, v := range d {
+		out[k] = v
+	}
+	out["key_id"] = a.KeyID
+	return out
 }
 
 // Target identifies what is being acted on. Fields are unused by the alpha
@@ -621,6 +675,12 @@ func (a *Authz) CanManageBreakGlass(actor Actor, action string) error {
 	return decide(actor, action, Target{Type: "break_glass"})
 }
 
+// CanManageAPIKeys gates the API key routes (ActionAPIKeyRead,
+// ActionAPIKeyCreate, ActionAPIKeyRevoke): super-admin only (D-76).
+func (a *Authz) CanManageAPIKeys(actor Actor, action string) error {
+	return decide(actor, action, Target{Type: "api_key"})
+}
+
 // CanReadCertificates gates GET /provider/certificates and GET /provider/pki.
 func (a *Authz) CanReadCertificates(actor Actor) error {
 	return decide(actor, ActionCertRead, Target{Type: "certificate"})
@@ -629,12 +689,19 @@ func (a *Authz) CanReadCertificates(actor Actor) error {
 // decide is the ONE policy function (D-72): super-admin → every action;
 // any other role → allowed iff roleActions lists the action for it. An
 // action missing from the table (a new constant, an unknown string) is
-// denied to every role except super-admin. Replaces the pre-Sprint-27 prefix
+// denied to every role except super-admin. An API key actor (K1, D-76) is
+// refused every write action first, whatever its role. Replaces the pre-Sprint-27 prefix
 // rule (D-05, D-31) with the same outcome for relay-ops.
 //
 // target is accepted but not yet consulted (flat model, no partner scoping).
 func decide(actor Actor, action string, target Target) error {
-	if actor.Role == RoleSuperAdmin {
+	if actor.IsAPIKey() {
+		// D-76: a key is read-only whatever its role, and never super-admin
+		// (the DB refuses such a key too).
+		if IsWriteAction(action) || actor.Role == RoleSuperAdmin {
+			return fmt.Errorf("%w: api key may not %q", ErrForbidden, action)
+		}
+	} else if actor.Role == RoleSuperAdmin {
 		return nil
 	}
 	if roleActions[actor.Role][action] {

@@ -27,9 +27,11 @@ func TestTenantSuspensionWiring(t *testing.T) {
 	if n := strings.Count(src, "workspaceGuard("); n < 8 {
 		t.Fatalf("workspaceGuard used on %d routes, want every tenant console route (≥ 8)", n)
 	}
+	// Sprint 27 K1: requireProviderOrKey is RequireProvider that also
+	// accepts a read-only API key (decide() refuses keys every write).
 	for _, route := range []string{
-		`"POST /provider/tenants/{id}/suspend", requireProvider(`,
-		`"POST /provider/tenants/{id}/resume", requireProvider(`,
+		`"POST /provider/tenants/{id}/suspend", requireProviderOrKey(`,
+		`"POST /provider/tenants/{id}/resume", requireProviderOrKey(`,
 	} {
 		if !strings.Contains(src, route) {
 			t.Fatalf("route %s not wired behind requireProvider", route)
