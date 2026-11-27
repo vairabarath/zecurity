@@ -103,10 +103,13 @@ describe('ResourceDetail protect gate (Fix 10)', () => {
   it('stays disabled when no active shield is on the host', async () => {
     renderDetail(resource(null), [shieldRow('s2', ShieldStatus.Disconnected, HOST)])
     await screen.findByRole('heading', { name: 'web' })
+    // Wait for the shield list first: the buttons are also disabled while it
+    // is still loading, so checking them before it renders proved nothing
+    // and the shield-s2 lookup raced the load (flaky in CI).
+    expect((await screen.findAllByText(/shield-s2/)).length).toBeGreaterThan(0)
     await waitFor(() => {
       for (const b of protectButtons()) expect(b).toBeDisabled()
     })
-    expect(screen.getAllByText(/shield-s2/).length).toBeGreaterThan(0)
   })
 
   it('a revoked bound shield does not block a new active shield on the host', async () => {
