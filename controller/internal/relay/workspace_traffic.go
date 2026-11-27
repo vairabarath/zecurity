@@ -67,7 +67,11 @@ type WorkspaceTrafficTracker struct {
 type relayTraffic struct {
 	at     time.Time
 	totals map[string]WorkspaceTrafficSample
-	view   RelayWorkspaceTraffic
+	// domains is this reading's trust domain → workspace id, "" for a trust
+	// domain that matched no active workspace (F23 R1-1 rule 4). Replaced at
+	// every reading, so it never holds more than one heartbeat's entries.
+	domains map[string]string
+	view    RelayWorkspaceTraffic
 }
 
 func NewWorkspaceTrafficTracker() *WorkspaceTrafficTracker {
@@ -78,9 +82,20 @@ func NewWorkspaceTrafficTracker() *WorkspaceTrafficTracker {
 const restartSlackSeconds = 5
 
 // Record stores a relay's per-workspace counters taken at `at` and derives
-// rates from its previous sample. A sample not newer than the stored one (a
-// late heartbeat) changes nothing.
-func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample) {
+// rates from its previous reading. A sample not newer than the stored one (a
+// late heartbeat) changes nothing. domains maps every trust domain the relay
+// reported to its workspace id, "" when it matched none (nil: not known).
+//
+// Rates (F23 R1-1, agreed 2026-11-23, option D):
+//  1. In a continuous window, a workspace with a previous counter rates from
+//     it; one absent from the previous reading rates from zero (the relay
+//     reports every entry that ever carried bytes, so absent means zero).
+//  2. A window that isn't continuous (first reading, relay restart) has no
+//     rate for any workspace on the relay.
+//  3. A counter that went down (reset or re-created entry) has no rate.
+//  4. A workspace whose trust domain was unmatched in the previous reading
+//     gets no zero baseline: that counter may be long-lived.
+func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample, domains map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	prev := t.relays[relayID]
@@ -101,14 +116,36 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 	for ws, cur := range samples {
 		totals[ws] = cur
 		r := WorkspaceRate{ActiveStreams: cur.ActiveStreams}
-		if p, ok := prev.totalsFor(ws); continuous && ok && cur.ToClient >= p.ToClient && cur.ToConnector >= p.ToConnector {
-			toClient := float64(cur.ToClient-p.ToClient) / gap
-			toConnector := float64(cur.ToConnector-p.ToConnector) / gap
-			r.ToClientBytesPerSec, r.ToConnectorBytesPerSec = &toClient, &toConnector
+		if continuous {
+			base, ok := prev.totalsFor(ws)
+			if !ok && !prev.zeroBaselineAllowed(ws, domains) {
+				view.Workspaces[ws] = r
+				continue
+			}
+			if cur.ToClient >= base.ToClient && cur.ToConnector >= base.ToConnector {
+				toClient := float64(cur.ToClient-base.ToClient) / gap
+				toConnector := float64(cur.ToConnector-base.ToConnector) / gap
+				r.ToClientBytesPerSec, r.ToConnectorBytesPerSec = &toClient, &toConnector
+			}
 		}
 		view.Workspaces[ws] = r
 	}
-	t.relays[relayID] = &relayTraffic{at: at, totals: totals, view: view}
+	t.relays[relayID] = &relayTraffic{at: at, totals: totals, domains: domains, view: view}
+}
+
+// zeroBaselineAllowed reports whether ws, absent from this (previous)
+// reading, may rate from zero: none of its trust domains in the current
+// reading was unmatched here (rule 4).
+func (r *relayTraffic) zeroBaselineAllowed(ws string, current map[string]string) bool {
+	for td, id := range current {
+		if id != ws {
+			continue
+		}
+		if was, seen := r.domains[td]; seen && was == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *relayTraffic) totalsFor(ws string) (WorkspaceTrafficSample, bool) {
@@ -209,17 +246,21 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 		return
 	}
 	samples := make(map[string]WorkspaceTrafficSample, len(entries))
+	seen := make(map[string]string, len(entries))
 	for _, e := range entries {
 		ws, ok := byDomain[e.GetTrustDomain()]
 		if !ok {
+			// Remembered for one reading as unmatched (R1-1 rule 4), never stored.
+			seen[e.GetTrustDomain()] = ""
 			log.Printf("relay heartbeat: workspace traffic %s: ignoring unknown or inactive trust domain %q", relayID, e.GetTrustDomain())
 			continue
 		}
+		seen[e.GetTrustDomain()] = ws
 		cur := samples[ws]
 		cur.ToConnector += e.GetBytesClientToConnector()
 		cur.ToClient += e.GetBytesConnectorToClient()
 		cur.ActiveStreams += e.GetActiveStreams()
 		samples[ws] = cur
 	}
-	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples)
+	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples, seen)
 }
