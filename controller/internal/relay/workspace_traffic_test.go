@@ -98,12 +98,39 @@ func TestWorkspaceTraffic_RestartGivesNoRate(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTraffic_UptimeWithinSlackStillRates(t *testing.T) {
+// Combined restart check (agreed 2026-11-24): restart if
+// U_now < U_prev + gap − 5 s. Delivery jitter within the 5 s tolerance is
+// not a restart.
+func TestWorkspaceTraffic_JitterWithinToleranceStillRates(t *testing.T) {
 	tr := NewWorkspaceTrafficTracker()
 	tr.Record("r1", t0, 1000, map[string]WorkspaceTrafficSample{wsA: {ToClient: 0}}, nil)
-	// 60 s gap, uptime 56 s: within the 5 s delivery slack, same as B2.
-	tr.Record("r1", t0.Add(60*time.Second), 56, map[string]WorkspaceTrafficSample{wsA: {ToClient: 600}}, nil)
+	// 60 s gap, uptime grew 56 s: this heartbeat arrived 4 s later than the last.
+	tr.Record("r1", t0.Add(60*time.Second), 1056, map[string]WorkspaceTrafficSample{wsA: {ToClient: 600}}, nil)
 	wantRate(t, "to client", onlyRelay(t, tr).Workspaces[wsA].ToClientBytesPerSec, 10)
+}
+
+// A relay that restarts just after a reading reports an uptime close to the
+// gap. The old check (uptime + 5 >= gap) passed it; the combined check uses
+// the previous uptime and catches it, for a young relay too.
+func TestWorkspaceTraffic_RestartJustAfterAReadingIsDetected(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		prevUptime uint64
+	}{
+		{"long-running relay", 1000},
+		{"young relay (previous uptime below the gap)", 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewWorkspaceTrafficTracker()
+			tr.Record("r1", t0, tc.prevUptime, map[string]WorkspaceTrafficSample{wsA: {ToClient: 100}}, nil)
+			// Restarted 4 s after that reading: uptime 56 s at a 60 s gap.
+			tr.Record("r1", t0.Add(60*time.Second), 56, map[string]WorkspaceTrafficSample{wsA: {ToClient: 5000}}, nil)
+			v := onlyRelay(t, tr)
+			if v.WindowSeconds != 0 || v.Workspaces[wsA].ToClientBytesPerSec != nil {
+				t.Fatalf("restart not detected: %+v", v)
+			}
+		})
+	}
 }
 
 // F23 R1-1 (live run 2026-11-23): a workspace absent from the previous

@@ -16,11 +16,11 @@ import (
 // A relay reports, per trust domain, the bytes it bridged in each direction
 // since it started and its open streams (heartbeat field 13). The controller
 // maps each trust domain to its workspace, ignores (and logs) any it doesn't
-// know, and keeps the result in memory (D-02: one controller). Rates use the
-// same window and restart rules as the relay totals (B2, F5): they are taken
-// on the heartbeat's database-write cadence, a counter that went down or an
-// uptime shorter than the gap means a restart, and then there is no rate for
-// that window, never a negative or invented one.
+// know, and keeps the result in memory (D-02: one controller). Rates are
+// taken on the heartbeat's database-write cadence. A relay restart (its
+// uptime didn't grow by the gap) or a counter that went down gives no rate
+// for that window, never a negative or invented one. The F23 fixes
+// (2026-11-24) are documented on Record.
 //
 // Pre-production refinement (2026-11-21): every relay is rebuilt with R1, so
 // an empty field 13 means the relay carried no tenant traffic (0). "Not
@@ -66,6 +66,7 @@ type WorkspaceTrafficTracker struct {
 
 type relayTraffic struct {
 	at     time.Time
+	uptime uint64
 	totals map[string]WorkspaceTrafficSample
 	// domains is this reading's trust domain → workspace id, "" for a trust
 	// domain that matched no active workspace (F23 R1-1 rule 4). Replaced at
@@ -78,7 +79,8 @@ func NewWorkspaceTrafficTracker() *WorkspaceTrafficTracker {
 	return &WorkspaceTrafficTracker{relays: map[string]*relayTraffic{}}
 }
 
-// restartSlackSeconds matches B2's bytesRateValid: heartbeat delivery jitter.
+// restartSlackSeconds tolerates heartbeat delivery jitter and the relay's
+// whole-second uptime: the same 5 s as B2's bytesRateValid.
 const restartSlackSeconds = 5
 
 // Record stores a relay's per-workspace counters taken at `at` and derives
@@ -91,7 +93,7 @@ const restartSlackSeconds = 5
 //     it; one absent from the previous reading rates from zero (the relay
 //     reports every entry that ever carried bytes, so absent means zero).
 //  2. A window that isn't continuous (first reading, relay restart) has no
-//     rate for any workspace on the relay.
+//     rate for any workspace on the relay. Restart: U_now < U_prev + gap − 5 s.
 //  3. A counter that went down (reset or re-created entry) has no rate.
 //  4. A workspace whose trust domain was unmatched in the previous reading
 //     gets no zero baseline: that counter may be long-lived.
@@ -107,7 +109,7 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 	continuous := false
 	if prev != nil {
 		gap = at.Sub(prev.at).Seconds()
-		continuous = gap > 0 && float64(uptimeSeconds)+restartSlackSeconds >= gap
+		continuous = gap > 0 && !restarted(prev.uptime, uptimeSeconds, gap)
 	}
 	if continuous {
 		view.WindowSeconds = gap
@@ -130,7 +132,15 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 		}
 		view.Workspaces[ws] = r
 	}
-	t.relays[relayID] = &relayTraffic{at: at, totals: totals, domains: domains, view: view}
+	t.relays[relayID] = &relayTraffic{at: at, uptime: uptimeSeconds, totals: totals, domains: domains, view: view}
+}
+
+// restarted is the combined restart check (agreed 2026-11-24): the relay's
+// uptime, a monotonic clock (Rust Instant), must have grown by the gap, less
+// the tolerance. It catches a restart just after the previous reading, for a
+// young relay too, and contains the older uptime + 5 >= gap test (prev = 0).
+func restarted(prevUptime, uptime uint64, gapSeconds float64) bool {
+	return float64(uptime) < float64(prevUptime)+gapSeconds-restartSlackSeconds
 }
 
 // zeroBaselineAllowed reports whether ws, absent from this (previous)
