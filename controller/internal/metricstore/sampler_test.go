@@ -1,6 +1,8 @@
 package metricstore
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -31,6 +33,8 @@ func has(m map[key]float64, series, subject string) bool {
 
 const fleet = providerquery.FleetSubjectID
 
+func allLive(string) bool { return true }
+
 func TestRelaySamples_OnlyActiveRelaysAndKnownRates(t *testing.T) {
 	relays := []providerquery.RelaySummary{
 		{ID: "r-active", Status: "active", ConnectionCount: 4, Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(1000), ToConnectorBytesPerSec: f(10)}},
@@ -39,7 +43,7 @@ func TestRelaySamples_OnlyActiveRelaysAndKnownRates(t *testing.T) {
 		{ID: "r-offline", Status: "inactive", ConnectionCount: 9, Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(5)}},
 	}
 	active := map[string]bool{}
-	m := index(relaySamples(relays, false, active))
+	m := index(relaySamples(relays, false, allLive, active))
 
 	if m[key{providerquery.SeriesRelayConnections, "r-active"}] != 4 || m[key{providerquery.SeriesRelayBytesToClients, "r-active"}] != 1000 {
 		t.Fatalf("active relay samples: %v", m)
@@ -65,11 +69,11 @@ func TestRelaySamples_OnlyActiveRelaysAndKnownRates(t *testing.T) {
 }
 
 func TestRelaySamples_FleetGapWhenNothingReportsOrListTruncated(t *testing.T) {
-	m := index(relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "inactive"}}, false, map[string]bool{}))
+	m := index(relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "inactive"}}, false, allLive, map[string]bool{}))
 	if has(m, providerquery.SeriesFleetConnections, fleet) {
 		t.Fatal("no reporting relay → fleet gap, not 0")
 	}
-	m = index(relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "active", ConnectionCount: 3}}, true, map[string]bool{}))
+	m = index(relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "active", ConnectionCount: 3}}, true, allLive, map[string]bool{}))
 	if has(m, providerquery.SeriesFleetConnections, fleet) {
 		t.Fatal("a truncated relay list can't give a fleet total")
 	}
@@ -168,9 +172,69 @@ func TestTenantRelaySamples_NonContinuousViewWritesNoBytes(t *testing.T) {
 	}
 }
 
+// F23 R1-3 B (2026-11-24): a relay's byte rates are averages over its last
+// DB-write window. Once its heartbeats stop they would be repeated each
+// minute until eviction (up to 150 s), so they are used only while the relay
+// is live (last heartbeat within RelayLiveMaxAge). Connections still follow
+// the relay status.
+func TestRelaySamples_SilentRelayHasNoByteSamples(t *testing.T) {
+	relays := []providerquery.RelaySummary{
+		{ID: "r-live", Status: "active", ConnectionCount: 1, Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(100), ToConnectorBytesPerSec: f(1)}},
+		{ID: "r-silent", Status: "active", ConnectionCount: 2, Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(9000), ToConnectorBytesPerSec: f(90)}},
+	}
+	live := func(id string) bool { return id == "r-live" }
+	m := index(relaySamples(relays, false, live, map[string]bool{}))
+	if has(m, providerquery.SeriesRelayBytesToClients, "r-silent") || has(m, providerquery.SeriesRelayBytesToConnectors, "r-silent") {
+		t.Fatalf("a silent relay's last rate must not be repeated: %v", m)
+	}
+	if m[key{providerquery.SeriesFleetBytesToClients, fleet}] != 100 {
+		t.Fatalf("fleet bytes over live relays only: %v", m)
+	}
+	if !has(m, providerquery.SeriesRelayConnections, "r-silent") || m[key{providerquery.SeriesFleetConnections, fleet}] != 3 {
+		t.Fatalf("connections still follow the relay status: %v", m)
+	}
+}
+
+type fakeHeartbeats struct {
+	at  map[string]time.Time
+	err error
+}
+
+func (f fakeHeartbeats) LastHeartbeat(_ context.Context, id string) (time.Time, bool, error) {
+	if f.err != nil {
+		return time.Time{}, false, f.err
+	}
+	t, ok := f.at[id]
+	return t, ok, nil
+}
+
+func TestRelayLive_ValkeyThenPersistedHeartbeat(t *testing.T) {
+	persistedOld := now.Add(-4 * time.Minute)
+	persistedNew := now.Add(-10 * time.Second)
+	for _, tc := range []struct {
+		name      string
+		hb        providerquery.HeartbeatSource
+		persisted *time.Time
+		want      bool
+	}{
+		{"valkey fresh", fakeHeartbeats{at: map[string]time.Time{"r": now.Add(-40 * time.Second)}}, &persistedOld, true},
+		{"valkey older than 75 s", fakeHeartbeats{at: map[string]time.Time{"r": now.Add(-80 * time.Second)}}, &persistedOld, false},
+		{"valkey down: persisted (written every heartbeat then)", fakeHeartbeats{err: errors.New("down")}, &persistedNew, true},
+		{"valkey down, persisted old", fakeHeartbeats{err: errors.New("down")}, &persistedOld, false},
+		{"no cache configured", nil, &persistedNew, true},
+		{"no heartbeat at all", fakeHeartbeats{}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := relayLive(context.Background(), tc.hb, "r", tc.persisted, now, RelayLiveMaxAge); got != tc.want {
+				t.Fatalf("live = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEverySampledSeriesIsRegisteredWithItsSubject(t *testing.T) {
 	var all []Sample
-	all = append(all, relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "active", Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(1), ToConnectorBytesPerSec: f(1)}}}, false, map[string]bool{})...)
+	all = append(all, relaySamples([]providerquery.RelaySummary{{ID: "r", Status: "active", Bandwidth: &providerquery.RelayBandwidth{ToClientBytesPerSec: f(1), ToConnectorBytesPerSec: f(1)}}}, false, allLive, map[string]bool{})...)
 	all = append(all, tenantSamples([]tenantCount{{id: "t"}})...)
 	all = append(all, tenantRelaySamples([]tenantCount{{id: "t"}}, map[string]bool{"r": true},
 		[]relay.RelayWorkspaceTraffic{view("r", 0, map[string]relay.WorkspaceRate{"t": {ToClientBytesPerSec: f(1), ToConnectorBytesPerSec: f(1)}})}, now, time.Minute)...)

@@ -48,6 +48,11 @@ type Sampler struct {
 	// may have gone silent). main.go uses two heartbeat DB-write windows
 	// plus a minute.
 	TrafficMaxAge time.Duration
+	// Heartbeats is the Valkey relay liveness (relay.Service); nil uses the
+	// persisted heartbeat only. LiveMaxAge: a relay whose last heartbeat is
+	// older has no byte samples (F23 R1-3 B); zero means RelayLiveMaxAge.
+	Heartbeats providerquery.HeartbeatSource
+	LiveMaxAge time.Duration
 	// Retention (D-49); zero means the default. Shorter values are for tests.
 	SampleRetention time.Duration
 	RollupRetention time.Duration
@@ -61,6 +66,24 @@ func (s *Sampler) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// RelayLiveMaxAge: two 30 s relay heartbeats plus 15 s (F23 R1-3 B). Below
+// the 90 s eviction, so a silent relay's last rates stop before eviction.
+const RelayLiveMaxAge = 75 * time.Second
+
+func (s *Sampler) liveMaxAge() time.Duration {
+	if s.LiveMaxAge > 0 {
+		return s.LiveMaxAge
+	}
+	return RelayLiveMaxAge
+}
+
+// relayLive: the relay's freshest heartbeat (Valkey liveness, else the
+// persisted one) is within maxAge.
+func relayLive(ctx context.Context, hb providerquery.HeartbeatSource, relayID string, persisted *time.Time, now time.Time, maxAge time.Duration) bool {
+	last := providerquery.EffectiveHeartbeat(ctx, hb, relayID, persisted)
+	return last != nil && now.Sub(*last) <= maxAge
 }
 
 func (s *Sampler) sampleRetention() time.Duration {
@@ -141,17 +164,23 @@ func (s *Sampler) Collect(ctx context.Context, now time.Time) ([]Sample, error) 
 	relays, truncated, err := providerquery.RelayLoads(ctx, s.DB)
 	keep(err)
 	active := map[string]bool{}
+	live := map[string]bool{}
 	if err == nil {
-		out = append(out, relaySamples(relays, truncated, active)...)
+		for _, r := range relays {
+			if r.Status == "active" && relayLive(ctx, s.Heartbeats, r.ID, r.LastHeartbeatAt, now, s.liveMaxAge()) {
+				live[r.ID] = true
+			}
+		}
+		out = append(out, relaySamples(relays, truncated, func(id string) bool { return live[id] }, active)...)
 	}
 
 	tenants, err := s.tenantCounts(ctx, now)
 	keep(err)
 	if err == nil {
 		out = append(out, tenantSamples(tenants)...)
-		// R1 series need the relay list too (only active relays count).
+		// R1 series need the relay list too (only active, live relays count).
 		if s.Traffic != nil && relays != nil {
-			out = append(out, tenantRelaySamples(tenants, active, s.Traffic.Snapshot(), now, s.TrafficMaxAge)...)
+			out = append(out, tenantRelaySamples(tenants, live, s.Traffic.Snapshot(), now, s.TrafficMaxAge)...)
 		}
 	}
 	return out, firstErr
@@ -159,8 +188,10 @@ func (s *Sampler) Collect(ctx context.Context, now time.Time) ([]Sample, error) 
 
 // relaySamples: per active relay, its connections and measured rates; fleet
 // totals over the relays that report. An inactive (offline) relay has no
-// sample: a gap. active collects the active relay ids.
-func relaySamples(relays []providerquery.RelaySummary, truncated bool, active map[string]bool) []Sample {
+// sample: a gap. A relay that isn't live (F23 R1-3 B) keeps its connections
+// but has no byte samples: its last window's rate would be repeated. active
+// collects the active relay ids.
+func relaySamples(relays []providerquery.RelaySummary, truncated bool, live func(string) bool, active map[string]bool) []Sample {
 	var out []Sample
 	var conns, toClients, toConnectors float64
 	var nConns, nClients, nConnectors int
@@ -172,7 +203,7 @@ func relaySamples(relays []providerquery.RelaySummary, truncated bool, active ma
 		out = append(out, Sample{providerquery.SeriesRelayConnections, providerquery.MetricSubjectRelay, r.ID, float64(r.ConnectionCount)})
 		conns += float64(r.ConnectionCount)
 		nConns++
-		if bw := r.Bandwidth; bw != nil {
+		if bw := r.Bandwidth; bw != nil && live(r.ID) {
 			if bw.ToClientBytesPerSec != nil {
 				out = append(out, Sample{providerquery.SeriesRelayBytesToClients, providerquery.MetricSubjectRelay, r.ID, *bw.ToClientBytesPerSec})
 				toClients += *bw.ToClientBytesPerSec
@@ -260,19 +291,19 @@ func tenantSamples(tenants []tenantCount) []Sample {
 	)
 }
 
-// tenantRelaySamples: each tenant's relay traffic summed over the active
-// relays whose R1 view is fresh (D-54 refined: a workspace missing from a
+// tenantRelaySamples: each tenant's relay traffic summed over the active,
+// live relays (usable) whose R1 view is fresh (D-54 refined: a workspace missing from a
 // reporting relay's view had no traffic there). No fresh view at all → no
 // sample for any tenant (not reported). A tenant whose rate is unknown on a
 // reporting relay this window gets no byte samples; its stream count is
 // still known. A fresh view without a window (a relay restart or first
 // reading) gives no byte samples for any tenant (F23 R1-2): it can't say
 // which tenants it carried, and a partial sum would read as the real total.
-func tenantRelaySamples(tenants []tenantCount, active map[string]bool, views []relay.RelayWorkspaceTraffic, now time.Time, maxAge time.Duration) []Sample {
+func tenantRelaySamples(tenants []tenantCount, usable map[string]bool, views []relay.RelayWorkspaceTraffic, now time.Time, maxAge time.Duration) []Sample {
 	var fresh []relay.RelayWorkspaceTraffic
 	bytesKnown := true
 	for _, v := range views {
-		if active[v.RelayID] && now.Sub(v.MeasuredAt) <= maxAge {
+		if usable[v.RelayID] && now.Sub(v.MeasuredAt) <= maxAge {
 			fresh = append(fresh, v)
 			// F23 R1-2: a view without a window (restart, first reading)
 			// can't say which tenants it carried: no tenant bytes this minute.

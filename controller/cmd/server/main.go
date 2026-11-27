@@ -1185,6 +1185,7 @@ func main() {
 		DB:              db.Pool,
 		Traffic:         relayWorkspaceTraffic,
 		TrafficMaxAge:   trafficMaxAge,
+		Heartbeats:      relaySvc, // Valkey liveness: byte rates only while live (F23 R1-3 B)
 		SampleRetention: mustDuration("METRIC_SAMPLE_RETENTION", providerquery.SampleRetention),
 		RollupRetention: mustDuration("METRIC_ROLLUP_RETENTION", providerquery.RollupRetention),
 	}

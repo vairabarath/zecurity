@@ -265,6 +265,12 @@ func scanRelaySummary(row pgx.Row, extra ...any) (RelaySummary, error) {
 	return s, nil
 }
 
+// EffectiveHeartbeat is effectiveHeartbeat for other readers (the F23 metric
+// sampler's liveness check, R1-3 B), so both use one definition.
+func EffectiveHeartbeat(ctx context.Context, hb HeartbeatSource, relayID string, db *time.Time) *time.Time {
+	return effectiveHeartbeat(ctx, hb, relayID, db)
+}
+
 // effectiveHeartbeat returns the fresher of the persisted heartbeat and the
 // Valkey liveness key. A Valkey error or missing key falls back to the
 // database value: a read API shouldn't fail because the cache is down.
