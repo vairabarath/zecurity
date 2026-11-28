@@ -4075,8 +4075,9 @@ serves on `127.0.0.1:9102`.
 - **X5 and X6 built** (PR #270, stacked on #269): the break-glass alert fires even when acknowledged before the first tick; disabling or demoting a super-admin revokes their API keys in the same transaction (audited, never restored). Go gate 51 packages green, 10 mutations caught, live PASS on the lab.
 - **Security review finding fixed in #270:** a key created at the same moment as its creator's disable or demotion could survive; `CreateAPIKey` now locks and re-checks the creator (`TestAPIKeys_CreateRacesCreatorDisable`).
 
+- **Merged:** #269 (`64fd47d0`) and #270 (`99783587`, retargeted to `main`). **F20 and F35 ticked: Sprint 27 complete** (27 / 40).
+
 **Open:**
-- **Merge #269 then #270** (retarget #270 to `main` after #269); then tick F20 and F35.
 - **Barath's review** of the merged stack and the open points in `Sprint27/path.md`, now including D-77 and D-78.
 - **Lab:** the acceptance controller, console, mail and webhook helpers and the relay on `suryavardhan` are still running; stop them and delete `~/s27relay` on that host when done.
 - **Still open from before:** the Sprint 24 acceptance run; Sprint 26 lab teardown (luffy `sudo`, .41).

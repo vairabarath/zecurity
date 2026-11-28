@@ -2,7 +2,7 @@
 type: sprint
 sprint: 27
 title: Provider Dashboard — provider access and API (F19, F20, F35)
-status: ACTIVE — every phase merged 2026-11-28 (#262 → #267, main `8db309bf`; at Sathiya's go before Barath's review); acceptance run PASS 2026-11-28 (main `b6521928`); F19 ticked; left: fixes X5 (D-77) and X6 (D-78), then tick F20 and F35; Barath's review of the open points below
+status: DONE — every phase merged 2026-11-28 (#262 → #267; at Sathiya's go before Barath's review); acceptance PASS 2026-11-28 (main `b6521928`); docs #269 `64fd47d0`; X5 + X6 merged #270 `99783587`; F19, F20, F35 ticked; left: Barath's review of the open points below
 created: 2026-11-23
 team:
   - Person 1 = Barath (M2): F19 — O1 role matrix and new roles; F20 — G1 loud break-glass
@@ -182,8 +182,8 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] O2: Console per role + break-glass banner (Sathiya; live PASS 2026-11-28) — #267 merged `8db309bf`
 - [x] Sprint acceptance run — PASS 2026-11-28 on `main` `b6521928` (run by Sathiya; results below and in `Pending-Live-Tests.md`); tracker F19 ticked
 - [x] D-77 and D-78 decided 2026-11-28 (Sathiya) from the run's two questions; written into the Decision Record (amendment 2026-11-28)
-- [ ] X5: break-glass alert even when acknowledged before the first tick (D-77) — built on `fix/sprint27-x5-x6` (stacked on #269), gate green, live PASS 2026-11-28; merge, then tick F20
-- [ ] X6: disabling or demoting a super-admin permanently revokes their API keys (D-78) — built on `fix/sprint27-x5-x6`, gate green, live PASS 2026-11-28; merge, then tick F35
+- [x] X5: break-glass alert even when acknowledged before the first tick (D-77) — live PASS 2026-11-28; merged #270 `99783587`; F20 ticked
+- [x] X6: disabling or demoting a super-admin permanently revokes their API keys (D-78), incl. the create-vs-disable race fix — live PASS 2026-11-28; merged #270 `99783587`; F35 ticked
 
 ### Merged before review: open points for Barath (2026-11-28)
 
@@ -221,7 +221,7 @@ Not run: nothing from the acceptance list. Two questions came out of the run and
 
 ## Post-Sprint Fixes
 
-### X5 (built, live PASS; not merged): break-glass alert even when acknowledged early (D-77)
+### X5 (merged #270, live PASS): break-glass alert even when acknowledged early (D-77)
 **Issue:** a `recover-admin` use acknowledged in the console before the evaluator's next tick raised no `provider.break_glass_used` alert and no webhook (email and banner still happened). Found in the acceptance run.
 
 **Root cause:** the evaluator signal reads only unacknowledged events (`controller/internal/alerting/signals.go`, `breakGlassUsed`: `WHERE acknowledged_at IS NULL`), so an event acknowledged first is never seen as firing.
@@ -238,7 +238,7 @@ Not run: nothing from the acceptance list. Two questions came out of the run and
 ```
 An event acknowledged before any tick is still observed until its alert has fired: it fires on that tick and resolves on the next (the ack resolves it, never prevents it). **Test:** `TestBreakGlass_AckBeforeFirstTick` (`internal/breakglass/breakglass_db_test.go`); 2 mutations caught. **Live (2026-11-28):** `recover-admin`, ack via the API before any tick (no alert event yet) → fired then resolved within 20 s, webhook firing + resolved (critical, platform), no re-fire, no temporary password in the payloads. Phase file: G1 → Post-Phase Fixes.
 
-### X6 (built, live PASS; not merged): revoke a super-admin's API keys when they're disabled or demoted (D-78)
+### X6 (merged #270, live PASS): revoke a super-admin's API keys when they're disabled or demoted (D-78)
 **Issue:** a key kept working after the super-admin who created it was disabled or demoted (K1 review question, from an automated security review).
 
 **Fix applied:** `revokeCreatorKeysTx` (`internal/provider/apikeys.go`) revokes every unrevoked key the operator created (`revoked_by` = the acting super-admin, reason `creator disabled` / `creator demoted`, one `api_key.revoke` audit row per key with name, prefix and cause); `SetDisabled` (disable) and `ChangeRole` (from `super-admin`) call it in their transaction and add `api_keys_revoked: N` to the operator audit (`operators.go`); the actor-less `Store.Disable` (`store.go`, tests only) revokes too. Re-enabling or re-promoting restores nothing (revocation is terminal, `076_` trigger). **Test:** `TestAPIKeys_CreatorDisabledOrDemoted` (`internal/provider/apikeys_creator_db_test.go`); 6 mutations caught. **Live (2026-11-28):** two new super-admins each created a key; disable → that key 401 (revoked, "creator disabled", by the acting super-admin), other keys 200; enable → still 401; demote → 401 ("creator demoted"); re-promote → still 401; audit: disable `api_keys_revoked: 1`, role change `1`, one `api_key.revoke` row per key, no secret. Phase file: K1 → Post-Phase Fixes. **Race (automated security review of the first push):** a key created while its creator was being disabled or demoted could commit after the revocation and survive. `CreateAPIKey` now locks the creator row `FOR SHARE` and refuses (403 `forbidden`, `ErrAPIKeyCreatorNotActive`) unless it is still an active super-admin; the disable and role-change transactions lock the same row `FOR UPDATE`, so the two serialise. Test `TestAPIKeys_CreateRacesCreatorDisable` (a create waiting behind a disable is refused; a disabled or non-super-admin creator is refused); 2 mutations caught; gate green.
