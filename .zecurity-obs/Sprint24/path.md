@@ -154,8 +154,8 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - [x] Phase 0: D-48 … D-54 decided and written into the Decision Record (2026-11-20)
 - [x] Documents reviewed (scope draft, Sprint 24 files, Decision Record amendment) — signed off by Barath 2026-11-20; implementation may start
 - [x] X1 — Sprint 23 follow-ups (Sathiya) — merged (#233, `53e5d01e`) — live-checked 2026-11-20 (PASS)
-- [ ] R1 — Per-workspace relay counters (Barath)
-- [ ] M1 — Metric store + read API (Barath)
+- [ ] R1 — Per-workspace relay counters (Barath) — merged (#237, fixes #273) — re-check 2026-11-28 PASS except one R1-3 stale minute; waits for R1-3 C (PR B)
+- [x] M1 — Metric store + read API (Barath) — merged (#239, fixes #273) — live-checked 2026-11-23, M1-1 re-checked 2026-11-28 (PASS)
 - [ ] M2 — Console charts (Barath)
 - [x] A1 — Alert rules + evaluator (Sathiya) — merged (#234) — live-checked 2026-11-20 (PASS)
 - [x] A2 — Delivery: webhook, email (Sathiya) — merged (#235) — live-checked 2026-11-20 (PASS)
@@ -176,6 +176,13 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 - **Rule 6:** a left-out relay that may still carry a tenant's traffic (recent reading, or a connector still placed on it) → that tenant's bytes are a gap. A live relay without a fresh view → no tenant relay sample.
 - **M1-1:** a re-roll never thins an hour's roll-up.
 - **Not here:** R1-3 C, M2-1, M2-2 and M2-3 (console, PR B). The purged-slug reuse is logged separately (`Planning/Security-Finding-Purged-Slug-Reuse.md`).
+- **Merged** as #273 (`2dbf87a7`, 2026-11-28; `main` merged in first, conflict in `workspace_traffic.go` resolved by threading `seen` through main's usage helpers).
+
+**Usage timestamp after the #273 merge**, branch `fix/f23-usage-received-at`: usage gets `receivedAt` (UTC) on every heartbeat again; the R1 tracker keeps the monotonic `arrived`. Harmless before (the collector converts to UTC), now consistent and tested. Details in the phase file.
+
+**Live re-check 2026-11-28** (`main` `2dbf87a7` + the usage fix, reset DB): R1-1, R1-2, M1-1 and the two-tenant run **pass**; usage equals the clients' bytes. R1-3 B leaves **one** stale minute after a relay stop (it was up to two), which R1-3 C removes. Record: `Planning/Pending-Live-Tests.md`.
+
+**PR B decisions (2026-11-28, Sathiya; for Barath's review):** M2-1 "No data" in chart gaps; M2-2 "Not reported" on the tenant page while the relay is stopped or has no current report; M2-3 the historical capacity line follows the setting in force at each point in time; R1-3 C a view older than one reporting window is "Not reported".
 
 ## Out of scope
 

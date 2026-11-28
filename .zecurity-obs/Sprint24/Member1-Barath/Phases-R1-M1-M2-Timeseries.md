@@ -260,6 +260,40 @@ R1-3 C (the console label) is in PR B.
 - a re-run that covers fewer minutes keeps the fuller row;
 - the `Tick` comment ("re-running is harmless") is corrected.
 
+### Fix: usage got the tracker's monotonic time after the merge with `main` (#273 follow-up)
+**Issue:** merging `main` into `fix/sprint24-f23-findings` (#273) combined two changes to `recordWorkspaceTraffic`: Sprint 25's usage path (F32-1, usage on every heartbeat) and this branch's monotonic `arrived` time for the R1 tracker. The merged code passed `arrived` (local zone, monotonic reading) to the usage collector on DB-write heartbeats, but `receivedAt` (UTC) on throttled ones.
+
+**Root cause:** the merge (`06f9e5d1`, Sathiya) threaded one `at` into both the tracker and `recordUsage`. Harmless today, because `usage.Collector.RecordRelayCounters` starts with `at = at.UTC()`, but the collector would see two kinds of timestamp if that line were ever removed.
+
+**Fix applied** (`internal/relay/heartbeat.go`, `internal/relay/workspace_traffic.go`, branch `fix/f23-usage-received-at`):
+```go
+// BEFORE:
+s.recordWorkspaceTraffic(ctx, relayID, arrived, req)
+// … Record(relayID, at, …); s.recordUsage(ctx, relayID, at, req, samples)
+
+// AFTER:
+s.recordWorkspaceTraffic(ctx, relayID, arrived, receivedAt, req)
+// … Record(relayID, arrived, …); s.recordUsage(ctx, relayID, receivedAt, req, samples)
+```
+
+**Test:** `TestHeartbeat_DBWriteFeedsTrackerAndUsageWithUTCTime` (`internal/relay/usage_every_heartbeat_test.go`): one DB-write heartbeat feeds both the tracker (monotonic time, the workspace recorded through `seen`) and usage (UTC, no monotonic reading, same instant). It fails without the fix ("usage time is in Local, want UTC").
+
+### Live re-check 2026-11-28 (`main` `2dbf87a7` + the usage fix above)
+Sathiya, reset local DB (migrations through `077_`), lab `RELAY_HEARTBEAT_DB_WRITE_INTERVAL=1m`. Results and numbers: `Planning/Pending-Live-Tests.md`, results log 2026-11-28.
+
+| Finding | Result |
+|---|---|
+| R1-1 | **Pass.** T1's first minute (12:04) and T2's (12:07) each have a tenant row equal to their share of the relay total. |
+| R1-2 | **Pass.** First window after a relay restart (12:15): no byte rows for any tenant, stream counts written; rates back at 12:16. |
+| R1-3 (B) | **Pass with one residual.** After the stop, 12:12–12:14 are a gap (never 0), but 12:11 repeated 12:10's values: the relay was still "live" (heartbeat ≤ 75 s) at that tick. Removed by R1-3 C (decided below, PR B). |
+| M1-1 | **Pass.** A restart re-rolled an hour over 2 leftover samples and kept the 60-sample roll-up. |
+
+### PR B decisions (2026-11-28, Sathiya; for Barath's review)
+- **M2-1:** charts show "No data" in gaps.
+- **M2-2:** the tenant page shows "Not reported" while the relay is stopped or has no current report.
+- **M2-3:** the historical capacity line follows the capacity setting in force at each point in time.
+- **R1-3 C:** a view older than one reporting window counts as "Not reported".
+
 ### R1 freshness thresholds (one table)
 `W` = `RELAY_HEARTBEAT_DB_WRITE_INTERVAL` (default 5 min, lab 1 min). `TrafficMaxAge` = `2W + 1 min`, one value in `main.go` for both the tracker and the sampler.
 
