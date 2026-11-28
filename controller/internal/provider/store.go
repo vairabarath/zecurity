@@ -329,21 +329,31 @@ func (s *Store) CreateBootstrapSuperAdminIfNone(ctx context.Context, email, pass
 }
 
 // Disable soft-disables a provider user (revokes access, preserves audit FK)
-// and bumps session_generation so every outstanding token dies at once.
+// and bumps session_generation so every outstanding token dies at once. It
+// has no acting operator and writes no audit row (operator management uses
+// SetDisabled); like SetDisabled it permanently revokes the API keys the user
+// created (D-78), in the same transaction, with the user as revoked_by.
 func (s *Store) Disable(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE provider_users
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE provider_users
                 SET disabled_at = NOW(), session_generation = session_generation + 1, updated_at = NOW()
               WHERE id = $1 AND disabled_at IS NULL`,
-		id,
-	)
-	if err != nil {
-		return fmt.Errorf("disable provider user: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrProviderUserNotFound
-	}
-	return nil
+			id,
+		)
+		if err != nil {
+			return fmt.Errorf("disable provider user: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrProviderUserNotFound
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE provider_api_keys SET revoked_at = NOW(), revoked_by = $1, revoke_reason = $2
+			  WHERE created_by = $1 AND revoked_at IS NULL`, id, RevokeReasonCreatorDisabled); err != nil {
+			return fmt.Errorf("revoke creator api keys: %w", err)
+		}
+		return nil
+	})
 }
 
 // dbExec is the subset of pgx used to write an audit row. Both *pgxpool.Pool and

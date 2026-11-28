@@ -78,6 +78,9 @@ var (
 	ErrAPIKeyInvalidName   = errors.New("invalid api key name")
 	ErrAPIKeyInvalidCIDR   = errors.New("invalid api key cidr")
 	ErrAPIKeyNameMismatch  = errors.New("confirmation does not match the key name")
+	// ErrAPIKeyCreatorNotActive: the creating operator is no longer an active
+	// super-admin when the key would be stored (D-78).
+	ErrAPIKeyCreatorNotActive = errors.New("api key creator is not an active super-admin")
 )
 
 // IsAPIKeyToken reports whether a bearer token is an API key (by its
@@ -218,6 +221,26 @@ func (s *Store) CreateAPIKey(ctx context.Context, actor AuditActor, in NewAPIKey
 	var created *APIKey
 	var full string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// D-78: lock the creator and re-check it is still an active
+		// super-admin. The disable and role-change transactions lock the same
+		// row FOR UPDATE before revoking the operator's keys, so the two
+		// serialise: a create that commits first is revoked by the later
+		// disable or demotion, and a create that waits sees the new state and
+		// is refused. Without the lock a key created concurrently with its
+		// creator's demotion could commit after the revocation and survive.
+		var role string
+		var disabled bool
+		err := tx.QueryRow(ctx,
+			`SELECT role, disabled_at IS NOT NULL FROM provider_users WHERE id = $1 FOR SHARE`, actor.UserID).Scan(&role, &disabled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAPIKeyCreatorNotActive
+		}
+		if err != nil {
+			return fmt.Errorf("lock api key creator: %w", err)
+		}
+		if role != RoleSuperAdmin || disabled {
+			return ErrAPIKeyCreatorNotActive
+		}
 		var id string
 		if err := tx.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
 			return fmt.Errorf("api key id: %w", err)
@@ -299,6 +322,57 @@ func (s *Store) RevokeAPIKey(ctx context.Context, actor AuditActor, id, reason, 
 		return nil
 	})
 	return out, err
+}
+
+// Reasons recorded on keys revoked because their creator lost super-admin
+// (D-78).
+const (
+	RevokeReasonCreatorDisabled = "creator disabled"
+	RevokeReasonCreatorDemoted  = "creator demoted"
+)
+
+// revokeCreatorKeysTx (D-78, Sprint 27 X6) permanently revokes every key
+// creatorID created that isn't revoked yet, inside the caller's transaction
+// (the operator disable or role change), so the operator change and the
+// revocations commit or fail together. Each key gets the acting super-admin
+// as revoked_by, the system reason and its own api_key.revoke audit row (name
+// and prefix, never the secret). Revocation is terminal: re-enabling or
+// re-promoting the operator restores nothing. Returns how many keys were
+// revoked.
+func (s *Store) revokeCreatorKeysTx(ctx context.Context, tx pgx.Tx, actor AuditActor, creatorID, reason, cause string) (int, error) {
+	rows, err := tx.Query(ctx,
+		`UPDATE provider_api_keys SET revoked_at = NOW(), revoked_by = $2, revoke_reason = $3
+		  WHERE created_by = $1 AND revoked_at IS NULL
+		  RETURNING id::text, name, prefix`, creatorID, actor.UserID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("revoke creator api keys: %w", err)
+	}
+	type revoked struct{ id, name, prefix string }
+	var keys []revoked
+	for rows.Next() {
+		var k revoked
+		if err := rows.Scan(&k.id, &k.name, &k.prefix); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("revoked api key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("revoke creator api keys: %w", err)
+	}
+	for _, k := range keys {
+		uid := actor.UserID
+		if err := s.InsertAuditTx(ctx, tx, AuditEntry{
+			ProviderUserID: &uid, ProviderEmail: actor.Email, IPAddress: actor.IP,
+			Action: AuditAPIKeyRevoke, TargetType: "api_key", TargetID: k.id,
+			Details: WithChange(map[string]any{"reason": reason, "name": k.name, "prefix": k.prefix, "cause": cause, "creator_id": creatorID},
+				map[string]any{"status": "active"}, map[string]any{"status": "revoked"}),
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
 }
 
 // apiKeyAuthRow is what authentication needs from a key row.

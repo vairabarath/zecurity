@@ -272,3 +272,43 @@ func TestBreakGlass_EndToEnd(t *testing.T) {
 		t.Fatalf("resolve: %+v", resolved)
 	}
 }
+
+// D-77 (Sprint 27 acceptance, fix X5): an event acknowledged before the
+// evaluator's first tick still raises the critical alert (fired on that
+// tick) and the acknowledgement resolves it on the next; it never fires
+// again. An event acknowledged after its alert fired is unaffected.
+func TestBreakGlass_AckBeforeFirstTick(t *testing.T) {
+	pool, store := newDB(t)
+	admin, second := seed(t, store)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `UPDATE alert_rules SET enabled = (id = $1)`, ruleBreakGlass); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RecoverAdmin(ctx, store, second.Email, "lost phone", "ctl-host-1"); err != nil {
+		t.Fatal(err)
+	}
+	eventID := one[string](t, pool, `SELECT id::text FROM provider_break_glass_events`)
+	// Acknowledged at once, before any tick.
+	if _, err := pool.Exec(ctx, `UPDATE provider_break_glass_events SET acknowledged_at = NOW(), acknowledged_by = $2, ack_note = 'seen'
+	                              WHERE id = $1`, eventID, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	ev := &alerting.Evaluator{Store: alerting.NewStore(pool), Observer: alerting.Sources{DB: pool}}
+	fired := ev.Tick(ctx)
+	if len(fired) != 1 || fired[0].Transition != alerting.TransitionFired || fired[0].TargetID != eventID ||
+		fired[0].Severity != alerting.SeverityCritical || fired[0].Scope != alerting.ScopePlatform {
+		t.Fatalf("an early ack must not skip the alert: %+v", fired)
+	}
+	resolved := ev.Tick(ctx)
+	if len(resolved) != 1 || resolved[0].Transition != alerting.TransitionResolved || resolved[0].TargetID != eventID {
+		t.Fatalf("the ack must resolve it on the next tick: %+v", resolved)
+	}
+	for i := 0; i < 2; i++ {
+		if again := ev.Tick(ctx); len(again) != 0 {
+			t.Fatalf("tick %d after resolve: %+v", i, again)
+		}
+	}
+	if n := one[int](t, pool, `SELECT count(*) FROM alert_events WHERE target_id = $1`, eventID); n != 2 {
+		t.Fatalf("events for the early-acknowledged use: %d, want 2 (fired, resolved)", n)
+	}
+}

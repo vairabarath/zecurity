@@ -152,6 +152,8 @@ func writeAPIKeyError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusConflict, "already_revoked")
 	case errors.Is(err, ErrAPIKeyNotFound):
 		WriteError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ErrAPIKeyCreatorNotActive):
+		WriteError(w, http.StatusForbidden, "forbidden")
 	default:
 		log.Printf("api keys: %v", err)
 		WriteError(w, http.StatusInternalServerError, "server_error")
