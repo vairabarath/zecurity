@@ -2,8 +2,9 @@ import type { ComponentType, SVGProps } from 'react'
 import { BarChart3, Bell, Building2, ChevronsUpDown, Gauge, History, KeyRound, Layers, LayoutGrid, LogOut, RadioTower, ReceiptText, ScrollText, Settings2, ShieldCheck, Users } from 'lucide-react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { signOut } from '@/auth/flows'
-import { ROLE_LABELS, SECTIONS, sectionsFor, type Section } from '@/auth/roles'
+import { can, ROLE_LABELS, SECTIONS, sectionsFor, type Section } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
+import { BreakGlassBanner } from '@/components/BreakGlassBanner'
 import { ProviderBrand } from '@/components/ProviderBrand'
 import { SessionMeter } from '@/components/SessionMeter'
 import {
@@ -30,6 +31,7 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   certificates: ShieldCheck,
   audit: ScrollText,
   users: Users,
+  'api-keys': KeyRound,
 }
 
 /** Initials for the avatar: the first two letters of the email's local part. */
@@ -119,6 +121,8 @@ export function Layout({ sections = SECTIONS }: { sections?: readonly Section[] 
 
       <main className="min-w-0 flex-1 px-4 pb-14 pt-6 sm:px-6 lg:px-9 lg:pt-7">
         <div className="mx-auto w-full max-w-[1180px]">
+          {/* Sprint 27 O2 / G1 (D-75): unacknowledged break-glass recoveries, super-admins only. */}
+          {can(me?.role, 'break_glass.read') && <BreakGlassBanner />}
           <Outlet />
         </div>
       </main>

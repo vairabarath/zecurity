@@ -3,7 +3,7 @@ import { AlertTriangle, Plus, RefreshCw } from 'lucide-react'
 import { Navigate } from 'react-router-dom'
 import { listRelayPools } from '@/api/reads'
 import type { RelayPoolSummary } from '@/api/types'
-import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { PageHeader } from '@/components/PageHeader'
 import { DefaultPoolBadge, PoolLink, PoolStateBadge, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
@@ -30,8 +30,8 @@ const fetchPools = () => listRelayPools()
 export function RelayPools() {
   const { state, reload } = useDetailQuery('pools', fetchPools)
   const role = useSessionStore((s) => s.me?.role)
-  const canCreate = hasRole(role, PROVIDER_ROLES)
-  const isSuperAdmin = hasRole(role, ['super-admin'])
+  const canCreate = can(role, 'relay.pool.create')
+  const isSuperAdmin = can(role, 'relay.pool.set_placement')
   const [creating, setCreating] = useState(false)
   const [notice, setNotice] = useState<RelayActionNotice | null>(null)
 

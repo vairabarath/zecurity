@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { listRelays } from '@/api/reads'
 import { createRelay } from '@/api/relays'
 import { RELAY_STATUSES, type Page, type RelayStatus, type RelaySummary } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { AddRelayDialog, type NewRelay } from '@/components/AddRelayDialog'
 import { BandwidthCell } from '@/components/Bandwidth'
@@ -36,7 +36,6 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // only and sends nothing). Policy (D-40): for relays in residency pools,
 // whether the relay enforces the pool's workspace policy.
 
-const CAN_CREATE = ['super-admin', 'relay-ops'] as const
 
 const FILTER_KEYS = ['status'] as const
 const ALL = 'all' // chip value for "no status filter" (every status except deleted)
@@ -62,7 +61,7 @@ function fetchRelays(f: Filters, cursor: string | undefined): Promise<Page<Relay
 export function Relays() {
   const q = usePagedQuery<Page<RelaySummary>>({ filterKeys: FILTER_KEYS, validate: validStatus, fetchPage: fetchRelays })
   const onStatus = useCallback((v: string) => q.setFilters(v === ALL ? {} : { status: v }), [q])
-  const canCreate = hasRole(useSessionStore((s) => s.me?.role), CAN_CREATE)
+  const canCreate = can(useSessionStore((s) => s.me?.role), 'relay.create')
   const [adding, setAdding] = useState(false)
   // Bumped on every opening so the form starts empty (it keeps its own state).
   const [addKey, setAddKey] = useState(0)

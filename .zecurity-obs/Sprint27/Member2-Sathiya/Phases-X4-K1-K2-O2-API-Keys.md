@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 (PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 built (stacked on K1), live PASS, not committed yet; O2 next
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 (PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 (PR #266), live PASS; O2 built (stacked on K2), live PASS, not committed yet
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role
@@ -284,6 +284,72 @@ Branch `feat/sprint27-k2-keys-console`, **stacked on K1** (PR #264 → G1 #263 �
 ### Live check (O2)
 - Sign in as each new role: the nav shows exactly its pages and there are no write buttons where it can't write.
 - The break-glass banner appears after G1's live step and clears on acknowledge.
+
+### Implementation record (2026-11-28)
+
+Branch `feat/sprint27-o2-console-roles`, **stacked on K2** (PR #266 → K1 #264 → G1 #263 → O1 #262). Mostly console; one small controller read change.
+
+- **The role matrix in the console:**
+  - `src/auth/role-matrix.json` is a copy of the server's `roleActions`.
+  - **`TestConsoleRoleMatrix`** (controller, `internal/provider/console_matrix_test.go`) fails if the two differ, so the console can't drift.
+  - `roles.ts`:
+    - `PROVIDER_ROLES` = 5 roles; `ROLE_LABELS`, `ROLE_HELP` (one line each); `TOTP_REQUIRED_ROLES`;
+    - **`can(role, action)`** uses the server's action names; super-admin may do everything; an unknown role nothing;
+    - `rolesWith(action)`.
+  - `tsconfig.app.json` gains `resolveJsonModule`.
+- **Pages per role:**
+  - Each section is shown to `rolesWith(<the read its page needs>)`, not to a named list:
+    - alerts / timeline: `alert.read`; relays and pools: `relay.read`;
+    - tenants: `tenant.list.read`; plans and billing settings: `plan.read`; usage: `tenant.usage.read`; invoices: `invoice.read`;
+    - certificates: `cert.read`; audit: `audit.view`; operators: `provider_user.manage`; API keys: `api_key.read`.
+  - The tenant detail route needs `tenant.read` (`TENANT_DETAIL_ROLES`), so billing gets Forbidden there.
+  - A page outside the role → `/forbidden` (existing `RequireRole`).
+- **Write buttons follow `can()`:**
+  - **relay components:** drain/resume `relay.drain`, revoke/delete `relay.revoke`, move `relay.move`, pools `relay.pool.*`, Add relay `relay.create`;
+  - **tenant sections:** suspend, delete, quotas, pool, plan, first-admin, Create tenant, each by its own action;
+  - **Plans:** New card / Duplicate `plan.create`; Edit / Remove price `plan.update`; Delete `plan.delete`; Make default `plan.set_default`; the "Change the billing currency" link `billing.settings.write`;
+  - **Invoices:** Regenerate, Issue, Mark paid, Void, Resend by `invoice.write`;
+  - **Billing settings:** a **read-only mode** (fields disabled, no reason, no Save) without `billing.settings.write`;
+  - **Alerts:**
+    - Rules tab `alert.rule.read` with Edit by `alert.rule.update`; Channels tab `alert.channel.read` with its buttons by `alert.channel.update`;
+    - the scope filter only in the full view; tenant names by `tenant.read`;
+    - support's description says "Tenant alerts…".
+  - **Timeline:** tenant, rule and channel links and the tenant focus each follow their read; support gets a tenant-only description.
+  - **Overview:** each tile is read only by roles allowed it (relays and pools, firing alerts, certificates, audit, health, the trend series), so billing makes **no** Overview requests and support only alerts + health. "Your access" text and a link for relay-ops, billing and support.
+- **Billing on the tenant list (D-73 "tenant list (name, plan, status)"):**
+  - **controller:** `TenantSummary.current_plan {id, name}`, from a join in the list/detail query; named so to keep the response guard against any `lan_` key fragment; DTO surface test updated; new `TestListTenants_CurrentPlan`;
+  - **console:** a Plan column for everyone; **Change plan** on the list only for roles with `tenant.plan.assign` and without `tenant.read` (billing; super-admins change it on the tenant page). The dialog is the existing `ChangePlanDialog`, exported with a minimal tenant shape. Names link to the detail only with `tenant.read`.
+- **Operator dialogs:** the role select lists the 5 roles with a help line, plus "Must set up two-step verification at first sign-in" for the TOTP roles. Operator counts gain "Other roles".
+- **Break-glass banner (G1's API):**
+  - `src/api/breakGlass.ts`: list, acknowledge (in `api-surface.test.ts`);
+  - `components/BreakGlassBanner.tsx` in `Layout`, only for `break_glass.read` (super-admins): "Break-glass recovery used for <email> at <time>: <reason>", host, and **Acknowledge** with a required note; `already_acknowledged` closes it quietly.
+  - **Test helper:** `test/fetch.ts` answers `GET /provider/break-glass` with no events when a test doesn't route it, and records it in `bannerCalls`, not `calls`, so page tests keep counting only the page's requests.
+- **Existing tests updated:** RelayDetail used `auditor` as its unknown-role example (now `owner`); a Tenants fixture gained a plan.
+- **Tests** (`src/pages/ConsolePerRole.test.tsx`, 24):
+  - the 5 roles and help; `can()` spot checks;
+  - **navigation:** exactly the pages per role (relay-ops, auditor, billing, support);
+  - **Forbidden:** pages outside each role, with no request;
+  - **Overview:** billing none, support alerts + health, auditor its 7 reads;
+  - **write buttons:**
+    - auditor: Plans (no New card, edit, delete, default or currency link), Billing settings (read-only), Invoices (no Regenerate), Alerts rules (no Edit);
+    - billing: Plans (create and edit, no delete or default); the tenant list shows the plan and Change plan, with no detail link;
+    - support: the tenant list (link, no Change plan, no Create tenant); Alerts (Active/History only, tenant wording);
+  - **operator dialog:** help line, no two-step note for relay-ops;
+  - **banner:** shown to super-admin, acknowledge needs a note, sends it, and the banner clears; no other role reads it.
+- **Mutation checks (9, each caught):** console matrix drift (Go test); tenants page for every role; auditor gets New card; billing settings never read-only; banner for every role; billing gets detail links; Overview reads relays for every role; ack without a note; tenant detail route open to billing.
+- **Gate:**
+  - console: `npm test` 67 files / 889 tests, `npm run lint` clean, `npm run build` OK;
+  - controller: full `go test -count=1 ./...` with every DB variable: 51 packages ok, 0 failures, the 2 known skips; `TestConsoleRoleMatrix` and `TestListTenants_CurrentPlan` ran.
+- **Live check (2026-11-28): PASS.**
+  - **Setup:** controller from the branch (sha256 `dd5c539f…`) on a fresh DB through `077_`; console dev server; Orca's built-in browser; driver `~/.cache/zecurity-s27/o2ui.py` (each role in its own tab, password + TOTP via stdin).
+  - **auditor:**
+    - nav: Overview, Alerts, Timeline, Relays, Relay pools, Tenants, Plans, Usage, Invoices, Billing settings, Certificates, Audit log;
+    - Plans showed only History, plus the currency link, then fixed (above);
+    - Billing settings read-only; Alerts rules without Edit; Operators and API keys Forbidden.
+  - **billing:** nav: Overview, Tenants, Plans, Usage, Invoices, Billing settings. Tenants: "Change plan of S27 Acme", no detail link. Plans: New card, Edit, Duplicate, Remove price, no Delete or Make default. Invoices: Regenerate drafts. Relays and Alerts Forbidden.
+  - **support:** nav: Overview, Alerts, Timeline, Tenants. The tenant name links to the detail. Alerts: Active and History only. Invoices and Plans Forbidden.
+  - **relay-ops:** unchanged (Add relay; Tenants Forbidden).
+  - **Banner:** `recover-admin --email bg@s27.test --reason "O2 live check: lost phone"`, then the main super-admin saw the banner with the operator and reason. Acknowledge was disabled until a note was typed; after acknowledging, the banner cleared. Audit `break_glass.acknowledge` has the note; the temporary password never appeared on the page.
 
 ---
 

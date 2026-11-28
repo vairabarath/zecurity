@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import type { OperatorView } from '@/api/types'
-import { PROVIDER_ROLES, ROLE_LABELS, isProviderRole, type ProviderRole } from '@/auth/roles'
+import { PROVIDER_ROLES, ROLE_HELP, ROLE_LABELS, TOTP_REQUIRED_ROLES, isProviderRole, type ProviderRole } from '@/auth/roles'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -38,19 +38,27 @@ function RoleSelect({
   value: ProviderRole
   onChange: (r: ProviderRole) => void
 }) {
+  // Sprint 27 O2 (D-73, D-74): every role with one line on what it can do,
+  // and the two-step note for the roles that must use TOTP.
   return (
-    <Select value={value} onValueChange={(v) => isProviderRole(v) && onChange(v)}>
-      <SelectTrigger id={id} aria-label={label}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {PROVIDER_ROLES.map((r) => (
-          <SelectItem key={r} value={r}>
-            {ROLE_LABELS[r]}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="grid gap-1.5">
+      <Select value={value} onValueChange={(v) => isProviderRole(v) && onChange(v)}>
+        <SelectTrigger id={id} aria-label={label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {PROVIDER_ROLES.map((r) => (
+            <SelectItem key={r} value={r}>
+              {ROLE_LABELS[r]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground" data-testid={`${id}-help`}>
+        {ROLE_HELP[value]}
+        {TOTP_REQUIRED_ROLES.includes(value) && ' Must set up two-step verification at first sign-in.'}
+      </p>
+    </div>
   )
 }
 

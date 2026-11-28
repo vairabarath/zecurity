@@ -29,6 +29,7 @@ export function BillingSettingsForm({
   cardCount,
   onSave,
   onDone,
+  readOnly = false,
 }: {
   settings: BillingSettings
   countries: BillingCountry[]
@@ -36,6 +37,8 @@ export function BillingSettingsForm({
   cardCount: number
   onSave: (change: Partial<BillingSettings>, reason: string) => Promise<void>
   onDone: (text: string) => void
+  /** Sprint 27 O2: shown to roles that can't write the settings (auditor). */
+  readOnly?: boolean
 }) {
   const [country, setCountry] = useState(settings.country)
   const [currency, setCurrency] = useState(settings.currency)
@@ -100,6 +103,8 @@ export function BillingSettingsForm({
         Billing settings
       </h2>
       <form onSubmit={submit} className="mt-4 grid max-w-2xl gap-5" noValidate>
+        {readOnly && <p className="text-sm text-muted-foreground">Read-only: your role can view the billing settings but not change them.</p>}
+        <fieldset disabled={readOnly} className="contents">
         {error && (
           <Alert variant="destructive" role="alert">
             <AlertDescription>{error}</AlertDescription>
@@ -220,12 +225,17 @@ export function BillingSettingsForm({
           </span>
         </label>
 
-        <ReasonField id="billing-settings-reason" value={reason} onChange={setReason} />
-        <div>
-          <Button type="submit" disabled={!valid || pending}>
-            {pending ? 'Saving…' : 'Save settings'}
-          </Button>
-        </div>
+        </fieldset>
+        {!readOnly && (
+          <>
+            <ReasonField id="billing-settings-reason" value={reason} onChange={setReason} />
+            <div>
+              <Button type="submit" disabled={!valid || pending}>
+                {pending ? 'Saving…' : 'Save settings'}
+              </Button>
+            </div>
+          </>
+        )}
       </form>
     </Card>
   )

@@ -475,6 +475,8 @@ export interface TenantSummary {
    * Status only: the tenant's exported logs are never shown to the provider.
    */
   deletion: TenantDeletion | null
+  /** The tenant's current plan, id and name (Sprint 27 O2, D-73); null if none. */
+  current_plan?: { id: string; name: string } | null
 }
 
 export type PurgeStep = 'pending' | 'exported' | 'revoked' | 'destroyed' | 'done'

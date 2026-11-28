@@ -3,7 +3,7 @@ import { ArrowLeft, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { getRelayPool } from '@/api/reads'
 import type { RelayPoolDetail as RelayPoolDetailDTO, RelayPoolRelay } from '@/api/types'
-import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { DefaultPoolBadge, HOLD_DOWN_NOTE, PoolStateBadge, RegionCode, RelayPolicyBadge, ResidencyBadge } from '@/components/PoolBadges'
 import { DeletePoolDialog, PlacementDialog, RenamePoolDialog } from '@/components/PoolDialogs'
@@ -132,8 +132,8 @@ function PoolView({
   const blocking = blockers(p.relay_list)
   const activeMembers = p.relay_list.filter((r) => r.status === 'active').length
   const [edit, setEdit] = useState<Edit | null>(null)
-  const canManage = !p.is_default && hasRole(role, PROVIDER_ROLES)
-  const canPlace = !p.is_default && hasRole(role, ['super-admin'])
+  const canManage = !p.is_default && can(role, 'relay.pool.update')
+  const canPlace = !p.is_default && can(role, 'relay.pool.set_placement')
   // As primary or failover pool (D-39): either way, the controller refuses region/residency changes.
   const inUse = p.tenants + p.failover_tenants > 0
   const done = (n: RelayActionNotice) => {

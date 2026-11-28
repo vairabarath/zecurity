@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '@/api/client'
 import { moveRelayToPool } from '@/api/pools'
 import type { RelayDetail } from '@/api/types'
-import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { PoolLink, RegionCode, RelayPolicyBadge, ResidencyBadge } from '@/components/PoolBadges'
 import { PoolSelect } from '@/components/PoolSelect'
@@ -27,7 +27,7 @@ const plural = (n: number, one: string) => `${n.toLocaleString()} ${one}${n === 
 export function RelayPoolCard({ relay, onDone }: { relay: RelayDetail; onDone: (notice: RelayActionNotice) => void }) {
   const role = useSessionStore((s) => s.me?.role)
   const [moving, setMoving] = useState(false)
-  const canMove = hasRole(role, PROVIDER_ROLES) && relay.status !== 'revoked' && relay.status !== 'deleted'
+  const canMove = can(role, 'relay.move') && relay.status !== 'revoked' && relay.status !== 'deleted'
   const p = relay.pool
 
   return (

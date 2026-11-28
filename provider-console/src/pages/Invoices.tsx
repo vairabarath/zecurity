@@ -3,6 +3,8 @@ import { ChevronLeft, ChevronRight, Download, RefreshCw, RotateCcw } from 'lucid
 import { Link, useSearchParams } from 'react-router-dom'
 import { getInvoice, listInvoices, regenerateInvoices } from '@/api/billing'
 import type { Invoice, InvoiceListItem, InvoicePage, InvoiceStatus } from '@/api/types'
+import { can } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog } from '@/components/ConfirmDangerDialog'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
@@ -131,6 +133,8 @@ function InvoiceTable({
 }) {
   const [cursors, setCursors] = useState<string[]>([''])
   const [regenerating, setRegenerating] = useState(false)
+  // Sprint 27 O2: billing and super-admins write invoices; auditor reads only.
+  const canWrite = can(useSessionStore((s) => s.me?.role), 'invoice.write')
   const cursor = cursors[cursors.length - 1]
   const { state } = useDetailQuery(`invoices|${month}|${status ?? ''}|${round}|${cursor}`, () =>
     listInvoices({ month, status, cursor: cursor || undefined, limit: PAGE_SIZE }),
@@ -156,10 +160,12 @@ function InvoiceTable({
           <span className="text-[13px] text-muted-foreground">
             {p.items.length === 0 ? 'No invoices for this month yet.' : `${p.items.length} invoice${p.items.length === 1 ? '' : 's'} on this page.`}
           </span>
-          <Button variant="outline" size="sm" onClick={() => setRegenerating(true)}>
-            <RotateCcw aria-hidden />
-            Regenerate drafts
-          </Button>
+          {canWrite && (
+            <Button variant="outline" size="sm" onClick={() => setRegenerating(true)}>
+              <RotateCcw aria-hidden />
+              Regenerate drafts
+            </Button>
+          )}
         </div>
         {p.items.length > 0 && (
           <div className="overflow-x-auto">

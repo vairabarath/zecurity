@@ -87,6 +87,17 @@ type TenantSummary struct {
 	// D-46); null when neither is set. Status only: never the tenant's
 	// exported content.
 	Deletion *TenantDeletion `json:"deletion"`
+	// CurrentPlan is the tenant's current plan, id and name only (Sprint 27
+	// O2, D-73: the billing role's tenant list shows name, plan and status).
+	// Null only for a workspace without a plan row. (Not "plan_id": the
+	// response guard forbids any "lan_" key fragment.)
+	CurrentPlan *TenantPlanRef `json:"current_plan"`
+}
+
+// TenantPlanRef names a plan.
+type TenantPlanRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // TenantDeletion is a tenant's deletion state for the provider console.
@@ -218,8 +229,10 @@ SELECT w.id::text, w.slug, w.name, w.status, w.trust_domain, w.created_at, k.not
        COALESCE(rc.n, 0), gc.n, ar.n, rp.n,
        w.suspended_at, w.suspended_by, w.suspension_reason,
        w.delete_scheduled_at, w.delete_after, w.delete_by, w.delete_reason, w.legal_hold, w.legal_hold_reason,
-       (SELECT tp.step FROM tenant_purges tp WHERE tp.workspace_id = w.id)
+       (SELECT tp.step FROM tenant_purges tp WHERE tp.workspace_id = w.id),
+       pl.id::text, pl.name
   FROM workspaces w
+  LEFT JOIN plans pl ON pl.id = w.plan_id
   LEFT JOIN workspace_ca_keys k ON k.tenant_id = w.id
   LEFT JOIN LATERAL (
        SELECT count(*) FILTER (WHERE status = 'pending')      AS pending,
@@ -263,6 +276,7 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 	var suspendedAt *time.Time
 	var suspendedBy, suspensionReason *string
 	var d TenantDeletion
+	var planID, planName *string
 	if err := row.Scan(
 		&s.ID, &s.Slug, &s.Name, &s.Status, &s.TrustDomain, &s.CreatedAt, &s.CANotAfter,
 		&c.Connectors.Pending, &c.Connectors.Active, &c.Connectors.Disconnected, &c.Connectors.Revoked,
@@ -273,11 +287,15 @@ func scanTenantSummary(row pgx.Row) (TenantSummary, error) {
 		&c.Policies.Resources, &c.Policies.Groups, &c.Policies.AccessRules, &c.Policies.ResourcePolicies,
 		&suspendedAt, &suspendedBy, &suspensionReason,
 		&d.ScheduledAt, &d.DeleteAfter, &d.By, &d.Reason, &d.LegalHold, &d.LegalHoldReason, &d.PurgeStep,
+		&planID, &planName,
 	); err != nil {
 		return TenantSummary{}, err
 	}
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.CANotAfter = utcPtr(s.CANotAfter)
+	if planID != nil && planName != nil {
+		s.CurrentPlan = &TenantPlanRef{ID: *planID, Name: *planName}
+	}
 	if suspendedAt != nil {
 		s.Suspension = &TenantSuspension{SuspendedAt: suspendedAt.UTC()}
 		if suspendedBy != nil {

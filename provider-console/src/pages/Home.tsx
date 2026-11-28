@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { listActiveAlerts, type ActiveAlert } from '@/api/alerts'
 import { getCertificates, getHealth, listRelayPools, queryAudit } from '@/api/reads'
 import type { AuditEntry, CertificateEntry, CertificateExpiryResult, HealthResult, Page, RelayPoolSummary, RelaySummary } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can, ROLE_LABELS, sectionsFor } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ControlPlaneHealth } from '@/components/ControlPlaneHealth'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
@@ -47,6 +47,9 @@ const fetchPools = () => listRelayPools()
 const fetchFiring = () => listActiveAlerts({ status: 'firing' })
 const skip = () => Promise.resolve(null)
 
+type FiringSummary = { items: ActiveAlert[]; truncated: boolean }
+type PoolList = { items: RelayPoolSummary[] }
+
 function greeting(hour: number): string {
   if (hour < 12) return 'Good morning'
   if (hour < 18) return 'Good afternoon'
@@ -63,20 +66,34 @@ export function Home() {
   const me = useSessionStore((s) => s.me)
   const expiresAt = useSessionStore((s) => s.expiresAt)
   const [round, setRound] = useState(0)
-  const isSuperAdmin = hasRole(me?.role, ['super-admin'])
+  // Sprint 27 O2 (D-73): each tile is read only by roles allowed its read,
+  // so billing and support never see 403 tiles. UX only: the server decides.
+  const role = me?.role
+  const seeRelays = can(role, 'relay.read')
+  const seeAlerts = can(role, 'alert.read')
+  const seeCerts = can(role, 'cert.read')
+  const seeAudit = can(role, 'audit.view')
+  const seeHealth = can(role, 'health.read')
+  const tenantSeries = can(role, 'tenant.metrics.read')
+  const relaySeries = can(role, 'relay.metrics.read')
 
-  const fleet = useDetailQuery(`relays|${round}`, fetchFleet)
-  const pools = useDetailQuery(`pools|${round}`, fetchPools)
-  const firing = useDetailQuery(`firing|${round}`, fetchFiring)
-  const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchSoonCertificates : skip)
-  const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchRecentAudit : skip)
-  const health = useDetailQuery<HealthResult | null>(`health|${round}|${isSuperAdmin}`, isSuperAdmin ? fetchHealth : skip)
+  const fleet = useDetailQuery<Fleet | null>(`relays|${round}|${seeRelays}`, seeRelays ? fetchFleet : skip)
+  const pools = useDetailQuery<PoolList | null>(`pools|${round}|${seeRelays}`, seeRelays ? fetchPools : skip)
+  const firing = useDetailQuery<FiringSummary | null>(`firing|${round}|${seeAlerts}`, seeAlerts ? fetchFiring : skip)
+  const certs = useDetailQuery<CertificateExpiryResult | null>(`certs|${round}|${seeCerts}`, seeCerts ? fetchSoonCertificates : skip)
+  const audit = useDetailQuery<Page<AuditEntry> | null>(`audit|${round}|${seeAudit}`, seeAudit ? fetchRecentAudit : skip)
+  const health = useDetailQuery<HealthResult | null>(`health|${round}|${seeHealth}`, seeHealth ? fetchHealth : skip)
   // F23 trend (Sprint 24 M2): read here, not in the tile, so the tile
   // remounting inside FleetTiles never sends a second request; not read
   // until the role is known (the series depends on it: one read per visit).
   // The window is taken when the read can be sent (role known), not at mount.
   const trendWindow = useMetricWindow('24h', `${round}|${me ? 'me' : ''}`)
-  const trend = useMetricSeries(me ? (isSuperAdmin ? 'fleet.active_sessions' : 'fleet.connections') : null, undefined, trendWindow, round)
+  const trend = useMetricSeries(
+    me ? (tenantSeries ? 'fleet.active_sessions' : relaySeries ? 'fleet.connections' : null) : null,
+    undefined,
+    trendWindow,
+    round,
+  )
 
   if (!me) return null
   const refresh = () => setRound((n) => n + 1)
@@ -85,7 +102,7 @@ export function Home() {
     <div className="flex flex-col gap-6">
       <PageHeader
         title={`${greeting(new Date().getHours())}, ${firstName(me.email)}`}
-        description="The state of the relay fleet and what needs attention."
+        description={seeRelays ? 'The state of the relay fleet and what needs attention.' : `Signed in as ${ROLE_LABELS[me.role] ?? me.role}.`}
         actions={
           <Button variant="outline" onClick={refresh} aria-label="Refresh overview">
             <RefreshCw aria-hidden />
@@ -94,36 +111,43 @@ export function Home() {
         }
       />
 
-      <FleetTiles state={fleet.state} onRetry={refresh}>
-        <FiringAlertsTile state={firing.state} />
-        <FleetTrendTile superAdmin={isSuperAdmin} state={trend} />
-        {isSuperAdmin && <CertificateTile state={certs.state} />}
-      </FleetTiles>
+      {seeRelays ? (
+        <FleetTiles state={fleet.state as DetailState<Fleet>} onRetry={refresh}>
+          {seeAlerts && <FiringAlertsTile state={firing.state as DetailState<FiringSummary>} />}
+          <FleetTrendTile superAdmin={tenantSeries} state={trend} />
+          {seeCerts && <CertificateTile state={certs.state} />}
+        </FleetTiles>
+      ) : (
+        seeAlerts && (
+          <div className="flex flex-wrap gap-4">
+            <FiringAlertsTile state={firing.state as DetailState<FiringSummary>} />
+          </div>
+        )
+      )}
 
       <div className="flex flex-wrap items-start gap-4">
-        <Card className="min-w-0 flex-[3_1_520px]" aria-labelledby="attention-heading">
-          <div className="flex items-center justify-between border-b border-border px-5 py-4">
-            <h2 id="attention-heading" className="font-semibold">
-              Needs attention
-            </h2>
-          </div>
-          <Attention fleet={fleet.state} pools={pools.state} certs={isSuperAdmin ? certs.state : undefined} onRetry={refresh} />
-        </Card>
+        {seeRelays && (
+          <Card className="min-w-0 flex-[3_1_520px]" aria-labelledby="attention-heading">
+            <div className="flex items-center justify-between border-b border-border px-5 py-4">
+              <h2 id="attention-heading" className="font-semibold">
+                Needs attention
+              </h2>
+            </div>
+            <Attention
+              fleet={fleet.state as DetailState<Fleet>}
+              pools={pools.state as DetailState<PoolList>}
+              certs={seeCerts ? certs.state : undefined}
+              onRetry={refresh}
+            />
+          </Card>
+        )}
 
         <div className="flex min-w-0 flex-[2_1_360px] flex-col gap-4">
-          {isSuperAdmin && <ControlPlaneHealth state={health.state} onRetry={refresh} />}
-          {isSuperAdmin ? (
+          {seeHealth && <ControlPlaneHealth state={health.state} onRetry={refresh} />}
+          {seeAudit ? (
             <RecentActivity state={audit.state} onRetry={refresh} />
           ) : (
-            <Card className="flex flex-col gap-2 p-5">
-              <h2 className="font-semibold">Your access</h2>
-              <p className="text-sm leading-relaxed text-subtle-foreground">
-                As relay ops you can see the relay fleet. Tenants, certificates, the audit log and operators are for super-admins.
-              </p>
-              <Button asChild variant="outline" className="mt-1.5 self-start">
-                <Link to="/relays">Open relays</Link>
-              </Button>
-            </Card>
+            <YourAccess role={me.role} />
           )}
 
           <Card role="region" aria-labelledby="session-heading">
@@ -520,6 +544,29 @@ function RecentActivity({ state, onRetry }: { state: DetailState<Page<AuditEntry
             </li>
           ))}
         </ul>
+      )}
+    </Card>
+  )
+}
+
+// What a role can open, for roles without the audit log (Sprint 27 O2):
+// the role's own pages, from the same section table as the navigation.
+const ACCESS_TEXT: Record<string, string> = {
+  'relay-ops': 'As relay ops you can see the relay fleet. Tenants, certificates, the audit log and operators are for super-admins.',
+  billing: 'As billing you manage plan cards, billing settings and invoices, read usage, and assign tenants’ plans.',
+  support: 'As support you can read tenants and their agents, their alerts and timeline, and the control-plane health. You can’t change anything.',
+}
+
+function YourAccess({ role }: { role: string }) {
+  const first = sectionsFor(role).find((s) => s.key !== 'home')
+  return (
+    <Card className="flex flex-col gap-2 p-5">
+      <h2 className="font-semibold">Your access</h2>
+      <p className="text-sm leading-relaxed text-subtle-foreground">{ACCESS_TEXT[role] ?? 'Your role can see the pages in the menu.'}</p>
+      {first && (
+        <Button asChild variant="outline" className="mt-1.5 self-start">
+          <Link to={first.path}>Open {first.label.toLowerCase()}</Link>
+        </Button>
       )}
     </Card>
   )

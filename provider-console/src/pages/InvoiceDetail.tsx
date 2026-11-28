@@ -3,6 +3,8 @@ import { ArrowLeft, Printer, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { getInvoice, issueInvoice, markInvoicePaid, resendInvoice, voidInvoice } from '@/api/billing'
 import type { InvoiceDetail as InvoiceDetailData } from '@/api/types'
+import { can } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog, MAX_DANGER_REASON } from '@/components/ConfirmDangerDialog'
 import { InvoicePrint } from '@/components/InvoicePrint'
 import { PageHeader } from '@/components/PageHeader'
@@ -39,6 +41,8 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 type Action = 'issue' | 'paid' | 'void' | 'resend'
 
 export function InvoiceDetail() {
+  // Sprint 27 O2: billing and super-admins write invoices; auditor reads only.
+  const canWrite = can(useSessionStore((s) => s.me?.role), 'invoice.write')
   const { id = '' } = useParams()
   const { state, reload } = useDetailQuery(id, getInvoice)
   const [action, setAction] = useState<Action | null>(null)
@@ -101,8 +105,8 @@ export function InvoiceDetail() {
               <Printer aria-hidden />
               Print
             </Button>
-            {inv.status === 'draft' && <Button onClick={() => setAction('issue')}>Issue</Button>}
-            {inv.status === 'issued' && (
+            {canWrite && inv.status === 'draft' && <Button onClick={() => setAction('issue')}>Issue</Button>}
+            {canWrite && inv.status === 'issued' && (
               <>
                 <Button onClick={() => setAction('paid')}>Mark paid</Button>
                 <Button variant="outline" onClick={() => setAction('void')}>
@@ -110,7 +114,7 @@ export function InvoiceDetail() {
                 </Button>
               </>
             )}
-            {inv.status !== 'draft' && (
+            {canWrite && inv.status !== 'draft' && (
               <Button variant="outline" onClick={() => setAction('resend')}>
                 Resend email
               </Button>

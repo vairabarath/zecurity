@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '@/api/client'
 import { assignTenantRelayPool } from '@/api/pools'
 import type { PoolMigration, RelayPoolSummary, TenantDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { HOLD_DOWN_NOTE, PoolLink, RegionCode, ResidencyBadge } from '@/components/PoolBadges'
 import { PoolSelect } from '@/components/PoolSelect'
@@ -20,7 +20,6 @@ import { assignPoolFailure, type PoolFailure } from '@/lib/pool-errors'
 import { failoverProblem, poolOptionLabel, reasonValid } from '@/lib/pool-format'
 import { usePools } from '@/lib/usePools'
 
-const SUPER_ADMIN = ['super-admin'] as const
 /** Radix Select can't use "" as an item value; this stands for "no failover pool". */
 const NONE = 'none'
 
@@ -35,7 +34,7 @@ export function TenantRelayPoolSection({ tenant, onDone }: { tenant: TenantDetai
   const [changing, setChanging] = useState(false)
   const rp = tenant.relay_pool
   const fo = rp.failover
-  const canChange = hasRole(role, SUPER_ADMIN)
+  const canChange = can(role, 'tenant.relay_pool.assign')
 
   return (
     <Card role="region" aria-labelledby="tenant-pool-title" className="px-5 py-5">

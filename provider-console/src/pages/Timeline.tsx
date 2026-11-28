@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { RefreshCw, X } from 'lucide-react'
 import { Link, Navigate, useSearchParams } from 'react-router-dom'
 import { listTimeline, type TimelineItem } from '@/api/alerts'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
@@ -47,7 +47,16 @@ const SOURCE_CHIPS = [
 
 const TRANSITION_LABELS: Record<string, string> = { fired: 'Fired', renotified: 'Reminder', resolved: 'Resolved' }
 
-function focusFor(it: TimelineItem, isSuperAdmin: boolean): { key: FocusKey; id: string } | null {
+// Sprint 27 O2 (D-73): links and tenant focus follow the role's reads.
+interface Perms {
+  tenants: boolean
+  rules: boolean
+  channels: boolean
+  /** The full view (audit rows of every kind): super-admin and auditor. */
+  full: boolean
+}
+
+function focusFor(it: TimelineItem, perms: Perms): { key: FocusKey; id: string } | null {
   switch (it.target_type) {
     case 'relay':
       return { key: 'relay_id', id: it.target_id }
@@ -55,11 +64,11 @@ function focusFor(it: TimelineItem, isSuperAdmin: boolean): { key: FocusKey; id:
     case 'relay_pool':
       return { key: 'pool_id', id: it.target_id }
   }
-  if (isSuperAdmin && it.tenant_id) return { key: 'tenant_id', id: it.tenant_id }
+  if (perms.tenants && it.tenant_id) return { key: 'tenant_id', id: it.tenant_id }
   return null
 }
 
-function targetHref(it: TimelineItem, isSuperAdmin: boolean): string | null {
+function targetHref(it: TimelineItem, perms: Perms): string | null {
   const id = encodeURIComponent(it.target_id)
   switch (it.target_type) {
     case 'relay':
@@ -69,18 +78,24 @@ function targetHref(it: TimelineItem, isSuperAdmin: boolean): string | null {
       return `/relay-pools/${id}`
     case 'tenant':
     case 'workspace':
-      return isSuperAdmin ? `/tenants/${id}` : null
+      return perms.tenants ? `/tenants/${id}` : null
     case 'alert_rule':
-      return isSuperAdmin ? '/alerts?tab=rules' : null
+      return perms.rules ? '/alerts?tab=rules' : null
     case 'alert_channel':
-      return isSuperAdmin ? '/alerts?tab=channels' : null
+      return perms.channels ? '/alerts?tab=channels' : null
   }
   return null
 }
 
 export function Timeline() {
   const me = useSessionStore((s) => s.me)
-  const isSuperAdmin = hasRole(me?.role, ['super-admin'])
+  const role = me?.role
+  const perms: Perms = {
+    tenants: can(role, 'tenant.read'),
+    rules: can(role, 'alert.rule.read'),
+    channels: can(role, 'alert.channel.read'),
+    full: can(role, 'audit.view'),
+  }
   const [sp, setSp] = useSearchParams()
   const [round, setRound] = useState(0)
 
@@ -90,7 +105,7 @@ export function Timeline() {
     for (const key of FOCUS_KEYS) {
       const v = sp.get(key) ?? ''
       if (!v || !UUID_RE.test(v)) continue
-      if (key === 'tenant_id' && !isSuperAdmin) continue
+      if (key === 'tenant_id' && !perms.tenants) continue
       return { key, id: v }
     }
     return null
@@ -122,9 +137,11 @@ export function Timeline() {
       <PageHeader
         title="Timeline"
         description={
-          isSuperAdmin
+          perms.full
             ? 'What happened, in order: alerts fired and resolved, and what operators and the system did to relays, pools, tenants and alert rules.'
-            : 'What happened to relays and pools, in order: alerts fired and resolved, and what operators and the system did.'
+            : perms.tenants
+              ? 'Tenant alerts, in order: when they fired and resolved.'
+              : 'What happened to relays and pools, in order: alerts fired and resolved, and what operators and the system did.'
         }
         actions={
           <Button variant="outline" onClick={() => setRound((n) => n + 1)} aria-label="Refresh timeline">
@@ -151,7 +168,7 @@ export function Timeline() {
         round={round}
         focus={focus}
         source={source}
-        isSuperAdmin={isSuperAdmin}
+        perms={perms}
         onFocus={(f) => setFocus(f)}
       />
     </div>
@@ -162,13 +179,13 @@ function TimelineTable({
   round,
   focus,
   source,
-  isSuperAdmin,
+  perms,
   onFocus,
 }: {
   round: number
   focus: { key: FocusKey; id: string } | null
   source: '' | 'alert' | 'audit'
-  isSuperAdmin: boolean
+  perms: Perms
   onFocus: (f: { key: FocusKey; id: string; name: string }) => void
 }) {
   const [cursors, setCursors] = useState<string[]>([''])
@@ -213,7 +230,7 @@ function TimelineTable({
         </TableHeader>
         <TableBody>
           {items.map((it) => (
-            <TimelineRow key={`${it.source}:${it.id}`} it={it} isSuperAdmin={isSuperAdmin} focused={focus} onFocus={onFocus} />
+            <TimelineRow key={`${it.source}:${it.id}`} it={it} perms={perms} focused={focus} onFocus={onFocus} />
           ))}
         </TableBody>
       </Table>
@@ -230,19 +247,19 @@ function TimelineTable({
 
 function TimelineRow({
   it,
-  isSuperAdmin,
+  perms,
   focused,
   onFocus,
 }: {
   it: TimelineItem
-  isSuperAdmin: boolean
+  perms: Perms
   focused: { key: FocusKey; id: string } | null
   onFocus: (f: { key: FocusKey; id: string; name: string }) => void
 }) {
   const isAlert = it.source === 'alert'
   const title = isAlert ? (it.summary ?? '') : actionLabel(it.action ?? '')
-  const href = targetHref(it, isSuperAdmin)
-  const focus = focusFor(it, isSuperAdmin)
+  const href = targetHref(it, perms)
+  const focus = focusFor(it, perms)
   const canFocus = focus && !(focused && focused.key === focus.key && focused.id === focus.id)
   const focusName = focus?.key === 'tenant_id' && it.target_type !== 'tenant' && it.target_type !== 'workspace' ? '' : it.target_name
   return (
@@ -278,7 +295,7 @@ function TimelineRow({
           )}
           <span className="text-[12.5px] text-muted-foreground">
             {it.target_type}
-            {isSuperAdmin && it.tenant_id && it.target_type !== 'tenant' && it.target_type !== 'workspace' && (
+            {perms.tenants && it.tenant_id && it.target_type !== 'tenant' && it.target_type !== 'workspace' && (
               <>
                 {' · '}
                 <Link to={`/tenants/${encodeURIComponent(it.tenant_id)}`} className="text-primary hover:underline">

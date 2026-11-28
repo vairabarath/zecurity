@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '@/api/client'
 import { inheritTenantQuota, setTenantQuota } from '@/api/quotas'
 import { ErrorCode, type TenantDetail, type TenantQuota } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ReasonField } from '@/components/ReasonField'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -17,7 +17,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { formatLimit, PLAN_LIMIT_LABELS } from '@/lib/plan-format'
 import { reasonValid } from '@/lib/pool-format'
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 const SOURCE_LABELS: Record<TenantQuota['source'], string> = {
   plan: 'Plan',
@@ -33,7 +32,7 @@ const SOURCE_LABELS: Record<TenantQuota['source'], string> = {
 // button is UX only. Each save sends one request and reloads the page.
 export function TenantQuotasSection({ tenant, onDone }: { tenant: TenantDetail; onDone: (notice: RelayActionNotice) => void }) {
   const role = useSessionStore((s) => s.me?.role)
-  const canChange = hasRole(role, SUPER_ADMIN)
+  const canChange = can(role, 'tenant.quota.set')
   const [editing, setEditing] = useState<TenantQuota | null>(null)
 
   return (
