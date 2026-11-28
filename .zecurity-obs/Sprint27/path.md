@@ -183,7 +183,7 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] Sprint acceptance run — PASS 2026-11-28 on `main` `b6521928` (run by Sathiya; results below and in `Pending-Live-Tests.md`); tracker F19 ticked
 - [x] D-77 and D-78 decided 2026-11-28 (Sathiya) from the run's two questions; written into the Decision Record (amendment 2026-11-28)
 - [ ] X5: break-glass alert even when acknowledged before the first tick (D-77); live recheck; then tick F20
-- [ ] X6: API keys stop working when their creator is disabled or demoted (D-78); live recheck; then tick F35
+- [ ] X6: disabling or demoting a super-admin permanently revokes their API keys (D-78); live recheck; then tick F35
 
 ### Merged before review: open points for Barath (2026-11-28)
 
@@ -197,7 +197,7 @@ The whole stack was merged at Sathiya's go before Barath reviewed it. Choices ma
   - the break-glass event table lives in `077_`;
   - the email is sent by a controller job, not the CLI;
   - the banner UI landed with O2.
-- **K1 — decided 2026-11-28 (D-78, option b):** a key keeps working after its creator is disabled or demoted. The options were (a) keep it; (b) refuse keys whose creator is no longer an active super-admin; (c) revoke a user's keys when they're disabled or demoted. Decision: the key stops working (generic 401) while its creator isn't an active super-admin → fix X6. Flagged by an automated security review.
+- **K1 — decided 2026-11-28 (D-78, option c):** a key keeps working after its creator is disabled or demoted. The options were (a) keep it; (b) refuse keys whose creator is no longer an active super-admin; (c) revoke a user's keys when they're disabled or demoted. Decision: disabling or demoting the creator permanently revokes their keys (re-enabling never restores them) → fix X6. Flagged by an automated security review.
 - **K2:** the 365-day preset ends 10 minutes short of a year; a picked date expires at 23:59 UTC.
 - **O2:**
   - `TenantSummary.current_plan` on the list (D-73 "name, plan, status");
@@ -228,10 +228,10 @@ Not run: nothing from the acceptance list. Two questions came out of the run and
 
 **Fix (to build):** every break-glass event fires the alert once, acknowledged or not, and the acknowledgement resolves it; DB test for an ack before the first tick; live recheck. Phase file: G1 → Post-Phase Fixes.
 
-### X6 (pending): API keys stop working when their creator is disabled or demoted (D-78)
+### X6 (pending): revoke a super-admin's API keys when they're disabled or demoted (D-78)
 **Issue:** a key kept working after the super-admin who created it was disabled or demoted (K1 review question, from an automated security review).
 
-**Fix (to build):** key authentication refuses (generic 401 `invalid_api_key`) a key whose creator isn't an active super-admin, checked on every request; tests for disabled and demoted creators; live recheck. Phase file: K1 → Post-Phase Fixes.
+**Fix (to build):** the operator disable and role-change paths revoke every active key the operator created in the same transaction (`revoked_at`, `revoked_by` = the acting super-admin, reason `creator disabled` / `creator demoted`) and record the count in the operator change's audit; re-enabling or re-promoting restores nothing; tests for disable, demote, re-enable (keys stay revoked), and keys of other super-admins untouched; live recheck (key → 401 after its creator is disabled; `api_key.expiring` resolves). Phase file: K1 → Post-Phase Fixes.
 
 ## Out of scope
 

@@ -358,9 +358,9 @@ Branch `feat/sprint27-o2-console-roles`, **stacked on K2** (PR #266 → K1 #264 
 ### Fix (pending, X6): API keys keep working after their creator is disabled or demoted (K1, D-78)
 **Issue:** a key's authority didn't depend on its creator: after the super-admin who created it was disabled or demoted to another role, the key still authenticated (K1 review question, from an automated security review; recorded in `path.md` open points).
 
-**Decision (D-78, 2026-11-28, option b):** a key stops working while its creator is not an active super-admin.
+**Decision (D-78, 2026-11-28, option c):** disabling or demoting a super-admin permanently revokes every active key they created; re-enabling or re-promoting never restores them.
 
-**Fix (to build):** key authentication (`controller/internal/provider/apikeys.go`) joins the creator and refuses, with the generic 401 `invalid_api_key`, a key whose creator is disabled or not `super-admin`, on every request; the keys list can show why such a key doesn't work; tests for a disabled and a demoted creator (and that nothing in the response says which check failed); live recheck. Then tick F35.
+**Fix (to build):** in the operator disable and role-change transactions (`controller/internal/provider/operators.go` and its store), revoke every active key the operator created (`revoked_at`, `revoked_by` = the acting super-admin, reason `creator disabled` / `creator demoted`) and add the revoked count to that action's audit details (no secrets). Revocation stays terminal. Tests: disable → keys revoked and 401; demote → same; re-enable → still revoked; other super-admins' keys untouched; a failed operator change revokes nothing (same transaction); live recheck incl. `api_key.expiring` resolving. Then tick F35.
 
 ### Acceptance run (2026-11-28): PASS
 X4, K1 (52/52 and `api_key.expiring` 6/6), K2 (8/8 in the browser) and O2 (navigation and buttons per role) passed on `main` `b6521928`; results in `path.md` → Acceptance run and `Pending-Live-Tests.md`.

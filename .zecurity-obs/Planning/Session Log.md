@@ -4069,7 +4069,7 @@ serves on `127.0.0.1:9102`.
 - **F19 ticked** (25 / 40).
 - **Decisions (Decision Record amendment 2026-11-28):**
   - D-77: every break-glass use raises the critical alert, even if acknowledged at once; the ack resolves it.
-  - D-78: an API key stops working when its creator is disabled or demoted.
+  - D-78: disabling or demoting a super-admin permanently revokes the API keys they created (re-enabling never restores them).
 
 **Open:**
 - **X5** (D-77) and **X6** (D-78): build, test, live recheck; then tick F20 and F35.

@@ -1171,12 +1171,12 @@ Made during the Sprint 27 acceptance run (2026-11-28, `main` `b6521928`), which 
 | ID | Topic | Decision |
 |---|---|---|
 | D-77 | Break-glass alert and acknowledgement | **Every** `recover-admin` use raises the critical `provider.break_glass_used` alert, even when a super-admin acknowledges the banner before the evaluator's next tick. Acknowledging **resolves** the alert; it never prevents the alert from being created. (Found live: an acknowledgement within one evaluator interval skipped the alert and its webhook, because the evaluator only read unacknowledged events.) |
-| D-78 | API keys and their creator | An API key **stops working when its creator is no longer an active super-admin** (disabled or demoted): every request with such a key is refused with the generic 401 `invalid_api_key`, checked on every request (option b of the K1 review question). The key row and its audit history are kept; revoking it stays an explicit super-admin action. |
+| D-78 | API keys and their creator | When a super-admin is **disabled or demoted** (role changed away from `super-admin`), every active API key they created is **permanently revoked** in the same transaction (option c of the K1 review question). Revocation is the existing terminal state: re-enabling or re-promoting the operator never restores the keys; new keys must be created. Each revoked key gets `revoked_at`, the acting super-admin as `revoked_by` and a system reason (`creator disabled` / `creator demoted`); the operator change's audit records how many keys were revoked (never a secret). A revoked key gets the generic 401 `invalid_api_key`, and its `api_key.expiring` alert resolves. The key rows and their audit history are kept. |
 
 ### Effect on earlier decisions
 
 | Decision | Effect |
 |---|---|
 | D-75 | **Clarified** by D-77: "every use raises a critical alert" holds regardless of when the banner is acknowledged; the acknowledgement resolves the alert. |
-| D-76 | **Extended** by D-78: a key's authority depends on its creator staying an active super-admin. |
+| D-76 | **Extended** by D-78: disabling or demoting a key's creator permanently revokes the key. |
 | D-71 … D-74 | **Unchanged**. |
