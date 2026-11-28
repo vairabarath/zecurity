@@ -21,11 +21,11 @@ tags:
 
 **Progress:** Must have **18 / 18** done · Can have 9 / 22 done · **Total 27 / 40** (ticked = merged **and** live-checked)
 
-**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). S4 tenant deletion (#229) was live-checked on its branch (two runs, PASS); the merged S4 code is identical to the tested code (only B2 #226 and docs were merged in afterwards). Sprint 25 usage (F32, F33) live PASS 2026-11-24; Sprint 26 billing (F34) acceptance live PASS 2026-11-26 (#260).
+**Live checks:** all merged items passed on 2026-11-12 (F5, F8, F14, F15, F16, F17, F25, F38), 2026-11-17 (relay pools: F4, F9, F10, F11) and 2026-11-19 (Sprint 23 on `main` `4d1faf50`: B1 #222, B2 #226, S1 #223, S2 recheck #225, S3 #224, cross-feature checks; [[Pending-Live-Tests]]). S4 tenant deletion (#229) was live-checked on its branch (two runs, PASS); the merged S4 code is identical to the tested code (only B2 #226 and docs were merged in afterwards). Sprint 25 usage (F32, F33) live PASS 2026-11-24; Sprint 26 billing (F34) acceptance live PASS 2026-11-26 (#260). Sprint 27 provider access (F19, F20, F35) acceptance live PASS 2026-11-28 on `b6521928`, with the X5/X6 fixes (#270) live PASS the same day.
 
-## Status snapshot (2026-11-27)
+## Status snapshot (2026-11-28)
 
-Checked against `main` `7ee717bc` (Must-have rows last changed 2026-11-19). "Quick" = controller read API + console view only (🟢 in the effort key).
+Checked against `main` `f15bd8b6` (Must-have rows last changed 2026-11-19; Can-have rows refreshed for Sprint 27). "Quick" = controller read API + console view only (🟢 in the effort key).
 
 ### Must have (Phase 1): 18 of 18 done
 
@@ -263,3 +263,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-28: Sprint 27 merged at Sathiya's go, before Barath's review: O1 #262, G1 #263, K1 #264 (incl. the `api_key.expiring` alert), K2 #266, O2 #267 (`main` `8db309bf`; migrations `075_` … `077_`). F19, F20, F35 → 🧪 (each phase live PASS); ticked after the Sprint 27 acceptance run. Progress unchanged at 24 / 40.
 - 2026-11-28: Sprint 27 acceptance run PASS on `main` `b6521928` (roles, break-glass, API keys, keys console, console per role, X4; relay drain on a real relay) ([[Pending-Live-Tests]]). **F19 ticked.** Two questions from the run decided the same day: D-77 (every break-glass use alerts, even if acknowledged at once; the ack resolves it) and D-78 (disabling or demoting a super-admin permanently revokes their API keys). F20 and F35 stay 🧪 until fixes X5 and X6 are merged and live-checked. Progress 25 / 40 (Can have 7 / 22).
 - 2026-11-28: X5 (D-77: break-glass alert even when acknowledged at once) and X6 (D-78: disabling or demoting a super-admin revokes their API keys, incl. the create-vs-disable race fix) merged in #270 (`99783587`; docs #269 `64fd47d0`), each live PASS. **F20 and F35 ticked: Sprint 27 complete (F19, F20, F35).** Progress 27 / 40 (Can have 9 / 22).
+- 2026-11-28: snapshot refreshed against `main` `f15bd8b6` (Sprint 27 complete, #271). Totals checked: Must have 18 / 18, Can have 9 / 22 (F19, F20, F21, F24, F25, F32, F33, F34, F35), total 27 / 40. Still waiting for a tick: F23, F26, F27 (Sprint 24 acceptance run).
