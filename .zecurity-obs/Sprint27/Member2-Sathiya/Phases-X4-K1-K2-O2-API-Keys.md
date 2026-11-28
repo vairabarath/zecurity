@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 built (draft PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 next
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 (PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 built (stacked on K1), live PASS, not committed yet; O2 next
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role
@@ -230,6 +230,39 @@ Same branch, on top of G1's `077_` (which seeds the rule: warning, enabled, `{"d
 
 ### Live check (K2)
 Create, copy, use (a curl read), revoke from the console; the key isn't visible after the dialog closes.
+
+### Implementation record (2026-11-27)
+
+Branch `feat/sprint27-k2-keys-console`, **stacked on K1** (PR #264 → G1 #263 → O1 #262). Console only; no controller change.
+
+- **`src/api/apiKeys.ts`:** `listApiKeys`, `createApiKey`, `revokeApiKey` (+ the `ApiKey` type, `API_KEY_ROLES`). `api-surface.test.ts` lists the two writes (`POST /provider/api-keys`, `POST /provider/api-keys/{id}/revoke`) and the read on purpose.
+- **Settings → API keys** (`src/pages/APIKeys.tsx`, `/settings/api-keys`, section `api-keys` under Governance, super-admin only in `roles.ts`):
+  - the table shows name (and CIDRs), role, the 12-character prefix only, created at and by, expiry with "expires in N days" (warning style under 14, `data-testid="expires-soon"`), last used (time and IP, or "Never"), status, and Revoke for unrevoked keys;
+  - empty state and an info panel (read-only, shown once, alert 14 days before expiry, audited).
+- **`src/components/APIKeyDialogs.tsx`:**
+  - **Create:** name; role with one line on what it can read; expiry presets 30 / 90 / 365 days (default 90) or a date, at most 365 days; optional CIDRs (commas or new lines, shape-checked; the server validates); reason. `allowed_cidrs` is left out when empty.
+  - **Show once** (`KeyShownOnceDialog`): the full key, a Copy button and "You won't see this key again". The key lives only in the dialog's props: closing drops it, and it is never stored. This dialog joins the clipboard allowlist in `static-guards.test.ts`.
+  - **Revoke:** `ConfirmDangerDialog` with a reason and the key name typed exactly.
+- **Choices:**
+  - The 365-day preset ends 10 minutes short of a year, because the server refuses ≥ 365 days less a minute.
+  - A picked date expires at 23:59 UTC that day.
+  - `ROLE_LABELS` gains Auditor / Billing / Support (the key roles; O2 does the navigation).
+- **Tests** (`src/pages/APIKeys.test.tsx`, 9):
+  - **access:** super-admin nav entry; relay-ops get Forbidden, no nav entry, no key requests;
+  - **list:** fields, prefix only, the expires-soon warning, revoked rows without Revoke;
+  - **create:** the exact body (role, 30-day expiry, CIDRs, reason); the key shown once, absent from session and local storage, gone from the page after close; the default 90 days with CIDRs omitted; a bad CIDR blocks submit; a server error (`name_taken`) stays in the dialog;
+  - **revoke:** blocked until the full name is typed, then sends reason + `confirm_name`;
+  - **format helpers:** presets inside the limit, expiry texts, the 14-day warning.
+- **Mutation checks (7, each caught):** key kept on the page after close; key written to sessionStorage; revoke without the typed name; create without a reason; the 365-day preset over the limit; the expires-soon warning removed; the page opened to relay-ops.
+- **Gate:** `npm test` 66 files / 865 tests pass; `npm run lint` clean; `npm run build` OK.
+- **Live check (2026-11-27): PASS.**
+  - **Setup:** controller from the branch (sha256 `aa2c25c1…`) on :8080 with a fresh DB through `077_`, console dev server on :5174, driven in Orca's built-in browser; signed in as the super-admin with password + TOTP.
+  - **Page:** API keys appears under Governance; the empty state is shown.
+  - **Create:** created `k2-live-reader` (Support, 30 days, reason). The show-once dialog displayed an 80-character `zpk_…` key, captured straight into a 0600 file, never printed.
+  - **Use:** `curl` with it: `GET /provider/tenants` 200; `GET /provider/invoices`, `POST /provider/tenants` and `GET /provider/me` 403.
+  - **After closing:** the key isn't in the DOM, sessionStorage or localStorage. The list shows `zpk_770ae338…`, Support and "expires in 29 days"; after a reload, Last used shows the curl call (`::1`).
+  - **Revoke:** "Revoke key" stayed disabled with a partly typed name and worked with the full name. The row shows "Revoked by …", the toast "API key k2-live-reader revoked." appeared, and the next curl call got 401 `invalid_api_key`.
+  - **Audit:** `api_key.create` and `api_key.revoke` with their reasons; no key in the audit or the controller log.
 
 ---
 

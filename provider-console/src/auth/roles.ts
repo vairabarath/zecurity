@@ -4,7 +4,8 @@
 // Certificates; relay pools (D-37) added Relay pools; plans (D-43) added Plans;
 // alerts (Sprint 24 A3, F26) added Alerts; the incident timeline (T1, F27)
 // added Timeline; usage (Sprint 25 U3, F33) added Usage; billing (Sprint 26
-// P4, F34) added Invoices and Billing settings.
+// P4, F34) added Invoices and Billing settings; API keys (Sprint 27 K2, F35)
+// added API keys.
 //
 // This is UX only. The controller authorizes every /provider/* request on
 // its own (decide()); hiding a section never grants or removes access.
@@ -16,6 +17,11 @@ export type ProviderRole = (typeof PROVIDER_ROLES)[number]
 export const ROLE_LABELS: Record<string, string> = {
   'super-admin': 'Super-admin',
   'relay-ops': 'Relay ops',
+  // Sprint 27 (D-73): operator roles from O1, also the roles an API key may
+  // have (K2). Navigation for them comes with O2.
+  auditor: 'Auditor',
+  billing: 'Billing',
+  support: 'Support',
 }
 
 export interface Section {
@@ -45,6 +51,8 @@ export const SECTIONS: readonly Section[] = [
   { key: 'certificates', path: '/certificates', label: 'Certificates', roles: ['super-admin'], group: 'Trust' },
   { key: 'audit', path: '/audit', label: 'Audit log', roles: ['super-admin'], group: 'Governance' },
   { key: 'users', path: '/users', label: 'Operators', roles: ['super-admin'], group: 'Governance' },
+  // API keys (Sprint 27 K2, D-76): managing access, super-admin only.
+  { key: 'api-keys', path: '/settings/api-keys', label: 'API keys', roles: ['super-admin'], group: 'Governance' },
 ]
 
 /** The roles a section needs, for wrapping its route in RequireRole. */

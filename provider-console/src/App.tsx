@@ -4,6 +4,7 @@ import { rolesFor } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
 import { Alerts } from '@/pages/Alerts'
+import { APIKeys } from '@/pages/APIKeys'
 import { BillingSettings } from '@/pages/BillingSettings'
 import { Audit } from '@/pages/Audit'
 import { Certificates } from '@/pages/Certificates'
@@ -74,6 +75,9 @@ export function AppRoutes() {
           <Route element={<RequireRole roles={rolesFor('invoices')} />}>
             <Route path="invoices" element={<Invoices />} />
             <Route path="invoices/:id" element={<InvoiceDetail />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('api-keys')} />}>
+            <Route path="settings/api-keys" element={<APIKeys />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('billing-settings')} />}>
             <Route path="billing/settings" element={<BillingSettings />} />

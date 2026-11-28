@@ -14,8 +14,8 @@
   - `decide()` becomes an explicit role → actions table; existing roles keep exactly today's permissions; an action with no entry is denied to every role except super-admin;
   - new roles `auditor` (all reads), `billing` (cards, billing settings, invoices, usage, tenant list, plan assignment), `support` (tenant reads, the tenant's alerts and timeline, health); TOTP mandatory for all three; `075_provider_roles`.
 - **G1 — loud break-glass (D-75)**, Barath (**built by Sathiya, takeover 2026-11-27**; live PASS; PR #263 stacked on #262), after O1: `recover-admin --reason` on the controller host is the only path; each use raises a critical `provider.break_glass_used` alert, emails every super-admin and shows a console banner until acknowledged; `077_provider_alert_kinds` (also holds K1's `api_key.expiring`).
-- **K1 — provider API keys (D-76)**, Sathiya (parts 1 and 2 built, live PASS; draft PR #264 stacked on G1), after O1 (expiry alert after `077_`): `zpk_<id>_<secret>`, SHA-256 at rest, shown once; one role per key (never super-admin); read-only; expires ≤ 365 days; optional CIDR allowlist and rate limit; never a session; `076_provider_api_keys`.
-- **K2 — keys console**, Sathiya, after K1: create (show once), list (prefix only), revoke with a reason.
+- **K1 — provider API keys (D-76)**, Sathiya (parts 1 and 2 built, live PASS; PR #264 stacked on G1), after O1 (expiry alert after `077_`): `zpk_<id>_<secret>`, SHA-256 at rest, shown once; one role per key (never super-admin); read-only; expires ≤ 365 days; optional CIDR allowlist and rate limit; never a session; `076_provider_api_keys`.
+- **K2 — keys console**, Sathiya (built, stacked on K1 #264, live PASS, not committed yet), after K1: create (show once), list (prefix only), revoke with a reason.
 - **O2 — console per role**, Sathiya, after O1: navigation and write buttons follow the matrix (UX only; the server decides).
 - **Not in Sprint 27:** agent changes, external IdPs (D-29), impersonation or support grants (F31), partner scoping (F37), several roles per operator, step-up beyond today's TOTP, keys that write, OAuth/mTLS for the API, F22, F28, F29, F36, F38, F39, F40.
 
