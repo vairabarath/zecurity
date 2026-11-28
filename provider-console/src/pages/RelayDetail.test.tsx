@@ -286,8 +286,9 @@ describe('Relay detail: danger zone visibility', () => {
 
   // Unknown roles can't open relay pages at all (route guard); the danger zone
   // also checks the role itself, so it stays hidden even without the guard.
+  // ('auditor' was the unknown example before Sprint 27 made it a role.)
   it.each([
-    ['an unknown role', 'auditor'],
+    ['an unknown role', 'owner'],
     ['an empty role', ''],
     ['a near-miss role', 'Super-Admin'],
   ])('%s: Forbidden page, and the danger zone itself refuses to render', async (_, role) => {

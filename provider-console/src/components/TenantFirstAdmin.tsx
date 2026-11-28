@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { reinviteFirstAdmin } from '@/api/tenants'
 import type { TenantDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ReasonField } from '@/components/ReasonField'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -15,7 +15,6 @@ import { Label } from '@/components/ui/label'
 import { reasonValid } from '@/lib/pool-format'
 import { EMAIL_PATTERN, tenantCreateErrorMessage } from '@/lib/tenant-format'
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 // Tenant detail's "First admin" section (Sprint 23 S2, D-44): shown while the
 // provider-issued first-admin seat is unclaimed. An expired invitation refuses
@@ -24,7 +23,7 @@ const SUPER_ADMIN = ['super-admin'] as const
 // is UX only; the controller decides.
 export function TenantFirstAdminSection({ tenant, onDone }: { tenant: TenantDetail; onDone: (notice: RelayActionNotice) => void }) {
   const role = useSessionStore((s) => s.me?.role)
-  const canSend = hasRole(role, SUPER_ADMIN)
+  const canSend = can(role, 'tenant.first_admin.reinvite')
   const [sending, setSending] = useState(false)
   const inv = tenant.first_admin_invitation
   if (!inv) return null

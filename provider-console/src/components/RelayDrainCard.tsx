@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { ApiError } from '@/api/client'
 import { drainRelay, resumeRelay } from '@/api/relays'
 import type { RelayDetail } from '@/api/types'
-import { hasRole, PROVIDER_ROLES } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog, type DangerError } from '@/components/ConfirmDangerDialog'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -56,7 +56,7 @@ export function RelayDrainCard({ relay, onDone }: { relay: RelayDetail; onDone: 
   // Guards a second submit before the pending re-render lands.
   const inFlight = useRef(false)
 
-  if (!hasRole(role, PROVIDER_ROLES) || (relay.status !== 'active' && relay.status !== 'inactive')) return null
+  if (!can(role, 'relay.drain') || (relay.status !== 'active' && relay.status !== 'inactive')) return null
   const draining = relay.draining_since !== null
   const progress = drainProgress(relay)
 
@@ -108,7 +108,7 @@ export function RelayDrainCard({ relay, onDone }: { relay: RelayDetail; onDone: 
           <p className="text-sm" data-drain-state={relay.drain_state ?? undefined}>
             {progress}
           </p>
-          {relay.drain_state === 'drained' && hasRole(role, ['super-admin']) && (
+          {relay.drain_state === 'drained' && can(role, 'relay.revoke') && (
             <p className="text-sm text-subtle-foreground">It can now be revoked or deleted without cutting live connections.</p>
           )}
           {resumeError && (

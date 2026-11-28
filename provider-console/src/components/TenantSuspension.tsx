@@ -2,7 +2,7 @@ import { useRef, useState, type FormEvent } from 'react'
 import { ApiError } from '@/api/client'
 import { resumeTenant, suspendTenant } from '@/api/tenants'
 import type { TenantDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog, type DangerError } from '@/components/ConfirmDangerDialog'
 import { ReasonField } from '@/components/ReasonField'
@@ -16,7 +16,6 @@ import { formatDateTime } from '@/lib/format'
 import { reasonValid } from '@/lib/pool-format'
 import { tenantLifecycleFailure, type TenantLifecycleAction } from '@/lib/tenant-errors'
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 /** The "Suspended" badge for a tenant suspended by the provider (status stays "active"). */
 export function SuspendedBadge() {
@@ -41,7 +40,7 @@ export function TenantSuspensionSection({ tenant, onDone }: { tenant: TenantDeta
   // Guards a second submit before the pending re-render lands.
   const inFlight = useRef(false)
   const s = tenant.suspension
-  const canAct = hasRole(role, SUPER_ADMIN)
+  const canAct = can(role, 'tenant.suspend')
 
   function open(next: TenantLifecycleAction) {
     setError(undefined)

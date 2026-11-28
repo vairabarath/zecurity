@@ -3,7 +3,7 @@ import { ApiError } from '@/api/client'
 import { assignTenantPlan } from '@/api/plans'
 import { listPlans } from '@/api/reads'
 import { PLAN_LIMIT_KEYS, type PlanSummary, type TenantDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ReasonField } from '@/components/ReasonField'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -17,7 +17,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { formatLimit, PLAN_LIMIT_LABELS, planErrorMessage } from '@/lib/plan-format'
 import { reasonValid } from '@/lib/pool-format'
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 // Tenant detail's "Plan" section (Sprint 23 B1, D-43). It shows what the
 // audited tenant read returned; the Change plan dialog loads the plan list
@@ -25,7 +24,7 @@ const SUPER_ADMIN = ['super-admin'] as const
 // button is UX only. Limits are enforced by quotas (S3).
 export function TenantPlanSection({ tenant, onDone }: { tenant: TenantDetail; onDone: (notice: RelayActionNotice) => void }) {
   const role = useSessionStore((s) => s.me?.role)
-  const canChange = hasRole(role, SUPER_ADMIN)
+  const canChange = can(role, 'tenant.plan.assign')
   const [changing, setChanging] = useState(false)
   const plan = tenant.plan
 
@@ -59,7 +58,7 @@ export function TenantPlanSection({ tenant, onDone }: { tenant: TenantDetail; on
       </dl>
       {canChange && changing && (
         <ChangePlanDialog
-          tenant={tenant}
+          tenant={{ id: tenant.id, name: tenant.name, planId: tenant.plan.id, billingPlanName: (tenant.billing_plan ?? tenant.plan).name }}
           onCancel={() => setChanging(false)}
           onDone={(n) => {
             setChanging(false)
@@ -73,9 +72,19 @@ export function TenantPlanSection({ tenant, onDone }: { tenant: TenantDetail; on
 
 type PlansState = { status: 'loading' } | { status: 'ready'; items: PlanSummary[] } | { status: 'error' }
 
-function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: TenantDetail; onCancel: () => void; onDone: (n: RelayActionNotice) => void }) {
+/** What ChangePlanDialog needs: from the tenant detail, or a tenant list row (billing, Sprint 27 O2). */
+export interface PlanTarget {
+  id: string
+  name: string
+  /** The current plan; null when unknown. */
+  planId: string | null
+  /** The card this month is billed at (the detail knows it; the list doesn't). */
+  billingPlanName?: string
+}
+
+export function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: PlanTarget; onCancel: () => void; onDone: (n: RelayActionNotice) => void }) {
   const [plans, setPlans] = useState<PlansState>({ status: 'loading' })
-  const [planId, setPlanId] = useState(tenant.plan.id)
+  const [planId, setPlanId] = useState(tenant.planId ?? '')
   const [reason, setReason] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -92,7 +101,7 @@ function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: TenantDetail; 
   }, [])
 
   const chosen = plans.status === 'ready' ? plans.items.find((p) => p.id === planId) : undefined
-  const valid = planId !== tenant.plan.id && chosen !== undefined && reasonValid(reason)
+  const valid = planId !== tenant.planId && chosen !== undefined && reasonValid(reason)
 
   async function submit(e: FormEvent) {
     e.preventDefault()
@@ -122,8 +131,14 @@ function ChangePlanDialog({ tenant, onCancel, onDone }: { tenant: TenantDetail; 
               Limits change now: the new plan’s limits apply to <strong className="text-foreground">{tenant.name}</strong> at once. Nothing is
               deleted if the new limits are lower; the tenant can’t create more until it’s below them.{' '}
               <span data-testid="billing-from-next-month">
-                Billing changes from next month; this month is billed at the{' '}
-                <strong className="text-foreground">{(tenant.billing_plan ?? tenant.plan).name}</strong> card as it was on the 1st.
+                Billing changes from next month;{' '}
+                {tenant.billingPlanName ? (
+                  <>
+                    this month is billed at the <strong className="text-foreground">{tenant.billingPlanName}</strong> card as it was on the 1st.
+                  </>
+                ) : (
+                  <>this month is billed at the card the tenant had on the 1st.</>
+                )}
               </span>
             </DialogDescription>
           </DialogHeader>

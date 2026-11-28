@@ -3,6 +3,8 @@ import { RefreshCw } from 'lucide-react'
 import { Navigate } from 'react-router-dom'
 import { getBillingSettings, listPlanCards, updateBillingSettings } from '@/api/billing'
 import { BillingSettingsForm } from '@/components/BillingSettingsForm'
+import { can } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
 import { PageHeader } from '@/components/PageHeader'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -19,6 +21,8 @@ const fetchSettings = () => getBillingSettings()
 const fetchCards = () => listPlanCards()
 
 export function BillingSettings() {
+  // Sprint 27 O2: billing and super-admins change the settings; auditor reads them.
+  const readOnly = !can(useSessionStore((s) => s.me?.role), 'billing.settings.write')
   const settings = useDetailQuery('billing-settings', fetchSettings)
   const cards = useDetailQuery('plan-cards', fetchCards)
   const [notice, setNotice] = useState<string | null>(null)
@@ -55,6 +59,7 @@ export function BillingSettings() {
           settings={current}
           countries={countries && countries.length > 0 ? countries : BILLING_COUNTRIES}
           cardCount={cards.state.data.items.filter((c) => c.price).length}
+          readOnly={readOnly}
           onSave={(change, reason) => updateBillingSettings(change, reason)}
           onDone={(text) => {
             setNotice(text)

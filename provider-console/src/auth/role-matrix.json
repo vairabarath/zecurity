@@ -1,0 +1,55 @@
+{
+  "_comment": "Mirror of controller/internal/provider/authz.go roleActions (Sprint 27 O2, D-72/D-73). super-admin may do everything. UX only: the controller decides. TestConsoleRoleMatrix (controller) fails if this file and the server table differ.",
+  "roles": {
+    "relay-ops": [
+      "alert.read",
+      "relay.capacity.set",
+      "relay.create",
+      "relay.drain",
+      "relay.issue_token",
+      "relay.metrics.read",
+      "relay.move",
+      "relay.placement_rejected",
+      "relay.pool.create",
+      "relay.pool.delete",
+      "relay.pool.update",
+      "relay.read",
+      "relay.resume",
+      "timeline.relay_audit"
+    ],
+    "auditor": [
+      "alert.channel.read",
+      "alert.read",
+      "alert.rule.read",
+      "audit.view",
+      "cert.read",
+      "health.read",
+      "invoice.read",
+      "plan.read",
+      "relay.metrics.read",
+      "relay.read",
+      "tenant.list.read",
+      "tenant.metrics.read",
+      "tenant.read",
+      "tenant.usage.read",
+      "timeline.relay_audit"
+    ],
+    "billing": [
+      "billing.settings.write",
+      "invoice.read",
+      "invoice.write",
+      "plan.create",
+      "plan.read",
+      "plan.update",
+      "tenant.list.read",
+      "tenant.plan.assign",
+      "tenant.usage.read"
+    ],
+    "support": [
+      "alert.read",
+      "health.read",
+      "tenant.list.read",
+      "tenant.read"
+    ]
+  }
+}

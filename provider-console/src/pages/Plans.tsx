@@ -3,6 +3,8 @@ import { Plus, RefreshCw } from 'lucide-react'
 import { Link, Navigate } from 'react-router-dom'
 import { createPlanCard, getBillingSettings, listPlanCards, updatePlanCard } from '@/api/billing'
 import type { PlanCardSummary } from '@/api/types'
+import { can } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog } from '@/components/ConfirmDangerDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { PlanCard } from '@/components/PlanCard'
@@ -29,6 +31,13 @@ type Action =
   | { kind: 'create' }
 
 export function Plans() {
+  // Sprint 27 O2 (D-73): billing creates and edits cards; delete and default
+  // stay super-admin; auditor reads only. UX only: the server decides.
+  const role = useSessionStore((s) => s.me?.role)
+  const canCreate = can(role, 'plan.create')
+  const canEdit = can(role, 'plan.update')
+  const canDelete = can(role, 'plan.delete')
+  const canDefault = can(role, 'plan.set_default')
   const cards = useDetailQuery('plan-cards', fetchCards)
   const settings = useDetailQuery('billing-settings', fetchSettings)
   const [action, setAction] = useState<Action | null>(null)
@@ -84,12 +93,12 @@ export function Plans() {
               <div role="listitem" key={p.id} className="flex">
                 <PlanCard
                   plan={p}
-                  onEdit={currency ? () => setAction({ kind: 'edit', plan: p }) : undefined}
-                  onDuplicate={currency ? () => setAction({ kind: 'duplicate', plan: p }) : undefined}
+                  onEdit={currency && canEdit ? () => setAction({ kind: 'edit', plan: p }) : undefined}
+                  onDuplicate={currency && canCreate ? () => setAction({ kind: 'duplicate', plan: p }) : undefined}
                   onHistory={() => setAction({ kind: 'history', plan: p })}
-                  onRemovePrice={() => setAction({ kind: 'remove-price', plan: p })}
-                  onMakeDefault={() => setAction({ kind: 'default', plan: p })}
-                  onDelete={() => setAction({ kind: 'delete', plan: p })}
+                  onRemovePrice={canEdit ? () => setAction({ kind: 'remove-price', plan: p }) : undefined}
+                  onMakeDefault={canDefault ? () => setAction({ kind: 'default', plan: p }) : undefined}
+                  onDelete={canDelete ? () => setAction({ kind: 'delete', plan: p }) : undefined}
                 />
               </div>
             ))}
@@ -117,10 +126,12 @@ export function Plans() {
               <RefreshCw aria-hidden />
               Refresh
             </Button>
-            <Button onClick={() => setAction({ kind: 'create' })} disabled={!currency}>
-              <Plus aria-hidden />
-              New card
-            </Button>
+            {canCreate && (
+              <Button onClick={() => setAction({ kind: 'create' })} disabled={!currency}>
+                <Plus aria-hidden />
+                New card
+              </Button>
+            )}
           </>
         }
       />
@@ -137,9 +148,11 @@ export function Plans() {
       {currency && (
         <p className="text-[13px] text-muted-foreground">
           Prices are in {currency}.{' '}
-          <Link to="/billing/settings" className="text-primary hover:underline">
-            Change the billing currency
-          </Link>
+          {can(role, 'billing.settings.write') && (
+            <Link to="/billing/settings" className="text-primary hover:underline">
+              Change the billing currency
+            </Link>
+          )}
         </p>
       )}
       {notice && (

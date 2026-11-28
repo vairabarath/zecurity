@@ -3,6 +3,7 @@ import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as alertsApi from './alerts'
 import * as apiKeysApi from './apiKeys'
+import * as breakGlassApi from './breakGlass'
 import * as authApi from './auth'
 import * as billingApi from './billing'
 import * as metricsApi from './metrics'
@@ -36,6 +37,7 @@ import * as usageApi from './usage'
 // invoice writes (issue, mark paid, void, regenerate, resend); plan cards reuse the plan create and update
 // writes. Reads: billing settings, invoices list and detail, and a card's revisions.
 // API keys (Sprint 27 K2, F35; D-76 amends D-30) add key create and revoke, plus the key list read.
+// The break-glass banner (Sprint 27 O2 with G1; D-75 amends D-30) adds the acknowledge write and the list read.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -59,6 +61,7 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/totp/enroll',
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
+  'POST /provider/break-glass/{id}/ack',
   'POST /provider/invoices/regenerate',
   'POST /provider/invoices/{id}/issue',
   'POST /provider/invoices/{id}/mark-paid',
@@ -99,6 +102,7 @@ const ALLOWED_READS = [
   'GET /provider/api-keys',
   'GET /provider/audit',
   'GET /provider/billing/settings',
+  'GET /provider/break-glass',
   'GET /provider/certificates',
   'GET /provider/health',
   'GET /provider/invoices',
@@ -124,6 +128,7 @@ const ALLOWED_READS = [
 const API_MODULES: Record<string, Record<string, unknown>> = {
   alerts: alertsApi,
   apiKeys: apiKeysApi,
+  breakGlass: breakGlassApi,
   billing: billingApi,
   auth: authApi,
   metrics: metricsApi,
@@ -142,7 +147,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 const ID = 'a'
 const normalize = (path: string) =>
   path
-    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events|invoices|api-keys))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events|invoices|api-keys|break-glass))/${ID}(?=/|$)`), '$1/{id}')
     .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
     .replace(new RegExp(`^/provider/metrics/${ID}$`), '/provider/metrics/{series}')
 
@@ -233,6 +238,8 @@ describe('API surface', () => {
       'GET /provider/api-keys': { status: 200, body: { items: [] } },
       'POST /provider/api-keys': { status: 201, body: { api_key: {}, key: 'zpk_x' } },
       [`POST /provider/api-keys/${ID}/revoke`]: { status: 200, body: { api_key: {} } },
+      'GET /provider/break-glass': { status: 200, body: { items: [] } },
+      [`POST /provider/break-glass/${ID}/ack`]: { status: 204 },
     })
 
     let exported = 0

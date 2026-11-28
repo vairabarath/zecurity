@@ -1,6 +1,6 @@
 import { Route, Routes } from 'react-router-dom'
 import { RedirectIfAuthenticated, RequireRole, RequireSession } from '@/auth/guards'
-import { rolesFor } from '@/auth/roles'
+import { rolesFor, TENANT_DETAIL_ROLES } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
 import { Alerts } from '@/pages/Alerts'
@@ -67,6 +67,9 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireRole roles={rolesFor('tenants')} />}>
             <Route path="tenants" element={<Tenants />} />
+          </Route>
+          {/* The detail needs tenant.read: billing has the list only (D-73). */}
+          <Route element={<RequireRole roles={TENANT_DETAIL_ROLES} />}>
             <Route path="tenants/:id" element={<TenantDetail />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('plans')} />}>
