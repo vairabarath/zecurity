@@ -1,7 +1,7 @@
 ---
 type: tracker
 title: Provider Dashboard — Feature Tracker
-updated: 2026-11-27
+updated: 2026-11-28
 owners: [Barath (M2), Sathiya (M1)]
 source: Feature list from Barath, 2026-10-26 (Phase 1 / 2 / 3)
 baseline: main 7ee717bc (Sprint 26 merged and live-checked, #260; Sprint 27 active)
@@ -54,8 +54,8 @@ Checked against `main` `7ee717bc` (Must-have rows last changed 2026-11-19). "Qui
 
 | ID | Feature | Status | What's left |
 |---|---|---|---|
-| F19 | Provider admin roles | 🚧 Sprint 27 | Two roles today. **Sprint 27 (active, D-72/D-73):** O1 role matrix + `auditor`, `billing`, `support` (Barath, `075_`), O2 console per role (Sathiya) |
-| F20 | Break-glass account | 🚧 Sprint 27 | `recover-admin` CLI exists. **Sprint 27 (active, D-75):** G1 loud break-glass — `--reason`, critical alert, email to super-admins, console banner (Barath, `077_`) |
+| F19 | Provider admin roles | 🧪 Merged, live ✓ | Sprint 27 O1 #262 (role matrix + `auditor`, `billing`, `support`, `075_`) and O2 #267 (console per role); each live PASS. Tick after the Sprint 27 acceptance |
+| F20 | Break-glass account | 🧪 Merged, live ✓ | Sprint 27 G1 #263 (`recover-admin --reason`, critical alert, email to super-admins, banner API, `077_`) and the banner in O2 #267; live PASS. Tick after the Sprint 27 acceptance |
 | F21 | MFA on the provider console | ✅ Done | — |
 | F22 | Tunnel success rate per relay/tenant | ⬜ Not started | Needs relay/connector counters (large) |
 | F23 | Active-session timeseries | 🧪 Merged, live ◐ | Sprint 24 R1 #237, M1 #239, M2 #240, fixes #242. Live run 2026-11-23 (Barath, `main` `2ae68355`; results on `docs/sprint24-f23-live-results`, no PR yet): **R1 fail** (defects R1-1 first window has no tenant rate, R1-2 non-continuous window writes 0; fix PR not authorized), M1 pass (M1-1 low), M2 pass except design questions M2-1 … M2-3, cross-feature pass; R1-3 open |
@@ -70,7 +70,7 @@ Checked against `main` `7ee717bc` (Must-have rows last changed 2026-11-19). "Qui
 | F32 | Usage collection | ✅ Done | — (Sprint 25 U1, #245 + F32-1 fix #253; live PASS 2026-11-24 ([[Pending-Live-Tests]]); usage alerts U4 #248) |
 | F33 | Per-tenant usage report | ✅ Done | — (Sprint 25 U2 #246, U3 #247 + fixes #253; live PASS 2026-11-24) |
 | F34 | Billing plans and invoicing | ✅ Done | — (Sprint 26: P1a #257, P1b #258, P2 #259, P3 #250, P4 #251 + #254; purged-tenant snapshot fix and dev test clock in the acceptance PR; acceptance live PASS 2026-11-26 ([[Pending-Live-Tests]])) |
-| F35 | Provider API + API keys | 🚧 Sprint 27 | REST API exists. **Sprint 27 (active, D-76):** K1 read-only keys, one role, ≤ 365 days, expiry alert (Sathiya, `076_`, after O1), K2 keys console |
+| F35 | Provider API + API keys | 🧪 Merged, live ✓ | Sprint 27 K1 #264 (read-only keys, `076_`, `api_key.expiring` alert) and K2 #266 (keys console); live PASS. Open review point: keys outliving a disabled creator. Tick after the Sprint 27 acceptance |
 | F36 | Tenant self-signup / provisioning | ◐ Partly | First sign-in creates a workspace; no provider-side workflow |
 | F37 | Multi-provider / reseller hierarchy | ⬜ Not started | Needs a decision |
 | F38 | Compliance export | ◐ Partly | Audit export CSV/JSON (client-side, ≤ 10,000 rows, PR #190) live check PASS 2026-11-12 ([[Pending-Live-Tests]], PR #197); full SOC 2 bundle is larger |
@@ -124,8 +124,8 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 ### Can have (Phase 2)
 
 *Access control*
-- [ ] **F19** Provider admin roles (owner / operator / read-only / support) 🚧 (Sprint 27 O1, O2)
-- [ ] **F20** Break-glass account with forced audit entry 🚧 (Sprint 27 G1)
+- [ ] **F19** Provider admin roles (owner / operator / read-only / support) 🧪 (merged #262, #267; live PASS; tick after the Sprint 27 acceptance)
+- [ ] **F20** Break-glass account with forced audit entry 🧪 (merged #263, #267; live PASS; tick after the Sprint 27 acceptance)
 - [x] **F21** MFA enforcement on provider console ✅
 
 *Monitoring*
@@ -149,7 +149,7 @@ All merged in PR #190 (F14's quick part was already in place). Boxes are ticked 
 ### Can have (Phase 3)
 
 - [x] **F34** Billing plans and invoicing ✅
-- [ ] **F35** Provider API + API keys 🚧 (Sprint 27 K1, K2)
+- [ ] **F35** Provider API + API keys 🧪 (merged #264, #266; live PASS; tick after the Sprint 27 acceptance)
 - [ ] **F36** Tenant self-signup / provisioning workflow ◐ (first login creates a workspace)
 - [ ] **F37** Multi-provider / reseller hierarchy ⬜
 - [ ] **F38** Compliance export (SOC 2 evidence, audit bundles) ◐ (audit CSV/JSON export PR #190, live PASS 2026-11-12; no SOC 2 bundle)
@@ -204,8 +204,8 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 
 | ID | Feature | Status | Effort for what's left | Evidence / what's missing | Owner |
 |----|---------|--------|------------------------|---------------------------|-------|
-| F19 | Provider admin roles (owner / operator / read-only / support) | 🚧 | 🟡 | Two roles today: super-admin and relay-ops (D-05, D-31), enforced server-side in `decide()`. More roles need a decision on the action matrix. **Sprint 27 (active):** D-72 explicit role → actions matrix (amends D-05, D-31), D-73 roles `auditor`, `billing`, `support`, D-74 TOTP mandatory; O1 (`075_provider_roles`), O2 console per role. | Barath, Sathiya |
-| F20 | Break-glass account with forced audit entry | 🚧 | 🟡 | `zecurity-controller provider recover-admin` (Phase T) on the controller host, audited as `provider_user.recover_admin`. Decide whether this counts, or a standing break-glass account is wanted. **Sprint 27 (active, D-75):** the CLI stays the only path (no standing account); `--reason` required; critical `provider.break_glass_used` alert, email to every super-admin, console banner until acknowledged; G1 (`077_provider_alert_kinds`). | Barath |
+| F19 | Provider admin roles (owner / operator / read-only / support) | 🧪 | 🟡 | Two roles today: super-admin and relay-ops (D-05, D-31), enforced server-side in `decide()`. More roles need a decision on the action matrix. **Sprint 27 (merged #262, #267):** D-72 explicit role → actions matrix (amends D-05, D-31), D-73 roles `auditor`, `billing`, `support`, D-74 TOTP mandatory; O1 (`075_provider_roles`), O2 console per role. | Barath, Sathiya |
+| F20 | Break-glass account with forced audit entry | 🧪 | 🟡 | `zecurity-controller provider recover-admin` (Phase T) on the controller host, audited as `provider_user.recover_admin`. Decide whether this counts, or a standing break-glass account is wanted. **Sprint 27 (merged #263, #267, D-75):** the CLI stays the only path (no standing account); `--reason` required; critical `provider.break_glass_used` alert, email to every super-admin, console banner until acknowledged; G1 (`077_provider_alert_kinds`). | Barath |
 | F21 | MFA enforcement on provider console | ✅ | — | Super-admin TOTP, Phase T (PR #138); live AT-T PASS (PR #147). | |
 | F22 | Tunnel establishment success rate per relay and per tenant | ⬜ | 🔴 | Needs success/failure counters reported by relays/connectors. | |
 | F23 | Active session count timeseries | 🧪 | 🟡 / 🔴 | Merged in Sprint 24 (R1 #237 per-workspace relay counters, proto field 13; M1 #239 metric store `068_`, 1-min 7 days, hourly 400 days; M2 #240 charts; fixes #242). Live 2026-11-23: R1 fail (R1-1, R1-2), M1 pass, M2 pass except M2-1/M2-2, cross-feature pass; see `Pending-Live-Tests.md` "F23 findings" on `docs/sprint24-f23-live-results`. | Barath |
@@ -225,7 +225,7 @@ All six done: #1–#5 merged in PR #190; #6 was already in place.
 | ID | Feature | Status | Effort for what's left | Evidence / what's missing | Owner |
 |----|---------|--------|------------------------|---------------------------|-------|
 | F34 | Billing plans and invoicing | ✅ | 🔴 | Sprint 26 (D-62 … D-70): editable plan cards, editable currency (default USD), month-start plan billing, invoices with a gap-free number, emailed to tenant admins, optional tax. Merged #257, #258, #259, #250, #251, #254 (2026-11-26); acceptance live PASS 2026-11-26. | Barath, Sathiya |
-| F35 | Provider API + API keys | 🚧 | 🟡 | Provider REST API exists (session tokens). **Sprint 27 (active, D-76):** read-only keys `zpk_…` (SHA-256 at rest, shown once), one role each (never super-admin), expire ≤ 365 days, optional CIDR allowlist and rate limit, never a session; `api_key.expiring` alert 14 days ahead; K1 (`076_provider_api_keys`), K2 keys console. | Sathiya |
+| F35 | Provider API + API keys | 🧪 | 🟡 | Provider REST API exists (session tokens). **Sprint 27 (merged #264, #266, D-76):** read-only keys `zpk_…` (SHA-256 at rest, shown once), one role each (never super-admin), expire ≤ 365 days, optional CIDR allowlist and rate limit, never a session; `api_key.expiring` alert 14 days ahead; K1 (`076_provider_api_keys`), K2 keys console. | Sathiya |
 | F36 | Tenant self-signup / provisioning workflow | ◐ | 🟡 | First sign-in creates a workspace with its admin and CA. No provider-side provisioning workflow. | |
 | F37 | Multi-provider / reseller hierarchy | ⬜ | ⚖️ 🔴 | Single provider today (decisions doc Q1). | |
 | F38 | Compliance export (SOC 2 evidence, audit bundles) | ◐ | 🟡 | **Audit export merged** (PR #190, live PASS 2026-11-12): CSV/JSON from `GET /provider/audit` in the browser, applied filters and order kept, keyset pages without repeats, ≤ 10,000 rows with an explicit limit message, CSV formula cells neutralised. Missing: SOC 2 evidence bundle. | |
@@ -260,3 +260,4 @@ From `CLAUDE.md` and the Decision Record (binding):
 - 2026-11-23: Can-have status refreshed. F23: Barath's live run today (results on `docs/sprint24-f23-live-results`, no PR yet) — R1 fail (R1-1, R1-2), M1 and cross-feature pass, M2 pass with design questions. F26 and F27 live-checked, waiting for the Sprint 24 acceptance tick. F30 probably done by relay pools #200 (to confirm and tick). F32/F33 still in review (#245–#248), not live-checked. F34 in progress (drafts #250, #251). Not started: F22, F28, F29, F37, F39, F40; partly done, each needing a decision: F19, F20, F31, F35, F36, F38. Progress unchanged at 21 / 40.
 - 2026-11-23: Sprint 27 planned and signed off (provider access: F19, F20, F35; D-71 … D-76; PR #252). Starts after Sprint 26 closes.
 - 2026-11-27: Sprint 26 closed: #260 merged (`7ee717bc`; purged-tenant final invoice fix, dev billing test clock, acceptance PASS 2026-11-26); F34 ticked. **Sprint 27 started** (F19, F20, F35 → 🚧; X4 done by #260; next O1 by Barath, then K1). Stale rows fixed: progress 24 / 40 (Can have 6 / 22: F21, F24, F25, F32, F33, F34); F5, F7, F8, F12 detail rows (done in Sprint 23); F23, F26, F27 checklist marked 🧪; decided Must-have decisions struck. Sprint 24 acceptance (F23, F26, F27) still open.
+- 2026-11-28: Sprint 27 merged at Sathiya's go, before Barath's review: O1 #262, G1 #263, K1 #264 (incl. the `api_key.expiring` alert), K2 #266, O2 #267 (`main` `8db309bf`; migrations `075_` … `077_`). F19, F20, F35 → 🧪 (each phase live PASS); ticked after the Sprint 27 acceptance run. Progress unchanged at 24 / 40.

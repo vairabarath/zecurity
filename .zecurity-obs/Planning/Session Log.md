@@ -4038,3 +4038,26 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Barath: open a PR for the F23 results; decide on the R1 fix PR and the design questions; review and merge #244 → #248, then #249; start Sprint 26 P1a.
 - Sprint 25 live run: paused, waiting for how the lab hosts (.41, .53, .46, enrolled to Barath's controller) are shared.
+
+## 2026-11-27 – 2026-11-28 — Sathiya (M1): Sprint 26 close, Sprint 27 built and merged
+
+**Done:**
+- **Sprint 26 closed:** #260 merged (`7ee717bc`: purged-tenant final invoice fix, dev billing test clock, acceptance record; F34 ticked).
+- **Secret-scan false positive:** #261 (Stripe-like `whsec_` fixture in `Alerts.test.tsx`).
+- **Flaky admin test fixed:** #265 (`ResourceDetail.protect.test.tsx`).
+- **Sprint 27 started:** #252 merged; `CLAUDE.md` switched to Sprint 27; tracker refreshed (24 / 40).
+- **Sprint 27 built, live-checked and merged** at Sathiya's go, before Barath's review (`main` `8db309bf`):
+  - O1 role matrix + auditor / billing / support (#262, takeover);
+  - G1 loud break-glass (#263, takeover);
+  - K1 read-only API keys + `api_key.expiring` alert (#264);
+  - K2 keys console (#266);
+  - O2 console per role + break-glass banner (#267).
+  - Migrations `075_` … `077_`.
+  - Each phase: full gates (Go 51 packages with DB env; console 889 tests), mutation checks, a live check (records in the phase files and `Pending-Live-Tests.md`).
+
+**Open:**
+- **The Sprint 27 acceptance run** (both; reset lab DB, current `main`). Tick F19, F20, F35 after it.
+- **Barath's review of the merged stack:** open points in `Sprint27/path.md`, incl. the K1 question (keys outliving a disabled creator), which needs a Decision Record call.
+- **Lab teardown left over from Sprint 26:** luffy connector + `nft` table `s26` (needs `sudo`); .41 was unreachable.
+- **Sprint 24 acceptance run:** still open (F23 R1-1/R1-2; F26, F27 not ticked).
+- **Local DB:** recreate it (`075_` … `077_`).
