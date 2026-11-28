@@ -183,7 +183,7 @@ describe('Alerts: usage rule', () => {
 describe('Alerts: channels', () => {
   it('adds a webhook: the secret is shown once, cleared on close and never stored', async () => {
     signedInAs(superAdminMe)
-    const secret = 'whsec_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG'
+    const secret = 'whsec_test-not-a-real-secret'
     let listed: AlertChannel[] = []
     const { calls } = mockFetch({
       'GET /provider/alert-channels': () => ({ status: 200, body: { items: listed } }),
