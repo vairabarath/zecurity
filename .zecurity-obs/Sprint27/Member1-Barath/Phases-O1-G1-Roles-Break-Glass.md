@@ -222,11 +222,11 @@ Barath's phase, built by Sathiya at Sathiya's instruction (as O1). Branch `feat/
 
 ## Post-Phase Fixes
 
-### Fix (pending, X5): break-glass alert skipped when acknowledged before the first tick (G1, D-77)
+### Fix (X5, built, live PASS; not merged): break-glass alert skipped when acknowledged before the first tick (G1, D-77)
 **Issue:** in the Sprint 27 acceptance run (2026-11-28), a `recover-admin` use acknowledged in the console within one evaluator interval raised no critical `provider.break_glass_used` alert and no webhook; the super-admin emails and the banner still happened. D-75 says every use alerts.
 
 **Root cause:** `controller/internal/alerting/signals.go`, `breakGlassUsed`, reads only `provider_break_glass_events WHERE acknowledged_at IS NULL`, so an event acknowledged before the next tick never fires.
 
 **Decision (D-77, 2026-11-28):** every use raises the alert, even if acknowledged at once; the acknowledgement resolves it and never prevents it.
 
-**Fix (to build):** the signal fires each break-glass event once whether or not it is acknowledged, and resolves it when acknowledged (an event acknowledged before the first tick fires and resolves); DB test for that case; live recheck (ack right after recovery → alert and webhook fired, then resolved). Then tick F20.
+**Fix applied:** `breakGlassUsed` also observes an acknowledged event whose alert has never fired (`OR NOT EXISTS (… alert_events … transition = 'fired')`), so it fires on that tick and the acknowledgement resolves it on the next. Test `TestBreakGlass_AckBeforeFirstTick`; 2 mutations caught; live PASS 2026-11-28 (ack before any tick → fired + resolved, webhook firing + resolved, no re-fire). Branch `fix/sprint27-x5-x6`. Tick F20 after merge.

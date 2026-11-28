@@ -202,7 +202,8 @@ func (s *Store) CreateOperator(ctx context.Context, actor AuditActor, email, rol
 	return created, nil
 }
 
-// ChangeRole sets the operator's role and bumps session_generation. The same
+// ChangeRole sets the operator's role and bumps session_generation; demoting
+// a super-admin permanently revokes the API keys they created (D-78). The same
 // role is a no-op (changed=false: no update, no audit, no bump). Self-changes
 // and demoting the last active super-admin are refused.
 func (s *Store) ChangeRole(ctx context.Context, actor AuditActor, id, role string) (*ProviderUser, bool, error) {
@@ -241,9 +242,20 @@ func (s *Store) ChangeRole(ctx context.Context, actor AuditActor, id, role strin
 		if err != nil {
 			return fmt.Errorf("change provider role: %w", err)
 		}
+		details := map[string]any{"email": u.Email, "from": target.Role, "to": u.Role}
+		// D-78: demoting a super-admin permanently revokes the API keys they
+		// created, in this transaction.
+		if target.Role == RoleSuperAdmin {
+			n, err := s.revokeCreatorKeysTx(ctx, tx, actor, id, RevokeReasonCreatorDemoted, AuditOperatorRoleChange)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				details["api_keys_revoked"] = n
+			}
+		}
 		if err := s.auditOperator(ctx, tx, actor, AuditOperatorRoleChange, u,
-			WithChange(map[string]any{"email": u.Email, "from": target.Role, "to": u.Role},
-				map[string]any{"role": target.Role}, map[string]any{"role": u.Role})); err != nil {
+			WithChange(details, map[string]any{"role": target.Role}, map[string]any{"role": u.Role})); err != nil {
 			return err
 		}
 		result, changed = u, true
@@ -257,8 +269,9 @@ func (s *Store) ChangeRole(ctx context.Context, actor AuditActor, id, role strin
 
 // SetDisabled disables or enables an operator.
 //
-//   - Disable: sets disabled_at and bumps session_generation. Refused for self
-//     and for the last active super-admin.
+//   - Disable: sets disabled_at, bumps session_generation and permanently
+//     revokes the API keys the operator created (D-78). Refused for self and
+//     for the last active super-admin.
 //   - Enable: clears disabled_at, CLEARS password_hash (so the old credential
 //     is never trusted again — the operator cannot sign in until an explicit
 //     reset-password) and bumps session_generation. No password is generated.
@@ -298,6 +311,15 @@ func (s *Store) SetDisabled(ctx context.Context, actor AuditActor, id string, di
                     SET disabled_at = NOW(), session_generation = session_generation + 1, updated_at = NOW()
                   WHERE id = $1`, id); err != nil {
 				return fmt.Errorf("disable provider user: %w", err)
+			}
+			// D-78: disabling an operator permanently revokes the API keys
+			// they created, in this transaction.
+			n, err := s.revokeCreatorKeysTx(ctx, tx, actor, id, RevokeReasonCreatorDisabled, AuditOperatorDisable)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				details["api_keys_revoked"] = n
 			}
 			action = AuditOperatorDisable
 			WithChange(details, map[string]any{"status": "active"}, map[string]any{"status": "disabled"})

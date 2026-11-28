@@ -301,6 +301,57 @@ func (s *Store) RevokeAPIKey(ctx context.Context, actor AuditActor, id, reason, 
 	return out, err
 }
 
+// Reasons recorded on keys revoked because their creator lost super-admin
+// (D-78).
+const (
+	RevokeReasonCreatorDisabled = "creator disabled"
+	RevokeReasonCreatorDemoted  = "creator demoted"
+)
+
+// revokeCreatorKeysTx (D-78, Sprint 27 X6) permanently revokes every key
+// creatorID created that isn't revoked yet, inside the caller's transaction
+// (the operator disable or role change), so the operator change and the
+// revocations commit or fail together. Each key gets the acting super-admin
+// as revoked_by, the system reason and its own api_key.revoke audit row (name
+// and prefix, never the secret). Revocation is terminal: re-enabling or
+// re-promoting the operator restores nothing. Returns how many keys were
+// revoked.
+func (s *Store) revokeCreatorKeysTx(ctx context.Context, tx pgx.Tx, actor AuditActor, creatorID, reason, cause string) (int, error) {
+	rows, err := tx.Query(ctx,
+		`UPDATE provider_api_keys SET revoked_at = NOW(), revoked_by = $2, revoke_reason = $3
+		  WHERE created_by = $1 AND revoked_at IS NULL
+		  RETURNING id::text, name, prefix`, creatorID, actor.UserID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("revoke creator api keys: %w", err)
+	}
+	type revoked struct{ id, name, prefix string }
+	var keys []revoked
+	for rows.Next() {
+		var k revoked
+		if err := rows.Scan(&k.id, &k.name, &k.prefix); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("revoked api key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("revoke creator api keys: %w", err)
+	}
+	for _, k := range keys {
+		uid := actor.UserID
+		if err := s.InsertAuditTx(ctx, tx, AuditEntry{
+			ProviderUserID: &uid, ProviderEmail: actor.Email, IPAddress: actor.IP,
+			Action: AuditAPIKeyRevoke, TargetType: "api_key", TargetID: k.id,
+			Details: WithChange(map[string]any{"reason": reason, "name": k.name, "prefix": k.prefix, "cause": cause, "creator_id": creatorID},
+				map[string]any{"status": "active"}, map[string]any{"status": "revoked"}),
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(keys), nil
+}
+
 // apiKeyAuthRow is what authentication needs from a key row.
 type apiKeyAuthRow struct {
 	id, name, role, prefix string

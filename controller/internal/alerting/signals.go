@@ -550,17 +550,26 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// breakGlassUsed (G1, D-75): one observation per break-glass event not yet
-// acknowledged. It fires on the next tick after recover-admin ran (even if the
-// controller was down then) and resolves when a super-admin acknowledges the
-// event. The summary has the recovered operator, the time, the host and the
-// reason: never the temporary password (the event row never holds it).
+// breakGlassUsed (G1, D-75, D-77): one observation per break-glass event
+// that is not yet acknowledged, or that has never fired. It fires on the next
+// tick after recover-admin ran (even if the controller was down then) and
+// resolves when a super-admin acknowledges the event. An event acknowledged
+// before any tick saw it is still observed until its alert has fired, so it
+// fires on that tick and resolves on the next: acknowledging resolves the
+// alert, it never prevents it (D-77). The summary has the recovered
+// operator, the time, the host and the reason: never the temporary password
+// (the event row never holds it).
 func (s Sources) breakGlassUsed(ctx context.Context) ([]Observation, error) {
 	rows, err := s.DB.Query(ctx, `
-		SELECT id::text, email, reason, host, created_at
-		  FROM provider_break_glass_events
-		 WHERE acknowledged_at IS NULL
-		 ORDER BY created_at, id
+		SELECT b.id::text, b.email, b.reason, b.host, b.created_at
+		  FROM provider_break_glass_events b
+		 WHERE b.acknowledged_at IS NULL
+		    OR NOT EXISTS (SELECT 1 FROM alert_events e
+		                    WHERE e.kind = 'provider.break_glass_used'
+		                      AND e.target_type = 'break_glass_event'
+		                      AND e.target_id = b.id::text
+		                      AND e.transition = 'fired')
+		 ORDER BY b.created_at, b.id
 		 LIMIT $1`, maxObservations+1)
 	if err != nil {
 		return nil, fmt.Errorf("break-glass events: %w", err)
