@@ -160,3 +160,77 @@ func TestAPIKeys_CreatorDisabledOrDemoted(t *testing.T) {
 		t.Fatal("boot's key was affected")
 	}
 }
+
+// D-78 race (security review of X6): a key created while its creator is
+// being disabled or demoted must never survive. CreateAPIKey locks the
+// creator row FOR SHARE and re-checks it; the disable/demotion holds the row
+// FOR UPDATE, so a create waiting behind it sees the new state and is
+// refused. A creator who is already disabled or not a super-admin is refused
+// outright.
+func TestAPIKeys_CreateRacesCreatorDisable(t *testing.T) {
+	store, pool := provider.NewTestStore(t)
+	ctx := context.Background()
+	_, boot, err := provider.Bootstrap(ctx, store, e2eEmail, e2eTempPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootActor := provider.AuditActor{UserID: boot.ID, Email: boot.Email}
+	dave, err := store.CreateOperator(ctx, bootActor, "dave@inkyank.com", provider.RoleSuperAdmin, "x-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	daveActor := provider.AuditActor{UserID: dave.ID, Email: dave.Email}
+	newKey := func(name string) error {
+		_, _, err := store.CreateAPIKey(ctx, daveActor, provider.NewAPIKey{Name: name, Role: provider.RoleAuditor,
+			ExpiresAt: time.Now().Add(30 * 24 * time.Hour), AllowedCIDRs: []string{}, Reason: "race test"})
+		return err
+	}
+
+	// A disable transaction holds dave's row (as SetDisabled's lockTarget does).
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM provider_users WHERE id = $1 FOR UPDATE`, dave.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- newKey("racing") }()
+	select {
+	case err := <-done:
+		t.Fatalf("create did not wait for the creator lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := tx.Exec(ctx, `UPDATE provider_users SET disabled_at = NOW() WHERE id = $1`, dave.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, provider.ErrAPIKeyCreatorNotActive) {
+			t.Fatalf("create after the creator was disabled: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("create never finished")
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM provider_api_keys WHERE created_by = $1`, dave.ID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("keys stored for a disabled creator: %d %v", n, err)
+	}
+
+	// Already disabled, or no longer a super-admin: refused outright.
+	if err := newKey("after-disable"); !errors.Is(err, provider.ErrAPIKeyCreatorNotActive) {
+		t.Fatalf("disabled creator: %v", err)
+	}
+	erin, err := store.CreateOperator(ctx, bootActor, "erin@inkyank.com", provider.RoleAuditor, "x-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateAPIKey(ctx, provider.AuditActor{UserID: erin.ID, Email: erin.Email}, provider.NewAPIKey{Name: "erin",
+		Role: provider.RoleAuditor, ExpiresAt: time.Now().Add(24 * time.Hour), AllowedCIDRs: []string{}, Reason: "x"}); !errors.Is(err, provider.ErrAPIKeyCreatorNotActive) {
+		t.Fatalf("non-super-admin creator: %v", err)
+	}
+}

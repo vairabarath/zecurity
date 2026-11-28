@@ -78,6 +78,9 @@ var (
 	ErrAPIKeyInvalidName   = errors.New("invalid api key name")
 	ErrAPIKeyInvalidCIDR   = errors.New("invalid api key cidr")
 	ErrAPIKeyNameMismatch  = errors.New("confirmation does not match the key name")
+	// ErrAPIKeyCreatorNotActive: the creating operator is no longer an active
+	// super-admin when the key would be stored (D-78).
+	ErrAPIKeyCreatorNotActive = errors.New("api key creator is not an active super-admin")
 )
 
 // IsAPIKeyToken reports whether a bearer token is an API key (by its
@@ -218,6 +221,26 @@ func (s *Store) CreateAPIKey(ctx context.Context, actor AuditActor, in NewAPIKey
 	var created *APIKey
 	var full string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// D-78: lock the creator and re-check it is still an active
+		// super-admin. The disable and role-change transactions lock the same
+		// row FOR UPDATE before revoking the operator's keys, so the two
+		// serialise: a create that commits first is revoked by the later
+		// disable or demotion, and a create that waits sees the new state and
+		// is refused. Without the lock a key created concurrently with its
+		// creator's demotion could commit after the revocation and survive.
+		var role string
+		var disabled bool
+		err := tx.QueryRow(ctx,
+			`SELECT role, disabled_at IS NOT NULL FROM provider_users WHERE id = $1 FOR SHARE`, actor.UserID).Scan(&role, &disabled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAPIKeyCreatorNotActive
+		}
+		if err != nil {
+			return fmt.Errorf("lock api key creator: %w", err)
+		}
+		if role != RoleSuperAdmin || disabled {
+			return ErrAPIKeyCreatorNotActive
+		}
 		var id string
 		if err := tx.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
 			return fmt.Errorf("api key id: %w", err)
