@@ -187,12 +187,14 @@ func (f *fakeObserver) Observe(_ context.Context, kind string, _ Params, _ time.
 func TestAlertsDB_SchemaScopes(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	// 069 seeds nine rules; 072 (Sprint 25 U4) adds tenant.usage_over.
-	if n := e.count(t, `SELECT count(*) FROM alert_rules`); n != 10 {
-		t.Fatalf("seeded rules = %d, want 10", n)
+	// 069 seeds nine rules; 072 (Sprint 25 U4) adds tenant.usage_over; 077
+	// (Sprint 27 G1) adds the enabled platform rules provider.break_glass_used
+	// and api_key.expiring.
+	if n := e.count(t, `SELECT count(*) FROM alert_rules`); n != 12 {
+		t.Fatalf("seeded rules = %d, want 12", n)
 	}
-	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'platform' AND enabled`); n != 5 {
-		t.Fatalf("enabled platform rules = %d, want 5", n)
+	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'platform' AND enabled`); n != 7 {
+		t.Fatalf("enabled platform rules = %d, want 7", n)
 	}
 	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'tenant' AND enabled`); n != 0 {
 		t.Fatalf("tenant rules must start disabled, %d enabled", n)
@@ -644,7 +646,7 @@ func TestAlertsDB_ReviewFixes(t *testing.T) {
 	// A bad stored rule is skipped, the others still listed.
 	e.exec(t, `UPDATE alert_rules SET params = '{"keys": ["sessions"]}' WHERE kind = 'tenant.over_quota'`)
 	rules, err := e.store.ListRules(ctx)
-	if err != nil || len(rules) != 9 { // ten seeded (072 adds one), one bad
+	if err != nil || len(rules) != 11 { // twelve seeded (072 adds one, 077 two), one bad
 		t.Fatalf("list with one bad rule: %d rules, %v", len(rules), err)
 	}
 

@@ -594,7 +594,7 @@ func TestResetTOTP_Guards(t *testing.T) {
 func TestRecoverAdmin_ResetsPasswordAndTOTP(t *testing.T) {
 	e := newTOTPEnv(t)
 	ctx := context.Background()
-	temp, err := provider.RecoverAdmin(ctx, e.store, "  "+strings.ToUpper(e2eEmail)+" ")
+	temp, err := provider.RecoverAdmin(ctx, e.store, "  "+strings.ToUpper(e2eEmail)+" ", "lost authenticator", "ctl-host")
 	if err != nil || len(temp) < 12 {
 		t.Fatalf("recover-admin: %q %v", temp, err)
 	}
@@ -625,16 +625,16 @@ func TestRecoverAdmin_Boundaries(t *testing.T) {
 	e := newTOTPEnv(t)
 	ctx := context.Background()
 	e.createOperator(t, "relay@inkyank.com", provider.RoleRelayOps)
-	if _, err := provider.RecoverAdmin(ctx, e.store, "relay@inkyank.com"); !errors.Is(err, provider.ErrNotSuperAdmin) {
+	if _, err := provider.RecoverAdmin(ctx, e.store, "relay@inkyank.com", "lost authenticator", "ctl-host"); !errors.Is(err, provider.ErrNotSuperAdmin) {
 		t.Fatalf("relay-ops: %v, want ErrNotSuperAdmin", err)
 	}
-	if _, err := provider.RecoverAdmin(ctx, e.store, "nobody@inkyank.com"); !errors.Is(err, provider.ErrProviderUserNotFound) {
+	if _, err := provider.RecoverAdmin(ctx, e.store, "nobody@inkyank.com", "lost authenticator", "ctl-host"); !errors.Is(err, provider.ErrProviderUserNotFound) {
 		t.Fatalf("unknown: %v, want ErrProviderUserNotFound", err)
 	}
 	id, temp := e.createOperator(t, "second@inkyank.com", provider.RoleSuperAdmin)
 	e.activateSuperAdmin(t, "second@inkyank.com", temp, "second-final-pass-1")
 	call(t, e.srv, http.MethodPost, "/provider/users/"+id+"/disable", e.admin, nil)
-	if _, err := provider.RecoverAdmin(ctx, e.store, "second@inkyank.com"); !errors.Is(err, provider.ErrAccountDisabled) {
+	if _, err := provider.RecoverAdmin(ctx, e.store, "second@inkyank.com", "lost authenticator", "ctl-host"); !errors.Is(err, provider.ErrAccountDisabled) {
 		t.Fatalf("disabled super-admin: %v, want ErrAccountDisabled", err)
 	}
 	if n := e.auditCount(t, provider.AuditRecoverAdmin); n != 0 {

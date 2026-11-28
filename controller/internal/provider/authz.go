@@ -191,6 +191,16 @@ const (
 	ActionInvoiceResend     = "invoice.resend"
 )
 
+// Break-glass (Sprint 27 G1, D-75): the console banner lists unacknowledged
+// recover-admin events and a super-admin acknowledges one with a note.
+// Super-admin only (no role row lists them). break_glass.notified is the
+// audit row of the email to super-admins (system actor).
+const (
+	ActionBreakGlassRead        = "break_glass.read"
+	ActionBreakGlassAcknowledge = "break_glass.acknowledge"
+	ActionBreakGlassNotified    = "break_glass.notified"
+)
+
 // actionClass says what an action constant is: a read, a write, or only the
 // name of an audit row (never passed to decide()). Every Action* constant has
 // exactly one entry (TestActionClass_EveryConstant); K1 uses it to refuse
@@ -272,6 +282,10 @@ var actionClasses = map[string]actionClass{
 	ActionCertRead:           classRead,
 	ActionHealthRead:         classRead,
 	ActionProviderUserManage: classWrite,
+	// break-glass (G1)
+	ActionBreakGlassRead:        classRead,
+	ActionBreakGlassAcknowledge: classWrite,
+	ActionBreakGlassNotified:    classAuditOnly,
 }
 
 // IsWriteAction reports whether action is anything but a classified read.
@@ -598,6 +612,13 @@ func (a *Authz) CanManageAlertChannels(actor Actor, action string, target Target
 // CanReadHealth gates GET /provider/health (super-admin, auditor, support).
 func (a *Authz) CanReadHealth(actor Actor) error {
 	return decide(actor, ActionHealthRead, Target{Type: "health"})
+}
+
+// CanManageBreakGlass gates the break-glass banner routes
+// (ActionBreakGlassRead, ActionBreakGlassAcknowledge): super-admin only
+// (D-75).
+func (a *Authz) CanManageBreakGlass(actor Actor, action string) error {
+	return decide(actor, action, Target{Type: "break_glass"})
 }
 
 // CanReadCertificates gates GET /provider/certificates and GET /provider/pki.

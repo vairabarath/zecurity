@@ -46,6 +46,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/breakglass"
 	"github.com/yourorg/ztna/controller/internal/certalert"
 	"github.com/yourorg/ztna/controller/internal/changehint"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
@@ -571,6 +572,13 @@ func main() {
 	mux.Handle("POST /provider/users/{id}/enable", requireProvider(http.HandlerFunc(operatorHandlers.Enable)))
 	mux.Handle("POST /provider/users/{id}/reset-password", requireProvider(http.HandlerFunc(operatorHandlers.ResetPassword)))
 	mux.Handle("POST /provider/users/{id}/reset-totp", requireProvider(http.HandlerFunc(operatorHandlers.ResetTOTP)))
+	// Loud break-glass (Sprint 27 G1, D-75): the console banner lists
+	// unacknowledged recover-admin events; a super-admin acknowledges one with
+	// a note (audited). The alert and the email come from the evaluator and
+	// the break-glass email job below.
+	breakGlass := &breakglass.Handler{DB: db.Pool, Store: providerStore, Authz: providerAuthz}
+	mux.Handle("GET /provider/break-glass", requireProvider(http.HandlerFunc(breakGlass.List)))
+	mux.Handle("POST /provider/break-glass/{id}/ack", requireProvider(http.HandlerFunc(breakGlass.Ack)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
 	mux.Handle("GET /workspaces/{slug}/auth",
@@ -1182,6 +1190,11 @@ func main() {
 	} else {
 		log.Printf("cert expiry alert: disabled (CERT_EXPIRY_ALERTS=false)")
 	}
+
+	// Break-glass email (Sprint 27 G1, D-75): every recover-admin run is
+	// emailed to every active super-admin; retried until one recipient took it.
+	breakGlassMail := &breakglass.Job{DB: db.Pool, Store: providerStore, Sender: inviteEmailer}
+	workers.Go("break-glass-email", func() { breakGlassMail.Run(ctx, 30*time.Second) })
 
 	// Alert delivery (Sprint 24 A2) runs even with ALERTS_ENABLED=false: rule
 	// changes through the API can still record events (resolved on delete or
