@@ -4061,3 +4061,19 @@ serves on `127.0.0.1:9102`.
 - **Lab teardown left over from Sprint 26:** luffy connector + `nft` table `s26` (needs `sudo`); .41 was unreachable.
 - **Sprint 24 acceptance run:** still open (F23 R1-1/R1-2; F26, F27 not ticked).
 - **Local DB:** recreate it (`075_` … `077_`).
+
+## 2026-11-28 — Sathiya (M1): Sprint 27 acceptance run
+
+**Done:**
+- **Sprint 27 acceptance PASS** on `main` `b6521928` (reset local DB, migrations through `077_`): roles, break-glass, API keys and the expiry alert, keys console, console per role and X4, plus a relay-ops drain on a real relay (`suryavardhan`, 192.168.1.97). Record: `Sprint27/path.md` → Acceptance run, `Pending-Live-Tests.md`.
+- **F19 ticked** (25 / 40).
+- **Decisions (Decision Record amendment 2026-11-28):**
+  - D-77: every break-glass use raises the critical alert, even if acknowledged at once; the ack resolves it.
+  - D-78: an API key stops working when its creator is disabled or demoted.
+
+**Open:**
+- **X5** (D-77) and **X6** (D-78): build, test, live recheck; then tick F20 and F35.
+- **Barath's review** of the merged stack and the open points in `Sprint27/path.md`, now including D-77 and D-78.
+- **Lab:** the acceptance controller, console, mail and webhook helpers and the relay on `suryavardhan` are still running; stop them and delete `~/s27relay` on that host when done.
+- **Still open from before:** the Sprint 24 acceptance run; Sprint 26 lab teardown (luffy `sudo`, .41).
+

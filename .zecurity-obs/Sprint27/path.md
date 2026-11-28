@@ -2,7 +2,7 @@
 type: sprint
 sprint: 27
 title: Provider Dashboard — provider access and API (F19, F20, F35)
-status: ACTIVE — every phase built, live-checked and merged 2026-11-28 (#262 → #267, main `8db309bf`; merged at Sathiya's go before Barath's review); left: the Sprint 27 acceptance run, Barath's review of the open points below
+status: ACTIVE — every phase merged 2026-11-28 (#262 → #267, main `8db309bf`; at Sathiya's go before Barath's review); acceptance run PASS 2026-11-28 (main `b6521928`); F19 ticked; left: fixes X5 (D-77) and X6 (D-78), then tick F20 and F35; Barath's review of the open points below
 created: 2026-11-23
 team:
   - Person 1 = Barath (M2): F19 — O1 role matrix and new roles; F20 — G1 loud break-glass
@@ -180,7 +180,10 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] K1: API keys `076_provider_api_keys` + `api_key.expiring` alert (Sathiya; live PASS 2026-11-27) — #264 merged `74cf6f69`
 - [x] K2: Keys console (Sathiya; live PASS 2026-11-27) — #266 merged `53790138`
 - [x] O2: Console per role + break-glass banner (Sathiya; live PASS 2026-11-28) — #267 merged `8db309bf`
-- [ ] Sprint acceptance run (both); tracker F19, F20, F35
+- [x] Sprint acceptance run — PASS 2026-11-28 on `main` `b6521928` (run by Sathiya; results below and in `Pending-Live-Tests.md`); tracker F19 ticked
+- [x] D-77 and D-78 decided 2026-11-28 (Sathiya) from the run's two questions; written into the Decision Record (amendment 2026-11-28)
+- [ ] X5: break-glass alert even when acknowledged before the first tick (D-77); live recheck; then tick F20
+- [ ] X6: API keys stop working when their creator is disabled or demoted (D-78); live recheck; then tick F35
 
 ### Merged before review: open points for Barath (2026-11-28)
 
@@ -190,19 +193,45 @@ The whole stack was merged at Sathiya's go before Barath reviewed it. Choices ma
   - support doesn't see `tenant.usage_over` alerts;
   - auditor doesn't get the operator list.
 - **G1:**
+  - **decided 2026-11-28 (D-77):** an acknowledgement before the evaluator's first tick skipped the alert; every use must alert and the ack resolves it → fix X5;
   - the break-glass event table lives in `077_`;
   - the email is sent by a controller job, not the CLI;
   - the banner UI landed with O2.
-- **K1 (needs a Decision Record call):** a key keeps working after its creator is disabled or demoted. The options are (a) keep it; (b) refuse keys whose creator is no longer an active super-admin; (c) revoke a user's keys when they're disabled or demoted. Flagged by an automated security review.
+- **K1 — decided 2026-11-28 (D-78, option b):** a key keeps working after its creator is disabled or demoted. The options were (a) keep it; (b) refuse keys whose creator is no longer an active super-admin; (c) revoke a user's keys when they're disabled or demoted. Decision: the key stops working (generic 401) while its creator isn't an active super-admin → fix X6. Flagged by an automated security review.
 - **K2:** the 365-day preset ends 10 minutes short of a year; a picked date expires at 23:59 UTC.
 - **O2:**
   - `TenantSummary.current_plan` on the list (D-73 "name, plan, status");
   - Change plan on the list only for roles without the tenant detail;
   - the Overview loads only the tiles a role may read.
 
+### Acceptance run — 2026-11-28: PASS
+
+`main` `b6521928`, migrations through `077_provider_alert_kinds`, reset local DB, one controller built from that commit (`ENV=development`, evaluator every 10 s, `BILLING_TEST_NOW=2026-12-01T06:05:00Z` so November closes, SMTP to a local capture server, webhook to a local receiver). For X4 the controller was restarted with `TENANT_DELETE_GRACE=2m` and a local purge export directory. Relay `suryavardhan` (Arch host 192.168.1.97, run in the foreground without installing, pool `s27-drain`). Drivers in `~/.cache/zecurity-s27` (not in the repo). Run by Sathiya.
+
+| Stage | Result |
+|---|---|
+| **Roles (O1)** | setup 10/10; full API matrix 120/120 (the relay-ops drain, 409 on an unenrolled relay in the first pass, rerun on the real relay: drain 204, resume 204, both audited as relay-ops); invoice 8/8 (billing regenerates and issues; auditor, support, relay-ops void → 403) |
+| **Break-glass (G1)** | 17/17: `--reason` required; critical alert, both super-admin emails (audited count 2), banner acknowledged with a note, alert resolved. Banner in the console (O2): shown to super-admin, submit disabled until a note, gone after ack, temporary password never on the page. **Finding → D-77:** an ack within one evaluator interval skipped the alert |
+| **API keys (K1)** | 52/52 (one key per role, read-only, 403 on writes, auth/operator/key routes refused, revoke/expiry/CIDR → 401, rate limit, audited as the key). `api_key.expiring`: 6/6 with one webhook channel (fired once for the key 10 days out, one webhook and one email, not re-fired, resolved on revoke; one delivery per channel; no key in payload, email or log). The first pass counted every event twice because the harness had created two webhook channels |
+| **Keys console (K2)** | 8/8 in the browser: key shown once (`zpk_…`), reads 200, writes 403; after closing, not in the page, localStorage or sessionStorage; list by prefix; revoke needs a reason and the typed name → Revoked, 401; create and revoke audited without the key |
+| **Console per role (O2)** | navigation and buttons per role match the matrix: auditor every read section, no writes (billing settings read-only, operators and keys forbidden); billing tenants (Change plan, no detail), plans, usage, invoices, billing settings; support tenants, alerts (no rules or channels, no platform alerts), timeline; relay-ops relays (Add relay), pools (Create pool), alerts, timeline relay rows; super-admin everything incl. Operators and API keys |
+| **X4** | a tenant suspended, deleted and purged mid-month kept its `usage_tenants` snapshot through the usage prune (controller restarted after the purge) and got one final November invoice (USD 10.00, "S27 X4 Purged", card "S27 Card") |
+
+Not run: nothing from the acceptance list. Two questions came out of the run and were decided the same day (D-77, D-78); their fixes are X5 and X6 below.
+
 ## Post-Sprint Fixes
 
-_None yet._
+### X5 (pending): break-glass alert even when acknowledged early (D-77)
+**Issue:** a `recover-admin` use acknowledged in the console before the evaluator's next tick raised no `provider.break_glass_used` alert and no webhook (email and banner still happened). Found in the acceptance run.
+
+**Root cause:** the evaluator signal reads only unacknowledged events (`controller/internal/alerting/signals.go`, `breakGlassUsed`: `WHERE acknowledged_at IS NULL`), so an event acknowledged first is never seen as firing.
+
+**Fix (to build):** every break-glass event fires the alert once, acknowledged or not, and the acknowledgement resolves it; DB test for an ack before the first tick; live recheck. Phase file: G1 → Post-Phase Fixes.
+
+### X6 (pending): API keys stop working when their creator is disabled or demoted (D-78)
+**Issue:** a key kept working after the super-admin who created it was disabled or demoted (K1 review question, from an automated security review).
+
+**Fix (to build):** key authentication refuses (generic 401 `invalid_api_key`) a key whose creator isn't an active super-admin, checked on every request; tests for disabled and demoted creators; live recheck. Phase file: K1 → Post-Phase Fixes.
 
 ## Out of scope
 
