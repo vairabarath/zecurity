@@ -282,14 +282,13 @@ func (h *ReadHandlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := actor.UserID
 	if err := h.store.InsertAuditTx(ctx, tx, AuditEntry{
-		ProviderUserID: &userID,
+		ProviderUserID: actor.AuditUserID(),
 		ProviderEmail:  actor.Email,
 		Action:         ActionTenantRead,
 		TargetType:     "tenant",
 		TargetID:       id,
-		Details:        tenantReadAuditDetails,
+		Details:        actor.AuditDetails(tenantReadAuditDetails),
 		IPAddress:      clientIP(r),
 	}); err != nil {
 		fail(http.StatusInternalServerError, "server_error", "audit insert", err)

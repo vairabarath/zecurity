@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
+	"net"
 	"net/http"
 	"strings"
 
@@ -28,6 +30,22 @@ type ProviderOption func(*providerOptions)
 type providerOptions struct {
 	allowPasswordChangeToken bool
 	allowMFAStage            string
+	apiKeys                  APIKeyAuthenticator
+}
+
+// APIKeyAuthenticator turns a provider API key into an api_key Actor
+// (Sprint 27 K1, D-76). *provider.APIKeyAuthenticator implements it.
+type APIKeyAuthenticator interface {
+	Authenticate(ctx context.Context, key, ip string) (provider.Actor, error)
+}
+
+// AcceptAPIKeys lets a route accept a provider API key (zpk_…) as well as a
+// session. Without it a key gets 403 api_key_not_allowed: the auth, TOTP,
+// operator and API-key routes never take one (D-76). A key never reaches
+// the JWT verifier and never yields a session; decide() refuses it every
+// write.
+func AcceptAPIKeys(a APIKeyAuthenticator) ProviderOption {
+	return func(o *providerOptions) { o.apiKeys = a }
 }
 
 // AllowPasswordChangeToken lets a password-change-only token (claim pwc=true)
@@ -62,6 +80,10 @@ func AllowMFAToken(stage string) ProviderOption {
 //     from the DB row on every request, so a token minted before TOTP was
 //     enforced is refused at once, not when it expires (D-28, OQ-3).
 //
+// A bearer token in the API key format (zpk_…) is never verified as a JWT:
+// it is authenticated as a key on routes with AcceptAPIKeys, and refused
+// with 403 api_key_not_allowed everywhere else.
+//
 // The role always comes from the DB row, never the token. It NEVER calls
 // WorkspaceGuard — provider identity has no tenant.
 func RequireProvider(verifier ProviderTokenVerifier, users ProviderUserLookup, opts ...ProviderOption) func(http.Handler) http.Handler {
@@ -79,6 +101,11 @@ func RequireProvider(verifier ProviderTokenVerifier, users ProviderUserLookup, o
 			parts := strings.SplitN(raw, " ", 2)
 			if len(parts) != 2 || parts[0] != "Bearer" || parts[1] == "" {
 				writeProviderJSON(w, http.StatusUnauthorized, "malformed Authorization header")
+				return
+			}
+
+			if provider.IsAPIKeyToken(parts[1]) {
+				serveAPIKey(w, r, next, o, parts[1])
 				return
 			}
 
@@ -132,6 +159,37 @@ func RequireProvider(verifier ProviderTokenVerifier, users ProviderUserLookup, o
 	}
 }
 
+// serveAPIKey authenticates an API key request (K1, D-76). The generic 401
+// never says which check failed.
+func serveAPIKey(w http.ResponseWriter, r *http.Request, next http.Handler, o providerOptions, key string) {
+	if o.apiKeys == nil || o.allowPasswordChangeToken || o.allowMFAStage != "" {
+		writeProviderJSON(w, http.StatusForbidden, "api_key_not_allowed")
+		return
+	}
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	actor, err := o.apiKeys.Authenticate(r.Context(), key, ip)
+	switch {
+	case errors.Is(err, provider.ErrInvalidAPIKey):
+		writeProviderJSON(w, http.StatusUnauthorized, "invalid_api_key")
+		return
+	case errors.Is(err, provider.ErrAPIKeyRateLimited):
+		w.Header().Set("Retry-After", "1")
+		writeProviderJSON(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	case err != nil:
+		log.Printf("provider api key: %v", err)
+		writeProviderJSON(w, http.StatusInternalServerError, "provider lookup failed")
+		return
+	case !actor.IsAPIKey():
+		writeProviderJSON(w, http.StatusInternalServerError, "provider lookup failed")
+		return
+	}
+	next.ServeHTTP(w, r.WithContext(provider.WithActor(r.Context(), actor)))
+}
+
 func hasOTP(amr []string) bool {
 	for _, m := range amr {
 		if m == provider.AMROTP {
@@ -146,4 +204,17 @@ func writeProviderJSON(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// RefuseProviderAPIKey wraps an unauthenticated provider route (the login)
+// so a request carrying an API key gets 403 api_key_not_allowed (D-76: keys
+// never touch the auth routes).
+func RefuseProviderAPIKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if raw := r.Header.Get("Authorization"); strings.HasPrefix(raw, "Bearer ") && provider.IsAPIKeyToken(strings.TrimPrefix(raw, "Bearer ")) {
+			writeProviderJSON(w, http.StatusForbidden, "api_key_not_allowed")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

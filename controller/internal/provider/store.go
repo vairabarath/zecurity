@@ -372,6 +372,9 @@ func (s *Store) InsertAuditTx(ctx context.Context, db dbExec, e AuditEntry) erro
 		}
 		details = b
 	}
+	if e.ProviderUserID != nil && *e.ProviderUserID == "" {
+		e.ProviderUserID = nil // an API key actor (K1) is not a provider user
+	}
 	_, err := db.Exec(ctx,
 		`INSERT INTO provider_audit_logs
                    (provider_user_id, provider_email, action, target_type, target_id, details, ip_address)

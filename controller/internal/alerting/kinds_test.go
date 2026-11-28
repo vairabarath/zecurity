@@ -1,10 +1,8 @@
 package alerting
 
 import (
-	"context"
 	"errors"
 	"testing"
-	"time"
 )
 
 func TestParseParams(t *testing.T) {
@@ -134,10 +132,5 @@ func TestNewProviderKinds(t *testing.T) {
 	}
 	if _, err := ParseParams(KindCertificateExpiring, []byte(`{"days_before": 14}`)); err == nil {
 		t.Error("certificate.expiring took days_before")
-	}
-	// Until K1 wires its signal, api_key.expiring is "not evaluated" (states
-	// unchanged), never "nothing expiring".
-	if _, err := (Sources{}).Observe(context.Background(), KindAPIKeyExpiring, Params{DaysBefore: 14}, time.Now()); !errors.Is(err, errNoSource) {
-		t.Fatalf("api_key.expiring without K1: %v", err)
 	}
 }

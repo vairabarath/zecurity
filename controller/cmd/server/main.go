@@ -537,7 +537,7 @@ func main() {
 		providerStore,
 		provider.NewValkeyLoginLimiter(valkeycompat.NewAdapter(connectorValkey)),
 	)
-	mux.Handle("POST /provider/auth/login", http.HandlerFunc(providerAuth.Login))
+	mux.Handle("POST /provider/auth/login", middleware.RefuseProviderAPIKey(http.HandlerFunc(providerAuth.Login)))
 	mux.Handle("POST /provider/auth/password",
 		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowPasswordChangeToken())(
 			http.HandlerFunc(providerAuth.ChangePassword)))
@@ -579,6 +579,17 @@ func main() {
 	breakGlass := &breakglass.Handler{DB: db.Pool, Store: providerStore, Authz: providerAuthz}
 	mux.Handle("GET /provider/break-glass", requireProvider(http.HandlerFunc(breakGlass.List)))
 	mux.Handle("POST /provider/break-glass/{id}/ack", requireProvider(http.HandlerFunc(breakGlass.Ack)))
+	// Provider API keys (Sprint 27 K1, D-76): read-only, one role, expiring,
+	// never a session. Every provider route from here on accepts a key as
+	// well as a session (requireProviderOrKey); the auth, TOTP, /provider/me,
+	// operator and key routes above and below take sessions only and refuse
+	// a key with 403. decide() refuses a key every write.
+	providerAPIKeys := provider.NewAPIKeyAuthenticator(providerStore)
+	requireProviderOrKey := middleware.RequireProvider(providerIdentity, providerStore, middleware.AcceptAPIKeys(providerAPIKeys))
+	apiKeyHandlers := &provider.APIKeyHandlers{Store: providerStore, Authz: providerAuthz}
+	mux.Handle("GET /provider/api-keys", requireProvider(http.HandlerFunc(apiKeyHandlers.List)))
+	mux.Handle("POST /provider/api-keys", requireProvider(http.HandlerFunc(apiKeyHandlers.Create)))
+	mux.Handle("POST /provider/api-keys/{id}/revoke", requireProvider(http.HandlerFunc(apiKeyHandlers.Revoke)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
 	mux.Handle("GET /workspaces/{slug}/auth",
@@ -705,16 +716,16 @@ func main() {
 			}
 		}
 	}
-	mux.Handle("POST /provider/relays", requireProvider(http.HandlerFunc(relayAdminHandler.Create)))
-	mux.Handle("POST /provider/relays/{id}/revoke", requireProvider(http.HandlerFunc(relayAdminHandler.Revoke)))
-	mux.Handle("DELETE /provider/relays/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.Delete)))
+	mux.Handle("POST /provider/relays", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.Create)))
+	mux.Handle("POST /provider/relays/{id}/revoke", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.Revoke)))
+	mux.Handle("DELETE /provider/relays/{id}", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.Delete)))
 
 	// Sprint 22 Phase D (D-32): drain and resume. Post-commit, only on a real
 	// change: the heartbeat draining flag and the relay-list broadcast (see
 	// relay.DrainFanout).
 	relayAdminHandler.OnRelayDrainChanged = relay.DrainFanout(relaySvc, publishRelayList)
-	mux.Handle("POST /provider/relays/{id}/drain", requireProvider(http.HandlerFunc(relayAdminHandler.Drain)))
-	mux.Handle("POST /provider/relays/{id}/resume", requireProvider(http.HandlerFunc(relayAdminHandler.Resume)))
+	mux.Handle("POST /provider/relays/{id}/drain", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.Drain)))
+	mux.Handle("POST /provider/relays/{id}/resume", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.Resume)))
 
 	// Relay pools (D-37 … D-41). Moves and tenant assignments publish the
 	// relay lists after commit; RELAY_POOL_MIGRATION_WINDOW is how long a
@@ -725,13 +736,13 @@ func main() {
 		log.Fatalf("RELAY_POOL_MIGRATION_WINDOW=%s is shorter than the connector drain timeout (%s): a graceful move would cut in-flight streams",
 			relayAdminHandler.PoolMigrationWindow, relay.MinPoolMigrationWindow)
 	}
-	mux.Handle("POST /provider/relay-pools", requireProvider(http.HandlerFunc(relayAdminHandler.CreatePool)))
-	mux.Handle("PATCH /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.UpdatePool)))
-	mux.Handle("DELETE /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.DeletePool)))
-	mux.Handle("POST /provider/relays/{id}/pool", requireProvider(http.HandlerFunc(relayAdminHandler.MoveRelay)))
+	mux.Handle("POST /provider/relay-pools", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.CreatePool)))
+	mux.Handle("PATCH /provider/relay-pools/{id}", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.UpdatePool)))
+	mux.Handle("DELETE /provider/relay-pools/{id}", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.DeletePool)))
+	mux.Handle("POST /provider/relays/{id}/pool", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.MoveRelay)))
 	// Relay link capacity (Sprint 23 B2, D-42): relay-ops and super-admin.
-	mux.Handle("PUT /provider/relays/{id}/link-capacity", requireProvider(http.HandlerFunc(relayAdminHandler.SetLinkCapacity)))
-	mux.Handle("PUT /provider/tenants/{id}/relay-pool", requireProvider(http.HandlerFunc(relayAdminHandler.AssignTenantPool)))
+	mux.Handle("PUT /provider/relays/{id}/link-capacity", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.SetLinkCapacity)))
+	mux.Handle("PUT /provider/tenants/{id}/relay-pool", requireProviderOrKey(http.HandlerFunc(relayAdminHandler.AssignTenantPool)))
 
 	// Tenant suspend / resume (Sprint 23 S1, D-45). Super-admin only (D-06),
 	// reason + typed slug (D-17 extended), audited with before/after. After
@@ -750,14 +761,14 @@ func main() {
 		Mailer:      inviteEmailer,
 		AppBaseURL:  envOr("APP_BASE_URL", "http://localhost:5173"),
 	}
-	mux.Handle("POST /provider/tenants/{id}/suspend", requireProvider(http.HandlerFunc(tenantLifecycle.Suspend)))
-	mux.Handle("POST /provider/tenants/{id}/resume", requireProvider(http.HandlerFunc(tenantLifecycle.Resume)))
+	mux.Handle("POST /provider/tenants/{id}/suspend", requireProviderOrKey(http.HandlerFunc(tenantLifecycle.Suspend)))
+	mux.Handle("POST /provider/tenants/{id}/resume", requireProviderOrKey(http.HandlerFunc(tenantLifecycle.Resume)))
 	// Tenant deletion (Sprint 23 S4, D-46): schedule (suspended tenants
 	// only, reason + typed slug), cancel, legal hold; super-admin only,
 	// audited with before/after.
-	mux.Handle("POST /provider/tenants/{id}/delete", requireProvider(http.HandlerFunc(tenantLifecycle.Delete)))
-	mux.Handle("POST /provider/tenants/{id}/delete/cancel", requireProvider(http.HandlerFunc(tenantLifecycle.CancelDelete)))
-	mux.Handle("PUT /provider/tenants/{id}/legal-hold", requireProvider(http.HandlerFunc(tenantLifecycle.LegalHold)))
+	mux.Handle("POST /provider/tenants/{id}/delete", requireProviderOrKey(http.HandlerFunc(tenantLifecycle.Delete)))
+	mux.Handle("POST /provider/tenants/{id}/delete/cancel", requireProviderOrKey(http.HandlerFunc(tenantLifecycle.CancelDelete)))
+	mux.Handle("PUT /provider/tenants/{id}/legal-hold", requireProviderOrKey(http.HandlerFunc(tenantLifecycle.LegalHold)))
 	// The purge job (D-46, single controller D-02): export (tenant S3 sink,
 	// else TENANT_PURGE_EXPORT_DIR) → revoke → tenant_purge (D-13) →
 	// tombstone; idempotent and resumable.
@@ -784,10 +795,10 @@ func main() {
 	// Plans (Sprint 23 B1, D-43): super-admin only, audited. New workspaces
 	// get the current default plan from a database trigger (migration 062).
 	planHandler := &plans.Handler{Store: plans.NewStore(db.Pool), Authz: providerAuthz, ProviderStore: providerStore}
-	mux.Handle("POST /provider/plans", requireProvider(http.HandlerFunc(planHandler.Create)))
-	mux.Handle("PATCH /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Update)))
-	mux.Handle("DELETE /provider/plans/{id}", requireProvider(http.HandlerFunc(planHandler.Delete)))
-	mux.Handle("POST /provider/plans/{id}/default", requireProvider(http.HandlerFunc(planHandler.SetDefault)))
+	mux.Handle("POST /provider/plans", requireProviderOrKey(http.HandlerFunc(planHandler.Create)))
+	mux.Handle("PATCH /provider/plans/{id}", requireProviderOrKey(http.HandlerFunc(planHandler.Update)))
+	mux.Handle("DELETE /provider/plans/{id}", requireProviderOrKey(http.HandlerFunc(planHandler.Delete)))
+	mux.Handle("POST /provider/plans/{id}/default", requireProviderOrKey(http.HandlerFunc(planHandler.SetDefault)))
 	// Sprint 26 P1b (F34, D-64, D-69, D-70): billing settings, super-admin only.
 	billingSettings := &provider.BillingSettingsHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore}
 	// Sprint 26 P2/P3 (F34, D-66, D-68, D-70): the invoice generator (month
@@ -808,26 +819,26 @@ func main() {
 	}
 	invoiceGen := &billing.Generator{DB: db.Pool, SettleDelay: mustDuration("BILLING_SETTLE_DELAY", billing.DefaultSettleDelay), Now: billingClock}
 	invoiceAPI := &provider.InvoiceHandler{DB: db.Pool, Authz: providerAuthz, Store: providerStore, Generator: invoiceGen, ProviderName: billingProviderName, Now: billingClock}
-	mux.Handle("GET /provider/invoices", requireProvider(http.HandlerFunc(invoiceAPI.List)))
-	mux.Handle("GET /provider/invoices/{id}", requireProvider(http.HandlerFunc(invoiceAPI.Get)))
-	mux.Handle("POST /provider/invoices/regenerate", requireProvider(http.HandlerFunc(invoiceAPI.Regenerate)))
-	mux.Handle("POST /provider/invoices/{id}/issue", requireProvider(http.HandlerFunc(invoiceAPI.Issue)))
-	mux.Handle("POST /provider/invoices/{id}/mark-paid", requireProvider(http.HandlerFunc(invoiceAPI.MarkPaid)))
-	mux.Handle("POST /provider/invoices/{id}/void", requireProvider(http.HandlerFunc(invoiceAPI.Void)))
-	mux.Handle("POST /provider/invoices/{id}/resend", requireProvider(http.HandlerFunc(invoiceAPI.Resend)))
-	mux.Handle("GET /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Get)))
-	mux.Handle("PATCH /provider/billing/settings", requireProvider(http.HandlerFunc(billingSettings.Update)))
-	mux.Handle("PUT /provider/tenants/{id}/plan", requireProvider(http.HandlerFunc(planHandler.Assign)))
+	mux.Handle("GET /provider/invoices", requireProviderOrKey(http.HandlerFunc(invoiceAPI.List)))
+	mux.Handle("GET /provider/invoices/{id}", requireProviderOrKey(http.HandlerFunc(invoiceAPI.Get)))
+	mux.Handle("POST /provider/invoices/regenerate", requireProviderOrKey(http.HandlerFunc(invoiceAPI.Regenerate)))
+	mux.Handle("POST /provider/invoices/{id}/issue", requireProviderOrKey(http.HandlerFunc(invoiceAPI.Issue)))
+	mux.Handle("POST /provider/invoices/{id}/mark-paid", requireProviderOrKey(http.HandlerFunc(invoiceAPI.MarkPaid)))
+	mux.Handle("POST /provider/invoices/{id}/void", requireProviderOrKey(http.HandlerFunc(invoiceAPI.Void)))
+	mux.Handle("POST /provider/invoices/{id}/resend", requireProviderOrKey(http.HandlerFunc(invoiceAPI.Resend)))
+	mux.Handle("GET /provider/billing/settings", requireProviderOrKey(http.HandlerFunc(billingSettings.Get)))
+	mux.Handle("PATCH /provider/billing/settings", requireProviderOrKey(http.HandlerFunc(billingSettings.Update)))
+	mux.Handle("PUT /provider/tenants/{id}/plan", requireProviderOrKey(http.HandlerFunc(planHandler.Assign)))
 	// Per-tenant quota overrides (Sprint 23 S3, D-47): super-admin only,
 	// reason required, audited with before/after.
 	quotaAdmin := &quotaadmin.Handler{Pool: db.Pool, Authz: providerAuthz, ProviderStore: providerStore}
-	mux.Handle("PUT /provider/tenants/{id}/quotas/{key}", requireProvider(http.HandlerFunc(quotaAdmin.Set)))
+	mux.Handle("PUT /provider/tenants/{id}/quotas/{key}", requireProviderOrKey(http.HandlerFunc(quotaAdmin.Set)))
 
 	// Tenant creation (Sprint 23 S2, D-44): super-admin only, audited; the
 	// same workspace bootstrap as self-signup plus a first-admin invitation.
 	tenantCreateHandler := &tenantcreate.Handler{Creator: bootstrapSvc, Authz: providerAuthz, ProviderStore: providerStore, Sender: inviteEmailer}
-	mux.Handle("POST /provider/tenants", requireProvider(http.HandlerFunc(tenantCreateHandler.Create)))
-	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProvider(http.HandlerFunc(tenantCreateHandler.Reinvite)))
+	mux.Handle("POST /provider/tenants", requireProviderOrKey(http.HandlerFunc(tenantCreateHandler.Create)))
+	mux.Handle("POST /provider/tenants/{id}/first-admin-invitation", requireProviderOrKey(http.HandlerFunc(tenantCreateHandler.Reinvite)))
 
 	// Alerts (Sprint 24 A1, F26, D-50/D-53): alert reads (super-admin; relay-ops
 	// relay and pool alerts only) and rule management (super-admin, reason,
@@ -863,22 +874,22 @@ func main() {
 	alertNotifier := alerting.Notifier(alertDeliverer)
 	alertHandler := &alerting.Handler{Store: alertStore, Authz: providerAuthz, ProviderStore: providerStore, Notifier: alertNotifier}
 	alertChannelHandler := &alerting.ChannelHandler{Channels: alertChannels, Deliverer: alertDeliverer, Authz: providerAuthz, ProviderStore: providerStore}
-	mux.Handle("GET /provider/alert-channels", requireProvider(http.HandlerFunc(alertChannelHandler.List)))
-	mux.Handle("POST /provider/alert-channels", requireProvider(http.HandlerFunc(alertChannelHandler.Create)))
-	mux.Handle("PATCH /provider/alert-channels/{id}", requireProvider(http.HandlerFunc(alertChannelHandler.Update)))
-	mux.Handle("DELETE /provider/alert-channels/{id}", requireProvider(http.HandlerFunc(alertChannelHandler.Delete)))
-	mux.Handle("POST /provider/alert-channels/{id}/test", requireProvider(http.HandlerFunc(alertChannelHandler.Test)))
-	mux.Handle("POST /provider/alert-channels/{id}/rotate-secret", requireProvider(http.HandlerFunc(alertChannelHandler.Rotate)))
-	mux.Handle("GET /provider/alert-events/{id}/deliveries", requireProvider(http.HandlerFunc(alertChannelHandler.Deliveries)))
-	mux.Handle("GET /provider/alerts", requireProvider(http.HandlerFunc(alertHandler.ListActive)))
-	mux.Handle("GET /provider/alert-events", requireProvider(http.HandlerFunc(alertHandler.ListEvents)))
+	mux.Handle("GET /provider/alert-channels", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.List)))
+	mux.Handle("POST /provider/alert-channels", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Create)))
+	mux.Handle("PATCH /provider/alert-channels/{id}", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Update)))
+	mux.Handle("DELETE /provider/alert-channels/{id}", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Delete)))
+	mux.Handle("POST /provider/alert-channels/{id}/test", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Test)))
+	mux.Handle("POST /provider/alert-channels/{id}/rotate-secret", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Rotate)))
+	mux.Handle("GET /provider/alert-events/{id}/deliveries", requireProviderOrKey(http.HandlerFunc(alertChannelHandler.Deliveries)))
+	mux.Handle("GET /provider/alerts", requireProviderOrKey(http.HandlerFunc(alertHandler.ListActive)))
+	mux.Handle("GET /provider/alert-events", requireProviderOrKey(http.HandlerFunc(alertHandler.ListEvents)))
 	// T1 (F27): read-only incident timeline (alert events + provider audit).
 	timelineHandler := &alerting.TimelineHandler{DB: db.Pool, Authz: providerAuthz}
-	mux.Handle("GET /provider/timeline", requireProvider(http.HandlerFunc(timelineHandler.List)))
-	mux.Handle("GET /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.ListRules)))
-	mux.Handle("POST /provider/alert-rules", requireProvider(http.HandlerFunc(alertHandler.CreateRule)))
-	mux.Handle("PATCH /provider/alert-rules/{id}", requireProvider(http.HandlerFunc(alertHandler.UpdateRule)))
-	mux.Handle("DELETE /provider/alert-rules/{id}", requireProvider(http.HandlerFunc(alertHandler.DeleteRule)))
+	mux.Handle("GET /provider/timeline", requireProviderOrKey(http.HandlerFunc(timelineHandler.List)))
+	mux.Handle("GET /provider/alert-rules", requireProviderOrKey(http.HandlerFunc(alertHandler.ListRules)))
+	mux.Handle("POST /provider/alert-rules", requireProviderOrKey(http.HandlerFunc(alertHandler.CreateRule)))
+	mux.Handle("PATCH /provider/alert-rules/{id}", requireProviderOrKey(http.HandlerFunc(alertHandler.UpdateRule)))
+	mux.Handle("DELETE /provider/alert-rules/{id}", requireProviderOrKey(http.HandlerFunc(alertHandler.DeleteRule)))
 
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
@@ -915,24 +926,24 @@ func main() {
 	// process-local controller_grpc certificate. Tenant detail reads are
 	// audited fail-closed inside the handler.
 	providerReads := provider.NewReadHandlers(db.Pool, providerAuthz, providerStore, relaySvc, controllerRotator)
-	mux.Handle("GET /provider/relays", requireProvider(http.HandlerFunc(providerReads.ListRelays)))
-	mux.Handle("GET /provider/relays/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelay)))
-	mux.Handle("GET /provider/relay-pools", requireProvider(http.HandlerFunc(providerReads.ListRelayPools)))
-	mux.Handle("GET /provider/relay-pools/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelayPool)))
-	mux.Handle("GET /provider/plans", requireProvider(http.HandlerFunc(providerReads.ListPlans)))
+	mux.Handle("GET /provider/relays", requireProviderOrKey(http.HandlerFunc(providerReads.ListRelays)))
+	mux.Handle("GET /provider/relays/{id}", requireProviderOrKey(http.HandlerFunc(providerReads.GetRelay)))
+	mux.Handle("GET /provider/relay-pools", requireProviderOrKey(http.HandlerFunc(providerReads.ListRelayPools)))
+	mux.Handle("GET /provider/relay-pools/{id}", requireProviderOrKey(http.HandlerFunc(providerReads.GetRelayPool)))
+	mux.Handle("GET /provider/plans", requireProviderOrKey(http.HandlerFunc(providerReads.ListPlans)))
 	// Sprint 24 M1 (F23): stored metric series (relay/fleet relay: relay-ops too; tenant: super-admin).
-	mux.Handle("GET /provider/metrics/{series}", requireProvider(http.HandlerFunc(providerReads.GetMetricSeries)))
+	mux.Handle("GET /provider/metrics/{series}", requireProviderOrKey(http.HandlerFunc(providerReads.GetMetricSeries)))
 	// Usage (Sprint 25 U2, F33, D-60): super-admin only, audited.
-	mux.Handle("GET /provider/usage", requireProvider(http.HandlerFunc(providerReads.GetTenantUsage)))
-	mux.Handle("GET /provider/usage/tenants", requireProvider(http.HandlerFunc(providerReads.ListFleetUsage)))
-	mux.Handle("GET /provider/plans/{id}", requireProvider(http.HandlerFunc(providerReads.GetPlan)))
-	mux.Handle("GET /provider/plans/{id}/revisions", requireProvider(http.HandlerFunc(providerReads.ListPlanRevisions)))
-	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
-	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
-	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
-	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
-	mux.Handle("GET /provider/pki", requireProvider(http.HandlerFunc(providerReads.PKI)))
-	mux.Handle("GET /provider/health", requireProvider(http.HandlerFunc(providerReads.Health)))
+	mux.Handle("GET /provider/usage", requireProviderOrKey(http.HandlerFunc(providerReads.GetTenantUsage)))
+	mux.Handle("GET /provider/usage/tenants", requireProviderOrKey(http.HandlerFunc(providerReads.ListFleetUsage)))
+	mux.Handle("GET /provider/plans/{id}", requireProviderOrKey(http.HandlerFunc(providerReads.GetPlan)))
+	mux.Handle("GET /provider/plans/{id}/revisions", requireProviderOrKey(http.HandlerFunc(providerReads.ListPlanRevisions)))
+	mux.Handle("GET /provider/tenants", requireProviderOrKey(http.HandlerFunc(providerReads.ListTenants)))
+	mux.Handle("GET /provider/tenants/{id}", requireProviderOrKey(http.HandlerFunc(providerReads.GetTenant)))
+	mux.Handle("GET /provider/audit", requireProviderOrKey(http.HandlerFunc(providerReads.QueryAudit)))
+	mux.Handle("GET /provider/certificates", requireProviderOrKey(http.HandlerFunc(providerReads.Certificates)))
+	mux.Handle("GET /provider/pki", requireProviderOrKey(http.HandlerFunc(providerReads.PKI)))
+	mux.Handle("GET /provider/health", requireProviderOrKey(http.HandlerFunc(providerReads.Health)))
 
 	// Health & Readiness (PENDING-10 Phase 1).
 	// Bounded check timeouts and 1s result caching prevent probe storms from saturating downstream services.

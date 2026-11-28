@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 waits for O1
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 built (draft PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 next
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role
@@ -111,6 +111,103 @@ Order: **X4 → K1 (after O1 merges) → K2 → O2**. K1's expiry-alert part wai
   - outside CIDR → 401;
   - `/provider/auth/*`, `/provider/users` and `/provider/api-keys` → 403 with a key.
 - **Expiry alert:** a key expiring in under 14 days → one `api_key.expiring` alert (webhook and email, no secret); revoke → resolved.
+
+---
+
+### Implementation record (part 1: keys; 2026-11-27)
+
+Branch `feat/sprint27-k1-api-keys`, **stacked on G1** (PR #263, itself on O1 #262; K1 uses O1's matrix and `IsWriteAction`, and its expiry alert needs G1's `077_`). It was rebased onto G1 on 2026-11-27 before its first push (conflicts in `authz.go`, `authz_matrix_test.go`, `main.go` and the docs: both sides added actions, routes and rows; kept both). The **expiry alert (`api_key.expiring`) is not built yet**: it needs G1's `077_provider_alert_kinds` (Barath). Everything else in "Build" is done.
+
+- **`076_provider_api_keys.sql`:** the table as specified, plus:
+  - a CHECK on the prefix shape and hash length;
+  - a CHECK tying `revoked_at`, `revoked_by` and `revoke_reason` together;
+  - a unique index on `lower(name)` among unrevoked keys;
+  - a trigger that makes a key immutable except for last-use and revocation, and makes revocation terminal (SQLSTATE 42501).
+- **Key format and auth (`internal/provider/apikeys.go`):**
+  - `zpk_<32 hex>_<43 base64url>`; the prefix is the first 12 characters; the stored SHA-256 is of the whole key, compared with `subtle.ConstantTimeCompare`.
+  - `APIKeyAuthenticator.Authenticate` checks, in order: shape, lookup by id, hash, not revoked, not expired, the role is a key role, source IP inside `allowed_cidrs` (when set), then the rate limit.
+  - Every key failure is `ErrInvalidAPIKey` → **401 `{"error":"invalid_api_key"}`**, the same body for every cause.
+  - The rate limit is a process-local token bucket (10/s, burst 30, D-02); over it, or on a limiter error, the request is refused (429 `rate_limited`, fail closed).
+  - `last_used_at` and `last_used_ip` are written at most once a minute per key.
+- **Middleware (`internal/middleware/provider.go`):**
+  - A bearer token starting with `zpk_` is **never** passed to the JWT verifier. With the new `AcceptAPIKeys(auth)` option it is authenticated as a key; without it (and on password-change or MFA-stage routes) the response is **403 `api_key_not_allowed`**.
+  - `RefuseProviderAPIKey` wraps the login route the same way.
+  - The actor is `Actor{Kind: api_key, Role, KeyID, KeyName, KeyPrefix, Email: "api_key:<name> (<prefix>)"}`, with no `amr` and no session.
+- **`decide()`:** an `api_key` actor is refused every write action (`IsWriteAction`, unknown = write) and is never treated as super-admin; then the role matrix applies as for people.
+- **New actions:** `api_key.read`, `api_key.create`, `api_key.revoke` are super-admin only (no role row), so auditor is excluded from `api_key.read` in the O1 boundary test.
+- **Routes (`cmd/server/main.go`):**
+  - `requireProviderOrKey` wraps every provider route after the operator block (63 routes).
+  - Session only: `/provider/auth/*` (login via `RefuseProviderAPIKey`), `/provider/me`, `/provider/users*` and the three key routes.
+  - The wiring test `cmd/server/tenant_suspension_wiring_test.go` now expects `requireProviderOrKey(` on suspend and resume.
+- **Key routes (`apikey_handlers.go`):**
+  - `GET /provider/api-keys`: no secret, no hash; status `active`, `expired` or `revoked`.
+  - `POST /provider/api-keys` (`{name, role, expires_at, allowed_cidrs?, reason}`): **201 `{api_key, key}` with `no-store`**. Refusals: 400 `invalid_role` (incl. super-admin), `invalid_expires_at` (past, or ≥ 365 days less a minute), `invalid_cidr`, `invalid_name`, `reason_required`; 409 `name_taken`.
+  - `POST /provider/api-keys/{id}/revoke` (`{reason, confirm_name}`): 400 `confirmation_mismatch`; 409 `already_revoked`.
+  - Audited `api_key.create` (reason; after: name, role, prefix, expiry, CIDRs) and `api_key.revoke` (reason, name, prefix; before/after status). Never the key or its hash.
+- **Audit of key reads:**
+  - `tenant.read`, the usage reads and the invoice reads go through `Actor.AuditUserID()` (nil for a key) and `Actor.AuditDetails()` (adds `key_id`), so a key's read is recorded as `api_key:<name> (<prefix>)`.
+  - `InsertAuditTx` stores an empty user id as NULL.
+
+**Tests:**
+- Unit (`apikeys_test.go`):
+  - every action × every key role: writes refused, reads follow the matrix, a super-admin key gets nothing;
+  - key format and parsing (rejects upper-case hex, wrong lengths and wrong scheme);
+  - create validation; `ipAllowed`; the token bucket (an unconfigured limiter errors);
+  - `AuditUserID` / `AuditDetails`;
+  - static guards: a constant-time compare, and no `IssueSession`, `IssueMFAToken` or `IssuePasswordChangeToken` call in the key code or the middleware.
+- DB-backed e2e (`apikeys_e2e_test.go`, wired like `main.go`):
+  - **create, list, revoke:** the key once with `no-store`, the list shows the prefix only, every refusal listed above, the DB refuses a super-admin key and a 366-day key, revocation is terminal in the DB, a revoked name can be reused, and no key or hash appears in the audit;
+  - **auth:** each role's reads 200 and writes 403; session-only routes 403 for a key, incl. login, logout, password and TOTP;
+  - **audit:** the support key's `tenant.read` is recorded as the key (NULL user id, `key_id`), and `last_used_at` is set;
+  - **refusals:** wrong secret, unknown id and malformed keys all get the same 401 body; revoked → 401; expired → 401;
+  - **no session path:** a spy verifier confirms no key ever reached the JWT verifier;
+  - **CIDR and rate limit:** inside 200, outside 401; a burst of 3 then 429; a limiter error → 429.
+- **Mutation checks (11, each caught):**
+  - write refusal removed; `IssueSession` reachable from the middleware;
+  - expiry not checked; revocation not checked; CIDR skipped;
+  - the key in the create audit; a non-constant-time compare;
+  - the rate limit ignored; a limiter error allowed;
+  - keys accepted on session-only routes; super-admin allowed as a key role.
+
+**Gate (2026-11-27):** `go build ./... && go vet ./...` clean; full `go test -count=1 ./...` with every DB variable set: 50 packages ok, 0 failures, only the 2 known hard-coded skips; the three key e2e tests ran (none skipped). (A first run failed in many DB packages at 0.00 s because the local Postgres was recreated mid-run, and on the wiring test that expected `requireProvider(` on suspend/resume, now `requireProviderOrKey(`; the re-run is clean.)
+
+**Live check (2026-11-27): PASS, 52 of 52 checks.**
+- **Setup:** local controller from the branch (sha256 `55b0010a…`) on a fresh DB through `076_`; driver `~/.cache/zecurity-s27/k1live.py`.
+- **Create:** one key per role (shown once); a super-admin key → 400 `invalid_role`; a 366-day key → 400; the list shows prefixes only.
+- **Reads and writes:**
+  - relay-ops key: relays 200, drain 403, tenants 403;
+  - auditor key: audit 200, invoices 200, relay create 403;
+  - billing key: invoices 200, regenerate 403, settings change 403;
+  - support key: tenant detail 200 (audited as `api_key:k1-support (zpk_…)`), invoices 403, suspend 403.
+- **Session-only routes:** `/provider/me`, `/provider/users`, `/provider/api-keys`, login, logout and TOTP verify → 403 for every key.
+- **Refusals:** wrong secret → 401; revoked → 401 on the next call; outside its CIDR → 401; a 70-second key 200 before expiry and 401 after; a burst of 45 calls → 429 after the first 30.
+- **No leaks:** the audit has `api_key.create` rows and no key; the controller log has no key.
+- The first run's driver mis-compared tuple results ("FAIL" where the printed value equals the wanted one, 12 lines); the helper was fixed and every value checked: 52 as expected, 0 real failures.
+- Not run yet: the expiry alert (after `077_`), the console (K2).
+
+### Implementation record (part 2: expiry alert; 2026-11-27)
+
+Same branch, on top of G1's `077_` (which seeds the rule: warning, enabled, `{"days_before": 14}`, fire 0 s, renotify 0, id `…0012`).
+
+- **Signal** `alerting.Sources.apiKeyExpiring` replaces G1's "not evaluated" placeholder.
+  - One observation per key that is not revoked, not yet expired and expires within `days_before` days of the evaluator's clock (14 by default).
+  - Target `api_key` / key id / key name.
+  - Summary: `Provider API key <name> (<prefix>, role <role>) expires at <RFC3339>`. Never the key or its hash.
+- **Fires once per key** (renotify 0). **Resolves** when the key is revoked, expires, or leaves the window (a replaced key is revoked).
+- **Tests:**
+  - `internal/alerting/apikey_alert_db_test.go` (test clock): the seed is as agreed; keys 10 days and exactly 14 days out fire, 20 days out doesn't, a revoked key and an expired key never fire; the payload has key, prefix and role but no hash; no re-fire on later ticks.
+  - Resolves on revoke; the 20-day key fires once it enters the window; resolves on expiry; resolves when `days_before` is lowered.
+  - `TestNewProviderKinds` no longer expects "not evaluated".
+- **Mutation checks (5, each caught):** fires for a revoked key; fires for an expired key; window ignored; hash in the payload; signal not wired.
+- **Gate (2026-11-27, combined O1 + G1 + K1):** `go build`, `go vet`, full `go test -count=1 ./...` with every DB variable: 51 packages ok, 0 failures, the 2 known skips; `TestAPIKeyExpiringDB`, the three key e2e tests and the break-glass tests ran.
+- **Live check (2026-11-27): PASS.**
+  - **Setup:** controller from the branch (sha256 `b43fa0f0…`, eval 10 s) on ports 18080/19090, because another controller started from the Orca app held 8080/9090 on the same local DB. Fresh DB through `077_`; local webhook receiver; mail capture.
+  - **Channels:** a webhook channel, and an email channel to `ops@lab.test` only (so a delivery claimed by the other controller could not reach a real inbox).
+  - **Keys:** two auditor keys, expiring in 10 and 30 days.
+  - **Fired:** within one tick the webhook got one `api_key.expiring` (firing, warning, platform) for the 10-day key only, delivered 204, and one email reached `ops@lab.test`. Both name the key and prefix, never the key. No re-fire after 25 s more.
+  - **Resolved:** revoking the key delivered `resolved` by webhook and email. Both deliveries went through this controller (both emails are in the local capture).
+  - The controller log has no key.
+
 
 ---
 

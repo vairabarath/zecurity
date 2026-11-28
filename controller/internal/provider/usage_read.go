@@ -168,9 +168,9 @@ func (h *ReadHandlers) auditedUsageRead(w http.ResponseWriter, r *http.Request, 
 		fail(http.StatusInternalServerError, "server_error", "marshal", err)
 		return
 	}
-	userID := actor.UserID
-	entry.ProviderUserID = &userID
+	entry.ProviderUserID = actor.AuditUserID()
 	entry.ProviderEmail = actor.Email
+	entry.Details = actor.AuditDetails(entry.Details)
 	entry.IPAddress = clientIP(r)
 	if err := h.store.InsertAuditTx(ctx, tx, entry); err != nil {
 		fail(http.StatusInternalServerError, "server_error", "audit insert", err)
