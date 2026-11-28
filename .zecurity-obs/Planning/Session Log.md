@@ -4082,3 +4082,18 @@ serves on `127.0.0.1:9102`.
 - **Lab:** the acceptance controller, console, mail and webhook helpers and the relay on `suryavardhan` are still running; stop them and delete `~/s27relay` on that host when done.
 - **Still open from before:** the Sprint 24 acceptance run; Sprint 26 lab teardown (luffy `sudo`, .41).
 
+
+## 2026-11-28 — Sathiya (M1): F23 fixes merged and re-checked live
+
+**Done:**
+- **#273 merged** (`2dbf87a7`): Barath's F23 findings fixes (R1-1, R1-2, R1-3 B, rule 6, M1-1). `main` was merged into the branch first; the conflict in `controller/internal/relay/workspace_traffic.go` (Sprint 25 usage path vs the R1 tracker) was resolved by threading the `seen` map through main's helpers. Gates: Go build, vet, DB-backed tests, relay `cargo test`, CI 8/8.
+- **Merge review:** both sides kept; one follow-up found: usage got the tracker's monotonic `arrived` time on DB-write heartbeats.
+- **Fix** (branch `fix/f23-usage-received-at`): usage gets `receivedAt` (UTC) on every heartbeat; new test `TestHeartbeat_DBWriteFeedsTrackerAndUsageWithUTCTime` (fails without the fix).
+- **Live re-check** on `main` `2dbf87a7` + the fix (reset DB, relay on suryavardhan, connectors/clients on luffy and this PC): R1-1, R1-2, two tenants at once, M1 values, usage and M1-1 **pass**; R1-3 B leaves one stale minute after a relay stop. Record: `Pending-Live-Tests.md` results log 2026-11-28.
+- **PR B decisions:** M2-1 "No data" in chart gaps; M2-2 "Not reported" on the tenant page while the relay is stopped or has no current report; M2-3 the historical capacity line follows the setting in force at each time; R1-3 C a view older than one reporting window is "Not reported".
+- **Sprint 24 M1 ticked** in `Sprint24/path.md`.
+
+**Open:**
+- **PR B** (console + R1-3 C) from the four decisions; Barath to review the decisions.
+- **Sprint 24 acceptance run** (ticks F23, F26, F27).
+- **Lab teardown:** controller and file servers on this PC, relay `~/s24relay` on suryavardhan, connector and files in `~/s24` on luffy; luffy's system `zecurity-connector` is stopped (not disabled); both clients run the s24 build (originals in `/usr/local/bin/zecurity-client.pre-s24`). Restoring needs `sudo`.

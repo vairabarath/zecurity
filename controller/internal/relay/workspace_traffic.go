@@ -262,7 +262,12 @@ func (s *Service) WithWorkspaceTraffic(tracker *WorkspaceTrafficTracker, lookup 
 // (a reader sees it as not reported) instead of being replaced by a guess.
 // It runs on the heartbeats that are written to the DB (the B2 cadence), so
 // R1's rates keep their window.
-func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at time.Time, req *relaypb.HeartbeatRequest) {
+//
+// arrived keeps Go's monotonic reading for the R1 tracker's window (F23 fix);
+// receivedAt is the same instant in UTC, which usage gets on every heartbeat
+// (throttled ones too, recordWorkspaceUsage), so the collector always sees
+// one kind of timestamp.
+func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, arrived, receivedAt time.Time, req *relaypb.HeartbeatRequest) {
 	if s.workspaceTraffic == nil || s.workspaceLookup == nil {
 		return
 	}
@@ -270,8 +275,8 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 	if !ok {
 		return
 	}
-	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples, seen)
-	s.recordUsage(ctx, relayID, at, req, samples)
+	s.workspaceTraffic.Record(relayID, arrived, req.GetUptimeSeconds(), samples, seen)
+	s.recordUsage(ctx, relayID, receivedAt, req, samples)
 }
 
 // recordWorkspaceUsage passes a throttled heartbeat's counters to the usage
