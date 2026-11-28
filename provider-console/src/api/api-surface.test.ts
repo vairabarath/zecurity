@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { useSessionStore } from '@/auth/session'
 import { mockFetch, superAdminMe } from '@/test/fetch'
 import * as alertsApi from './alerts'
+import * as apiKeysApi from './apiKeys'
+import * as breakGlassApi from './breakGlass'
 import * as authApi from './auth'
+import * as billingApi from './billing'
 import * as metricsApi from './metrics'
 import * as operatorsApi from './operators'
 import * as plansApi from './plans'
@@ -11,6 +14,7 @@ import * as quotasApi from './quotas'
 import * as readsApi from './reads'
 import * as relaysApi from './relays'
 import * as tenantsApi from './tenants'
+import * as usageApi from './usage'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
 // auth calls (incl. the Sprint 22 TOTP steps), the operator mutations
@@ -27,7 +31,13 @@ import * as tenantsApi from './tenants'
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose. Alerts (Sprint 24 A3, F26; D-53 amends
 // D-30) add rule update and channel create / update / delete / test / rotate secret, plus five alert reads. The
 // incident timeline (Sprint 24 T1, F27) adds one read and no write. Metrics (Sprint 24 M2, F23) add one read,
-// GET /provider/metrics/{series}, and no write.
+// GET /provider/metrics/{series}, and no write. Usage (Sprint 25 U3, F33) adds two reads, GET /provider/usage and
+// GET /provider/usage/tenants, and no write.
+// Billing (Sprint 26 P4, F34; D-70 amends D-30) adds the settings write (PATCH /provider/billing/settings) and the
+// invoice writes (issue, mark paid, void, regenerate, resend); plan cards reuse the plan create and update
+// writes. Reads: billing settings, invoices list and detail, and a card's revisions.
+// API keys (Sprint 27 K2, F35; D-76 amends D-30) add key create and revoke, plus the key list read.
+// The break-glass banner (Sprint 27 O2 with G1; D-75 amends D-30) adds the acknowledge write and the list read.
 
 const ALLOWED_WRITES = [
   'DELETE /provider/alert-channels/{id}',
@@ -36,18 +46,27 @@ const ALLOWED_WRITES = [
   'DELETE /provider/relays/{id}',
   'PATCH /provider/alert-channels/{id}',
   'PATCH /provider/alert-rules/{id}',
+  'PATCH /provider/billing/settings',
   'PATCH /provider/plans/{id}',
   'PATCH /provider/relay-pools/{id}',
   'PATCH /provider/users/{id}',
   'POST /provider/alert-channels',
   'POST /provider/alert-channels/{id}/rotate-secret',
   'POST /provider/alert-channels/{id}/test',
+  'POST /provider/api-keys',
+  'POST /provider/api-keys/{id}/revoke',
   'POST /provider/auth/login',
   'POST /provider/auth/logout',
   'POST /provider/auth/password',
   'POST /provider/auth/totp/enroll',
   'POST /provider/auth/totp/enroll/confirm',
   'POST /provider/auth/totp/verify',
+  'POST /provider/break-glass/{id}/ack',
+  'POST /provider/invoices/regenerate',
+  'POST /provider/invoices/{id}/issue',
+  'POST /provider/invoices/{id}/mark-paid',
+  'POST /provider/invoices/{id}/resend',
+  'POST /provider/invoices/{id}/void',
   'POST /provider/plans',
   'POST /provider/plans/{id}/default',
   'POST /provider/relay-pools',
@@ -80,14 +99,20 @@ const ALLOWED_READS = [
   'GET /provider/alert-events/{id}/deliveries',
   'GET /provider/alert-rules',
   'GET /provider/alerts',
+  'GET /provider/api-keys',
   'GET /provider/audit',
+  'GET /provider/billing/settings',
+  'GET /provider/break-glass',
   'GET /provider/certificates',
   'GET /provider/health',
+  'GET /provider/invoices',
+  'GET /provider/invoices/{id}',
   'GET /provider/me',
   'GET /provider/metrics/{series}',
   'GET /provider/pki',
   'GET /provider/plans',
   'GET /provider/plans/{id}',
+  'GET /provider/plans/{id}/revisions',
   'GET /provider/relay-pools',
   'GET /provider/relay-pools/{id}',
   'GET /provider/relays',
@@ -95,11 +120,16 @@ const ALLOWED_READS = [
   'GET /provider/tenants',
   'GET /provider/tenants/{id}',
   'GET /provider/timeline',
+  'GET /provider/usage',
+  'GET /provider/usage/tenants',
   'GET /provider/users',
 ]
 
 const API_MODULES: Record<string, Record<string, unknown>> = {
   alerts: alertsApi,
+  apiKeys: apiKeysApi,
+  breakGlass: breakGlassApi,
+  billing: billingApi,
   auth: authApi,
   metrics: metricsApi,
   operators: operatorsApi,
@@ -109,6 +139,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
   reads: readsApi,
   relays: relaysApi,
   tenants: tenantsApi,
+  usage: usageApi,
 }
 
 // Every function is called with ('a', 'b'): an id is always "a" (list
@@ -116,7 +147,7 @@ const API_MODULES: Record<string, Record<string, unknown>> = {
 const ID = 'a'
 const normalize = (path: string) =>
   path
-    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events))/${ID}(?=/|$)`), '$1/{id}')
+    .replace(new RegExp(`^(/provider/(?:users|relay-pools|relays|tenants|plans|alert-rules|alert-channels|alert-events|invoices|api-keys|break-glass))/${ID}(?=/|$)`), '$1/{id}')
     .replace(/^(\/provider\/tenants\/\{id\}\/quotas)\/[^/]+$/, '$1/{key}')
     .replace(new RegExp(`^/provider/metrics/${ID}$`), '/provider/metrics/{series}')
 
@@ -186,12 +217,29 @@ describe('API surface', () => {
       'GET /provider/alert-rules': { status: 200, body: { items: [] } },
       'GET /provider/alert-channels': { status: 200, body: { items: [] } },
       'GET /provider/timeline': page,
+      'GET /provider/usage': { status: 200, body: { buckets: [] } },
+      'GET /provider/usage/tenants': page,
+      'GET /provider/billing/settings': { status: 200, body: {} },
+      'PATCH /provider/billing/settings': { status: 204 },
+      [`GET /provider/plans/${ID}/revisions`]: { status: 200, body: { items: [] } },
+      'GET /provider/invoices': { status: 200, body: { items: [], totals: {}, currency: 'USD', next_cursor: null } },
+      [`GET /provider/invoices/${ID}`]: { status: 200, body: {} },
+      [`POST /provider/invoices/${ID}/issue`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/mark-paid`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/void`]: { status: 204 },
+      [`POST /provider/invoices/${ID}/resend`]: { status: 204 },
+      'POST /provider/invoices/regenerate': { status: 200, body: { regenerated: 0 } },
       [`PATCH /provider/alert-rules/${ID}`]: { status: 200, body: {} },
       'POST /provider/alert-channels': { status: 201, body: { channel: {}, secret: 'whsec_x' } },
       [`PATCH /provider/alert-channels/${ID}`]: { status: 200, body: {} },
       [`DELETE /provider/alert-channels/${ID}`]: { status: 204 },
       [`POST /provider/alert-channels/${ID}/test`]: { status: 200, body: { delivered: true, http_status: 204 } },
       [`POST /provider/alert-channels/${ID}/rotate-secret`]: { status: 200, body: { secret: 'whsec_y' } },
+      'GET /provider/api-keys': { status: 200, body: { items: [] } },
+      'POST /provider/api-keys': { status: 201, body: { api_key: {}, key: 'zpk_x' } },
+      [`POST /provider/api-keys/${ID}/revoke`]: { status: 200, body: { api_key: {} } },
+      'GET /provider/break-glass': { status: 200, body: { items: [] } },
+      [`POST /provider/break-glass/${ID}/ack`]: { status: 204 },
     })
 
     let exported = 0

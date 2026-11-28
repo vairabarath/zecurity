@@ -39,6 +39,7 @@ describe('source guards', () => {
 
   it('only the one-time secret dialogs touch the clipboard', () => {
     expect(filesMatching(/\bclipboard\b/).sort()).toEqual([
+      '/src/components/APIKeyDialogs.tsx', // KeyShownOnceDialog: a new API key, shown once (Sprint 27 K2, D-76)
       '/src/components/AlertDialogs.tsx', // SecretDialog: the webhook signing secret, shown once (A3)
       '/src/components/ProvisioningTokenDialog.tsx',
       '/src/components/TemporaryPasswordDialog.tsx',

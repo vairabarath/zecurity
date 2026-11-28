@@ -1,54 +1,74 @@
 import { useState } from 'react'
 import { Plus, RefreshCw } from 'lucide-react'
-import { Navigate } from 'react-router-dom'
-import { listPlans } from '@/api/reads'
-import { PLAN_LIMIT_KEYS, type PlanSummary } from '@/api/types'
+import { Link, Navigate } from 'react-router-dom'
+import { createPlanCard, getBillingSettings, listPlanCards, updatePlanCard } from '@/api/billing'
+import type { PlanCardSummary } from '@/api/types'
+import { can } from '@/auth/roles'
+import { useSessionStore } from '@/auth/session'
+import { ConfirmDangerDialog } from '@/components/ConfirmDangerDialog'
 import { PageHeader } from '@/components/PageHeader'
-import { CreatePlanDialog, DeletePlanDialog, EditPlanDialog, MakeDefaultPlanDialog } from '@/components/PlanDialogs'
+import { PlanCard } from '@/components/PlanCard'
+import { PlanCardDialog } from '@/components/PlanCardDialog'
+import { DeletePlanDialog, MakeDefaultPlanDialog } from '@/components/PlanDialogs'
+import { PlanHistoryDialog } from '@/components/PlanHistoryDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatLimit, PLAN_LIMIT_LABELS } from '@/lib/plan-format'
+import { planErrorMessage } from '@/lib/plan-format'
 import { useDetailQuery } from '@/lib/useDetailQuery'
 
-// Plans (Sprint 23 B1, D-43; super-admin only). A plan is a name and a
-// limit for each of the six quota keys (a number, or unlimited); no prices.
-// Every new workspace starts on the default plan. Limits are enforced by
-// quotas (S3); until then they are shown, not enforced.
+// Plans as cards (Sprint 23 B1 + Sprint 26 P4, D-43, D-63; super-admin only).
+// A card is a plan's limits plus an optional price in the billing currency.
+// Cards are created and edited at any time; every change is a new revision.
+// A month is billed at the revision in force on its 1st (D-63, changed
+// 2026-11-24): edits bill from the next month.
 
-const fetchPlans = () => listPlans()
+const fetchCards = () => listPlanCards()
+const fetchSettings = () => getBillingSettings()
 
-type Action = { kind: 'edit' | 'default' | 'delete'; plan: PlanSummary }
+type Action =
+  | { kind: 'edit' | 'duplicate' | 'history' | 'default' | 'delete' | 'remove-price'; plan: PlanCardSummary }
+  | { kind: 'create' }
 
 export function Plans() {
-  const { state, reload } = useDetailQuery('plans', fetchPlans)
-  const [creating, setCreating] = useState(false)
+  // Sprint 27 O2 (D-73): billing creates and edits cards; delete and default
+  // stay super-admin; auditor reads only. UX only: the server decides.
+  const role = useSessionStore((s) => s.me?.role)
+  const canCreate = can(role, 'plan.create')
+  const canEdit = can(role, 'plan.update')
+  const canDelete = can(role, 'plan.delete')
+  const canDefault = can(role, 'plan.set_default')
+  const cards = useDetailQuery('plan-cards', fetchCards)
+  const settings = useDetailQuery('billing-settings', fetchSettings)
   const [action, setAction] = useState<Action | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
+  const reload = () => {
+    cards.reload()
+    settings.reload()
+  }
   const done = (text: string) => {
     setAction(null)
     setNotice(text)
-    reload()
+    cards.reload()
   }
 
+  if (cards.state.status === 'session_ended') return null
+  if (cards.state.status === 'forbidden') return <Navigate to="/forbidden" replace />
+  // A card's price is always in the settings currency (D-64); without the
+  // settings a new card can't be priced, so creating waits for them.
+  const currency = settings.state.status === 'ready' ? settings.state.data.currency : null
+
   let body
-  switch (state.status) {
+  switch (cards.state.status) {
     case 'loading':
       body = (
-        <div aria-busy="true" aria-label="Loading plans" className="flex flex-col gap-2">
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
+        <div aria-busy="true" aria-label="Loading plans" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <Skeleton className="h-72 w-full" />
+          <Skeleton className="h-72 w-full" />
         </div>
       )
       break
-    case 'session_ended':
-      return null
-    case 'forbidden':
-      return <Navigate to="/forbidden" replace />
     case 'not_found':
     case 'error':
       body = (
@@ -62,16 +82,37 @@ export function Plans() {
         </Alert>
       )
       break
-    case 'ready':
-      body = <PlanTable plans={state.data.items} onAction={setAction} />
+    case 'ready': {
+      const items = cards.state.data.items
+      body =
+        items.length === 0 ? (
+          <p className="py-6 text-sm text-muted-foreground">No plans.</p>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" role="list" aria-label="Plan cards">
+            {items.map((p) => (
+              <div role="listitem" key={p.id} className="flex">
+                <PlanCard
+                  plan={p}
+                  onEdit={currency && canEdit ? () => setAction({ kind: 'edit', plan: p }) : undefined}
+                  onDuplicate={currency && canCreate ? () => setAction({ kind: 'duplicate', plan: p }) : undefined}
+                  onHistory={() => setAction({ kind: 'history', plan: p })}
+                  onRemovePrice={canEdit ? () => setAction({ kind: 'remove-price', plan: p }) : undefined}
+                  onMakeDefault={canDefault ? () => setAction({ kind: 'default', plan: p }) : undefined}
+                  onDelete={canDelete ? () => setAction({ kind: 'delete', plan: p }) : undefined}
+                />
+              </div>
+            ))}
+          </div>
+        )
       break
+    }
   }
 
   return (
     <div className="flex flex-col gap-6">
       <PageHeader
         title="Plans"
-        description="Each tenant is on one plan. A plan sets the most users, resources, remote networks, connectors, shields and client devices a tenant may have. New workspaces start on the default plan."
+        description="Each tenant is on one plan card: its limits and, when priced, what the tenant pays each month. Edits bill from the next month; this month is billed at the card as it was on the 1st."
         actions={
           <>
             <Button
@@ -85,105 +126,125 @@ export function Plans() {
               <RefreshCw aria-hidden />
               Refresh
             </Button>
-            <Button onClick={() => setCreating(true)}>
-              <Plus aria-hidden />
-              Create plan
-            </Button>
+            {canCreate && (
+              <Button onClick={() => setAction({ kind: 'create' })} disabled={!currency}>
+                <Plus aria-hidden />
+                New card
+              </Button>
+            )}
           </>
         }
       />
+      {settings.state.status !== 'ready' && settings.state.status !== 'loading' && (
+        <Alert variant="destructive">
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>Couldn’t load the billing settings, so cards can’t be created or edited.</span>
+            <Button variant="outline" size="sm" onClick={settings.reload}>
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      {currency && (
+        <p className="text-[13px] text-muted-foreground">
+          Prices are in {currency}.{' '}
+          {can(role, 'billing.settings.write') && (
+            <Link to="/billing/settings" className="text-primary hover:underline">
+              Change the billing currency
+            </Link>
+          )}
+        </p>
+      )}
       {notice && (
         <Alert role="status">
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}
       {body}
-      {creating && (
-        <CreatePlanDialog
-          onCancel={() => setCreating(false)}
-          onCreated={(p) => {
-            setCreating(false)
-            setNotice(`Plan ${p.name} created. Assign it to tenants from their tenant page.`)
-            reload()
-          }}
-        />
-      )}
-      {action?.kind === 'edit' && <EditPlanDialog plan={action.plan} onCancel={() => setAction(null)} onDone={done} />}
-      {action?.kind === 'default' && <MakeDefaultPlanDialog plan={action.plan} onCancel={() => setAction(null)} onDone={done} />}
-      {action?.kind === 'delete' && <DeletePlanDialog plan={action.plan} onCancel={() => setAction(null)} onDone={done} />}
+      {action && <ActionDialog action={action} currency={currency} onCancel={() => setAction(null)} onDone={done} />}
     </div>
   )
 }
 
-function PlanTable({ plans, onAction }: { plans: PlanSummary[]; onAction: (a: Action) => void }) {
-  if (plans.length === 0) return <p className="py-6 text-sm text-muted-foreground">No plans.</p>
+function ActionDialog({
+  action,
+  currency,
+  onCancel,
+  onDone,
+}: {
+  action: Action
+  currency: string | null
+  onCancel: () => void
+  onDone: (text: string) => void
+}) {
+  switch (action.kind) {
+    case 'create':
+      return currency ? (
+        <PlanCardDialog mode="create" currency={currency} onCreate={async (c, r) => void (await createPlanCard(c, r))} onCancel={onCancel} onDone={onDone} />
+      ) : null
+    case 'duplicate':
+      return currency ? (
+        <PlanCardDialog
+          mode="duplicate"
+          plan={action.plan}
+          currency={currency}
+          onCreate={async (c, r) => void (await createPlanCard(c, r))}
+          onCancel={onCancel}
+          onDone={onDone}
+        />
+      ) : null
+    case 'edit':
+      return currency ? (
+        <PlanCardDialog
+          mode="edit"
+          plan={action.plan}
+          currency={currency}
+          onUpdate={(change, r) => updatePlanCard(action.plan.id, change, r)}
+          onCancel={onCancel}
+          onDone={onDone}
+        />
+      ) : null
+    case 'history':
+      return <PlanHistoryDialog plan={action.plan} onClose={onCancel} />
+    case 'default':
+      return <MakeDefaultPlanDialog plan={action.plan} onCancel={onCancel} onDone={onDone} />
+    case 'delete':
+      return <DeletePlanDialog plan={action.plan} onCancel={onCancel} onDone={onDone} />
+    case 'remove-price':
+      return <RemovePriceDialog plan={action.plan} onCancel={onCancel} onDone={onDone} />
+  }
+}
+
+function RemovePriceDialog({ plan, onCancel, onDone }: { plan: PlanCardSummary; onCancel: () => void; onDone: (text: string) => void }) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   return (
-    <Card>
-      <Table aria-label="Plans">
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead>Plan</TableHead>
-            {PLAN_LIMIT_KEYS.map((k) => (
-              <TableHead key={k} className="text-right">
-                {PLAN_LIMIT_LABELS[k]}
-              </TableHead>
-            ))}
-            <TableHead className="text-right">Tenants</TableHead>
-            <TableHead className="text-right">
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {plans.map((p) => (
-            <TableRow key={p.id} aria-label={p.name}>
-              <TableCell>
-                <span className="inline-flex flex-col gap-0.5">
-                  <span className="inline-flex flex-wrap items-center gap-2 font-medium">
-                    {p.name}
-                    {p.is_default && (
-                      <Badge variant="secondary" title="New workspaces start on this plan">
-                        Default
-                      </Badge>
-                    )}
-                  </span>
-                  {p.description && <span className="text-[13px] text-muted-foreground">{p.description}</span>}
-                </span>
-              </TableCell>
-              {PLAN_LIMIT_KEYS.map((k) => (
-                <TableCell key={k} className="text-right font-mono text-[13px] tabular-nums" data-limit={k}>
-                  {formatLimit(p.limits[k])}
-                </TableCell>
-              ))}
-              <TableCell className="text-right font-mono text-[13px] tabular-nums">{p.tenants}</TableCell>
-              <TableCell className="text-right">
-                <span className="inline-flex flex-wrap justify-end gap-2">
-                  <Button variant="outline" size="sm" onClick={() => onAction({ kind: 'edit', plan: p })} aria-label={`Edit ${p.name}`}>
-                    Edit
-                  </Button>
-                  {!p.is_default && (
-                    <Button variant="outline" size="sm" onClick={() => onAction({ kind: 'default', plan: p })} aria-label={`Make ${p.name} the default`}>
-                      Make default
-                    </Button>
-                  )}
-                  {!p.is_default && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onAction({ kind: 'delete', plan: p })}
-                      aria-label={`Delete ${p.name}`}
-                      disabled={p.tenants > 0}
-                      title={p.tenants > 0 ? 'Move its tenants to another plan first' : undefined}
-                    >
-                      Delete
-                    </Button>
-                  )}
-                </span>
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </Card>
+    <ConfirmDangerDialog
+      title={`Remove the price of ${plan.name}?`}
+      description={
+        plan.tenants > 0
+          ? `${plan.tenants} tenant${plan.tenants === 1 ? '' : 's'} use this card. From next month they get no invoice; this month is billed at the card as it was on the 1st.`
+          : 'The card becomes not billable. Its limits stay.'
+      }
+      confirmText={plan.name}
+      requireConfirmText={false}
+      confirmLabel="Remove price"
+      pendingLabel="Removing…"
+      pending={pending}
+      error={error ? { message: error } : undefined}
+      onCancel={onCancel}
+      onConfirm={async (reason) => {
+        setPending(true)
+        setError(null)
+        try {
+          await updatePlanCard(plan.id, { price: null }, reason)
+          onDone(`${plan.name} is no longer billable from next month.`)
+        } catch (err) {
+          setError(planErrorMessage(err))
+        } finally {
+          setPending(false)
+        }
+      }}
+    />
   )
 }

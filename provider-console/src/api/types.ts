@@ -475,6 +475,8 @@ export interface TenantSummary {
    * Status only: the tenant's exported logs are never shown to the provider.
    */
   deletion: TenantDeletion | null
+  /** The tenant's current plan, id and name (Sprint 27 O2, D-73); null if none. */
+  current_plan?: { id: string; name: string } | null
 }
 
 export type PurgeStep = 'pending' | 'exported' | 'revoked' | 'destroyed' | 'done'
@@ -539,6 +541,12 @@ export interface TenantDetail extends TenantSummary {
   relay_pool: TenantRelayPool
   /** The tenant's plan (Sprint 23 B1, D-43). */
   plan: TenantPlan
+  /**
+   * The plan this month is billed at (Sprint 26 P1b, D-65: the month-start
+   * plan, from `PlanForMonth`). Absent from controllers before P1b; the
+   * console then names the current plan.
+   */
+  billing_plan?: { id: string; name: string }
   /** Limit and usage per quota key (Sprint 23 S3, D-47), in display order. */
   quotas: TenantQuota[]
   /**
@@ -734,5 +742,182 @@ export interface HealthResult {
   status: HealthStatus
   checked_at: string
   components: HealthComponent[]
+}
+
+
+// ---- Sprint 26 billing (F34, D-62 … D-70) ----
+// Shapes from the Sprint 26 phase files (P1b plan cards and billing
+// settings, P3 invoices). src/api/billing.ts calls them; this branch merges
+// only after P1b and P3, whose endpoints answer them.
+
+/** The D-57 meters a plan card can price, in display order. */
+export const BILLING_METERS = [
+  'relay_bytes_to_clients',
+  'relay_bytes_to_connectors',
+  'session_minutes',
+  'connector_minutes',
+  'shield_minutes',
+  'active_users',
+] as const
+export type BillingMeter = (typeof BILLING_METERS)[number]
+
+/** One priced meter: usage above `included` costs `unit_price_minor` per `unit`. */
+export interface MeterPrice {
+  included: number
+  unit: number
+  unit_price_minor: number
+}
+
+/** A plan card's price (D-63). Money is whole minor units of `currency` (D-64). */
+export interface PlanPrice {
+  currency: string
+  base_fee_minor: number
+  meters: Partial<Record<BillingMeter, MeterPrice>>
+}
+
+/** Billing settings (D-64, D-67, D-68, D-69); one row for the provider. */
+export interface BillingSettings {
+  country: string
+  currency: string
+  /** 0 = no tax ("Tax not included"). */
+  tax_rate_bp: number
+  tax_label: string
+  invoice_retention_years: number
+  email_tenants: boolean
+}
+
+export type InvoiceStatus = 'draft' | 'issued' | 'paid' | 'void'
+
+export interface InvoiceLine {
+  position: number
+  kind: 'base' | 'meter'
+  meter: BillingMeter | null
+  quantity: number | null
+  included: number | null
+  unit: number | null
+  billable_units: number | null
+  unit_price_minor: number | null
+  amount_minor: number
+}
+
+export interface InvoiceEmailDelivery {
+  kind: 'issued' | 'voided' | 'resend'
+  seq: number
+  status: 'pending' | 'sending' | 'sent' | 'failed' | 'not_delivered'
+  recipients_count: number
+  attempts: number
+  sent_at: string | null
+  last_error: string | null
+}
+
+/** One invoice (D-66): a snapshot; an issued invoice never changes. */
+export interface Invoice {
+  id: string
+  number: string | null
+  tenant_id: string
+  tenant_name: string
+  tenant_slug: string
+  /** The live workspace no longer exists (S4 purge); named from its snapshot. */
+  purged: boolean
+  /** First day of the UTC month, YYYY-MM-DD. */
+  month: string
+  status: InvoiceStatus
+  currency: string
+  plan_name: string
+  plan_revision: number
+  subtotal_minor: number
+  tax_rate_bp: number
+  tax_label: string
+  tax_minor: number
+  total_minor: number
+  incomplete_hours: number
+  generated_at: string
+  issued_at: string | null
+  paid_at: string | null
+  paid_reference: string | null
+  voided_at: string | null
+  void_reason: string | null
+  lines?: InvoiceLine[]
+  emails?: InvoiceEmailDelivery[]
+}
+
+/** A plan card (D-63): the plan plus its price (null = not billable) and revision. */
+export interface PlanCardSummary extends PlanSummary {
+  price: PlanPrice | null
+  revision: number
+}
+
+/** A new plan card (POST /provider/plans with a price, D-63). */
+export interface NewPlanCard {
+  name: string
+  description: string
+  limits: PlanLimits
+  price: PlanPrice | null
+}
+
+/** Only the changed fields; `price: null` removes the price, a missing `price` leaves it. */
+export interface PlanCardChange {
+  name?: string
+  description?: string
+  limits?: PlanLimits
+  price?: PlanPrice | null
+}
+
+/** One entry of a card's append-only history (GET /provider/plans/{id}/revisions). */
+export interface PlanRevision {
+  revision: number
+  changed_at: string
+  /** The operator's email, or "system" for a currency switch. */
+  changed_by: string
+  reason: string
+  /** The whole card after this change. */
+  card: { name: string; description: string; limits: PlanLimits; price: PlanPrice | null }
+}
+
+/** GET /provider/billing/settings: the settings and the countries the controller knows (P1b). */
+export interface BillingSettingsResponse extends BillingSettings {
+  countries?: { code: string; name: string; currency: string }[]
+}
+
+/** The last email delivery of an invoice, as the list shows it (P3). */
+export type InvoiceEmailStatus = InvoiceEmailDelivery['status'] | null
+
+/** One row of GET /provider/invoices. */
+export interface InvoiceListItem extends Invoice {
+  last_email_status: InvoiceEmailStatus
+}
+
+export interface InvoiceStatusTotal {
+  count: number
+  subtotal_minor: number
+  tax_minor: number
+  total_minor: number
+}
+
+/** GET /provider/invoices: a keyset page plus the month's totals per status. */
+export interface InvoicePage {
+  items: InvoiceListItem[]
+  totals: Partial<Record<InvoiceStatus, InvoiceStatusTotal>>
+  /** The settings currency the totals are in. */
+  currency: string
+  next_cursor: string | null
+}
+
+/** One status change of an invoice. */
+export interface InvoiceStatusEvent {
+  status: InvoiceStatus
+  at: string
+  actor: string
+  reason: string | null
+}
+
+/** GET /provider/invoices/{id}: the invoice with its lines, history and email deliveries (never addresses). */
+export interface InvoiceDetail extends Invoice {
+  lines: InvoiceLine[]
+  emails: InvoiceEmailDelivery[]
+  history: InvoiceStatusEvent[]
+  /** Whether issuing emails the tenant's admins (the D-68 setting at read time). */
+  email_tenants: boolean
+  provider_name: string
 }
 

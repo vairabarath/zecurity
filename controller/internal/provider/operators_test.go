@@ -457,3 +457,26 @@ func TestGuard_LastSuperAdmin_Concurrent(t *testing.T) {
 		})
 	}
 }
+
+// Sprint 27 O1: the lock-out guards hold with the new roles — the last
+// active super-admin can't be demoted to one of them.
+func TestOperatorGuards_LastSuperAdmin_NewRoles(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	only := mkOperator(t, s, "only-admin@inkyank.com", RoleSuperAdmin)
+	actor := actorFor(mkOperator(t, s, "aud@inkyank.com", RoleAuditor))
+	for _, role := range []string{RoleAuditor, RoleBilling, RoleSupport} {
+		if _, _, err := s.ChangeRole(ctx, actor, only.ID, role); !errors.Is(err, ErrLastSuperAdmin) {
+			t.Errorf("demote last super-admin to %s: %v", role, err)
+		}
+	}
+	// The DB CHECK (075_) accepts the new roles and still refuses others.
+	for _, role := range []string{RoleAuditor, RoleBilling, RoleSupport} {
+		if u := mkOperator(t, s, role+"-db@inkyank.com", role); u.Role != role {
+			t.Fatalf("created %s as %q", role, u.Role)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE provider_users SET role = 'owner' WHERE id = $1`, only.ID); err == nil {
+		t.Fatal("role CHECK accepted 'owner'")
+	}
+}

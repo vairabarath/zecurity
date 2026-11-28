@@ -163,7 +163,7 @@ func (s *Store) ResetOperatorTOTP(ctx context.Context, actor AuditActor, id, rea
 // recover-admin` (ADR-029, D-26 note): for an active super-admin, a new
 // temporary-password hash with must_change_password, TOTP cleared, sessions
 // ended, audited as system:cli. Returns whether a TOTP enrolment was cleared.
-func (s *Store) RecoverAdmin(ctx context.Context, email, passwordHash string) (bool, error) {
+func (s *Store) RecoverAdmin(ctx context.Context, email, passwordHash, reason, host string) (bool, error) {
 	var hadTOTP bool
 	err := s.withTx(ctx, func(tx pgx.Tx) error {
 		var id, role string
@@ -196,12 +196,23 @@ func (s *Store) RecoverAdmin(ctx context.Context, email, passwordHash string) (b
               WHERE id = $1`, id, passwordHash); err != nil {
 			return fmt.Errorf("recover admin: %w", err)
 		}
+		// G1 (D-75): the break-glass event, in the same transaction. The
+		// controller raises the alert, emails super-admins and shows the
+		// banner from it; it never holds the temporary password.
+		var eventID string
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO provider_break_glass_events (provider_user_id, email, reason, host)
+             VALUES ($1, $2, $3, $4) RETURNING id::text`, id, normalizeEmail(email), reason, host,
+		).Scan(&eventID); err != nil {
+			return fmt.Errorf("break-glass event: %w", err)
+		}
 		return s.InsertAuditTx(ctx, tx, AuditEntry{
 			ProviderEmail: SystemCLIActor,
 			Action:        AuditRecoverAdmin,
 			TargetType:    "provider_user",
 			TargetID:      id,
-			Details: WithChange(map[string]any{"email": normalizeEmail(email), "totp_cleared": hadTOTP},
+			Details: WithChange(map[string]any{"email": normalizeEmail(email), "totp_cleared": hadTOTP,
+				"reason": reason, "host": host, "break_glass_event_id": eventID},
 				map[string]any{"totp": totpState(enabledAt, ct), "must_change_password": mustChange},
 				map[string]any{"totp": TOTPStateNone, "must_change_password": true}),
 		})

@@ -531,7 +531,8 @@ func jsonKeys(t *testing.T, v any) []string {
 // The DTOs are the allowed response surface; any new field must be a
 // deliberate change to these lists.
 func TestTenantDTOSurface(t *testing.T) {
-	summary := []string{"ca_not_after", "counts", "created_at", "deletion", "id", "name", "slug", "status", "suspension", "trust_domain"}
+	// Sprint 27 O2 (D-73): current_plan {id, name}, for the billing role's list.
+	summary := []string{"ca_not_after", "counts", "created_at", "current_plan", "deletion", "id", "name", "slug", "status", "suspension", "trust_domain"}
 	detail := append(append([]string{}, summary...), "connectors", "connectors_truncated", "remote_networks",
 		"first_admin_invitation", "plan", "quotas", "relay_pool", "remote_networks_truncated", "shields", "shields_truncated")
 	sort.Strings(detail)
@@ -554,9 +555,10 @@ func TestTenantDTOSurface(t *testing.T) {
 			"previous", "region", "relay_path", "residency", "using_failover"}},
 		"TenantFailoverPool":         {TenantFailoverPool{}, []string{"eligible_relays", "id", "name", "region", "residency"}},
 		"TenantPlan":                 {TenantPlan{}, []string{"id", "is_default", "limits", "name"}},
+		"TenantPlanRef":              {TenantPlanRef{}, []string{"id", "name"}},
 		"TenantDeletion":             {TenantDeletion{}, []string{"by", "delete_after", "legal_hold", "legal_hold_reason", "purge_step", "reason", "scheduled_at"}},
 		"TenantFirstAdminInvitation": {TenantFirstAdminInvitation{}, []string{"expires_at", "status"}},
-		"PlanSummary":                {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "tenants", "updated_at"}},
+		"PlanSummary":                {PlanSummary{}, []string{"created_at", "description", "id", "is_default", "limits", "name", "price", "revision", "tenants", "updated_at"}},
 		"TenantRelayPoolPrevious":    {TenantRelayPoolPrevious{}, []string{"id", "name", "region", "residency", "until"}},
 		"TenantConnector": {TenantConnector{}, []string{"cert_not_after", "id", "last_heartbeat_at", "name",
 			"remote_network_id", "revoked_at", "status", "version"}},
@@ -566,5 +568,32 @@ func TestTenantDTOSurface(t *testing.T) {
 		if got := jsonKeys(t, c.v); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%s keys = %v\nwant %v", name, got, c.want)
 		}
+	}
+}
+
+// Sprint 27 O2 (D-73): every list row carries the tenant's current plan (id
+// and name), so the billing role sees name, plan and status without the
+// tenant detail.
+func TestListTenants_CurrentPlan(t *testing.T) {
+	pool := newTestDB(t)
+	ctx := context.Background()
+	a := seedWorkspace(t, pool, "t-plan-a", "active", t0)
+	b := seedWorkspace(t, pool, "t-plan-b", "active", t0.Add(time.Minute))
+	if _, err := pool.Exec(ctx, `UPDATE workspaces SET plan_id = '00000000-0000-0000-0001-000000000002' WHERE id = $1`, b); err != nil {
+		t.Fatal(err)
+	}
+	page, err := ListTenants(ctx, pool, TenantFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]*TenantPlanRef{}
+	for _, s := range page.Items {
+		got[s.ID] = s.CurrentPlan
+	}
+	if got[b] == nil || got[b].ID != "00000000-0000-0000-0001-000000000002" || got[b].Name != "Legacy" {
+		t.Fatalf("tenant b plan: %+v", got[b])
+	}
+	if got[a] == nil || got[a].Name == "" || got[a].ID == got[b].ID {
+		t.Fatalf("tenant a plan (the default plan): %+v", got[a])
 	}
 }

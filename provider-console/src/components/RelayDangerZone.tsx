@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { ApiError } from '@/api/client'
 import { deleteRelay, revokeRelay } from '@/api/relays'
 import type { RelayDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog, type DangerError } from '@/components/ConfirmDangerDialog'
 import { Button } from '@/components/ui/button'
@@ -14,7 +14,6 @@ export interface RelayActionNotice {
   text: string
 }
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 // Relay detail's "Danger zone" (Sprint 22 Phase X; D-17, D-20, D-30, D-31).
 // Super-admin only, and only for a relay that isn't deleted: Revoke while it
@@ -31,7 +30,7 @@ export function RelayDangerZone({ relay, onDone }: { relay: RelayDetail; onDone:
   // Guards a second submit before the pending re-render lands.
   const inFlight = useRef(false)
 
-  if (!hasRole(role, SUPER_ADMIN) || relay.status === 'deleted') return null
+  if (!can(role, 'relay.revoke') || relay.status === 'deleted') return null
   const canRevoke = relay.status !== 'revoked'
   // Phase D (P3): advisory only, as of the page load; never blocks the action.
   const lastListed = relay.in_relay_list && relay.eligible_relay_count === 1

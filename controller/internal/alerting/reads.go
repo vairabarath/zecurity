@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/providerquery"
 )
 
@@ -34,6 +35,46 @@ type ReadFilter struct {
 	TenantID string
 	Status   string // active reads: pending | firing | "" (both)
 	Kinds    []string
+}
+
+// alertView is which alerts a role may read once decide() allowed
+// alert.read (Sprint 27 O1, D-73).
+type alertView int
+
+const (
+	// viewAll: super-admin and auditor see every alert.
+	viewAll alertView = iota
+	// viewRelayOps: platform relay and pool alerts only (D-40, D-50).
+	viewRelayOps
+	// viewTenant: tenant-scope alerts only, except usage alerts (support,
+	// D-73: tenants' alerts, never usage).
+	viewTenant
+)
+
+// viewFor maps a role to its alert view. Any role not listed gets the
+// narrowest platform view (relay-ops); decide() already refused alert.read
+// to roles without it.
+func viewFor(role string) alertView {
+	switch role {
+	case provider.RoleSuperAdmin, provider.RoleAuditor:
+		return viewAll
+	case provider.RoleSupport:
+		return viewTenant
+	default:
+		return viewRelayOps
+	}
+}
+
+// SupportKinds are the kinds support may read: tenant-scope kinds except
+// tenant.usage_over (support never sees usage, D-73).
+func SupportKinds() []string {
+	var out []string
+	for _, k := range Kinds() {
+		if ScopeOf(k) == ScopeTenant && k != KindTenantUsageOver {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // RelayOpsKinds are the kinds relay-ops may read (D-40 extended, D-50).

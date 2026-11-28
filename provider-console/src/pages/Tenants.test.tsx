@@ -34,7 +34,7 @@ function tenant(over: Partial<TenantSummary>): TenantSummary {
   }
 }
 const A = tenant({})
-const B = tenant({ id: 'bbbbbbbb-1111-2222-3333-444444444444', slug: 'beta', name: 'Beta', status: 'suspended', ca_not_after: null, counts: { ...A.counts, connectors: zeroAgents } })
+const B = tenant({ id: 'bbbbbbbb-1111-2222-3333-444444444444', slug: 'beta', name: 'Beta', status: 'suspended', ca_not_after: null, counts: { ...A.counts, connectors: zeroAgents }, current_plan: { id: 'p-free', name: 'Free' } })
 
 const listCalls = (calls: RecordedCall[]) => calls.filter((c) => c.path === '/provider/tenants')
 const detailCalls = (calls: RecordedCall[]) => calls.filter((c) => c.path.startsWith('/provider/tenants/'))

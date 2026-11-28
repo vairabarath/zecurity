@@ -1080,3 +1080,103 @@ Made by the product/architecture owner (Barath) on 2026-11-21, during Sprint 24 
 | D-14 | **Refined**: provider audit rows are read through `audit.view` (super-admin, full log) or, for the timeline's relay and pool allowlist only, `timeline.relay_audit` (super-admin, relay-ops). |
 | D-06, D-50 | Unchanged. |
 | D-30 | Unchanged; the timeline adds one read and no console write. |
+
+## Decision record amendment — 2026-11-21: usage metering and reports (F32, F33; usage alerts)
+
+Made by the product/architecture owner (Barath) for Sprint 25 (`.zecurity-obs/Sprint25/path.md`), after review of the scope draft (`.zecurity-obs/Sprint25/Scope-Draft.md`, PR #244). It **extends D-40** (usage is tenant data), **extends D-50** (a new built-in tenant rule kind) and **amends D-46** (the purge keeps a usage record). D-49 (the M1 metric store) is unchanged: usage is a separate ledger, not derived from it.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-56 | Sprint 25 scope | **F32** usage collection and **F33** per-tenant usage report, plus **usage-threshold alerts** on F26 (D-61), plus the Sprint 24 acceptance follow-ups (X2). Sprint 25 **measures, reports and warns**: **no pricing, invoicing or enforcement** (F34 billing is a later feature with its own decision). **No agent change.** |
+| D-57 | What is metered | Per tenant, in **UTC** hours, days and calendar months: `relay_bytes_to_clients` and `relay_bytes_to_connectors` — **exact** bytes from R1's **cumulative** per-trust-domain counters (D-54): the controller adds the delta between two heartbeats of the same relay run, never an integrated rate; `session_minutes` — for each minute, the tenant's client devices with a live session, added up; `connector_minutes`, `shield_minutes` — for each minute, the tenant's active connectors / shields, added up; **`active_users`** — distinct users of the tenant with a live client session at any minute of the calendar month (a monthly figure; not stored per day). The definitions of "live session", "active connector" and "active shield" are the ones M1's sampler uses (one definition, shared). **Only relayed traffic is metered:** a client that reaches its connector directly (Sprint 20 direct path) sends no bytes through a relay, so those bytes are not counted; metering them would need connector byte counters (an agent change, not decided). |
+| D-58 | Storage, retention, deletion | A Postgres **usage ledger** separate from M1: `usage_hourly` (tenant, meter, UTC hour, integer quantity, completeness), `usage_active_users` (tenant, month, user) and `usage_tenants` (a snapshot of the tenant's id, name, slug and plan name). Kept **25 months**, then pruned. When a tenant is **purged** (S4), its usage is **kept with its id and name** until retention ends, so a report or a later invoice can still name it; its per-user `usage_active_users` rows are reduced to the monthly count at purge, so **no user ids of a deleted tenant are kept**. |
+| D-59 | Gaps and accuracy | Usage is **counted, never estimated**: a minute the controller didn't collect is unmetered (never back-filled from M1 or interpolated); a relay restart (uptime shorter than the gap, or a counter going down) starts a new baseline and loses at most the bytes since that relay's last heartbeat, never producing a negative or doubled amount; an unknown or revoked trust domain's bytes are not stored (D-54). Every write is **idempotent** (per tenant, meter and minute for time meters; per relay heartbeat for byte deltas), so a restart or re-run never counts twice. An hour with a missed minute is marked **incomplete**, and so are the days and months that contain it; reports show it. |
+| D-60 | Who sees usage | Usage is **tenant data**: **super-admin only** through `tenant.usage.read` (relay-ops 403; D-40 extended). A read of one tenant's usage writes a **`tenant.usage.read`** provider audit row, as a tenant detail view does (OQ-1); the fleet usage list writes one **`usage.fleet.read`** row per request. No new console writes. **Tenant-facing usage** (admin UI) is a later feature; the API takes a tenant filter so it can be added without a redesign. |
+| D-61 | Usage alerts | A built-in **tenant** rule kind **`tenant.usage_over`** with parameters `meter` (one of D-57's meters) and a monthly `threshold`. One rule applies to every tenant; several rules may exist. It **fires once per tenant per month** when the month-to-date usage crosses the threshold and **resolves at the UTC month rollover**; an incomplete or failed read never resolves it (A1). Scope **tenant** (`tenant_id` set, D-50), delivered to the provider only; relay-ops never see it. Managed like every rule: super-admin only, reason and before/after audit (D-53). **Warns only:** no code path uses usage to refuse, slow or limit anything. |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-40 | **Extended**: usage (all meters, per tenant and fleet lists) is tenant-identifying and super-admin only; relay-ops get 403 and see no usage alerts. |
+| D-46 | **Amended**: the purge of a deleted tenant keeps its usage ledger rows and `usage_tenants` snapshot (id, name, slug, plan name) until the 25-month retention ends; per-user active-user rows are reduced to counts. Everything else the purge deletes stays deleted. |
+| D-50 | **Extended**: `tenant.usage_over` is a tenant-scope rule kind (new file `072_usage_alert_kind`; `069_` is not edited). |
+| D-49 | **Unchanged**: M1 stays the source for charts; usage is never derived from it. |
+
+## Decision record amendment — 2026-11-23: billing plans and invoicing (F34)
+
+Made for Sprint 26 (`.zecurity-obs/Sprint26/path.md`) after review of the scope draft (`.zecurity-obs/Sprint26/Scope-Draft.md`, PR #249). The six review questions were answered on 2026-11-23. **Sign-off:** given on 2026-11-23 by Sathiya, who instructed that it override the product-owner sign-off step; the product owner (Barath) reviews it in PR #249. This amendment **extends D-43** (plans become priced cards), **extends D-40/D-60** (billing is tenant data), **amends D-30** (new console writes) and **amends D-46** (the purge keeps invoices). The usage ledger (D-57 … D-61) is unchanged; billing only reads it.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-62 | Sprint 26 scope | **F34** plan cards, billing settings and invoices, with invoices **emailed to tenants**, plus the Sprint 25 acceptance follow-ups (X3). **Not in scope:** payment collection (no payment processor, no card or bank data), any enforcement on non-payment or usage (an unpaid invoice never suspends, throttles or limits a tenant; D-45 suspension stays a manual action), tenant-facing billing pages in the admin UI. **No agent change.** A plan card without a price is **not billable**: its tenants get no invoice. |
+| D-63 | Plan cards | A plan is a **card** that super-admins **create and edit at any time**. It has the D-43 part (name, description, the six D-47 limits) and an optional **price**: a **monthly base fee** and, for each meter it prices, an **included quantity**, a **unit size** and a **unit price** for usage above the included quantity. Billable meters are the D-57 meters, **each optional per card** (the minutes meters — session, connector, shield — as well); a meter the card leaves out is not billed. **Session minutes are not billed unless a card turns them on**: a new card starts with no meter billed (2026-11-24, Q-1: a session counts while it is valid, also while the device sleeps, so billing it is the provider's choice). Each create or edit (any combination of fields, in one transaction, with a reason and before/after audit) raises the card's **revision** and adds the whole card to an **append-only revision history**. A custom price for one tenant is a new card assigned to it (no per-tenant price override). The card **revision in force at the start of the UTC month** prices that month: an edit made during a month (price, included quantities, units, a billed meter turned on or off, or the currency, D-64) **applies from the next month**, and the month's invoice keeps the month-start terms. A card first created during the month prices it with its first revision. An issued invoice never changes. *(Changed 2026-11-24 by Sathiya: was "the card as it reads at month close".)* |
+| D-64 | Country and currency | One provider-wide **billing country and currency**, **editable**, default **United States / USD** (e.g. India / INR). Choosing a country fills in its currency, and the currency can still be set on its own. **Changing the currency switches every plan card to it** in one transaction, raising each card's revision. Amounts are **not converted**: the console warns and the provider reviews the prices. Drafts take the change when regenerated; issued invoices keep their currency. All money is whole **minor units** (integers, using the currency's exponent) with **no floating point**. Usage above the included quantity is rounded **up to whole units** per meter per invoice. An arithmetic overflow refuses, never wraps. |
+| D-65 | Plan change in the month | A tenant is billed for the **whole UTC month at the plan it had at the start of the month**. A plan changed mid-month is billed **from the next month**; there is no proration. The month-start plan is **preserved**: the first plan change in a month records the plan it replaces (`tenant_billing_plans`, tenant + month), in the same transaction as the change. A tenant created mid-month starts on its creation plan. **Limits (D-43/D-47) still change immediately**; only billing waits. |
+| D-66 | Invoice lifecycle | One invoice per tenant per UTC month: **draft** (regenerable; priced from each tenant's **month-start card revision**, D-63, and the current tax settings) → **issued** (immutable; the number comes from a **gap-free counter**, `INV-<year>-<6 digits>`) → **paid** (final; date and a free-text reference) or **void** (reason required). A correction is a void plus a new invoice, never an edit. Drafts are generated after the month closes **plus a 6-hour settling delay**. Quantities are **counts only (D-59)**, read through the U2 usage reader: hours the collector missed are billed as counted and stated on the invoice. An invoice keeps a snapshot of the tenant name and slug, plan name and card revision, currency, tax and every line's terms. |
+| D-67 | Retention and purge | Invoices are **financial records**, kept for an **editable retention period, default 8 years** (1–30). After that, a privileged prune function removes them (audited). They are **not deleted by the S4 purge** and not pruned with the usage ledger (D-58). A tenant purged during a month gets a final invoice for it, named from `usage_tenants`. |
+| D-68 | Tenant invoice email | When an invoice is **issued**, it is **emailed to the tenant's active admins**: HTML and plain text with the invoice snapshot and lines, no link into the provider console, no secrets, no other tenant's data. When it is **voided**, a void notice is sent. **Editable setting, default on.** Delivery goes through a queue with retries, at most once per (invoice, kind); a super-admin can resend. A send failure never changes or blocks the invoice. A tenant with no admin (e.g. purged) is recorded "not delivered". Recipient addresses are never written to the provider audit or logs. Uses the existing SMTP sender. |
+| D-69 | Tax | **Default: no tax**; the invoice says "Tax not included". **Editable:** one provider-wide **tax rate** (basis points, 0–10000) and **label** (e.g. "GST", "VAT"), applied to the subtotal and rounded half up in integers. The invoice stores the rate, label, tax and total. A change applies at month close or regenerate, never to an issued invoice. There are no tax IDs and no per-country or per-tenant rules. |
+| D-70 | Who, and console writes | Billing is **tenant data: super-admin only** (D-40/D-60 pattern; relay-ops get 403 and see no billing pages). Card writes use the D-43 plan actions. New `decide()` actions: `billing.settings.write`, `invoice.read`, `invoice.write`. Every write carries a reason and a before/after audit (D-53 style). Reading one invoice is audited as `invoice.read`; the invoice list writes one `invoice.fleet.read` row per request. A separate `billing` role belongs to F19 (later). |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-30 | **Amended**: card prices (on plan create and update), billing settings, and invoice issue, mark paid, void, regenerate and resend are console writes. |
+| D-40, D-60 | **Extended**: prices, billing settings and invoices are tenant data, super-admin only; relay-ops get 403. |
+| D-43 | **Extended**: plans become priced cards with a revision history; limits, default and assignment rules are unchanged. Plan assignment also records the month-start plan for billing (D-65). |
+| D-46 | **Amended**: the purge keeps the tenant's invoices (and their email delivery records) until the D-67 retention ends. |
+| D-45, D-47, D-57 … D-61 | **Unchanged**: no billing outcome suspends or limits a tenant; quotas and the usage ledger stay as they are. |
+
+## Decision record amendment — 2026-11-23: provider access and API (F19, F20, F35)
+
+Made for Sprint 27 (`.zecurity-obs/Sprint27/path.md`) after review of the scope draft (`.zecurity-obs/Sprint27/Scope-Draft.md`, PR #252). The six review questions were answered on 2026-11-23. **Sign-off:** given on 2026-11-23 by Sathiya, as for Sprint 26; the product owner (Barath) reviews it in PR #252. Sprint 27 is **planned**: it starts after Sprint 26 (F34) is merged and live-checked. This amendment **amends D-05, D-06, D-30, D-31 and D-68/D-70**, and **extends D-26, D-28 and D-50**.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-71 | Sprint 27 scope | **F19** roles `auditor`, `billing`, `support` with an explicit role matrix; **F20** loud break-glass; **F35** read-only provider API keys with an expiry alert; plus the Sprint 26 acceptance follow-ups (X4). **Not in scope:** agent changes, external provider IdPs (D-29), impersonation or support grants (F31), partner scoping (F37), several roles per operator, step-up beyond today's TOTP, keys that write. |
+| D-72 | Role matrix | One role per operator. `decide()` uses an **explicit role → actions table** instead of the `relay.*` prefix rule and its exception lists. Existing roles keep exactly today's permissions (proved by a full action × role table test). An action without a table entry is **denied to every role except `super-admin`**, and a test fails when an action constant has no entry or no read/write classification. `decide()` stays the only chokepoint; console visibility is never the control. |
+| D-73 | New roles | **`auditor`**: every read the console has, including tenants, usage, invoices, plan cards, billing settings and the provider audit log; no writes. **`billing`**: plan cards (create, edit, including price), billing settings, invoices (issue, mark paid, void, regenerate, resend), usage reads, the tenant list and tenant plan assignment; no relay, pool, tenant lifecycle, quota, alert or operator actions. **`support`**: tenant reads (list; detail with connectors, shields, devices and agent status), the tenant's alerts and timeline rows, health; no billing, usage or plan-card reads, no provider audit log, no writes. Every tenant read by these roles is audited as for super-admins (OQ-1). `relay-ops` still never sees tenant data (D-40). |
+| D-74 | TOTP for the new roles | TOTP is **mandatory** for `auditor`, `billing` and `support`, as for `super-admin` (D-28); `relay-ops` stays optional. No session is minted for them without `otp` in `amr`. |
+| D-75 | Break-glass | `zecurity-controller provider recover-admin` **on the controller host** is the only break-glass path: no standing break-glass account and no console or API route. It requires `--reason`. Every use raises a critical **platform** alert `provider.break_glass_used` (no secrets in the payload), emails every active super-admin, and shows a console banner to super-admins until one acknowledges it with a note (audited). The temporary password stays stdout-only. |
+| D-76 | Provider API keys | Keys `zpk_<id>_<secret>` (256-bit secret, SHA-256 at rest, constant-time compare), **shown once** and never logged, audited or returned again. **One role per key** from `relay-ops`, `auditor`, `billing`, `support`; **never `super-admin`**. **Read-only:** a key may use only its role's read actions; `decide()` refuses every write for an `api_key` actor. **Every key expires, at most 365 days**; optional source CIDR allowlist; per-key rate limit that fails closed. A key is an actor of kind `api_key`: it **never goes through `IssueSession`**, never yields a session, and is refused on auth, TOTP, operator-management and API-key routes. Reads audited for people are audited for keys with the key as the actor. A platform alert `api_key.expiring` fires once per key 14 days before expiry and resolves when the key is revoked, expires or is replaced (no secret in the payload). Only super-admins create and revoke keys, with a reason and before/after audit. |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-05 | **Amended**: the `relay.*` prefix rule is replaced by the explicit role matrix (D-72); `super-admin` and `relay-ops` permissions are unchanged. |
+| D-06 | **Amended**: tenant reads are open to `auditor` and `support`, the tenant list and plan assignment to `billing`; tenant lifecycle (create, suspend, resume, delete, legal hold), quotas and pools stay super-admin only. |
+| D-31 | **Amended in form only**: relay revoke and delete stay super-admin only, now as matrix entries rather than an exception list. |
+| D-68, D-70 | **Amended**: plan cards, billing settings and invoice actions are open to `billing`; invoice and usage reads to `auditor`. |
+| D-30 | **Amended**: API key create and revoke, and break-glass acknowledgement, are console writes. |
+| D-26, ADR-029 | **Extended**: `recover-admin` requires a reason and is announced by alert, email and banner. |
+| D-28 | **Extended**: TOTP mandatory for `auditor`, `billing`, `support`. |
+| D-50 | **Extended**: platform kinds `provider.break_glass_used` and `api_key.expiring` (new file `077_provider_alert_kinds`; `069_` and `072_` are not edited). |
+| D-24 … D-27, D-29, D-40 | **Unchanged**. |
+
+## Decision record amendment — 2026-11-28: break-glass alert and API key creators (F20, F35)
+
+Made during the Sprint 27 acceptance run (2026-11-28, `main` `b6521928`), which raised two questions about D-75 and D-76. **Decided by Sathiya on 2026-11-28**; the product owner (Barath) reviews it with the Sprint 27 open points. This amendment **clarifies D-75** and **extends D-76**. Both need a code fix before F20 and F35 are ticked.
+
+### Decided
+
+| ID | Topic | Decision |
+|---|---|---|
+| D-77 | Break-glass alert and acknowledgement | **Every** `recover-admin` use raises the critical `provider.break_glass_used` alert, even when a super-admin acknowledges the banner before the evaluator's next tick. Acknowledging **resolves** the alert; it never prevents the alert from being created. (Found live: an acknowledgement within one evaluator interval skipped the alert and its webhook, because the evaluator only read unacknowledged events.) |
+| D-78 | API keys and their creator | When a super-admin is **disabled or demoted** (role changed away from `super-admin`), every active API key they created is **permanently revoked** in the same transaction (option c of the K1 review question). Revocation is the existing terminal state: re-enabling or re-promoting the operator never restores the keys; new keys must be created. Each revoked key gets `revoked_at`, the acting super-admin as `revoked_by` and a system reason (`creator disabled` / `creator demoted`); each key gets its own `api_key.revoke` audit row (name, prefix, cause) and the operator change's audit records how many keys were revoked (never a secret). A revoked key gets the generic 401 `invalid_api_key`, and its `api_key.expiring` alert resolves. The key rows and their audit history are kept. |
+
+### Effect on earlier decisions
+
+| Decision | Effect |
+|---|---|
+| D-75 | **Clarified** by D-77: "every use raises a critical alert" holds regardless of when the banner is acknowledged; the acknowledgement resolves the alert. |
+| D-76 | **Extended** by D-78: disabling or demoting a key's creator permanently revokes the key. |
+| D-71 … D-74 | **Unchanged**. |

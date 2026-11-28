@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { ApiError } from '@/api/client'
 import { cancelTenantDelete, scheduleTenantDelete, setTenantLegalHold } from '@/api/tenants'
 import type { PurgeStep, TenantDetail } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { ConfirmDangerDialog, type DangerError } from '@/components/ConfirmDangerDialog'
 import type { RelayActionNotice } from '@/components/RelayDangerZone'
@@ -13,7 +13,6 @@ import { formatDateTime } from '@/lib/format'
 import { tenantLifecycleFailure, type TenantLifecycleAction } from '@/lib/tenant-errors'
 import { timeUntil } from '@/lib/tenant-format'
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 const PURGE_STEPS: Record<PurgeStep, string> = {
   pending: 'Starting: exporting the tenant’s logs',
@@ -33,7 +32,7 @@ type Action = 'delete' | 'cancel' | 'hold' | 'release'
 // hiding the buttons is UX only.
 export function TenantDeletionSection({ tenant, onDone }: { tenant: TenantDetail; onDone: (notice: RelayActionNotice) => void }) {
   const role = useSessionStore((s) => s.me?.role)
-  const canAct = hasRole(role, SUPER_ADMIN)
+  const canAct = can(role, 'tenant.delete')
   const [action, setAction] = useState<Action | null>(null)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<DangerError>()

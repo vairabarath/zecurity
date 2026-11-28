@@ -1,4 +1,5 @@
 import { request } from './client'
+import type { UsageMeter } from './usage'
 import { buildQuery } from './reads'
 import type { Page } from './types'
 
@@ -53,6 +54,9 @@ export interface AlertRuleParams {
   days?: number
   components?: string[]
   keys?: string[]
+  /** tenant.usage_over (Sprint 25 U4, D-61): the meter and its monthly threshold in the meter's raw unit. */
+  meter?: UsageMeter
+  threshold?: number
 }
 
 export interface AlertRule {

@@ -173,7 +173,7 @@ func TestAuditChange_TOTPEnrolResetAndRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecoverAdmin(ctx, admin.Email, hash); err != nil {
+	if _, err := s.RecoverAdmin(ctx, admin.Email, hash, "append-only test", "test-host"); err != nil {
 		t.Fatal(err)
 	}
 	wantChange(t, pool, AuditRecoverAdmin,

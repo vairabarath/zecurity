@@ -3988,3 +3988,97 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Barath approved D-55 and the commit; T1 PR opened. After merge: tick T1 in `path.md` and F27 in the tracker.
 - The A3 tick in `path.md` is committed on its own in the same branch.
+
+## 2026-11-21 — Claude Code (Sathiya, Sprint 24 close-out and Sprint 25 planning)
+
+**What was done:**
+- Merged T1 #238 (after merging main: R1 #237, M1 #239 conflicts in `CLAUDE.md` and `authz.go`, both sides kept). Local DB reset for `068_`.
+- Reviewed Barath's M2 (#240); it merged before the fixes landed, so the 7 findings were fixed in #242 (link ceiling on 1-minute ranges only, scale to data, trend tile label and timing, tooltip not a live region, 24 h axis day, one window per page) plus 4 second-review findings (sparkline crash on unparseable times, trend window at role, plain sparkline label, window in state); merged `cb441cc9`. T1 tick #243 merged.
+- Sprint 25 (usage metering, F32/F33 + usage alerts) planned: scope draft, `Sprint25/path.md`, both phase files, Decision Record amendment 2026-11-21 (usage, D-56 … D-61), `CLAUDE.md` switched to Sprint 25 (PR #244).
+
+**Key decisions (Barath, 2026-11-21):**
+- Active users per month is a meter; a purged tenant's usage is kept with its id and name (amends D-46); usage thresholds raise warning-only tenant alerts (D-61).
+- Usage is a separate exact ledger (not derived from M1); only relayed traffic is metered; super-admin only (`tenant.usage.read`).
+- U1a (schema) merges first as the contract; `usage_relay_baselines` persisted with the usage so a controller restart loses no bytes.
+
+**What's next:**
+- Sprint 24 acceptance run (both, reset lab DB, current `main`); findings → X2; tick F23, F26, F27.
+- Barath: U1a `071_usage` → U1b collector. Sathiya: X2 → U2 (after U1a) → U3 → U4 (`072_usage_alert_kind`).
+
+## 2026-11-23 — Claude Code (Sathiya, Sprint 26 planning)
+
+**What was done:**
+- Sprint 26 theme chosen: **F34 billing plans and invoicing**. Wrote the scope draft, `Sprint26/path.md`, both phase files, the Decision Record amendment 2026-11-23 (billing, D-62 … D-70) and switched `CLAUDE.md` to Sprint 26 (PR #249, stacked on #244).
+- Tracker refreshed: F23, F26, F27 merged (Sprint 24 acceptance pending); F32, F33 in review (#245 … #248); F34 is the Sprint 26 theme.
+
+**Key decisions (answered by Sathiya, 2026-11-23):**
+- Q1: billing uses **editable plan cards** (limits, monthly fee, and per meter an included quantity and a unit price above it), created and edited any time, with a revision history.
+- Q2: the currency is editable, default USD (e.g. INR for India). Changing the country or currency switches every card; amounts aren't converted.
+- Q3: a mid-month plan change bills **from the next month**; the month-start plan is preserved (`tenant_billing_plans`). Limits still change immediately.
+- Q4: invoice retention is editable, default 8 years. Q5: issued invoices are emailed to the tenant's admins (editable, default on). Q6: no tax by default; an editable single rate and label.
+- **Sign-off:** Sathiya instructed that their sign-off override the product-owner sign-off step. Recorded as such everywhere; Barath reviews in PR #249.
+
+**What's next:**
+- Merge the Sprint 25 stack (#244 → #248), run the Sprint 24 and Sprint 25 acceptance runs (findings → X2 / X3).
+- Barath: P1a (`073_plan_cards`, `074_invoices`) → P1b and P2. Sathiya: X3 → P3 (after P1a) → P4.
+
+## 2026-11-23 — Claude Code (Sathiya, Sprint 26 work and Sprint 27 planning)
+
+**What was done:**
+- Sprint 26 P3 part: invoice email and delivery worker (#250, draft; live check 14/14 against a capture SMTP server plus one real Gmail send). P4 part: billing console foundations (#251, draft; reviewed with the `web-design-guidelines` skill, previewed in a browser).
+- Checked Barath's Sprint 24 F23 live run (branch `docs/sprint24-f23-live-results`, no PR yet): R1 fail (R1-1, R1-2), M1 and cross-feature pass, M2 design questions. Usage counting (U1) isn't affected by R1-1. Tracker refreshed (#249).
+- Sprint 27 planned: provider access and API (F19, F20, F35). Scope draft, `Sprint27/path.md`, both phase files and the Decision Record amendment 2026-11-23, provider access (D-71 … D-76) (PR #252). `CLAUDE.md` lists Sprint 27 as planned; Sprint 26 stays active.
+
+**Key decisions (answered by Sathiya, 2026-11-23):**
+- Roles `auditor`, `billing` and `support` now, with an explicit role → actions matrix; `billing` may assign a tenant's plan; TOTP mandatory for all three.
+- API keys are read-only first, one role each (never super-admin), every key expires within 365 days, with an `api_key.expiring` alert this sprint.
+- Break-glass stays the `recover-admin` CLI on the controller host only; every use raises an alert, emails super-admins and shows a banner.
+- Sign-off for Sprint 27 given by Sathiya as for Sprint 26; Barath reviews in #252.
+
+**What's next:**
+- Barath: open a PR for the F23 results; decide on the R1 fix PR and the design questions; review and merge #244 → #248, then #249; start Sprint 26 P1a.
+- Sprint 25 live run: paused, waiting for how the lab hosts (.41, .53, .46, enrolled to Barath's controller) are shared.
+
+## 2026-11-27 – 2026-11-28 — Sathiya (M1): Sprint 26 close, Sprint 27 built and merged
+
+**Done:**
+- **Sprint 26 closed:** #260 merged (`7ee717bc`: purged-tenant final invoice fix, dev billing test clock, acceptance record; F34 ticked).
+- **Secret-scan false positive:** #261 (Stripe-like `whsec_` fixture in `Alerts.test.tsx`).
+- **Flaky admin test fixed:** #265 (`ResourceDetail.protect.test.tsx`).
+- **Sprint 27 started:** #252 merged; `CLAUDE.md` switched to Sprint 27; tracker refreshed (24 / 40).
+- **Sprint 27 built, live-checked and merged** at Sathiya's go, before Barath's review (`main` `8db309bf`):
+  - O1 role matrix + auditor / billing / support (#262, takeover);
+  - G1 loud break-glass (#263, takeover);
+  - K1 read-only API keys + `api_key.expiring` alert (#264);
+  - K2 keys console (#266);
+  - O2 console per role + break-glass banner (#267).
+  - Migrations `075_` … `077_`.
+  - Each phase: full gates (Go 51 packages with DB env; console 889 tests), mutation checks, a live check (records in the phase files and `Pending-Live-Tests.md`).
+
+**Open:**
+- **The Sprint 27 acceptance run** (both; reset lab DB, current `main`). Tick F19, F20, F35 after it.
+- **Barath's review of the merged stack:** open points in `Sprint27/path.md`, incl. the K1 question (keys outliving a disabled creator), which needs a Decision Record call.
+- **Lab teardown left over from Sprint 26:** luffy connector + `nft` table `s26` (needs `sudo`); .41 was unreachable.
+- **Sprint 24 acceptance run:** still open (F23 R1-1/R1-2; F26, F27 not ticked).
+- **Local DB:** recreate it (`075_` … `077_`).
+
+## 2026-11-28 — Sathiya (M1): Sprint 27 acceptance run
+
+**Done:**
+- **Sprint 27 acceptance PASS** on `main` `b6521928` (reset local DB, migrations through `077_`): roles, break-glass, API keys and the expiry alert, keys console, console per role and X4, plus a relay-ops drain on a real relay (`suryavardhan`, 192.168.1.97). Record: `Sprint27/path.md` → Acceptance run, `Pending-Live-Tests.md`.
+- **F19 ticked** (25 / 40).
+- **Decisions (Decision Record amendment 2026-11-28):**
+  - D-77: every break-glass use raises the critical alert, even if acknowledged at once; the ack resolves it.
+  - D-78: disabling or demoting a super-admin permanently revokes the API keys they created (re-enabling never restores them).
+
+- **Docs PR #269** (acceptance record, D-77, D-78, F19 tick) opened.
+- **X5 and X6 built** (PR #270, stacked on #269): the break-glass alert fires even when acknowledged before the first tick; disabling or demoting a super-admin revokes their API keys in the same transaction (audited, never restored). Go gate 51 packages green, 10 mutations caught, live PASS on the lab.
+- **Security review finding fixed in #270:** a key created at the same moment as its creator's disable or demotion could survive; `CreateAPIKey` now locks and re-checks the creator (`TestAPIKeys_CreateRacesCreatorDisable`).
+
+- **Merged:** #269 (`64fd47d0`) and #270 (`99783587`, retargeted to `main`). **F20 and F35 ticked: Sprint 27 complete** (27 / 40).
+
+**Open:**
+- **Barath's review** of the merged stack and the open points in `Sprint27/path.md`, now including D-77 and D-78.
+- **Lab:** the acceptance controller, console, mail and webhook helpers and the relay on `suryavardhan` are still running; stop them and delete `~/s27relay` on that host when done.
+- **Still open from before:** the Sprint 24 acceptance run; Sprint 26 lab teardown (luffy `sudo`, .41).
+

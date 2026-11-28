@@ -45,11 +45,21 @@ func TOTPProvisioningURI(email string, secret []byte) string {
 	return totp.ProvisioningURI(totpIssuer, email, secret)
 }
 
-// RequiresTOTP: a super-admin always (D-28), and anyone who has TOTP enabled
+// RequiresTOTP: super-admin, auditor, billing and support always (D-28,
+// D-74), and anyone who has TOTP enabled
 // (e.g. a demoted super-admin), so an enrolled factor can't be skipped. Both
 // IssueSession and RequireProvider apply this rule to the DB row.
 func RequiresTOTP(u *ProviderUser) bool {
-	return u.Role == RoleSuperAdmin || u.TOTPEnabledAt != nil
+	return roleRequiresTOTP[u.Role] || u.TOTPEnabledAt != nil
+}
+
+// roleRequiresTOTP: the roles that must use TOTP (D-28; D-74 adds auditor,
+// billing and support). relay-ops stays optional.
+var roleRequiresTOTP = map[string]bool{
+	RoleSuperAdmin: true,
+	RoleAuditor:    true,
+	RoleBilling:    true,
+	RoleSupport:    true,
 }
 
 func hasAMR(amr []string, method string) bool {

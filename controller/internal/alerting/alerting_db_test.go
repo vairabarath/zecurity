@@ -160,8 +160,9 @@ func (e *env) do(t *testing.T, role, method, path string, body any) resp {
 	req := httptest.NewRequest(method, path, strings.NewReader(raw))
 	req.RemoteAddr = "192.0.2.10:54321"
 	actor := provider.Actor{UserID: e.superID, Email: "admin@provider.test", Role: provider.RoleSuperAdmin}
-	if role == provider.RoleRelayOps {
-		actor = provider.Actor{UserID: e.opsID, Email: "ops@provider.test", Role: provider.RoleRelayOps}
+	if role != provider.RoleSuperAdmin {
+		// relay-ops and the Sprint 27 roles share the second operator row.
+		actor = provider.Actor{UserID: e.opsID, Email: "ops@provider.test", Role: role}
 	}
 	req = req.WithContext(provider.WithActor(req.Context(), actor))
 	rec := httptest.NewRecorder()
@@ -186,11 +187,14 @@ func (f *fakeObserver) Observe(_ context.Context, kind string, _ Params, _ time.
 func TestAlertsDB_SchemaScopes(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	if n := e.count(t, `SELECT count(*) FROM alert_rules`); n != 9 {
-		t.Fatalf("seeded rules = %d, want 9", n)
+	// 069 seeds nine rules; 072 (Sprint 25 U4) adds tenant.usage_over; 077
+	// (Sprint 27 G1) adds the enabled platform rules provider.break_glass_used
+	// and api_key.expiring.
+	if n := e.count(t, `SELECT count(*) FROM alert_rules`); n != 12 {
+		t.Fatalf("seeded rules = %d, want 12", n)
 	}
-	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'platform' AND enabled`); n != 5 {
-		t.Fatalf("enabled platform rules = %d, want 5", n)
+	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'platform' AND enabled`); n != 7 {
+		t.Fatalf("enabled platform rules = %d, want 7", n)
 	}
 	if n := e.count(t, `SELECT count(*) FROM alert_rules WHERE scope = 'tenant' AND enabled`); n != 0 {
 		t.Fatalf("tenant rules must start disabled, %d enabled", n)
@@ -642,7 +646,7 @@ func TestAlertsDB_ReviewFixes(t *testing.T) {
 	// A bad stored rule is skipped, the others still listed.
 	e.exec(t, `UPDATE alert_rules SET params = '{"keys": ["sessions"]}' WHERE kind = 'tenant.over_quota'`)
 	rules, err := e.store.ListRules(ctx)
-	if err != nil || len(rules) != 8 {
+	if err != nil || len(rules) != 11 { // twelve seeded (072 adds one, 077 two), one bad
 		t.Fatalf("list with one bad rule: %d rules, %v", len(rules), err)
 	}
 

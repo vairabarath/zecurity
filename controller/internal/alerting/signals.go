@@ -75,6 +75,12 @@ func (s Sources) Observe(ctx context.Context, kind string, p Params, now time.Ti
 		obs, err = s.tenantNoRelayPath(ctx)
 	case KindTenantOverQuota:
 		obs, err = s.tenantOverQuota(ctx, p)
+	case KindTenantUsageOver:
+		obs, err = s.tenantUsageOver(ctx, p, now)
+	case KindBreakGlassUsed:
+		obs, err = s.breakGlassUsed(ctx)
+	case KindAPIKeyExpiring:
+		obs, err = s.apiKeyExpiring(ctx, p, now)
 	default:
 		return nil, fmt.Errorf("alerting: unknown kind %q", kind)
 	}
@@ -406,6 +412,95 @@ func (s Sources) tenantOverQuota(ctx context.Context, p Params) ([]Observation, 
 	return out, nil
 }
 
+// tenantUsageOver (Sprint 25 U4, D-61): a watched tenant whose usage of
+// p.Meter so far this UTC month is at or above p.Threshold. It reads the
+// ledger through U2's month reader (one reader, never M1). Usage only grows
+// within a month, so an alert stays firing until the month rolls over and
+// usage restarts at 0 (then it resolves). A read error leaves states
+// unchanged (never resolves). Warns only: nothing reads this to refuse or
+// limit anything.
+func (s Sources) tenantUsageOver(ctx context.Context, p Params, now time.Time) ([]Observation, error) {
+	m, err := providerquery.ReadMonthUsage(ctx, s.DB, now)
+	if err != nil {
+		return nil, fmt.Errorf("tenant usage: %w", err)
+	}
+	rows, err := s.DB.Query(ctx, `SELECT w.id::text, w.slug FROM workspaces w WHERE `+activeTenant)
+	if err != nil {
+		return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+	}
+	watched := map[string]string{}
+	for rows.Next() {
+		var id, slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+		}
+		watched[id] = slug
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tenant usage: list tenants: %w", err)
+	}
+	var out []Observation
+	for _, t := range m.Tenants {
+		slug, ok := watched[t.Tenant.ID]
+		if !ok || t.Tenant.Purged {
+			continue // only tenants tenant rules watch (active, not suspended)
+		}
+		v := t.Value(p.Meter)
+		if v < p.Threshold {
+			continue
+		}
+		out = append(out, Observation{
+			TargetType: "tenant", TargetID: t.Tenant.ID, TargetName: t.Tenant.Name, TenantID: t.Tenant.ID,
+			Summary: fmt.Sprintf("Tenant %s used %s %s in %s (threshold %s)", slug, usageAmount(p.Meter, v),
+				usageMeterLabel(p.Meter), m.Month.Format("January 2006"), usageAmount(p.Meter, p.Threshold)),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TargetID < out[j].TargetID })
+	return out, nil
+}
+
+// usageMeterLabel names a usage meter in an alert summary.
+func usageMeterLabel(meter string) string {
+	switch meter {
+	case providerquery.UsageMeterRelayBytesToClients:
+		return "relayed to clients"
+	case providerquery.UsageMeterRelayBytesToConnectors:
+		return "relayed to connectors"
+	case providerquery.UsageMeterSessionMinutes:
+		return "of client sessions"
+	case providerquery.UsageMeterConnectorMinutes:
+		return "of connectors online"
+	case providerquery.UsageMeterShieldMinutes:
+		return "of shields online"
+	case providerquery.UsageMeterActiveUsers:
+		return "active users"
+	}
+	return meter
+}
+
+// usageAmount formats a usage quantity like the console: bytes in decimal
+// units, minutes as hours, users as a count.
+func usageAmount(meter string, v int64) string {
+	switch meter {
+	case providerquery.UsageMeterRelayBytesToClients, providerquery.UsageMeterRelayBytesToConnectors:
+		units := []string{"B", "kB", "MB", "GB", "TB", "PB", "EB"}
+		f, i := float64(v), 0
+		for f >= 1000 && i < len(units)-1 {
+			f /= 1000
+			i++
+		}
+		if i == 0 {
+			return fmt.Sprintf("%d B", v)
+		}
+		return fmt.Sprintf("%.1f %s", f, units[i])
+	case providerquery.UsageMeterActiveUsers:
+		return fmt.Sprintf("%d", v)
+	}
+	return fmt.Sprintf("%.1f h", float64(v)/60)
+}
+
 func collect(rows pgx.Rows, scan func(pgx.Rows) (Observation, error)) ([]Observation, error) {
 	defer rows.Close()
 	var out []Observation
@@ -453,4 +548,88 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// breakGlassUsed (G1, D-75, D-77): one observation per break-glass event
+// that is not yet acknowledged, or that has never fired. It fires on the next
+// tick after recover-admin ran (even if the controller was down then) and
+// resolves when a super-admin acknowledges the event. An event acknowledged
+// before any tick saw it is still observed until its alert has fired, so it
+// fires on that tick and resolves on the next: acknowledging resolves the
+// alert, it never prevents it (D-77). The summary has the recovered
+// operator, the time, the host and the reason: never the temporary password
+// (the event row never holds it).
+func (s Sources) breakGlassUsed(ctx context.Context) ([]Observation, error) {
+	rows, err := s.DB.Query(ctx, `
+		SELECT b.id::text, b.email, b.reason, b.host, b.created_at
+		  FROM provider_break_glass_events b
+		 WHERE b.acknowledged_at IS NULL
+		    OR NOT EXISTS (SELECT 1 FROM alert_events e
+		                    WHERE e.kind = 'provider.break_glass_used'
+		                      AND e.target_type = 'break_glass_event'
+		                      AND e.target_id = b.id::text
+		                      AND e.transition = 'fired')
+		 ORDER BY b.created_at, b.id
+		 LIMIT $1`, maxObservations+1)
+	if err != nil {
+		return nil, fmt.Errorf("break-glass events: %w", err)
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var id, email, reason, host string
+		var at time.Time
+		if err := rows.Scan(&id, &email, &reason, &host, &at); err != nil {
+			return nil, fmt.Errorf("break-glass event: %w", err)
+		}
+		out = append(out, Observation{
+			TargetType: "break_glass_event",
+			TargetID:   id,
+			TargetName: email,
+			Summary: fmt.Sprintf("Break-glass recovery used for %s on %s at %s: %s",
+				email, host, at.UTC().Format(time.RFC3339), reason),
+		})
+	}
+	return out, rows.Err()
+}
+
+// apiKeyExpiring (K1, D-76 Q6): one observation per active provider API key
+// (not revoked, not yet expired) that expires within days_before days of now.
+// The alert fires once per key (renotify 0) and resolves when the key is
+// revoked, expires, or is no longer within the window (a replaced key is
+// revoked). Target = the key id; the summary names the key, its prefix, role
+// and expiry. Never the key or its hash.
+func (s Sources) apiKeyExpiring(ctx context.Context, p Params, now time.Time) ([]Observation, error) {
+	days := p.DaysBefore
+	if days == 0 {
+		days = DefaultAPIKeyDaysBefore
+	}
+	rows, err := s.DB.Query(ctx, `
+		SELECT id::text, name, prefix, role, expires_at
+		  FROM provider_api_keys
+		 WHERE revoked_at IS NULL
+		   AND expires_at > $1
+		   AND expires_at <= $1 + make_interval(days => $2)
+		 ORDER BY expires_at, id
+		 LIMIT $3`, now, days, maxObservations+1)
+	if err != nil {
+		return nil, fmt.Errorf("expiring api keys: %w", err)
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var id, name, prefix, role string
+		var exp time.Time
+		if err := rows.Scan(&id, &name, &prefix, &role, &exp); err != nil {
+			return nil, fmt.Errorf("expiring api key: %w", err)
+		}
+		out = append(out, Observation{
+			TargetType: "api_key",
+			TargetID:   id,
+			TargetName: name,
+			Summary: fmt.Sprintf("Provider API key %s (%s, role %s) expires at %s",
+				name, prefix, role, exp.UTC().Format(time.RFC3339)),
+		})
+	}
+	return out, rows.Err()
 }

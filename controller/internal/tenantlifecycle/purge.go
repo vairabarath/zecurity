@@ -43,6 +43,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/tenantexport"
+	"github.com/yourorg/ztna/controller/internal/usage"
 )
 
 // SystemPurgeActor is the provider audit actor of a completed purge.
@@ -401,8 +402,20 @@ func (p *Purger) revoke(ctx context.Context, workspaceID string) error {
 // destroy runs the privileged purge (D-13) and records step 'destroyed'.
 func (p *Purger) destroy(ctx context.Context, workspaceID string) error {
 	// tenant_purge (D-13) deletes the workspace and records 'destroyed'.
-	if _, err := p.Pool.Exec(ctx, `SELECT tenant_purge($1)`, workspaceID); err != nil {
-		return fmt.Errorf("tenant_purge: %w", err)
+	// In the same transaction, before it, the tenant's usage is frozen
+	// (Sprint 25 U1, D-58 amends D-46): kept with its id and name, user ids
+	// reduced to monthly counts. One transaction, so a purge never deletes
+	// the workspace without freezing its usage, or freezes it twice.
+	if err := pgx.BeginTxFunc(ctx, p.Pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := usage.FreezeTenant(ctx, tx, workspaceID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT tenant_purge($1)`, workspaceID); err != nil {
+			return fmt.Errorf("tenant_purge: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if p.PublishRelayLists != nil {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fanoutTimeout)

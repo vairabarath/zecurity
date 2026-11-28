@@ -306,6 +306,12 @@ function OperatorCounts({ operators }: { operators: OperatorView[] }) {
   const tiles = [
     { label: 'Super-admins', value: active.filter((o) => o.role === 'super-admin').length, note: 'Everything, including this page' },
     { label: 'Relay ops', value: active.filter((o) => o.role === 'relay-ops').length, note: 'Relays only' },
+    // Sprint 27 (D-73): auditor, billing and support together.
+    {
+      label: 'Other roles',
+      value: active.filter((o) => o.role === 'auditor' || o.role === 'billing' || o.role === 'support').length,
+      note: 'Auditor, billing, support',
+    },
     { label: 'Need a password', value: active.filter((o) => !o.has_password || o.must_change_password).length, note: 'Must change it, or enabled without one' },
     { label: 'Disabled', value: operators.length - active.length, note: 'Can’t sign in' },
   ]

@@ -388,3 +388,52 @@ func TestOperatorResponses_NoSecrets(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 27 O1 (D-73): a super-admin may assign the new roles; a change to
+// or from one ends the operator's sessions (session_generation), and the
+// new role's TOTP rule applies at the next sign-in (D-74).
+func TestChangeRole_NewRolesEndSessions(t *testing.T) {
+	e := newOperatorEnv(t)
+	c := e.create(t, "ops@inkyank.com", provider.RoleRelayOps)
+	tok := e.activate(t, "ops@inkyank.com", c.TemporaryPassword, "ops-real-password-1")
+	for _, role := range []string{provider.RoleBilling, provider.RoleAuditor, provider.RoleSupport, provider.RoleRelayOps} {
+		code, body := call(t, e.srv, http.MethodPatch, "/provider/users/"+c.User.ID, e.admin, map[string]string{"role": role})
+		if code != http.StatusOK || !strings.Contains(body, `"role":"`+role+`"`) {
+			t.Fatalf("change to %s: %d %s", role, code, body)
+		}
+		if code, _ := call(t, e.srv, http.MethodGet, "/provider/me", tok, nil); code != http.StatusUnauthorized {
+			t.Fatalf("old token after change to %s: %d, want 401", role, code)
+		}
+		_, s := e.loginAs(t, "ops@inkyank.com", "ops-real-password-1")
+		if role == provider.RoleRelayOps {
+			// Enrolled earlier, so TOTP stays required (RequiresTOTP).
+			if s.MFA != provider.MFAStageVerify {
+				t.Fatalf("back to relay-ops with TOTP enabled: %+v", s)
+			}
+		} else if s.MFA == "" {
+			t.Fatalf("%s signed in without TOTP: %+v", role, s)
+		}
+		tok = completeMFA(t, e.srv, s).Token
+	}
+	// The new roles can't manage operators.
+	for _, role := range []string{provider.RoleAuditor, provider.RoleBilling, provider.RoleSupport} {
+		if code, _ := call(t, e.srv, http.MethodPatch, "/provider/users/"+c.User.ID, e.admin, map[string]string{"role": role}); code != http.StatusOK {
+			t.Fatalf("change to %s: %d", role, code)
+		}
+		_, s := e.loginAs(t, "ops@inkyank.com", "ops-real-password-1")
+		tok = completeMFA(t, e.srv, s).Token
+		for _, r := range []struct{ method, path string }{
+			{http.MethodGet, "/provider/users"},
+			{http.MethodPost, "/provider/users"},
+			{http.MethodPatch, "/provider/users/" + c.User.ID},
+		} {
+			if code, _ := call(t, e.srv, r.method, r.path, tok, map[string]string{"email": "y@inkyank.com", "role": role}); code != http.StatusForbidden {
+				t.Errorf("%s %s %s: %d, want 403", role, r.method, r.path, code)
+			}
+		}
+	}
+	// Unknown roles are still refused.
+	if code, body := call(t, e.srv, http.MethodPatch, "/provider/users/"+c.User.ID, e.admin, map[string]string{"role": "owner"}); code != http.StatusBadRequest {
+		t.Fatalf("unknown role: %d %s", code, body)
+	}
+}

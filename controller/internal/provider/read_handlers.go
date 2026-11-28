@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/yourorg/ztna/controller/internal/billing"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/providerquery"
 )
@@ -26,9 +27,11 @@ import (
 //	GET /provider/certificates    cert.read   (super-admin)
 //	GET /provider/pki             cert.read   (super-admin; CA tree + CRL status)
 //	GET /provider/health          health.read (super-admin; health_read.go)
+//	GET /provider/usage           tenant.usage.read (super-admin), audited (usage_read.go)
+//	GET /provider/usage/tenants   tenant.usage.read (super-admin), audited (usage_read.go)
 //
-// Only a successful tenant detail read is audited. Lists, relay, audit and
-// certificate reads, and 400/403/404 responses write nothing.
+// Only a successful tenant detail or usage read is audited. Lists, relay,
+// audit and certificate reads, and 400/403/404 responses write nothing.
 
 // ReadDB is what the read handlers need from the database: reads, plus
 // transactions for the audited tenant detail. *pgxpool.Pool satisfies it.
@@ -145,6 +148,21 @@ func (h *ReadHandlers) GetPlan(w http.ResponseWriter, r *http.Request) {
 	writeReadJSON(w, p)
 }
 
+// ListPlanRevisions: GET /provider/plans/{id}/revisions (plan.read,
+// super-admin; Sprint 26 P1b, D-63): the card history, newest first.
+func (h *ReadHandlers) ListPlanRevisions(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.actor(w, r)
+	if !ok || !h.allowed(w, h.authz.CanReadPlans(actor)) {
+		return
+	}
+	items, err := providerquery.ListPlanRevisions(r.Context(), h.db, r.PathValue("id"))
+	if err != nil {
+		h.queryError(w, err)
+		return
+	}
+	writeReadJSON(w, map[string]any{"items": items})
+}
+
 // GetRelayPool: GET /provider/relay-pools/{id} (relay.read). The tenant list
 // is included only for callers allowed tenant.read (super-admin, D-41);
 // relay-ops get counts only.
@@ -169,10 +187,11 @@ func (h *ReadHandlers) GetRelayPool(w http.ResponseWriter, r *http.Request) {
 
 // ── tenants ──────────────────────────────────────────────────────────────────
 
-// ListTenants: GET /provider/tenants?status=&limit=&cursor=  (not audited)
+// ListTenants: GET /provider/tenants?status=&limit=&cursor=  (not audited;
+// tenant.list.read, D-73)
 func (h *ReadHandlers) ListTenants(w http.ResponseWriter, r *http.Request) {
 	actor, ok := h.actor(w, r)
-	if !ok || !h.allowed(w, h.authz.CanReadTenants(actor, Target{Type: "tenant"})) {
+	if !ok || !h.allowed(w, h.authz.CanListTenants(actor)) {
 		return
 	}
 	q := r.URL.Query()
@@ -244,20 +263,32 @@ func (h *ReadHandlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The plan this month is billed at (D-65): the one rule, PlanForMonth.
+	bp, err := billing.PlanForMonth(ctx, tx, id, time.Now())
+	if err != nil {
+		fail(http.StatusInternalServerError, "server_error", "billing plan", err)
+		return
+	}
+	name, err := billing.PlanName(ctx, tx, bp.PlanID)
+	if err != nil {
+		fail(http.StatusInternalServerError, "server_error", "billing plan name", err)
+		return
+	}
+	detail.BillingPlan = &providerquery.TenantBillingPlan{ID: bp.PlanID, Name: name}
+
 	body, err := json.Marshal(detail) // serialize before the audit so nothing can fail after COMMIT
 	if err != nil {
 		fail(http.StatusInternalServerError, "server_error", "marshal", err)
 		return
 	}
 
-	userID := actor.UserID
 	if err := h.store.InsertAuditTx(ctx, tx, AuditEntry{
-		ProviderUserID: &userID,
+		ProviderUserID: actor.AuditUserID(),
 		ProviderEmail:  actor.Email,
 		Action:         ActionTenantRead,
 		TargetType:     "tenant",
 		TargetID:       id,
-		Details:        tenantReadAuditDetails,
+		Details:        actor.AuditDetails(tenantReadAuditDetails),
 		IPAddress:      clientIP(r),
 	}); err != nil {
 		fail(http.StatusInternalServerError, "server_error", "audit insert", err)

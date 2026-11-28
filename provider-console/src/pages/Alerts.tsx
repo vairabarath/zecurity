@@ -13,7 +13,7 @@ import {
   type AlertRule,
   type ChannelTestResult,
 } from '@/api/alerts'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import {
   CreateChannelDialog,
@@ -37,6 +37,7 @@ import { formatSeconds, kindLabel, SCOPE_FILTER_LABELS, SEVERITY_LABELS, severit
 import { formatRelative } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
 import { useDetailQuery, type DetailState } from '@/lib/useDetailQuery'
+import { formatMeter, METER_LABELS } from '@/lib/usage-format'
 
 // Alerts (Sprint 24 A3, F26; D-50, D-52, D-53). Four tabs:
 //   Active and History — both roles; the controller gives relay-ops relay and
@@ -53,7 +54,6 @@ const TABS_ALL = [
   { value: 'rules', label: 'Rules' },
   { value: 'channels', label: 'Channels' },
 ] as const
-const TABS_RELAY_OPS = TABS_ALL.slice(0, 2)
 
 const SCOPE_CHIPS = [
   { value: '', label: 'All' },
@@ -63,16 +63,24 @@ const SCOPE_CHIPS = [
 
 export function Alerts() {
   const me = useSessionStore((s) => s.me)
-  const isSuperAdmin = hasRole(me?.role, ['super-admin'])
+  // Sprint 27 O2 (D-73): what each role sees follows the matrix. Full view
+  // (rules, scope filter): super-admin and auditor. Channels and deliveries:
+  // alert.channel.read. Tenant names: tenant.read (support too). Writes
+  // (rule and channel changes): super-admin only. UX only: the server decides.
+  const role = me?.role
+  const fullView = can(role, 'alert.rule.read')
+  const seeChannels = can(role, 'alert.channel.read')
+  const showTenant = can(role, 'tenant.read')
+  const tenantOnly = showTenant && !fullView
   const [sp, setSp] = useSearchParams()
   // console_url in webhook and email payloads is /alerts?event=<id> (A2):
   // open History on that event.
   const eventLink = sp.get('event') ?? ''
   const rawTab = sp.get('tab') ?? (eventLink ? 'history' : 'active')
-  const known: Tab[] = isSuperAdmin ? ['active', 'history', 'rules', 'channels'] : ['active', 'history']
+  const known: Tab[] = ['active', 'history', ...(fullView ? (['rules'] as Tab[]) : []), ...(seeChannels ? (['channels'] as Tab[]) : [])]
   const tab: Tab = (known as string[]).includes(rawTab) ? (rawTab as Tab) : 'active'
   const rawScope = sp.get('scope') ?? ''
-  const scope = isSuperAdmin && (rawScope === 'platform' || rawScope === 'tenant') ? rawScope : ''
+  const scope = fullView && (rawScope === 'platform' || rawScope === 'tenant') ? rawScope : ''
   const [round, setRound] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   const refresh = () => {
@@ -93,9 +101,11 @@ export function Alerts() {
       <PageHeader
         title="Alerts"
         description={
-          isSuperAdmin
+          fullView
             ? 'Platform alerts (relays, pools, control plane, certificates) and tenant alerts (their connectors, shields, relay path, quotas), and where they are sent.'
-            : 'Relay and pool alerts.'
+            : tenantOnly
+              ? 'Tenant alerts: their connectors, shields, relay path and quotas.'
+              : 'Relay and pool alerts.'
         }
         actions={
           <Button variant="outline" onClick={refresh} aria-label="Refresh alerts">
@@ -105,8 +115,8 @@ export function Alerts() {
         }
       />
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <FilterChips label="View" options={isSuperAdmin ? TABS_ALL : TABS_RELAY_OPS} value={tab} onChange={(v) => set('tab', v)} />
-        {isSuperAdmin && (tab === 'active' || tab === 'history') && (
+        <FilterChips label="View" options={TABS_ALL.filter((t) => (known as string[]).includes(t.value))} value={tab} onChange={(v) => set('tab', v)} />
+        {fullView && (tab === 'active' || tab === 'history') && (
           <FilterChips label="Scope" options={SCOPE_CHIPS} value={scope} onChange={(v) => set('scope', v)} />
         )}
       </div>
@@ -115,7 +125,7 @@ export function Alerts() {
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}
-      {tab === 'active' && <ActiveTab round={round} scope={scope} showTenant={isSuperAdmin} />}
+      {tab === 'active' && <ActiveTab round={round} scope={scope} showTenant={showTenant} />}
       {tab === 'history' && (
         // keyed by scope: a new scope starts at its newest page (the cursor
         // stack belongs to one scope).
@@ -123,21 +133,24 @@ export function Alerts() {
           key={scope}
           round={round}
           scope={scope}
-          showTenant={isSuperAdmin}
-          showDeliveries={isSuperAdmin}
+          showTenant={showTenant}
+          showDeliveries={seeChannels}
           focusEvent={eventLink}
         />
       )}
-      {tab === 'rules' && isSuperAdmin && (
+      {tab === 'rules' && fullView && (
         <RulesTab
           round={round}
+          canEdit={can(role, 'alert.rule.update')}
           onDone={(t) => {
             setNotice(t)
             setRound((n) => n + 1)
           }}
         />
       )}
-      {tab === 'channels' && isSuperAdmin && <ChannelsTab round={round} onNotice={setNotice} onChanged={() => setRound((n) => n + 1)} />}
+      {tab === 'channels' && seeChannels && (
+        <ChannelsTab round={round} canEdit={can(role, 'alert.channel.update')} onNotice={setNotice} onChanged={() => setRound((n) => n + 1)} />
+      )}
     </div>
   )
 }
@@ -389,7 +402,7 @@ function DeliveriesDialog({ event, onClose }: { event: AlertEvent; onClose: () =
   )
 }
 
-function RulesTab({ round, onDone }: { round: number; onDone: (text: string) => void }) {
+function RulesTab({ round, canEdit, onDone }: { round: number; canEdit: boolean; onDone: (text: string) => void }) {
   const { state } = useDetailQuery(`rules|${round}`, () => listAlertRules())
   const [editing, setEditing] = useState<AlertRule | null>(null)
   if (state.status !== 'ready') return <NotReady state={state} what="alert rules" />
@@ -419,6 +432,9 @@ function RulesTab({ round, onDone }: { round: number; onDone: (text: string) => 
                     {kindLabel(r.kind)}
                     {r.params.threshold_percent !== undefined && ` · at ${r.params.threshold_percent}%`}
                     {r.params.days !== undefined && ` · within ${r.params.days} days`}
+                    {r.params.meter !== undefined &&
+                      r.params.threshold !== undefined &&
+                      ` · ${METER_LABELS[r.params.meter]} from ${formatMeter(r.params.meter, r.params.threshold)} a month`}
                   </span>
                 </span>
               </TableCell>
@@ -430,9 +446,11 @@ function RulesTab({ round, onDone }: { round: number; onDone: (text: string) => 
               <TableCell className="text-[13px]">{r.renotify_seconds > 0 ? `every ${formatSeconds(r.renotify_seconds)}` : 'never'}</TableCell>
               <TableCell>{r.enabled ? <Badge variant="success">Enabled</Badge> : <Badge variant="secondary">Disabled</Badge>}</TableCell>
               <TableCell className="text-right">
-                <Button variant="outline" size="sm" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}>
-                  Edit
-                </Button>
+                {canEdit && (
+                  <Button variant="outline" size="sm" onClick={() => setEditing(r)} aria-label={`Edit ${r.name}`}>
+                    Edit
+                  </Button>
+                )}
               </TableCell>
             </TableRow>
           ))}
@@ -454,7 +472,17 @@ function RulesTab({ round, onDone }: { round: number; onDone: (text: string) => 
 
 type ChannelAction = { kind: 'edit' | 'test' | 'rotate' | 'delete'; channel: AlertChannel }
 
-function ChannelsTab({ round, onNotice, onChanged }: { round: number; onNotice: (t: string) => void; onChanged: () => void }) {
+function ChannelsTab({
+  round,
+  canEdit,
+  onNotice,
+  onChanged,
+}: {
+  round: number
+  canEdit: boolean
+  onNotice: (t: string) => void
+  onChanged: () => void
+}) {
   const { state } = useDetailQuery(`channels|${round}`, () => listAlertChannels())
   const [creating, setCreating] = useState(false)
   const [action, setAction] = useState<ChannelAction | null>(null)
@@ -475,12 +503,14 @@ function ChannelsTab({ round, onNotice, onChanged }: { round: number; onNotice: 
   }
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex justify-end">
-        <Button onClick={() => setCreating(true)}>
-          <Plus aria-hidden />
-          Add channel
-        </Button>
-      </div>
+      {canEdit && (
+        <div className="flex justify-end">
+          <Button onClick={() => setCreating(true)}>
+            <Plus aria-hidden />
+            Add channel
+          </Button>
+        </div>
+      )}
       {state.status !== 'ready' ? (
         <NotReady state={state} what="alert channels" />
       ) : state.data.items.length === 0 ? (
@@ -518,6 +548,7 @@ function ChannelsTab({ round, onNotice, onChanged }: { round: number; onNotice: 
                   </TableCell>
                   <TableCell>{c.enabled ? <Badge variant="success">Enabled</Badge> : <Badge variant="secondary">Disabled</Badge>}</TableCell>
                   <TableCell className="text-right">
+                    {canEdit && (
                     <span className="inline-flex flex-wrap justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setAction({ kind: 'test', channel: c })} aria-label={`Test ${c.name}`}>
                         Test
@@ -534,6 +565,7 @@ function ChannelsTab({ round, onNotice, onChanged }: { round: number; onNotice: 
                         Delete
                       </Button>
                     </span>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

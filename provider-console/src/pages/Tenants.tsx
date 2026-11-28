@@ -3,7 +3,7 @@ import { Plus, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { listTenants } from '@/api/reads'
 import { TENANT_STATUSES, type AgentCounts, type CreateTenantResponse, type Page, type TenantStatus, type TenantSummary } from '@/api/types'
-import { hasRole } from '@/auth/roles'
+import { can } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
 import { CreateTenantDialog } from '@/components/CreateTenantDialog'
 import { DataState } from '@/components/DataState'
@@ -12,12 +12,14 @@ import { FilterChips } from '@/components/FilterChips'
 import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { StatusBadge } from '@/components/StatusBadge'
+import { ChangePlanDialog } from '@/components/TenantPlan'
 import { SuspendedBadge } from '@/components/TenantSuspension'
 import { TenantAvatar } from '@/components/TenantAvatar'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { toast } from '@/components/ui/use-toast'
 import { agentSummary } from '@/lib/format'
 import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 
@@ -28,7 +30,6 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // Sprint 23 S2 (D-44): super-admins create a tenant here (Create tenant); the
 // controller decides, hiding the button is UX only.
 
-const SUPER_ADMIN = ['super-admin'] as const
 
 const FILTER_KEYS = ['status'] as const
 const ALL = 'all' // chip value for "no status filter" (every status except deleted)
@@ -63,7 +64,15 @@ const STATUS_OPTIONS = [
 export function Tenants() {
   const q = usePagedQuery<Page<TenantSummary>>({ filterKeys: FILTER_KEYS, validate: validStatus, fetchPage: fetchTenants })
   const onStatus = useCallback((v: string) => q.setFilters(v === ALL ? {} : { status: v }), [q])
-  const canCreate = hasRole(useSessionStore((s) => s.me?.role), SUPER_ADMIN)
+  const role = useSessionStore((s) => s.me?.role)
+  const canCreate = can(role, 'tenant.create')
+  // Sprint 27 O2 (D-73): billing has the list (with the plan) and plan
+  // assignment, but not the tenant detail.
+  const canOpen = can(role, 'tenant.read')
+  // Plan assignment on the list is for roles without the detail (billing);
+  // the others change the plan on the tenant's page.
+  const canAssignPlan = can(role, 'tenant.plan.assign') && !canOpen
+  const [planFor, setPlanFor] = useState<TenantSummary | null>(null)
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<CreateTenantResponse | null>(null)
 
@@ -125,6 +134,7 @@ export function Tenants() {
                 <TableRow className="hover:bg-transparent">
                   <TableHead>Tenant</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Plan</TableHead>
                   <TableHead>Connectors</TableHead>
                   <TableHead>Shields</TableHead>
                   <TableHead className="text-right">Networks</TableHead>
@@ -141,9 +151,13 @@ export function Tenants() {
                       <div className="flex items-center gap-3">
                         <TenantAvatar name={t.name} />
                         <div className="flex min-w-0 flex-col">
-                          <Link to={`/tenants/${encodeURIComponent(t.id)}`} className="font-medium text-foreground hover:text-primary">
-                            {t.name}
-                          </Link>
+                          {canOpen ? (
+                            <Link to={`/tenants/${encodeURIComponent(t.id)}`} className="font-medium text-foreground hover:text-primary">
+                              {t.name}
+                            </Link>
+                          ) : (
+                            <span className="font-medium text-foreground">{t.name}</span>
+                          )}
                           <span className="flex flex-col whitespace-nowrap font-mono text-xs text-muted-foreground">
                             <span>{t.slug}</span>
                             <span className="max-w-48 truncate" title={t.trust_domain}>
@@ -158,6 +172,16 @@ export function Tenants() {
                         <StatusBadge status={t.status} />
                         {/* Sprint 23 S1 (D-45): status stays "active" while suspended. */}
                         {t.suspension && <SuspendedBadge />}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-[13px]">
+                      <div className="flex flex-col items-start gap-1">
+                        <span data-plan-cell>{t.current_plan?.name ?? '—'}</span>
+                        {canAssignPlan && (
+                          <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setPlanFor(t)} aria-label={`Change plan of ${t.name}`}>
+                            Change plan
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="min-w-28 max-w-36 text-[13px] leading-snug text-subtle-foreground">
@@ -190,6 +214,17 @@ export function Tenants() {
           </Card>
         )}
       </DataState>
+      {planFor && (
+        <ChangePlanDialog
+          tenant={{ id: planFor.id, name: planFor.name, planId: planFor.current_plan?.id ?? null }}
+          onCancel={() => setPlanFor(null)}
+          onDone={(n) => {
+            setPlanFor(null)
+            toast({ title: n.text })
+            q.retry()
+          }}
+        />
+      )}
     </div>
   )
 }

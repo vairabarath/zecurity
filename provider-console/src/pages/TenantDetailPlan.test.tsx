@@ -98,6 +98,30 @@ describe('Tenant detail: Plan', () => {
     ])
   })
 
+  it('Change plan says limits change now and billing from next month, naming the month-start card (D-65)', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({
+      [`GET /provider/tenants/${ID}`]: { status: 200, body: tenant({ billing_plan: { id: 'p-start', name: 'Starter' } }) },
+      'GET /provider/plans': { status: 200, body: { items: PLANS } },
+    })
+    renderApp(`/tenants/${ID}`)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Change plan' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Change plan' }))
+    expect(dialog.getByText(/Limits change now/)).toBeInTheDocument()
+    expect(dialog.getByTestId('billing-from-next-month')).toHaveTextContent(
+      'Billing changes from next month; this month is billed at the Starter card as it was on the 1st.',
+    )
+  })
+
+  it('without a billing plan from the controller, the current plan is named', async () => {
+    signedInAs(superAdminMe)
+    mockFetch({ [`GET /provider/tenants/${ID}`]: { status: 200, body: tenant() }, 'GET /provider/plans': { status: 200, body: { items: PLANS } } })
+    renderApp(`/tenants/${ID}`)
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Change plan' }))
+    expect(await screen.findByTestId('billing-from-next-month')).toHaveTextContent('billed at the Free card')
+  })
+
   it('relay-ops get no Change plan control (the section itself; the page is super-admin only)', () => {
     signedInAs(relayOpsMe)
     render(

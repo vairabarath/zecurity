@@ -21,8 +21,16 @@ export interface RecordedCall {
 
 type Route = FakeResponse | ((call: RecordedCall) => FakeResponse) | 'network-error'
 
+// The Layout's break-glass banner (Sprint 27 O2, D-75) reads
+// GET /provider/break-glass on every page a super-admin opens. Unless a test
+// routes it itself, it is answered with no events and kept out of `calls`
+// (recorded in `bannerCalls`), so page tests keep counting only the page's
+// own requests.
+const BANNER_ROUTE = 'GET /provider/break-glass'
+
 export function mockFetch(routes: Record<string, Route>) {
   const calls: RecordedCall[] = []
+  const bannerCalls: RecordedCall[] = []
   const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://console.test')
     const call: RecordedCall = {
@@ -32,8 +40,13 @@ export function mockFetch(routes: Record<string, Route>) {
       headers: { ...(init?.headers as Record<string, string> | undefined) },
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     }
+    const key = `${call.method} ${call.path}`
+    if (key === BANNER_ROUTE && routes[key] === undefined) {
+      bannerCalls.push(call)
+      return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
     calls.push(call)
-    const route = routes[`${call.method} ${call.path}`]
+    const route = routes[key]
     if (route === undefined) throw new Error(`unexpected request ${call.method} ${call.path}`)
     if (route === 'network-error') throw new TypeError('Failed to fetch')
     const r = typeof route === 'function' ? route(call) : route
@@ -44,7 +57,7 @@ export function mockFetch(routes: Record<string, Route>) {
     })
   })
   vi.stubGlobal('fetch', fn)
-  return { fn, calls }
+  return { fn, calls, bannerCalls }
 }
 
 export const superAdminMe: Me = {
