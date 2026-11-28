@@ -19,7 +19,8 @@ import (
 )
 
 // Invoice API (Sprint 26 P3, F34; D-66, D-68, D-70). Billing is tenant data:
-// super-admin only (invoice.read / invoice.write; relay-ops 403). Every
+// invoice.read (super-admin, auditor, billing) / invoice.write (super-admin,
+// billing) since D-73; relay-ops and support 403. Every
 // response is Cache-Control: no-store.
 //
 //	GET  /provider/invoices?month=YYYY-MM&status=&tenant_id=&cursor=&limit=   (audit invoice.fleet.read, one row)

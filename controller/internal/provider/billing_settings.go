@@ -16,7 +16,8 @@ import (
 )
 
 // Billing settings API (Sprint 26 P1b, F34; D-64, D-67, D-68, D-69, D-70).
-// Billing is tenant data: super-admin only (relay-ops 403, by decide()).
+// Billing is tenant data: super-admin and billing write, auditor reads too
+// (D-73); relay-ops and support 403, by decide().
 //
 //	GET   /provider/billing/settings  (plan.read)  → settings + countries
 //	PATCH /provider/billing/settings  (billing.settings.write)

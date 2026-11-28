@@ -187,10 +187,11 @@ func (h *ReadHandlers) GetRelayPool(w http.ResponseWriter, r *http.Request) {
 
 // ── tenants ──────────────────────────────────────────────────────────────────
 
-// ListTenants: GET /provider/tenants?status=&limit=&cursor=  (not audited)
+// ListTenants: GET /provider/tenants?status=&limit=&cursor=  (not audited;
+// tenant.list.read, D-73)
 func (h *ReadHandlers) ListTenants(w http.ResponseWriter, r *http.Request) {
 	actor, ok := h.actor(w, r)
-	if !ok || !h.allowed(w, h.authz.CanReadTenants(actor, Target{Type: "tenant"})) {
+	if !ok || !h.allowed(w, h.authz.CanListTenants(actor)) {
 		return
 	}
 	q := r.URL.Query()

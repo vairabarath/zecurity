@@ -160,8 +160,9 @@ func (e *env) do(t *testing.T, role, method, path string, body any) resp {
 	req := httptest.NewRequest(method, path, strings.NewReader(raw))
 	req.RemoteAddr = "192.0.2.10:54321"
 	actor := provider.Actor{UserID: e.superID, Email: "admin@provider.test", Role: provider.RoleSuperAdmin}
-	if role == provider.RoleRelayOps {
-		actor = provider.Actor{UserID: e.opsID, Email: "ops@provider.test", Role: provider.RoleRelayOps}
+	if role != provider.RoleSuperAdmin {
+		// relay-ops and the Sprint 27 roles share the second operator row.
+		actor = provider.Actor{UserID: e.opsID, Email: "ops@provider.test", Role: role}
 	}
 	req = req.WithContext(provider.WithActor(req.Context(), actor))
 	rec := httptest.NewRecorder()

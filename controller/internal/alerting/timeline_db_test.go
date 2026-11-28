@@ -294,3 +294,68 @@ func TestRelayOpsTimelineAuditActions(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 27 O1 (D-73): auditor sees what a super-admin sees; support sees
+// tenant alerts only (never usage alerts, platform alerts or audit rows);
+// billing has no alert.read.
+func TestAlertsDB_NewRoleViews(t *testing.T) {
+	e := timelineEnv(t)
+	f := seedTimeline(t, e)
+	e.exec(t, `INSERT INTO alert_events (rule_id, kind, scope, tenant_id, target_type, target_id, target_name,
+	               transition, status, severity, summary, started_at, occurred_at)
+	           VALUES ($1, $2, 'tenant', $3::uuid, 'tenant', $3::text, 'acme', 'fired', 'firing', 'warning', 'acme usage 600 GB', $4, $4)`,
+		ruleUsageOver, KindTenantUsageOver, f.tenant, f.t0.Add(270*time.Second))
+
+	// auditor = super-admin, row for row.
+	for _, q := range []url.Values{{}, {"tenant_id": {f.tenant}}, {"source": {"audit"}}} {
+		sa := labels(f, getTimeline(t, e, provider.RoleSuperAdmin, q).Items)
+		if au := labels(f, getTimeline(t, e, provider.RoleAuditor, q).Items); au != sa {
+			t.Fatalf("auditor timeline %v:\n got %s\nwant %s", q, au, sa)
+		}
+	}
+	sa := e.do(t, provider.RoleSuperAdmin, "GET", "/provider/alert-events", nil)
+	if au := e.do(t, provider.RoleAuditor, "GET", "/provider/alert-events", nil); au.code != 200 || au.body != sa.body {
+		t.Fatalf("auditor events differ: %d %s", au.code, au.body)
+	}
+
+	// support: the tenant's connector alert only.
+	sup := provider.RoleSupport
+	for _, q := range []url.Values{{}, {"tenant_id": {f.tenant}}} {
+		if got := labels(f, getTimeline(t, e, sup, q).Items); got != "alert:acme-connector/fired@240" {
+			t.Fatalf("support timeline %v: %s", q, got)
+		}
+	}
+	if got := getTimeline(t, e, sup, url.Values{"source": {"audit"}}); len(got.Items) != 0 {
+		t.Fatalf("support saw audit rows: %s", labels(f, got.Items))
+	}
+	r := e.do(t, sup, "GET", "/provider/alert-events", nil)
+	if r.code != 200 || !strings.Contains(r.body, KindConnectorOffline) {
+		t.Fatalf("support events: %d %s", r.code, r.body)
+	}
+	for _, leak := range []string{KindRelayOffline, KindPoolNoEligibleRelay, KindTenantUsageOver, "600 GB"} {
+		if strings.Contains(r.body, leak) {
+			t.Fatalf("support events contain %q: %s", leak, r.body)
+		}
+	}
+	for _, path := range []string{"/provider/alert-events?scope=platform", "/provider/alerts?scope=platform"} {
+		if r := e.do(t, sup, "GET", path, nil); r.code != 200 || strings.Contains(r.body, "relay") {
+			t.Fatalf("support %s: %d %s", path, r.code, r.body)
+		}
+	}
+
+	// billing: no alerts, no timeline. Rule management stays super-admin
+	// only for every new role.
+	for _, path := range []string{"/provider/alerts", "/provider/alert-events", "/provider/timeline"} {
+		if r := e.do(t, provider.RoleBilling, "GET", path, nil); r.code != 403 {
+			t.Fatalf("billing %s: %d", path, r.code)
+		}
+	}
+	for _, role := range []string{provider.RoleAuditor, provider.RoleBilling, provider.RoleSupport} {
+		if r := e.do(t, role, "PATCH", "/provider/alert-rules/"+ruleRelayOffline, map[string]any{"enabled": true, "reason": "x"}); r.code != 403 {
+			t.Fatalf("%s rule update: %d", role, r.code)
+		}
+	}
+	if r := e.do(t, provider.RoleAuditor, "GET", "/provider/alert-rules", nil); r.code != 200 {
+		t.Fatalf("auditor rule read: %d", r.code)
+	}
+}

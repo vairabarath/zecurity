@@ -10,7 +10,7 @@
 
 **Sprint 27 is the active sprint: provider access and API (F19, F20, F35).** Started 2026-11-27. Decisions **D-71 … D-76** are made (Decision Record amendment **2026-11-23, provider access**). The documents were signed off on 2026-11-23 by Sathiya (as for Sprint 26); Barath reviews them in PR #252. Sprint 26 (F34) is **merged and live-checked** (acceptance PASS 2026-11-26, #260 `7ee717bc`); F34 is ticked. Sprint 27 adds roles, loud break-glass and read-only API keys: **no agent change, no external IdP, no impersonation, no keys that write.**
 - **X4 — Sprint 26 follow-ups**, Sathiya: **done** — the acceptance run's one finding (a purged tenant's final invoice) was fixed in #260.
-- **O1 — role matrix + roles (D-72, D-73, D-74)**, Barath, merged first (the contract with K1 and O2):
+- **O1 — role matrix + roles (D-72, D-73, D-74)**, Barath (**built by Sathiya, takeover 2026-11-27**; live PASS, PR pending), merged first (the contract with K1 and O2):
   - `decide()` becomes an explicit role → actions table; existing roles keep exactly today's permissions; an action with no entry is denied to every role except super-admin;
   - new roles `auditor` (all reads), `billing` (cards, billing settings, invoices, usage, tenant list, plan assignment), `support` (tenant reads, the tenant's alerts and timeline, health); TOTP mandatory for all three; `075_provider_roles`.
 - **G1 — loud break-glass (D-75)**, Barath, after O1: `recover-admin --reason` on the controller host is the only path; each use raises a critical `provider.break_glass_used` alert, emails every super-admin and shows a console banner until acknowledged; `077_provider_alert_kinds` (also holds K1's `api_key.expiring`).

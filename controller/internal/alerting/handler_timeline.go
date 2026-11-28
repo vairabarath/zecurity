@@ -102,7 +102,14 @@ func (h *TimelineHandler) List(w http.ResponseWriter, r *http.Request) {
 		f.AuditActions = provider.RelayOpsTimelineAuditActions
 		f.OmitAuditDetails = true
 	}
-	if actor.Role != provider.RoleSuperAdmin {
+	switch viewFor(actor.Role) {
+	case viewAll:
+	case viewTenant:
+		// support: tenant alerts only (no usage alerts), as A1's reads; no
+		// audit rows (neither audit.view nor timeline.relay_audit).
+		f.AlertScope = ScopeTenant
+		f.AlertKinds = SupportKinds()
+	default:
 		// relay-ops: platform relay and pool alerts only, as A1's reads; a
 		// tenant filter gets nothing at all.
 		if f.TenantID != "" {

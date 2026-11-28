@@ -5,7 +5,7 @@ owner: Barath (Person 1, M2)
 features: [F19 provider admin roles, F20 break-glass]
 phases: [O1, G1]
 decisions: [D-71, D-72, D-73, D-74, D-75, D-05, D-06, D-26, D-28, D-31, D-50]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 next (migration 075_; latest on main is 074_invoices)
+status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 built by Sathiya (takeover, 2026-11-27, branch feat/sprint27-o1-role-matrix), live PASS; G1 next
 ---
 
 # Sprint 27 — Barath: O1 role matrix and roles (F19), G1 loud break-glass (F20)
@@ -70,6 +70,62 @@ Order: **O1 (merged first: the contract for K1 and O2) → G1**.
   - billing: issue an invoice → 200, suspend a tenant → 403;
   - support: tenant detail → 200 (audited), `GET /provider/invoices` → 403.
 - relay-ops spot-checks unchanged (drain 200, revoke 403).
+
+### Implementation record (built by Sathiya, takeover 2026-11-27)
+
+Barath's phase, built by Sathiya at Sathiya's instruction (as P1a–P2 in Sprint 26). Branch `feat/sprint27-o1-role-matrix` from `main` `6d25b6bd`.
+
+- **`075_provider_roles.sql`:** drops and re-adds `provider_users_role_check` with the five roles; `025_` untouched.
+- **Matrix (`internal/provider/authz.go`):**
+  - `roleActions`: an explicit action list per role (`relay-ops`, `auditor`, `billing`, `support`). `decide()`: super-admin → allow; otherwise allowed iff the role's list has the action. The prefix rule, `relayOpsAlsoAllowed` and `superAdminOnlyRelayActions` are gone.
+  - `relay-ops` = the pre-O1 outcome exactly: 14 actions, compared with a dump of the old `decide()` over all 62 action constants taken before the rewrite. It includes the audit-row name `relay.placement_rejected`, which the old prefix rule allowed.
+  - `actionClasses`: every `Action*` constant is `read`, `write` or `auditOnly` (audit-row names such as `invoice.issue`, `tenant.purged`). `IsWriteAction` = anything not a classified read (unknown → write, fail closed) for K1.
+  - `Roles` lists the five roles; `ValidRole` uses it.
+- **Choice made in the PR (the phase file asked for it):** a narrow **`tenant.list.read`** gates `GET /provider/tenants`, so `billing` gets the tenant list (the same summary rows as other roles: name, slug, status, counts, suspension/deletion state) but not the detail with agents (`tenant.read`). super-admin, auditor and support have both.
+- **Role → access (D-73):**
+  - `auditor`: every classified read (relays, pools, relay and tenant metrics, tenants, usage, plan cards + billing settings via `plan.read`, invoices, alerts, alert rules and channels, timeline, provider audit log, PKI, health). Not the operator list (`provider_user.manage` is a write): operator management stays super-admin only.
+  - `billing`: `plan.read`, `plan.create`, `plan.update`, `tenant.plan.assign`, `billing.settings.write`, `invoice.read`, `invoice.write`, `tenant.usage.read`, `tenant.list.read`. Plan delete and set-default stay super-admin only, as the phase file lists.
+  - `support`: `tenant.read`, `tenant.list.read`, `alert.read`, `health.read`.
+- **Alert and timeline visibility (`internal/alerting/reads.go`, `handler.go`, `handler_timeline.go`):** `viewFor(role)`: super-admin and auditor see everything; **support sees tenant-scope alerts except `tenant.usage_over`** (support never sees usage, D-73), no platform alerts and no audit rows in the timeline; every other role keeps the relay-ops view (unchanged). Choice to confirm: excluding usage alerts from support.
+- **TOTP (D-74):** `RequiresTOTP` → `roleRequiresTOTP` (super-admin, auditor, billing, support) or TOTP enabled.
+- Doc comments updated where they said "super-admin only" for billing, invoices, usage and health. The console (`roles.ts`, operator dialogs) is O2.
+
+**Tests:**
+- `authz_matrix_test.go`:
+  - every `Action*` constant (parsed from `authz.go`) has a class, and the class table has nothing else;
+  - the full table: every constant × every role plus non-roles (`""`, `admin`, `Auditor`, `billing `, `api_key`) against an expectation written independently of `roleActions`, with relay-ops pinned to the pre-O1 fixture;
+  - deny by default for unknown actions (incl. a new `relay.*` verb);
+  - role boundaries; `IsWriteAction`; tenant list vs detail; `RequiresTOTP`; `ValidRole`.
+- DB-backed:
+  - `TestTOTP_NewRolesMustEnrol`: password change → `mfa=enroll` → enrol → full session → later sign-in asks `verify`;
+  - `TestChangeRole_NewRolesEndSessions`: role changes to and from each new role end sessions; new roles get 403 on operator routes; an unknown role → 400;
+  - `TestOperatorGuards_LastSuperAdmin_NewRoles`: the last super-admin can't be demoted to a new role, and the DB CHECK accepts the new roles and refuses `owner`;
+  - `TestAlertsDB_NewRoleViews`: auditor = super-admin row for row; support only the tenant's connector alert (no relay, pool or usage alert, no audit rows); billing 403 on alerts and timeline; no new role manages rules.
+- **Mutation checks (each made a test fail):**
+  - the old prefix rule kept;
+  - an unclassified constant;
+  - an auditor write (`relay.drain`);
+  - billing given `tenant.suspend`;
+  - support given `invoice.read`;
+  - TOTP optional for billing;
+  - relay-ops losing drain;
+  - support shown usage alerts;
+  - support given the full alert view.
+
+**Gate (2026-11-27):** `go build ./... && go vet ./...` clean; full `go test -count=1 ./...` with every DB variable set (PKI, AUTH, ENROLLMENT, RESOURCE, SHIELD, `AUTH_TEST_VALKEY_URL` db 15): 50 packages ok, 0 failures, only the 2 known hard-coded skips; the six new DB-backed tests ran (none skipped). No console change in O1.
+
+**Live check (2026-11-27): PASS.**
+- **Setup:** local controller from the branch (sha256 `c2b7e2c4…`) on a fresh DB (migrations through `075_`), mail capture on 127.0.0.1:2525; driver `~/.cache/zecurity-s27/o1live.py`.
+- **TOTP:** each of `auditor`, `billing` and `support` was created by the super-admin. After its password change each got `mfa=enroll`, its enrol-stage token got 403 on `/provider/me`, and it enrolled; every later sign-in asked for `verify`. `relay-ops` got a full session without TOTP.
+- **Route matrix: 119 of 120 checks as expected** (17 reads and 12 writes per role, the TOTP verify prompts and the audit check).
+  - auditor: every read 200 except `/provider/users` (403); every write 403.
+  - billing: tenants list 200, tenant detail 403; plans, billing settings, invoices and usage 200; created a card (201), changed billing settings (200) and assigned a plan (200); relay, tenant suspend, quota, plan delete, alert-rule and operator writes 403; alerts and timeline 403.
+  - support: tenant list and detail, health, alerts and timeline 200; invoices, usage, plans, billing settings, audit and every write 403.
+  - relay-ops: unchanged (relay reads, relay create 201, resume 204, revoke 403, tenant routes 403).
+  - The one non-match: relay-ops **drain → 409 `invalid_state`**, because the test relay was never enrolled (`pending`; no relay host for this check). Authorization passed (not 403); drain itself is unchanged.
+- **Audit:** tenant detail reads are audited as `tenant.read` under `auditor@s27.test` and `support@s27.test`. Billing's writes are audited under its own email with the reason: `plan.create`, `billing.settings.update`, `invoice.issue`.
+- **Invoice:** with the dev test clock (`BILLING_TEST_NOW=2026-12-01T06:05:00Z`), November closed with 1 draft. `billing` issued it (204); auditor and support void → 403; billing suspend with the correct slug → 403.
+- Not run live: a real drain (needs an enrolled relay); the console (O2).
 
 ---
 
