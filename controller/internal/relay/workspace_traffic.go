@@ -16,11 +16,11 @@ import (
 // A relay reports, per trust domain, the bytes it bridged in each direction
 // since it started and its open streams (heartbeat field 13). The controller
 // maps each trust domain to its workspace, ignores (and logs) any it doesn't
-// know, and keeps the result in memory (D-02: one controller). Rates use the
-// same window and restart rules as the relay totals (B2, F5): they are taken
-// on the heartbeat's database-write cadence, a counter that went down or an
-// uptime shorter than the gap means a restart, and then there is no rate for
-// that window, never a negative or invented one.
+// know, and keeps the result in memory (D-02: one controller). Rates are
+// taken on the heartbeat's database-write cadence. A relay restart (its
+// uptime didn't grow by the gap) or a counter that went down gives no rate
+// for that window, never a negative or invented one. The F23 fixes
+// (2026-11-24) are documented on Record.
 //
 // Pre-production refinement (2026-11-21): every relay is rebuilt with R1, so
 // an empty field 13 means the relay carried no tenant traffic (0). "Not
@@ -62,25 +62,59 @@ type RelayWorkspaceTraffic struct {
 type WorkspaceTrafficTracker struct {
 	mu     sync.Mutex
 	relays map[string]*relayTraffic
+	// maxGap: a longer window between two readings has no rate (rule 5).
+	// Zero means no limit.
+	maxGap time.Duration
 }
 
 type relayTraffic struct {
 	at     time.Time
+	uptime uint64
 	totals map[string]WorkspaceTrafficSample
-	view   RelayWorkspaceTraffic
+	// domains is this reading's trust domain → workspace id, "" for a trust
+	// domain that matched no active workspace (F23 R1-1 rule 4). In memory
+	// only, for one reading; never stored. Replaced at
+	// every reading, so it never holds more than one heartbeat's entries.
+	domains map[string]string
+	view    RelayWorkspaceTraffic
 }
 
 func NewWorkspaceTrafficTracker() *WorkspaceTrafficTracker {
 	return &WorkspaceTrafficTracker{relays: map[string]*relayTraffic{}}
 }
 
-// restartSlackSeconds matches B2's bytesRateValid: heartbeat delivery jitter.
+// WithMaxGap sets rule 5's limit: a window longer than d has no rate. main.go
+// passes the sampler's TrafficMaxAge, so a gap is rejected exactly when the
+// previous reading would already count as not reported.
+func (t *WorkspaceTrafficTracker) WithMaxGap(d time.Duration) *WorkspaceTrafficTracker {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.maxGap = d
+	return t
+}
+
+// restartSlackSeconds tolerates heartbeat delivery jitter and the relay's
+// whole-second uptime: the same 5 s as B2's bytesRateValid.
 const restartSlackSeconds = 5
 
 // Record stores a relay's per-workspace counters taken at `at` and derives
-// rates from its previous sample. A sample not newer than the stored one (a
-// late heartbeat) changes nothing.
-func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample) {
+// rates from its previous reading. A sample not newer than the stored one (a
+// late heartbeat) changes nothing. domains maps every trust domain the relay
+// reported to its workspace id, "" when it matched none (nil: not known).
+//
+// Rates (F23 R1-1, agreed 2026-11-23, option D):
+//  1. In a continuous window, a workspace with a previous counter rates from
+//     it; one absent from the previous reading rates from zero (the relay
+//     reports every entry that ever carried bytes, so absent means zero).
+//  2. A window that isn't continuous (first reading, relay restart) has no
+//     rate for any workspace on the relay. Restart: U_now < U_prev + gap − 5 s.
+//  3. A counter that went down (reset or re-created entry) has no rate.
+//  4. A workspace whose trust domain was unmatched, or another workspace's,
+//     in the previous reading gets no zero baseline: that counter may be
+//     long-lived (a purged tenant's slug can be reused).
+//  5. A window longer than maxGap has no rate. Every reading, rated or not,
+//     is the baseline for the next one.
+func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSeconds uint64, samples map[string]WorkspaceTrafficSample, domains map[string]string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	prev := t.relays[relayID]
@@ -92,7 +126,8 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 	continuous := false
 	if prev != nil {
 		gap = at.Sub(prev.at).Seconds()
-		continuous = gap > 0 && float64(uptimeSeconds)+restartSlackSeconds >= gap
+		continuous = gap > 0 && !restarted(prev.uptime, uptimeSeconds, gap) &&
+			(t.maxGap <= 0 || at.Sub(prev.at) <= t.maxGap)
 	}
 	if continuous {
 		view.WindowSeconds = gap
@@ -101,14 +136,45 @@ func (t *WorkspaceTrafficTracker) Record(relayID string, at time.Time, uptimeSec
 	for ws, cur := range samples {
 		totals[ws] = cur
 		r := WorkspaceRate{ActiveStreams: cur.ActiveStreams}
-		if p, ok := prev.totalsFor(ws); continuous && ok && cur.ToClient >= p.ToClient && cur.ToConnector >= p.ToConnector {
-			toClient := float64(cur.ToClient-p.ToClient) / gap
-			toConnector := float64(cur.ToConnector-p.ToConnector) / gap
-			r.ToClientBytesPerSec, r.ToConnectorBytesPerSec = &toClient, &toConnector
+		if continuous {
+			base, ok := prev.totalsFor(ws)
+			if !ok && !prev.zeroBaselineAllowed(ws, domains) {
+				view.Workspaces[ws] = r
+				continue
+			}
+			if cur.ToClient >= base.ToClient && cur.ToConnector >= base.ToConnector {
+				toClient := float64(cur.ToClient-base.ToClient) / gap
+				toConnector := float64(cur.ToConnector-base.ToConnector) / gap
+				r.ToClientBytesPerSec, r.ToConnectorBytesPerSec = &toClient, &toConnector
+			}
 		}
 		view.Workspaces[ws] = r
 	}
-	t.relays[relayID] = &relayTraffic{at: at, totals: totals, view: view}
+	t.relays[relayID] = &relayTraffic{at: at, uptime: uptimeSeconds, totals: totals, domains: domains, view: view}
+}
+
+// restarted is the combined restart check (agreed 2026-11-24): the relay's
+// uptime, a monotonic clock (Rust Instant), must have grown by the gap, less
+// the tolerance. It catches a restart just after the previous reading, for a
+// young relay too, and contains the older uptime + 5 >= gap test (prev = 0).
+func restarted(prevUptime, uptime uint64, gapSeconds float64) bool {
+	return float64(uptime) < float64(prevUptime)+gapSeconds-restartSlackSeconds
+}
+
+// zeroBaselineAllowed reports whether ws, absent from this (previous)
+// reading, may rate from zero: none of its trust domains in the current
+// reading was reported here as unmatched or as another workspace's (rule 4).
+// Either way the relay entry existed and its counter may be long-lived.
+func (r *relayTraffic) zeroBaselineAllowed(ws string, current map[string]string) bool {
+	for td, id := range current {
+		if id != ws {
+			continue
+		}
+		if was, seen := r.domains[td]; seen && was != ws {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *relayTraffic) totalsFor(ws string) (WorkspaceTrafficSample, bool) {
@@ -200,11 +266,11 @@ func (s *Service) recordWorkspaceTraffic(ctx context.Context, relayID string, at
 	if s.workspaceTraffic == nil || s.workspaceLookup == nil {
 		return
 	}
-	samples, ok := s.workspaceSamples(ctx, relayID, req)
+	samples, seen, ok := s.workspaceSamples(ctx, relayID, req)
 	if !ok {
 		return
 	}
-	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples)
+	s.workspaceTraffic.Record(relayID, at, req.GetUptimeSeconds(), samples, seen)
 	s.recordUsage(ctx, relayID, at, req, samples)
 }
 
@@ -217,7 +283,7 @@ func (s *Service) recordWorkspaceUsage(ctx context.Context, relayID string, at t
 	if s.usageSink == nil || s.workspaceLookup == nil {
 		return
 	}
-	samples, ok := s.workspaceSamples(ctx, relayID, req)
+	samples, _, ok := s.workspaceSamples(ctx, relayID, req)
 	if !ok {
 		return
 	}
@@ -236,7 +302,7 @@ func (s *Service) recordUsage(ctx context.Context, relayID string, at time.Time,
 
 // workspaceSamples resolves a heartbeat's field 13 to workspace ids. ok is
 // false when the lookup failed (nothing may be recorded for this heartbeat).
-func (s *Service) workspaceSamples(ctx context.Context, relayID string, req *relaypb.HeartbeatRequest) (map[string]WorkspaceTrafficSample, bool) {
+func (s *Service) workspaceSamples(ctx context.Context, relayID string, req *relaypb.HeartbeatRequest) (map[string]WorkspaceTrafficSample, map[string]string, bool) {
 	entries := req.GetWorkspaceTraffic()
 	domains := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -245,22 +311,26 @@ func (s *Service) workspaceSamples(ctx context.Context, relayID string, req *rel
 	byDomain, err := s.workspaceLookup.ActiveWorkspacesByTrustDomain(ctx, domains)
 	if err != nil {
 		log.Printf("relay heartbeat: workspace traffic %s: %v — not recorded this window", relayID, err)
-		return nil, false
+		return nil, nil, false
 	}
 	samples := make(map[string]WorkspaceTrafficSample, len(entries))
+	seen := make(map[string]string, len(entries))
 	for _, e := range entries {
 		ws, ok := byDomain[e.GetTrustDomain()]
 		if !ok {
+			// Remembered for one reading as unmatched (R1-1 rule 4), never stored.
+			seen[e.GetTrustDomain()] = ""
 			log.Printf("relay heartbeat: workspace traffic %s: ignoring unknown or inactive trust domain %q", relayID, e.GetTrustDomain())
 			continue
 		}
+		seen[e.GetTrustDomain()] = ws
 		cur := samples[ws]
 		cur.ToConnector += e.GetBytesClientToConnector()
 		cur.ToClient += e.GetBytesConnectorToClient()
 		cur.ActiveStreams += e.GetActiveStreams()
 		samples[ws] = cur
 	}
-	return samples, true
+	return samples, seen, true
 }
 
 // WorkspaceUsageSink receives every heartbeat's per-workspace cumulative

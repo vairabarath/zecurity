@@ -165,7 +165,17 @@ Tracker: F23 and F26 (and F27 if built) ticked only after their live checks.
 
 ## Post-Sprint Fixes
 
-_None yet._
+**F23 findings (live run 2026-11-23), branch `fix/sprint24-f23-findings` (PR A).** Details, tests and the R1 freshness-threshold table are in `Member1-Barath/Phases-R1-M1-M2-Timeseries.md` → Post-Phase Fixes.
+- **R1-1:** a new tenant's first window rates from zero. There is no zero baseline after a restart, a counter decrease, or a domain unmatched or belonging to another tenant in the previous reading. Known limitation (re-created entry above its old counter) tested; the entry epoch is deferred.
+- **Tracker:**
+  - combined restart check `U_now < U_prev + gap − 5 s`;
+  - rule 5, a gap above `TrafficMaxAge` gives no rate;
+  - the window uses the monotonic clock.
+- **R1-2:** a relay view without a window → no tenant bytes that minute (streams still).
+- **R1-3 B:** byte rates only from live relays (heartbeat ≤ 75 s).
+- **Rule 6:** a left-out relay that may still carry a tenant's traffic (recent reading, or a connector still placed on it) → that tenant's bytes are a gap. A live relay without a fresh view → no tenant relay sample.
+- **M1-1:** a re-roll never thins an hour's roll-up.
+- **Not here:** R1-3 C, M2-1, M2-2 and M2-3 (console, PR B). The purged-slug reuse is logged separately (`Planning/Security-Finding-Purged-Slug-Reuse.md`).
 
 ## Out of scope
 

@@ -302,7 +302,11 @@ func main() {
 	relaySvc.WithPolicyLease(relayPolicyLease)
 	// Sprint 24 R1 (D-54): per-workspace relay traffic from heartbeat field
 	// 13, kept in memory (D-02). M1's sampler reads relayWorkspaceTraffic.
-	relayWorkspaceTraffic := relay.NewWorkspaceTrafficTracker()
+	// One freshness limit for R1 (F23 fixes, 2026-11-24): a reading older than
+	// this is not reported (sampler), and a longer gap between two readings has
+	// no rate (tracker rule 5). Two DB-write windows plus a minute.
+	trafficMaxAge := 2*relayHeartbeatDBWrite + time.Minute
+	relayWorkspaceTraffic := relay.NewWorkspaceTrafficTracker().WithMaxGap(trafficMaxAge)
 	relaySvc.WithWorkspaceTraffic(relayWorkspaceTraffic, relayStore)
 	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
 		rs, err := relayStore.ListRevokedRelaySerials(ctx)
@@ -1239,7 +1243,8 @@ func main() {
 	metricSampler := &metricstore.Sampler{
 		DB:              db.Pool,
 		Traffic:         relayWorkspaceTraffic,
-		TrafficMaxAge:   2*relayHeartbeatDBWrite + time.Minute,
+		TrafficMaxAge:   trafficMaxAge,
+		Heartbeats:      relaySvc, // Valkey liveness: byte rates only while live (F23 R1-3 B)
 		SampleRetention: mustDuration("METRIC_SAMPLE_RETENTION", providerquery.SampleRetention),
 		RollupRetention: mustDuration("METRIC_ROLLUP_RETENTION", providerquery.RollupRetention),
 	}

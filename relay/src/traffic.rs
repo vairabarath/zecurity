@@ -171,6 +171,46 @@ mod tests {
         assert!(t.snapshot().is_empty());
     }
 
+    /// F23 R1-1 relies on this (agreed 2026-11-23): the controller counts a
+    /// workspace absent from a report as a zero counter. That only holds if an
+    /// idle entry that ever carried bytes is still reported: the snapshot
+    /// filter tests the cumulative counters, not recent activity.
+    #[test]
+    fn idle_entry_with_bytes_is_still_reported() {
+        let t = TrafficTable::new();
+        let s = t.open_stream("ws-quiet.zecurity.in", "dddd");
+        add(&s, 3, 0);
+        drop(s);
+        let snap = t.snapshot();
+        assert_eq!(
+            snap,
+            vec![WorkspaceTraffic {
+                trust_domain: "ws-quiet.zecurity.in".into(),
+                bytes_client_to_connector: 3,
+                bytes_connector_to_client: 0,
+                active_streams: 0,
+            }],
+            "an idle entry with bytes stays in every report"
+        );
+        assert_eq!(t.snapshot(), snap, "and in the next one too");
+    }
+
+    /// A pruned entry is gone; re-opening it starts a new counter at zero. The
+    /// controller sees it absent (zero baseline) or lower (no rate), never an
+    /// inflated window (F23 R1-1).
+    #[test]
+    fn prune_then_reopen_restarts_at_zero() {
+        let t = TrafficTable::new();
+        add(&t.open_stream("ws-moved.zecurity.in", "eeee"), 500, 5000);
+        assert_eq!(t.prune(|_| false), 1);
+        assert!(t.snapshot().is_empty(), "pruned: absent from the report");
+        let s = t.open_stream("ws-moved.zecurity.in", "eeee");
+        add(&s, 1, 10);
+        let snap = t.snapshot();
+        assert_eq!(snap[0].bytes_client_to_connector, 1);
+        assert_eq!(snap[0].bytes_connector_to_client, 10);
+    }
+
     #[test]
     fn prune_drops_only_idle_entries_of_disallowed_workspaces() {
         let t = TrafficTable::new();

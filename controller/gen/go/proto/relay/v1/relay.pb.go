@@ -471,11 +471,15 @@ func (x *HeartbeatRequest) GetWorkspaceTraffic() []*WorkspaceTraffic {
 
 // Sprint 24 R1 (D-54): one workspace's share of the relay's traffic.
 type WorkspaceTraffic struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	TrustDomain            string                 `protobuf:"bytes,1,opt,name=trust_domain,json=trustDomain,proto3" json:"trust_domain,omitempty"`
-	BytesClientToConnector uint64                 `protobuf:"varint,2,opt,name=bytes_client_to_connector,json=bytesClientToConnector,proto3" json:"bytes_client_to_connector,omitempty"` // cumulative since relay start
-	BytesConnectorToClient uint64                 `protobuf:"varint,3,opt,name=bytes_connector_to_client,json=bytesConnectorToClient,proto3" json:"bytes_connector_to_client,omitempty"` // cumulative since relay start
-	ActiveStreams          uint32                 `protobuf:"varint,4,opt,name=active_streams,json=activeStreams,proto3" json:"active_streams,omitempty"`                                // open bridged streams now
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	TrustDomain string                 `protobuf:"bytes,1,opt,name=trust_domain,json=trustDomain,proto3" json:"trust_domain,omitempty"`
+	// Cumulative since this entry was created: the workspace's first stream
+	// through this relay process, or its first stream after the relay pruned
+	// the idle entry (workspace no longer allowed). Never decremented. An entry
+	// that ever carried bytes is reported in every heartbeat (F23 R1-1).
+	BytesClientToConnector uint64 `protobuf:"varint,2,opt,name=bytes_client_to_connector,json=bytesClientToConnector,proto3" json:"bytes_client_to_connector,omitempty"`
+	BytesConnectorToClient uint64 `protobuf:"varint,3,opt,name=bytes_connector_to_client,json=bytesConnectorToClient,proto3" json:"bytes_connector_to_client,omitempty"`
+	ActiveStreams          uint32 `protobuf:"varint,4,opt,name=active_streams,json=activeStreams,proto3" json:"active_streams,omitempty"` // open bridged streams now
 	unknownFields          protoimpl.UnknownFields
 	sizeCache              protoimpl.SizeCache
 }
