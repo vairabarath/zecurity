@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,12 +14,50 @@ import (
 type recordingUsageSink struct {
 	mu    sync.Mutex
 	calls []map[string]WorkspaceTrafficSample
+	ats   []time.Time
 }
 
-func (r *recordingUsageSink) RecordRelayCounters(_ context.Context, _ string, _ time.Time, _ uint64, c map[string]WorkspaceTrafficSample) {
+func (r *recordingUsageSink) RecordRelayCounters(_ context.Context, _ string, at time.Time, _ uint64, c map[string]WorkspaceTrafficSample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, c)
+	r.ats = append(r.ats, at)
+}
+
+// A DB-write heartbeat feeds both the R1 tracker and usage. The tracker keeps
+// the monotonic arrival time (F23 fix); usage gets the same instant as UTC,
+// the timestamp it gets on throttled heartbeats too.
+func TestHeartbeat_DBWriteFeedsTrackerAndUsageWithUTCTime(t *testing.T) {
+	tr := NewWorkspaceTrafficTracker()
+	sink := &recordingUsageSink{}
+	lookup := &fakeWorkspaceLookup{known: map[string]string{"ws-a.zecurity.in": wsA}}
+	svc := NewService(nil, &fakeHeartbeatStore{}, time.Hour).
+		WithWorkspaceTraffic(tr, lookup).
+		WithUsageSink(sink)
+
+	heartbeatWithTraffic(t, svc, 100,
+		&relaypb.WorkspaceTraffic{TrustDomain: "ws-a.zecurity.in", BytesConnectorToClient: 100, ActiveStreams: 1})
+
+	if len(sink.ats) != 1 {
+		t.Fatalf("usage saw %d heartbeats, want 1", len(sink.ats))
+	}
+	usageAt := sink.ats[0]
+	if usageAt.Location() != time.UTC {
+		t.Fatalf("usage time is in %v, want UTC", usageAt.Location())
+	}
+	if strings.Contains(usageAt.String(), "m=") {
+		t.Fatalf("usage time carries a monotonic reading: %s", usageAt)
+	}
+	v := onlyRelay(t, tr)
+	if !strings.Contains(v.MeasuredAt.String(), "m=") {
+		t.Fatalf("tracker time has no monotonic reading: %s", v.MeasuredAt)
+	}
+	if !v.MeasuredAt.Equal(usageAt) {
+		t.Fatalf("tracker %s and usage %s are different instants", v.MeasuredAt, usageAt)
+	}
+	if _, ok := v.Workspaces[wsA]; !ok {
+		t.Fatalf("tracker has no entry for %s", wsA)
+	}
 }
 
 // Sprint 25 live finding F32-1: the usage collector must see every heartbeat,

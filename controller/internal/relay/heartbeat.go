@@ -151,7 +151,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	}
 	// Sprint 24 R1 (D-54): per-workspace traffic on the same cadence and
 	// window as the relay totals above (B2).
-	s.recordWorkspaceTraffic(ctx, relayID, arrived, req)
+	s.recordWorkspaceTraffic(ctx, relayID, arrived, receivedAt, req)
 
 	transition, evalErr := s.store.EvaluateCapacityLabel(ctx, relayID, s.labelHoldDown)
 	if evalErr != nil {
