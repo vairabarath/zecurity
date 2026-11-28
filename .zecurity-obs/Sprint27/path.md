@@ -2,7 +2,7 @@
 type: sprint
 sprint: 27
 title: Provider Dashboard — provider access and API (F19, F20, F35)
-status: ACTIVE since 2026-11-27 — decided and signed off 2026-11-23 (sign-off given by Sathiya, as for Sprint 26; Barath reviews in PR #252); X4 done (#260); O1 built by Sathiya (takeover), live PASS, PR pending
+status: ACTIVE — every phase built, live-checked and merged 2026-11-28 (#262 → #267, main `8db309bf`; merged at Sathiya's go before Barath's review); left: the Sprint 27 acceptance run, Barath's review of the open points below
 created: 2026-11-23
 team:
   - Person 1 = Barath (M2): F19 — O1 role matrix and new roles; F20 — G1 loud break-glass
@@ -175,12 +175,30 @@ Tracker: F19, F20, F35 ticked only after their live checks.
 - [x] Phase 0: Q1–Q6 answered 2026-11-23; D-71 … D-76 written into the Decision Record (amendment 2026-11-23, provider access)
 - [x] Documents signed off 2026-11-23 (by Sathiya, as for Sprint 26; Barath reviews in PR #252)
 - [x] X4: Sprint 26 follow-ups (Sathiya) — the one acceptance finding fixed in #260; no other follow-up
-- [ ] O1: Role matrix + roles `075_provider_roles` (built by Sathiya, takeover 2026-11-27; live PASS 2026-11-27; PR #262 open)
-- [ ] G1: Loud break-glass `077_provider_alert_kinds` (built by Sathiya, takeover 2026-11-27; live PASS 2026-11-27; PR #263, stacked on #262)
-- [ ] K1: API keys `076_provider_api_keys` (Sathiya) — parts 1 (keys, auth, read-only, routes) and 2 (`api_key.expiring` alert) built, live PASS 2026-11-27; draft PR #264 stacked on G1 #263 → O1 #262
-- [ ] K2: Keys console (Sathiya) — live PASS 2026-11-27; PR #266 stacked on K1 #264
-- [ ] O2: Console per role (Sathiya) — built on `feat/sprint27-o2-console-roles` stacked on K2 (#266), live PASS 2026-11-28; not committed yet
+- [x] O1: Role matrix + roles `075_provider_roles` (built by Sathiya, takeover; live PASS 2026-11-27) — #262 merged `23ae7f53`
+- [x] G1: Loud break-glass `077_provider_alert_kinds` (built by Sathiya, takeover; live PASS 2026-11-27) — #263 merged `314de6aa`
+- [x] K1: API keys `076_provider_api_keys` + `api_key.expiring` alert (Sathiya; live PASS 2026-11-27) — #264 merged `74cf6f69`
+- [x] K2: Keys console (Sathiya; live PASS 2026-11-27) — #266 merged `53790138`
+- [x] O2: Console per role + break-glass banner (Sathiya; live PASS 2026-11-28) — #267 merged `8db309bf`
 - [ ] Sprint acceptance run (both); tracker F19, F20, F35
+
+### Merged before review: open points for Barath (2026-11-28)
+
+The whole stack was merged at Sathiya's go before Barath reviewed it. Choices made inside the phases, to confirm or change in review (details in each phase file's implementation record):
+- **O1:**
+  - a narrow `tenant.list.read` for billing's tenant list;
+  - support doesn't see `tenant.usage_over` alerts;
+  - auditor doesn't get the operator list.
+- **G1:**
+  - the break-glass event table lives in `077_`;
+  - the email is sent by a controller job, not the CLI;
+  - the banner UI landed with O2.
+- **K1 (needs a Decision Record call):** a key keeps working after its creator is disabled or demoted. The options are (a) keep it; (b) refuse keys whose creator is no longer an active super-admin; (c) revoke a user's keys when they're disabled or demoted. Flagged by an automated security review.
+- **K2:** the 365-day preset ends 10 minutes short of a year; a picked date expires at 23:59 UTC.
+- **O2:**
+  - `TenantSummary.current_plan` on the list (D-73 "name, plan, status");
+  - Change plan on the list only for roles without the tenant detail;
+  - the Overview loads only the tiles a role may read.
 
 ## Post-Sprint Fixes
 

@@ -5,7 +5,7 @@ owner: Sathiya (Person 2, M1)
 features: [Sprint 26 follow-ups (F34), F35 provider API keys, F19 console per role]
 phases: [X4, K1, K2, O2]
 decisions: [D-71, D-72, D-73, D-74, D-76, D-30, D-40, D-50, D-53]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — X4 done (#260); K1 parts 1 and 2 (PR #264, stacked on G1 #263 → O1 #262), live PASS; K2 (PR #266), live PASS; O2 built (stacked on K2), live PASS, not committed yet
+status: X4 done (#260); K1, K2, O2 live-checked and merged 2026-11-28 (#264 `74cf6f69`, #266 `53790138`, #267 `8db309bf`); merged before Barath's review (open points in path.md)
 ---
 
 # Sprint 27 — Sathiya: X4 follow-ups, K1 API keys, K2 keys console, O2 console per role

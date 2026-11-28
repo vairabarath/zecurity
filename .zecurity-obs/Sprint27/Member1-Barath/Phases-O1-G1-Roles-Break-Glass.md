@@ -5,7 +5,7 @@ owner: Barath (Person 1, M2)
 features: [F19 provider admin roles, F20 break-glass]
 phases: [O1, G1]
 decisions: [D-71, D-72, D-73, D-74, D-75, D-05, D-06, D-26, D-28, D-31, D-50]
-status: signed off 2026-11-23 (by Sathiya; Barath reviews in PR #252); active since 2026-11-27 — O1 built by Sathiya (takeover, 2026-11-27, PR #262), live PASS; G1 built by Sathiya (takeover, branch feat/sprint27-g1-break-glass stacked on O1), live PASS, uncommitted
+status: O1 and G1 built by Sathiya (takeover), live-checked and merged 2026-11-28 (#262 `23ae7f53`, #263 `314de6aa`); merged before Barath's review (open points in path.md)
 ---
 
 # Sprint 27 — Barath: O1 role matrix and roles (F19), G1 loud break-glass (F20)
